@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "ml4paleo"
+version = "0.1.0"
+description = "Deep learning computer vision pipelines for paleontological 3D reconstruction"
+authors = ["Jordan Matelsky <j6k4m8@gmail.com>"]
+license = "Apache 2.0"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+numpy = "^1.24.1"
+Pillow = "^9.4.0"
+psutil = "^5.9.4"
+torch = "^1.13.1"
+torchvision = "^0.14.1"
+
+[tool.poetry.dev-dependencies]
+black = "^23.1.0"
+jupyter = "^1.0.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
