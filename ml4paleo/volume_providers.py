@@ -234,7 +234,7 @@ class ImageStackVolumeProvider(VolumeProvider):
 
     @property
     def shape(self) -> Tuple[int, int, int]:
-        return (*Image.open(self.paths[0]).size, len(self.paths))
+        return (*Image.open(self.paths[0]).size[::-1], len(self.paths))
 
     def __getitem__(self, key):
         """
@@ -251,14 +251,12 @@ class ImageStackVolumeProvider(VolumeProvider):
         """
         # Normalize the indices
         zs, ys, xs = _normalize_key(key, self.shape)
-        print(zs, ys, xs)
 
         # Read the images.
         images = [self._read_image(self.paths[z]) for z in range(zs[0], zs[1])]
 
         # Return the subvolume.
         vol = np.stack(images, axis=-1)
-        print(vol.shape)
         # Return the subvolume.
         return vol[xs[0] : xs[1], ys[0] : ys[1], :]
 

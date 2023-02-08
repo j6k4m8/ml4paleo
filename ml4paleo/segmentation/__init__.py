@@ -63,7 +63,7 @@ class UNetSegmentation(Segmentation3D):
 
     """
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str = None):
         """
         Initialize the segmentation algorithm.
 
@@ -89,7 +89,26 @@ class UNetSegmentation(Segmentation3D):
         from ml4paleo.segmentation.models import UNet3D
 
         model = UNet3D()
-        model.load_state_dict(torch.load(self.model_path))
+        if self.model_path is not None:
+            model.load_state_dict(torch.load(self.model_path))
+        else:
+            # Initialize the model with Xavier initialization:
+            for m in model.modules():
+                if isinstance(m, torch.nn.Conv3d):
+                    torch.nn.init.xavier_normal_(m.weight)
+                    if m.bias is not None:
+                        torch.nn.init.zeros_(m.bias)
+                elif isinstance(m, torch.nn.ConvTranspose3d):
+                    torch.nn.init.xavier_normal_(m.weight)
+                    if m.bias is not None:
+                        torch.nn.init.zeros_(m.bias)
+                elif isinstance(m, torch.nn.BatchNorm3d):
+                    torch.nn.init.ones_(m.weight)
+                    torch.nn.init.zeros_(m.bias)
+                elif isinstance(m, torch.nn.Linear):
+                    torch.nn.init.xavier_normal_(m.weight)
+                    if m.bias is not None:
+                        torch.nn.init.zeros_(m.bias)
         model.eval()
 
         # Segment the volume:

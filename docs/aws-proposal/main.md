@@ -17,7 +17,7 @@ https://aws.amazon.com/government-education/research-and-technical-computing/clo
 Proposal for AWS Research Credit for X-Ray Tomography Segmentation Pipeline in Paleontology
 
 Problem:
-The current process of X-ray tomography segmentation in paleontology is done manually, which is time-consuming and limiting the advancement of science. There are many relatively small (i.e., 10s of GB) image stacks that need to be segmented and will yield rich new scientific data, such as skeletal morphology, gross anatomy, and ...
+The current process of X-ray tomography segmentation in paleontology is done manually, which is time-consuming and limiting the advancement of science. There are many relatively small (i.e., tens of GB) image stacks that need to be segmented and will yield rich new scientific data, such as skeletal morphology, gross anatomy, and ...
 
 Proposed AWS Solution:
 To automate the process, we propose building a X-ray tomography segmentation pipeline that consists of three components: an uploader service, a segmenter, and a mesh generator. The user will be able to upload their images through a website by clicking and dragging --- prioritizing user-friendliness for non technical users. The images will be stored in S3 and segmented into small subvolumes using a pre-trained U-Net. The segmentation can be done either on Sagemaker or EC2. The subvolumes will be stitched together either in Lambda or EC2 using a simple deterministic stitching process borrowed from big data neuroscience, and then the pipeline will generate meshes using standard marching-cubes libraries. The final result, the segmented stacks and meshes, will be available for the user to download from S3 through a link, which will be sent after authentication. Simple authentication will be implemented by requiring a secret token for the upload from the splash page and for downloading the results. The tokens will be stored in job metadata in a DynamoDB table, which will be created at the start of the upload.
@@ -32,4 +32,4 @@ AWS Employees Contacted: [none]
 
 AWS Public Data Sets Used: [none]
 
-Keywords: X-ray tomography, segmentation, paleontology, S3, Lambda, EC2, Sagemaker, U-Net, DynamoDB, authentication.
+Keywords: X-ray tomography, segmentation, paleontology, S3, Lambda, EC2, Sagemaker, DynamoDB, authentication with Cognito or Dynamo.
