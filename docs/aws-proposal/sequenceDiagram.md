@@ -1,3 +1,4 @@
+```mermaid
 sequenceDiagram
 
 Web Application (S3) ->> DynamoDB: Register new job
@@ -13,3 +14,4 @@ Stitch Compute (Lambda or EC2) ->> Segmentation Storage (S3): Store chunked segm
 
 Web Application (S3) ->> Segmentation Storage (S3): Request job results
 Segmentation Storage (S3) ->> Web Application (S3): Return partial or complete job results
+```
