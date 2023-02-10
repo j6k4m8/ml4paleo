@@ -16,6 +16,9 @@ ipykernel = "^6.21.1"
 matplotlib = "^3.6.3"
 zarr = "^2.13.6"
 tqdm = "^4.64.1"
+Flask = "^2.2.2"
+scikit-learn = "^1.2.1"
+scikit-image = "^0.19.3"
 
 [tool.poetry.dev-dependencies]
 black = "^23.1.0"

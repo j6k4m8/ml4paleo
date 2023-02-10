@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Web Annotation | ml4paleo</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body,
+        html {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        .submit-button {
+            position: fixed;
+            bottom: 0;
+            right: 0;
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 50px;
+            background-color: #fefefe;
+            border-top: 1px solid #e5e5e5;
+            text-align: center;
+            font-size: 20px;
+            line-height: 50px;
+            cursor: pointer;
+            text-transform: uppercase;
+            font-weight: bold;
+            /* opacity: 0.25; */
+            transition: opacity 0.15s ease-in-out;
+        }
+
+        .submit-button:hover {
+            opacity: 1;
+        }
+
+        .zoom-in-button-container {
+            position: fixed;
+            top: 0;
+            right: 0;
+            margin: 0;
+            padding: 0;
+            width: 2em;
+            text-align: center;
+            font-size: 20px;
+            line-height: 50px;
+            cursor: pointer;
+            text-transform: uppercase;
+            font-weight: bold;
+        }
+
+        .zoom-in-button-container .zoom-button {
+            position: relative;
+            width: 100%;
+            padding: 1em 0;
+            background-color: #fefefe;
+            text-align: center;
+            font-size: 30px;
+            line-height: 30px;
+            cursor: pointer;
+            text-transform: uppercase;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.4.1/lib/p5.js"></script>
+    <script>
+        const STATE = {
+            // Image Rendering:
+            imageLoaded: false,
+            imageFilter: "invert",
+
+            // Annotation Rendering:
+            colorScheme: 1,
+            annosVisible: true,
+            imageTransparency: 0.2,
+
+            // Brush:
+            brushSize: 10,
+
+
+            // Navigation:
+            zoom: 1,
+            panX: 0,
+            panY: 0,
+        };
+
+        const CONFIG = {
+            zoom: {
+                min: 0.005,
+                max: 7,
+            },
+
+            brushSize: {
+                min: 0.5,
+                max: 200,
+            },
+
+            pan: {
+                smallIncrement: 10,
+                bigIncrement: 100,
+            },
+
+            fingerColors: [
+                [
+                    "#FF0000",
+                    "#FF0000",
+                    "#00FF00",
+                    "#0000FF",
+                    "#FFFF00",
+                    "#00FFFF",
+                    "#FF00FF",
+                ],
+                [
+                    "#A60067",
+                    "#A60067",
+                    "#157F1F",
+                    "#6153CC",
+                    "#F9CB40",
+                    "#00cc99",
+                    "#FF00FF",
+                ],
+                [
+                    "#fdd9d6",
+                    "#fdd9d6",
+                    "#e5f4e2",
+                    "#d9e6f1",
+                    "#feecd2",
+                    "#eee4f1",
+                    "#f2ebde",
+                ],
+                [
+                    "#f18c8d",
+                    "#f18c8d",
+                    "#a6d7a4",
+                    "#9bbedb",
+                    "#ffbf7f",
+                    "#cba6d1",
+                    "#d2aa93",
+                ],
+            ],
+
+            backgroundColor: "#250902",
+        };
+
+
+        let img;
+        let paintPixels;
+
+        const BASE_URL = ``;
+
+        function screenToImage(x, y) {
+            // Return [x, y] in image coordinates;
+            const d = [
+                (x - width / 2 + (STATE.zoom * img.width) / 2) /
+                STATE.zoom -
+                STATE.panX / STATE.zoom,
+                (y - height / 2 + (STATE.zoom * img.height) / 2) /
+                STATE.zoom -
+                STATE.panY / STATE.zoom,
+            ];
+            return d;
+        }
+
+        function imageToScreen(x, y) {
+            // Return [x, y] in screen coordinates;
+            // Accounting for zoom and the translate to the center of the image.
+            d = [STATE.zoom * x, STATE.zoom * y];
+            return d;
+        }
+
+        function submitData() {
+            paintPixels.loadPixels();
+            const pixels = paintPixels.canvas.toDataURL();
+
+            fetch(`${BASE_URL}/api/data/submit`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ image: pixels }),
+            }).then((res) => {
+                return res.json();
+            }).then((data) => {
+                // There's a new image in data.prediction;
+                // b64 encoded png. Render it to paintPixels.
+                // img.src = `data:image/png;base64,${data.prediction}`;
+                loadImage('data:image/png;base64,' + data.prediction, img => {
+                    // Clear pixels by erasing:
+                    paintPixels.erase();
+                    paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
+                    paintPixels.noErase();
+                    // At half-size:
+                    paintPixels.image(img, 0, 0, img.width / 2, img.height / 2);
+                });
+            });
+        }
+
+        function preload() {
+            let _cachebuster = `?cachebuster=${Math.random()}`;
+
+            img = loadImage(
+                // `example.jpg`,
+                `${BASE_URL}/api/images/next${_cachebuster}`,
+                (f) => {
+                    STATE.imageLoaded = true;
+                    console.log(f);
+                }
+            );
+        }
+
+        function setup() {
+            createCanvas(windowWidth, windowHeight);
+            frameRate(8);
+
+            paintPixels = createGraphics(img.width / 2, img.height / 2);
+            frameRate(60);
+        }
+
+        function keyPressed() {
+            // Hitting escape resets pan and zoom:
+            if (keyCode === ESCAPE) {
+                STATE.panX = 0;
+                STATE.panY = 0;
+                STATE.zoom = 1;
+            }
+
+            // Pressing A toggles annotation visibility:
+            if (keyCode === 65) {
+                STATE.annosVisible = !STATE.annosVisible;
+            }
+
+            // Zoom in/out with + and -
+            if (keyCode === 173) {
+                // If holding shift, move in increments of 50%
+                if (keyIsDown(SHIFT)) {
+                    STATE.zoom -= 0.5;
+                } else {
+                    STATE.zoom -= 0.1;
+                }
+                boundZoom();
+            }
+            if (keyCode === 61) {
+                if (keyIsDown(SHIFT)) {
+                    STATE.zoom += 0.5;
+                } else {
+                    STATE.zoom += 0.1;
+                }
+                boundZoom();
+            }
+
+            // Pan with arrows:
+            if (keyCode === UP_ARROW) {
+                STATE.panY += keyIsDown(SHIFT)
+                    ? CONFIG.pan.bigIncrement
+                    : CONFIG.pan.smallIncrement;
+            }
+            if (keyCode === DOWN_ARROW) {
+                STATE.panY -= keyIsDown(SHIFT)
+                    ? CONFIG.pan.bigIncrement
+                    : CONFIG.pan.smallIncrement;
+            }
+            if (keyCode === LEFT_ARROW) {
+                STATE.panX += keyIsDown(SHIFT)
+                    ? CONFIG.pan.bigIncrement
+                    : CONFIG.pan.smallIncrement;
+            }
+            if (keyCode === RIGHT_ARROW) {
+                STATE.panX -= keyIsDown(SHIFT)
+                    ? CONFIG.pan.bigIncrement
+                    : CONFIG.pan.smallIncrement;
+            }
+
+            // Q and W to change brush size:
+            if (keyCode === 81) {
+                STATE.brushSize *= 0.9;
+                if (keyIsDown(SHIFT)) { STATE.brushSize *= 0.9; }
+                if (STATE.brushSize < CONFIG.brushSize.min) {
+                    STATE.brushSize = CONFIG.brushSize.min;
+                }
+            }
+            if (keyCode === 87) {
+                STATE.brushSize *= 1.1;
+                if (keyIsDown(SHIFT)) { STATE.brushSize *= 1.1; }
+                if (STATE.brushSize > CONFIG.brushSize.max) {
+                    STATE.brushSize = CONFIG.brushSize.max;
+                }
+            }
+
+        }
+
+        function boundZoom() {
+            if (STATE.zoom > CONFIG.zoom.max) {
+                STATE.zoom = CONFIG.zoom.max;
+            }
+            if (STATE.zoom < CONFIG.zoom.min) {
+                STATE.zoom = CONFIG.zoom.min;
+            }
+        }
+
+        function windowResized() {
+            resizeCanvas(windowWidth, windowHeight);
+        }
+
+        function mouseWheel(event) {
+            // Zoom in/out with mouse wheel:
+            STATE.zoom -= event.delta / 1000;
+            boundZoom();
+        }
+
+        function draw() {
+            push();
+            translate(
+                STATE.panX + (width / 2 - (STATE.zoom * img.width) / 2),
+                STATE.panY + (height / 2 - (STATE.zoom * img.height) / 2)
+            );
+            // If mouse is over the image, switch to cursor=CROSS.
+            // Otherwise, draw cursor=ARROW.
+            if (inBounds(mouseX, mouseY)) {
+                cursor(CROSS);
+            } else {
+                cursor(ARROW);
+            }
+            background(0);
+            // Draw axes:
+            stroke("white");
+            strokeWeight(1);
+            line(0, 0, 0, 100 * STATE.zoom);
+            line(0, 0, 100 * STATE.zoom, 0);
+
+            if (STATE.imageLoaded) {
+                background(CONFIG.backgroundColor);
+                image(
+                    img,
+                    0,
+                    0,
+                    img.width * STATE.zoom,
+                    img.height * STATE.zoom
+                );
+            }
+
+            if (!STATE.annosVisible) {
+                return;
+            }
+
+            imgcoords = screenToImage(mouseX, mouseY);
+            if (paintPixels && STATE.annosVisible) {
+                tint(255, STATE.imageTransparency * 255);
+                image(paintPixels, 0, 0, paintPixels.width * 2 * STATE.zoom, paintPixels.height * 2 * STATE.zoom);
+            }
+
+            pop();
+            if (inBounds(mouseX, mouseY)) {
+                cursor(CROSS);
+                // Draw the current brush size:
+                noFill();
+                strokeWeight(1);
+                // Draw the brush size as a circle:
+
+                if (!keyIsDown(SHIFT)) {
+                    stroke((keyIsDown(OPTION) || keyIsDown(ALT)) ? "white" : "red");
+                    ellipse(mouseX, mouseY, STATE.brushSize * STATE.zoom, STATE.brushSize * STATE.zoom);
+                    stroke((keyIsDown(OPTION) || keyIsDown(ALT)) ? "red" : "white");
+                    ellipse(mouseX, mouseY, STATE.brushSize * 1.05 * STATE.zoom, STATE.brushSize * 1.05 * STATE.zoom);
+                }
+            }
+            textSize(12);
+            fill("white");
+            text(
+                `Mouse: ${Math.round(imgcoords[0])}, ${Math.round(
+                    imgcoords[1]
+                )}\nZoom: ${Math.round(STATE.zoom * 100)}%`,
+                10,
+                10
+            );
+        }
+
+        function inBounds(x, y) {
+            // return true if x, y screenspace coordinates are inside the
+            // image, accounting for pan and zoom
+
+            // Convert to image coordinates
+            let imgcoords = screenToImage(x, y);
+
+            // Check if in bounds
+            return (
+                imgcoords[0] >= 0 &&
+                imgcoords[0] < img.width &&
+                imgcoords[1] >= 0 &&
+                imgcoords[1] < img.height
+            );
+        }
+
+        function mousePressed() {
+            if (!inBounds(mouseX, mouseY)) {
+                // Check for submit button press:
+                return;
+            }
+
+            // If we're in the middle of a gesture, ignore clicks
+            if (keyIsDown(SHIFT)) {
+                return;
+            }
+        }
+
+        function mouseDragged() {
+            // Pan when holding shift:
+            if (keyIsDown(SHIFT) || !inBounds(mouseX, mouseY)) {
+                STATE.panX += movedX;
+                STATE.panY += movedY;
+                return;
+            }
+
+            paintPixels.fill(255, 0, 0);
+            paintPixels.noStroke();
+            let mappedMouse = screenToImage(mouseX, mouseY);
+            let pMappedMouse = screenToImage(pmouseX, pmouseY);
+
+            // If holding alt, then erase:
+            if (keyIsDown(OPTION) || keyIsDown(ALT)) {
+                paintPixels.erase();
+                paintPixels.ellipse(
+                    mappedMouse[0] / 2,
+                    mappedMouse[1] / 2,
+                    STATE.brushSize / 2,
+                    STATE.brushSize / 2
+                );
+                paintPixels.noErase();
+            } else {
+                paintPixels.ellipse(
+                    mappedMouse[0] / 2,
+                    mappedMouse[1] / 2,
+                    STATE.brushSize / 2,
+                    STATE.brushSize / 2
+                );
+                paintPixels.strokeWeight(STATE.brushSize / 2);
+                paintPixels.stroke(255, 0, 0)
+                paintPixels.line(pMappedMouse[0] / 2, pMappedMouse[1] / 2, mappedMouse[0] / 2, mappedMouse[1] / 2);
+                paintPixels.noStroke();
+            }
+        }
+
+    </script>
+
+    <!-- UI to submit (floating bottom) -->
+    <div class="submit-container">
+        <button class="submit-button" onclick="submitData()">Submit</button>
+    </div>
+    <!-- UI to zoom -->
+    <div class="zoom-in-button-container">
+        <button class="zoom-button" onclick="STATE.zoom += 0.1">+</button>
+        <button class="zoom-button" onclick="STATE.zoom -= 0.1">–</button>
+        <br />
+        <br />
+        <button class="zoom-button" onclick="backspace()">⌫</button>
+    </div>
+</body>
+
+</html>

@@ -9,6 +9,7 @@ object as if it were a numpy array.
 """
 
 import abc
+import logging
 import pathlib
 from functools import lru_cache
 from typing import List, Tuple, Union
@@ -16,6 +17,8 @@ from typing import List, Tuple, Union
 import numpy as np
 import psutil
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_key(
@@ -128,6 +131,28 @@ class VolumeProvider(abc.ABC):
     storage mechanism.
     """
 
+    @abc.abstractproperty
+    def shape(self) -> Tuple[int, int, int]:
+        """
+        Return the shape of the volume.
+
+        Returns:
+            The shape of the volume.
+
+        """
+        raise NotImplementedError
+
+    @abc.abstractproperty
+    def dtype(self) -> np.dtype:
+        """
+        Return the dtype of the volume.
+
+        Returns:
+            The dtype of the volume.
+
+        """
+        raise NotImplementedError
+
 
 class NumpyVolumeProvider(VolumeProvider):
     """
@@ -151,6 +176,14 @@ class NumpyVolumeProvider(VolumeProvider):
 
     def __getitem__(self, key):
         return self.data[key]
+
+    @property
+    def shape(self) -> Tuple[int, int, int]:
+        return self.data.shape
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.data.dtype
 
 
 class ImageStackVolumeProvider(VolumeProvider):
@@ -230,6 +263,7 @@ class ImageStackVolumeProvider(VolumeProvider):
             np.ndarray: The image data.
 
         """
+        logger.debug(f"Reading image {path}")
         return np.array(Image.open(path))
 
     @property
@@ -259,6 +293,10 @@ class ImageStackVolumeProvider(VolumeProvider):
         vol = np.stack(images, axis=-1)
         # Return the subvolume.
         return vol[xs[0] : xs[1], ys[0] : ys[1], :]
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self[0:1, 0:1, 0].dtype
 
 
 __all__ = ["VolumeProvider", "NumpyVolumeProvider", "ImageStackVolumeProvider"]
