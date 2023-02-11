@@ -1,3 +1,4 @@
+webpaint/user_segmentation
 *.h5
 *.hdf5
 *.npy
