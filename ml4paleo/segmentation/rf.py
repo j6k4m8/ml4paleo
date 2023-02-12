@@ -57,17 +57,14 @@ class RandomForest3DSegmenter(Segmenter3D):
             np.ndarray<u64>: The segmentation mask.
 
         """
-        # Reshape the volume:
-        volume = volume.reshape(-1, 1)
-
         # Extract features:
         features = self.features_fn(volume)
 
         # Segment the volume:
-        mask = self._clf.predict(features)
+        mask = self._clf.predict(features.reshape(-1, features.shape[-1]))
 
         # Reshape the mask:
-        mask = mask.reshape(volume.shape[0], 1, 1)
+        mask = mask.reshape(features.shape[:-1])
 
         return mask
 
@@ -80,17 +77,11 @@ class RandomForest3DSegmenter(Segmenter3D):
             mask (np.ndarray<u64>): The segmentation mask.
 
         """
-        # Reshape the volume:
-        volume = volume.reshape(-1, 1)
-
-        # Reshape the mask:
-        mask = mask.reshape(-1, 1)
-
         # Extract features:
         features = self.features_fn(volume)
 
         # Train the classifier:
-        self._clf.fit(features, mask)
+        self._clf.fit(features.reshape(-1, features.shape[-1]), mask.reshape(-1))
 
     def save(self, path: str) -> None:
         """

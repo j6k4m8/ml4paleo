@@ -2,15 +2,9 @@ import base64
 import io
 import time
 
-from flask import Flask, render_template, request, send_file, jsonify
-from PIL import Image
-
-# Random Forest:
-from sklearn.ensemble import RandomForestClassifier
-
-# feature extraction:
 import numpy as np
-
+from flask import Flask, jsonify, render_template, request, send_file
+from PIL import Image
 
 from ml4paleo.segmentation import RandomForest3DSegmenter
 
@@ -42,19 +36,17 @@ def paint():
     y = np.array(y).sum(axis=2)
     Xshape = X.shape
 
-    # Reshape the arrays to be 1D
-    X = X.reshape(-1, 1)
-    y = y.reshape(-1)
     y = y > 0
     y = y.astype(int)
 
     # Train the model
-    sample_freq = 100
-    model = RandomForestClassifier(n_estimators=20, max_depth=8, n_jobs=-1)
-    model.fit(X[::sample_freq], y[::sample_freq])
+    model = RandomForest3DSegmenter(
+        rf_kwargs=dict(n_estimators=20, max_depth=8, n_jobs=-1)
+    )
+    model.fit(X, y)
 
     # Generate a new prediction for `example.jpg`
-    prediction = model.predict(X)
+    prediction = model.segment(X)
 
     # Reshape the prediction to be 2D
     prediction = prediction.reshape(Xshape)
@@ -73,7 +65,6 @@ def paint():
         return jsonify({"prediction": base64.b64encode(f.read()).decode("utf-8")})
 
 
-# /api/images/next${_cachebuster}
 @app.route("/api/images/next")
 def next_image():
     # Send `example.jpg` as a file, using the `send_file` function
