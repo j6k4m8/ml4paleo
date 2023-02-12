@@ -61,7 +61,29 @@
                             here's some explanation text about what that means
                         </p>
                     </header>
+
+                    <label for="job-name">Job Name</label>
                     <input type="text" placeholder="Job Name" id="job-name">
+                    <small>
+                        This is the name of the job. It will be used to
+                        identify the job in the future. It should be something
+                        recognizable to you, like
+                        <code>"Pterosaur Earlobe"</code>
+                        (not <code>"job1"</code>).
+                    </small>
+
+                    <br />
+
+                    <label for="job-name">Job Name</label>
+                    <input type="text" placeholder="Job Name" id="job-name">
+                    <small>
+                        This is the name of the job. It will be used to
+                        identify the job in the future. It should be something
+                        recognizable to you, like
+                        <code>"Pterosaur Earlobe"</code>
+                        (not <code>"job1"</code>).
+                    </small>
+
                     <footer>
                         <button role="button" onclick="submitJob()">Submit</button>
                     </footer>
@@ -74,7 +96,6 @@
                     <header>
                         <h1>Upload</h1>
                     </header>
-                    <!-- progress bar -->
                     <progress value="0" max="100" id="progress"></progress>
                     <div class="dropzone"></div>
                 </article>
@@ -115,7 +136,7 @@
         }
 
         function submitJob() {
-            fetch(`/api/job`, {
+            fetch(`/api/job/new`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",

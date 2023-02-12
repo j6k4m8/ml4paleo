@@ -14,7 +14,10 @@ log = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
-# enum jobstatus
+class CONFIG:
+    upload_directory = "uploads"
+
+
 class JobStatus(Enum):
     PENDING = "pending"
     UPLOADING = "uploading"
@@ -25,6 +28,17 @@ class JobStatus(Enum):
 class UploadJob:
     def __init__(self):
         self.status = JobStatus.PENDING
+
+    def to_dict(self):
+        return {
+            "status": self.status.value,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "UploadJob":
+        job = cls()
+        job.status = JobStatus(d["status"])
+        return job
 
 
 UploadJobID = str
@@ -59,15 +73,21 @@ class JSONFileUploadJobManager(UploadJobManager):
         """
         Get all jobs from the file.
         """
-        with open(self.file_path, "r") as f:
-            return json.load(f)
+        try:
+            with open(self.file_path, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            # Move the corrupted file out of the way:
+            os.rename(self.file_path, f"{self.file_path}.{time.time()}")
+            return {}
 
     def _save_jobs(self, jobs: Dict[UploadJobID, UploadJob]):
         """
         Save all jobs to the file.
         """
         with open(self.file_path, "w") as f:
-            json.dump(jobs, f)
+            jobs_jsonable = {k: v.to_dict() for k, v in jobs.items()}
+            json.dump(jobs_jsonable, f)
 
     def new_job(self, job: UploadJob) -> UploadJobID:
         """
@@ -113,10 +133,6 @@ def new_job():
     job = UploadJob()
     job_id = job_manager.new_job(job)
     return jsonify({"job_id": job_id})
-
-
-class CONFIG:
-    upload_directory = "uploads"
 
 
 # https://codecalamity.com/uploading-large-files-by-chunking-featuring-python-flask-and-dropzone-js/
