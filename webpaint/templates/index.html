@@ -87,8 +87,7 @@
             imageTransparency: 0.2,
 
             // Brush:
-            brushSize: 10,
-
+            brushSize: 20,
 
             // Navigation:
             zoom: 1,
@@ -112,46 +111,7 @@
                 bigIncrement: 100,
             },
 
-            fingerColors: [
-                [
-                    "#FF0000",
-                    "#FF0000",
-                    "#00FF00",
-                    "#0000FF",
-                    "#FFFF00",
-                    "#00FFFF",
-                    "#FF00FF",
-                ],
-                [
-                    "#A60067",
-                    "#A60067",
-                    "#157F1F",
-                    "#6153CC",
-                    "#F9CB40",
-                    "#00cc99",
-                    "#FF00FF",
-                ],
-                [
-                    "#fdd9d6",
-                    "#fdd9d6",
-                    "#e5f4e2",
-                    "#d9e6f1",
-                    "#feecd2",
-                    "#eee4f1",
-                    "#f2ebde",
-                ],
-                [
-                    "#f18c8d",
-                    "#f18c8d",
-                    "#a6d7a4",
-                    "#9bbedb",
-                    "#ffbf7f",
-                    "#cba6d1",
-                    "#d2aa93",
-                ],
-            ],
-
-            backgroundColor: "#250902",
+            backgroundColor: "#333333",
         };
 
 
@@ -209,7 +169,6 @@
             let _cachebuster = `?cachebuster=${Math.random()}`;
 
             img = loadImage(
-                // `example.jpg`,
                 `${BASE_URL}/api/images/next${_cachebuster}`,
                 (f) => {
                     STATE.imageLoaded = true;
@@ -221,7 +180,6 @@
         function setup() {
             createCanvas(windowWidth, windowHeight);
             frameRate(8);
-
             paintPixels = createGraphics(img.width / 2, img.height / 2);
             frameRate(60);
         }
@@ -283,19 +241,18 @@
             // Q and W to change brush size:
             if (keyCode === 81) {
                 STATE.brushSize *= 0.9;
-                if (keyIsDown(SHIFT)) { STATE.brushSize *= 0.9; }
+                if (keyIsDown(SHIFT)) { STATE.brushSize *= 0.8; }
                 if (STATE.brushSize < CONFIG.brushSize.min) {
                     STATE.brushSize = CONFIG.brushSize.min;
                 }
             }
             if (keyCode === 87) {
                 STATE.brushSize *= 1.1;
-                if (keyIsDown(SHIFT)) { STATE.brushSize *= 1.1; }
+                if (keyIsDown(SHIFT)) { STATE.brushSize *= 1.2; }
                 if (STATE.brushSize > CONFIG.brushSize.max) {
                     STATE.brushSize = CONFIG.brushSize.max;
                 }
             }
-
         }
 
         function boundZoom() {
@@ -365,7 +322,6 @@
                 noFill();
                 strokeWeight(1);
                 // Draw the brush size as a circle:
-
                 if (!keyIsDown(SHIFT)) {
                     stroke((keyIsDown(OPTION) || keyIsDown(ALT)) ? "white" : "red");
                     ellipse(mouseX, mouseY, STATE.brushSize * STATE.zoom, STATE.brushSize * STATE.zoom);

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Wizard | ml4paleo</title>
+    <link rel="stylesheet" href="https://unpkg.com/@picocss/pico@1.*/css/pico.min.css">
+    <script src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/dropzone@5/dist/min/dropzone.min.css" type="text/css" />
+    <style type="text/css">
+        .dropzone {
+            border: 4px dashed #0087F7;
+            border-radius: 5px;
+            background: white;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+
+</head>
+
+<body>
+    <nav class="container">
+        <ul>
+            <li><strong>ml4paleo</strong></li>
+        </ul>
+        <ul>
+            <li><a href="#">About</a></li>
+        </ul>
+    </nav>
+    <div class="container">
+        <div class="row">
+            <div class="col">
+                <article id="intro-job">
+                    <header>
+                        <h1>
+                            ml4paleo
+                        </h1>
+                    </header>
+                    <p>
+                        blah blah blah what is this
+                    </p>
+                    <footer>
+                        <button role="button" onclick="startNewJob()">Create a new job</button>
+                    </footer>
+                </article>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col">
+                <article class="hidden" id="zone-job">
+                    <header>
+                        <h1>
+                            Start a new Job
+                        </h1>
+                        <p>
+                            here's some explanation text about what that means
+                        </p>
+                    </header>
+                    <input type="text" placeholder="Job Name" id="job-name">
+                    <footer>
+                        <button role="button" onclick="submitJob()">Submit</button>
+                    </footer>
+                </article>
+            </div>
+        </div>
+        <div class="row">
+            <div class="col">
+                <article class="hidden" id="zone-upload">
+                    <header>
+                        <h1>Upload</h1>
+                    </header>
+                    <!-- progress bar -->
+                    <progress value="0" max="100" id="progress"></progress>
+                    <div class="dropzone"></div>
+                </article>
+            </div>
+        </div>
+    </div>
+    <script>
+        const dropzone = new Dropzone("div.dropzone", {
+            // https://github.com/dropzone/dropzone/blob/main/src/options.js
+            url: "/api/upload",
+            parallelUploads: 4,
+            chunking: true,
+            forceChunking: true,
+            retryChunks: true,
+            maxFilesize: 10000, // MiB: 10GB,
+            createImageThumbnails: false,
+            thumbnailHeight: 30,
+            headers: {
+                "X-Job-Namespace": "ml4paleo",
+                "X-Job-ID": "test",
+            },
+            totaluploadprogress: function (progress, totalBytes, totalBytesSent) {
+                console.log({
+                    progress,
+                    totalBytes,
+                    totalBytesSent,
+                });
+                document.getElementById("progress").value = progress;
+            },
+        });
+
+        function startNewJob() {
+            // show the job creation form and scroll to it
+            document.getElementById("zone-job").classList.remove("hidden");
+            document.getElementById("zone-job").scrollIntoView();
+            // hide the intro
+            document.getElementById("intro-job").classList.add("hidden");
+        }
+
+        function submitJob() {
+            fetch(`/api/job`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    namespace: "ml4paleo",
+                    name: document.getElementById("job-name").value,
+                }),
+            })
+                .then((response) => response.json())
+                .then((data) => {
+                    console.log("Success:", data);
+                    // show the upload form and scroll to it
+                    document.getElementById("zone-upload").classList.remove("hidden");
+                    document.getElementById("zone-upload").scrollIntoView();
+                    // hide the job creation form
+                    document.getElementById("zone-job").classList.add("hidden");
+                })
+                .catch((error) => {
+                    console.error("Error:", error);
+                });
+        }
+    </script>
+</body>
+
+</html>
