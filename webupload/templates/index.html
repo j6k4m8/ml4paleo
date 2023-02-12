@@ -6,14 +6,16 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Upload Wizard | ml4paleo</title>
+    <link href="https://unpkg.com/dropzone@6.0.0-beta.1/dist/dropzone.css" rel="stylesheet" type="text/css" />
     <link rel="stylesheet" href="https://unpkg.com/@picocss/pico@1.*/css/pico.min.css">
-    <script src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/dropzone@5/dist/min/dropzone.min.css" type="text/css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.css">
+    <script src="https://unpkg.com/dropzone@6.0.0-beta.1/dist/dropzone-min.js"></script>
     <style type="text/css">
         .dropzone {
             border: 4px dashed #0087F7;
             border-radius: 5px;
             background: white;
+            min-height: 250px;
         }
 
         .hidden {
@@ -72,20 +74,8 @@
                         (not <code>"job1"</code>).
                     </small>
 
-                    <br />
-
-                    <label for="job-name">Job Name</label>
-                    <input type="text" placeholder="Job Name" id="job-name">
-                    <small>
-                        This is the name of the job. It will be used to
-                        identify the job in the future. It should be something
-                        recognizable to you, like
-                        <code>"Pterosaur Earlobe"</code>
-                        (not <code>"job1"</code>).
-                    </small>
-
                     <footer>
-                        <button role="button" onclick="submitJob()">Submit</button>
+                        <button role="button" onclick="submitJob()">Continue to Image Upload</button>
                     </footer>
                 </article>
             </div>
@@ -96,35 +86,34 @@
                     <header>
                         <h1>Upload</h1>
                     </header>
+                    <p id="job-id-readout">
+                        Something went wrong with the upload. Please refresh this page and try again.
+                    </p>
+                    <p>
+                        Drag and drop your images below, or click in the box below to select files.
+                    </p>
                     <progress value="0" max="100" id="progress"></progress>
+                    <small>
+                        <span id="progress-text"></span>
+                    </small>
+                    <input type="hidden" id="job-id">
                     <div class="dropzone"></div>
                 </article>
             </div>
         </div>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"
+        integrity="sha512-WFN04846sdKMIP5LKNphMaWzU7YpMyCU245etK3g/2ARYbPK9Ub18eG+ljU96qKRCWh+quCY7yefSmlkQw1ANQ=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
     <script>
-        const dropzone = new Dropzone("div.dropzone", {
-            // https://github.com/dropzone/dropzone/blob/main/src/options.js
-            url: "/api/upload",
-            parallelUploads: 4,
-            chunking: true,
-            forceChunking: true,
-            retryChunks: true,
-            maxFilesize: 10000, // MiB: 10GB,
-            createImageThumbnails: false,
-            thumbnailHeight: 30,
-            headers: {
-                "X-Job-Namespace": "ml4paleo",
-                "X-Job-ID": "test",
+        const notyf = new Notyf({
+            duration: 8000,
+            position: {
+                x: "right",
+                y: "bottom",
             },
-            totaluploadprogress: function (progress, totalBytes, totalBytesSent) {
-                console.log({
-                    progress,
-                    totalBytes,
-                    totalBytesSent,
-                });
-                document.getElementById("progress").value = progress;
-            },
+            dismissible: true,
         });
 
         function startNewJob() {
@@ -152,11 +141,45 @@
                     // show the upload form and scroll to it
                     document.getElementById("zone-upload").classList.remove("hidden");
                     document.getElementById("zone-upload").scrollIntoView();
+                    // replace the text in the job ID readout
+                    document.getElementById("job-id-readout").innerHTML = `
+                    Your job has been created with the ID <code id="rendered-job-id">${data.job_id}</code>.
+                    `;
                     // hide the job creation form
                     document.getElementById("zone-job").classList.add("hidden");
+                    // Set the Job ID in the hidden form field
+                    document.getElementById("job-id").value = data.job_id;
+                    // Set the Job ID in the Dropzone headers:
+                    function updateProgressText(progress, totalBytes, totalBytesSent) {
+                        document.getElementById("progress").value = progress;
+                        const roundedProgress = Math.round(100 * progress);
+                        document.getElementById("progress-text").innerHTML = `${roundedProgress / 100}%<br />${dropzone.getQueuedFiles().length} files remaining`;
+                    }
+                    // throttled updateProgressText to run max once per second, on the trailing edge
+                    const throttledUpdateProgressText = _.throttle(updateProgressText, 1000, { trailing: true });
+
+                    const dropzone = new Dropzone("div.dropzone", {
+                        // https://github.com/dropzone/dropzone/blob/main/src/options.js
+                        url: "/api/upload",
+                        parallelUploads: 4,
+                        chunking: true,
+                        forceChunking: true,
+                        retryChunks: true,
+                        maxFilesize: 10000, // MiB: 10GB,
+                        createImageThumbnails: false,
+                        thumbnailHeight: 30,
+                        headers: {
+                            "X-Job-Namespace": "ml4paleo",
+                            "X-Job-ID": data.job_id,
+                        },
+                        totaluploadprogress: function (progress, totalBytes, totalBytesSent) {
+                            throttledUpdateProgressText(progress, totalBytes, totalBytesSent);
+                        },
+                    });
                 })
                 .catch((error) => {
                     console.error("Error:", error);
+                    notyf.error(`Error creating job: ${error}`);
                 });
         }
     </script>
