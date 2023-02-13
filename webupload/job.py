@@ -3,11 +3,12 @@ import abc
 import logging
 import os
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 import json
 import uuid
 from enum import Enum
 from marshmallow import Schema, fields
+from jque import jque
 
 from enum import Enum
 import uuid
@@ -30,6 +31,15 @@ class JobStatus(Enum):
     SEGMENT_ERROR = "segment_error"
     DONE = "done"
     ERROR = "error"
+
+    @staticmethod
+    def from_string(label: str) -> "JobStatus":
+        for status in JobStatus:
+            if "." in label:
+                label = label.split(".")[-1]
+            if status.value.lower() == label.lower():
+                return status
+        raise ValueError(f"Invalid job status: {label}")
 
 
 class UploadJobSchema(Schema):
@@ -90,7 +100,13 @@ class UploadJob:
 
     @classmethod
     def from_dict(cls, d: dict) -> "UploadJob":
-        return UploadJobSchema().load(d)  # type: ignore
+        res = UploadJob(
+            id=d["id"],
+            name=d["name"],
+            status=JobStatus.from_string(d["status"]),
+            created_at=d["created_at"],
+        )
+        return res
 
 
 class UploadJobManager(abc.ABC):
@@ -124,7 +140,10 @@ class JSONFileUploadJobManager(UploadJobManager):
         """
         try:
             with open(self.file_path, "r") as f:
-                results = {k: UploadJob.from_dict(v) for k, v in json.load(f).items()}
+                results = {
+                    k: (UploadJob.from_dict(v) if isinstance(v, dict) else v)
+                    for k, v in json.load(f).items()
+                }
                 return results
         except json.JSONDecodeError as e:
             # Move the corrupted file out of the way:
@@ -158,7 +177,20 @@ class JSONFileUploadJobManager(UploadJobManager):
         Get a job by its ID.
         """
         jobs = self._load_jobs()
-        return jobs[job_id]
+        try:
+            d = jobs[job_id]
+            return d
+        except KeyError:
+            raise IndexError(job_id)
+
+    def update_job(self, job_id: UploadJobID, job: UploadJob) -> UploadJobID:
+        """
+        Update a job by its ID.
+        """
+        jobs = self._load_jobs()
+        jobs[job_id] = job
+        self._save_jobs(jobs)
+        return job.id
 
     def has_job(self, job_id: UploadJobID) -> bool:
         """
@@ -172,3 +204,11 @@ class JSONFileUploadJobManager(UploadJobManager):
         Generate a new job ID.
         """
         return _new_job_id()
+
+    def get_jobs_by_status(self, status: JobStatus) -> List[UploadJob]:
+        """
+        Get all jobs with a given status.
+        """
+        jobs = {k: v.to_dict() for k, v in self._load_jobs().items()}
+        qry = {"status": f"{status}"}
+        return [UploadJob.from_dict(u) for u in jque(list(jobs.values())).query(qry)]

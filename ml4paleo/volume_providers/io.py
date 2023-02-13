@@ -4,6 +4,7 @@ from typing import Tuple, Union
 import zarr
 import numpy as np
 import tqdm
+from numcodecs import Blosc
 
 
 def export_zarr_array(
@@ -36,7 +37,7 @@ def export_zarr_array(
     if dtype is None:
         dtype = volume_provider.dtype
     if compression is None:
-        compression = "gzip"
+        compression = Blosc()
     if chunk_size is None:
         chunk_size = (256, 256, 256)
 
@@ -67,10 +68,12 @@ def export_zarr_array(
     for i in prog_bar(range(0, volume_provider.shape[2], slice_count)):
         zstart = i
         zend = min(i + slice_count, volume_provider.shape[2])
-        zarr_array[
-            :, :, (zstart // downsample_factor[2]) : (zend // downsample_factor[2])
-        ] = volume_provider[:, :, zstart:zend].astype(dtype, copy=False)[
+        vol = volume_provider[:, :, zstart:zend]
+        vol = vol.astype(dtype)[
             :: downsample_factor[0], :: downsample_factor[1], :: downsample_factor[2]
         ]
+        zarr_array[
+            :, :, (zstart // downsample_factor[2]) : (zend // downsample_factor[2])
+        ] = vol
 
     return zarr_array

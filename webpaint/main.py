@@ -44,6 +44,7 @@ def paint():
         rf_kwargs=dict(n_estimators=20, max_depth=8, n_jobs=-1)
     )
     model.fit(X, y)
+    model.save("rf.pkl")
 
     # Generate a new prediction for `example.jpg`
     prediction = model.segment(X)

@@ -1,6 +1,6 @@
 import logging
 import os
-from flask import Flask, jsonify, render_template, request, make_response
+from flask import Flask, jsonify, render_template, request, make_response, send_file
 from werkzeug.utils import secure_filename
 
 from job import JSONFileUploadJobManager, JobStatus, UploadJob
@@ -12,6 +12,11 @@ app = Flask(__name__)
 
 
 class ML4PaleoWebApplication:
+    """
+    The main web application.
+
+    """
+
     def __init__(self, app: Flask):
         job_manager = JSONFileUploadJobManager("jobs.json")
         self.app = app
@@ -68,17 +73,15 @@ class ML4PaleoWebApplication:
                 # log.exception will include the traceback so we can see what's wrong
                 log.exception("Could not write to file")
                 return make_response(
-                    ("Not sure why," " but we couldn't write the file to disk", 500)
+                    ("Not sure why, but we couldn't write the file to disk", 500)
                 )
             total_chunks = int(request.form["dztotalchunkcount"])
             if current_chunk + 1 == total_chunks:
                 # This was the last chunk, the file should be complete and the size we expect
                 if os.path.getsize(save_path) != int(request.form["dztotalfilesize"]):
                     log.error(
-                        f"File {file.filename} was completed, "
-                        f"but has a size mismatch."
-                        f"Was {os.path.getsize(save_path)} but we"
-                        f" expected {request.form['dztotalfilesize']} "
+                        f"File {file.filename} was completed, but has a size mismatch."
+                        f"Was {os.path.getsize(save_path)} but we expected {request.form['dztotalfilesize']} "
                     )
                     return make_response(("Size mismatch", 500))
                 else:
@@ -101,6 +104,58 @@ class ML4PaleoWebApplication:
 
             job = job_manager.get_job(job_id)
             return jsonify({"job_id": job_id, "status": job.status})
+
+        @self.app.route("/api/job/status/upload-complete", methods=["POST"])
+        def upload_complete():
+            job_id = (request.get_json() or {}).get("job_id", None)
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            job.complete_upload()
+            job_manager.update_job(job_id, job)
+            return jsonify({"job_id": job_id, "status": str(job.status)})
+
+        @self.app.route("/job/<job_id>", methods=["GET"])
+        def get_ui_job_status(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            return render_template("job_page.html", job=job)
+
+        ############################
+        #
+        # Annotation
+        #
+        ############################
+
+        @self.app.route("/api/annotate/<job_id>/images/next")
+        def get_next_image(job_id):
+            job = job_manager.get_job(job_id)
+            return send_file("example.jpg")
+
+        @self.app.route("/api/annotate/<job_id>/data/submit", methods=["POST"])
+        def submit_annotation(job_id):
+            job = job_manager.get_job(job_id)
+            return jsonify({"status": "ok"})
+
+        @self.app.route("/job/annotate/<job_id>", methods=["GET"])
+        def annotation_page(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            return render_template("annotation_page.html", job=job)
 
     def run(self, **kwargs):
         self.app.run(host="0.0.0.0", **kwargs)

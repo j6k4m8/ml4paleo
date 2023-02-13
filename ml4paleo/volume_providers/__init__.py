@@ -153,6 +153,20 @@ class VolumeProvider(abc.ABC):
         """
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def __getitem__(self, key) -> np.ndarray:
+        """
+        Return a slice of the volume.
+
+        Arguments:
+            key: The slice to return.
+
+        Returns:
+            The slice of the volume.
+
+        """
+        raise NotImplementedError
+
 
 class NumpyVolumeProvider(VolumeProvider):
     """
@@ -284,7 +298,7 @@ class ImageStackVolumeProvider(VolumeProvider):
 
         """
         # Normalize the indices
-        zs, ys, xs = _normalize_key(key, self.shape)
+        zs, ys, xs = _normalize_key(key, self.shape[::-1])
 
         # Read the images.
         images = [self._read_image(self.paths[z]) for z in range(zs[0], zs[1])]

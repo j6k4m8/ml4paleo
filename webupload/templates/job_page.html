@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Wizard | ml4paleo</title>
+    <link rel="stylesheet" href="https://unpkg.com/@picocss/pico@1.*/css/pico.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.css">
+    <style type="text/css">
+        .dropzone {
+            border: 4px dashed #0087F7;
+            border-radius: 5px;
+            background: white;
+            min-height: 250px;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+
+</head>
+
+<body>
+    <nav class="container">
+        <ul>
+            <li><strong>ml4paleo</strong></li>
+        </ul>
+        <ul>
+            <li><a href="#">About</a></li>
+        </ul>
+    </nav>
+    <div class="container">
+        <div class="row">
+            <div class="col">
+                <article id="intro-job">
+                    <header>
+                        <h1>
+                            {{ job.name }}
+                        </h1>
+                    </header>
+
+                    <div>
+                        <label for="upload-progress">Upload Progress</label>
+                        <progress value="100" max="100" id="upload-progress"></progress>
+                    </div>
+                    {% if job.status | string == "JobStatus.CONVERTING" %}
+                    <div>
+                        <label for="convert-progress">Conversion Progress</label>
+                        <progress max="100" id="convert-progress"></progress>
+                    </div>
+                    {% endif %}
+                    {% if job.status | string == "JobStatus.CONVERTED" %}
+                    <div>
+                        <label for="convert-progress">Conversion Progress</label>
+                        <progress value="100" max="100" id="convert-progress"></progress>
+                    </div>
+                    <article>
+                        <header>
+                            <h2>Annotation</h2>
+                        </header>
+                        <div>
+                            <p>Segmentation will begin once you have annotated a handful of slices.</p>
+                            <p>Click <a href="{{ url_for('annotation_page', job_id=job.id) }}">here</a> to open the
+                                annotation tool.</p>
+                        </div>
+                    </article>
+                    {% endif %}
+                    {% if job.status | string == "JobStatus.SEGMENTING" %}
+                    <div>
+                        <label for="convert-progress">Conversion Progress</label>
+                        <progress value="100" max="100" id="convert-progress"></progress>
+                    </div>
+                    <div>
+                        <label for="segment-progress">Segmentation Progress</label>
+                        <progress max="100" id="segment-progress"></progress>
+                    </div>
+                    {% endif %}
+                    {% if job.status | string == "JobStatus.SEGMENTED" %}
+                    <div>
+                        <label for="convert-progress">Conversion Progress</label>
+                        <progress value="100" max="100" id="convert-progress"></progress>
+                    </div>
+                    <div>
+                        <label for="segment-progress">Segmentation Progress</label>
+                        <progress value="100" max="100" id="segment-progress"></progress>
+                    </div>
+                    {% endif %}
+                </article>
+            </div>
+        </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"
+        integrity="sha512-WFN04846sdKMIP5LKNphMaWzU7YpMyCU245etK3g/2ARYbPK9Ub18eG+ljU96qKRCWh+quCY7yefSmlkQw1ANQ=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+        const notyf = new Notyf({
+            duration: 8000,
+            position: {
+                x: "right",
+                y: "bottom",
+            },
+            dismissible: true,
+        });
+
+    </script>
+</body>
+
+</html>
