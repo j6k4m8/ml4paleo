@@ -16,6 +16,7 @@ from typing import List, Tuple, Union
 
 import numpy as np
 import psutil
+import zarr
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,34 @@ class NumpyVolumeProvider(VolumeProvider):
         return self.data.dtype
 
 
+
+class ZarrVolumeProvider(VolumeProvider):
+    """
+    A volume provider that provides a 3D volume of data from a zarr array.
+    """
+
+    def __init__(self, file_path: Union[str, pathlib.Path]):
+        """
+        Create a new ZarrVolumeProvider.
+
+        Arguments:
+            file_path: The path to the zarr file.
+
+        """
+        self.zarr = zarr.open(str(file_path), mode="r")
+
+    def __getitem__(self, key):
+        return self.zarr[key]
+
+    @property
+    def shape(self) -> Tuple[int, int, int]:
+        return self.zarr.shape
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.zarr.dtype
+
+
 class ImageStackVolumeProvider(VolumeProvider):
     """
     A VolumeProvider that provides a 3D volume of data from a stack of 2D
@@ -313,4 +342,7 @@ class ImageStackVolumeProvider(VolumeProvider):
         return self[0:1, 0:1, 0].dtype
 
 
+
 __all__ = ["VolumeProvider", "NumpyVolumeProvider", "ImageStackVolumeProvider"]
+
+

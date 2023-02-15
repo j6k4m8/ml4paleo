@@ -52,7 +52,7 @@ def paint():
     # Reshape the prediction to be 2D
     prediction = prediction.reshape(Xshape)
 
-    # Broadcast to a red image with 0 for G, B, and A channels:
+    # Broadcast to a red image with 0 for G, B, and 255 for A channels:
     predictionimg = np.zeros((prediction.shape[0], prediction.shape[1], 4))
     predictionimg[:, :, 0] = prediction * 255
     # Set the alpha channel to 255
