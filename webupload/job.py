@@ -20,12 +20,39 @@ UploadJobID = str
 
 
 class JobStatus(Enum):
+    # Unused.
     PENDING = "pending"
+
+    # When a user starts a job, it is created in the Uploading state.
     UPLOADING = "uploading"
+    # Once the web client registers the 100% mark on the upload, we call the
+    # server to mark the job as "uploaded".
     UPLOADED = "uploaded"
+
+    # The server will periodically check for UPLOADED jobs and start the
+    # conversion process by switching the status to CONVERTING.
     CONVERTING = "converting"
+    # Once the conversion is complete (right now all handled by the same job),
+    # the status will be set to CONVERTED.
     CONVERTED = "converted"
+    # Unused.
     CONVERT_ERROR = "convert_error"
+
+    # If a job has been annotated AT ALL and there are ANY training examples,
+    # the job will be put in the ANNOTATED state. This doesn't mean there is
+    # a complete annotation, just that there is at least one training example.
+    # This means that the job can be trained, and we can show that option to
+    # the user, in case they're low-patience. (But it also means that it's
+    # pretty likely that the model will be retrained a few times with an
+    # increasing number of training examples...)
+    ANNOTATED = "annotated"
+
+    # Once a user manually kicks off the training process, the job will be
+    # queued for training. This is the state it will be in until the training
+    # process picks it up and converts it to TRAINING.
+    TRAINING_QUEUED = "training_queued"
+
+    # Unused:
     SEGMENTING = "segmenting"
     SEGMENTED = "segmented"
     SEGMENT_ERROR = "segment_error"
@@ -84,12 +111,6 @@ class UploadJob:
 
     def complete_convert(self):
         self.set_status(JobStatus.CONVERTED)
-
-    def start_segment(self):
-        self.set_status(JobStatus.SEGMENTING)
-
-    def complete_segment(self):
-        self.set_status(JobStatus.SEGMENTED)
 
     def complete(self):
         self.set_status(JobStatus.DONE)
@@ -161,7 +182,7 @@ class JSONFileUploadJobManager(UploadJobManager):
             jobs_jsonable = {
                 k: (v if isinstance(v, dict) else v.to_dict()) for k, v in jobs.items()
             }
-            json.dump(jobs_jsonable, f)
+            json.dump(jobs_jsonable, f, indent=4)
 
     def new_job(self, job: UploadJob) -> UploadJobID:
         """
@@ -183,11 +204,21 @@ class JSONFileUploadJobManager(UploadJobManager):
         except KeyError:
             raise IndexError(job_id)
 
-    def update_job(self, job_id: UploadJobID, job: UploadJob) -> UploadJobID:
+    def update_job(
+        self,
+        job_id: UploadJobID,
+        job: Optional[UploadJob] = None,
+        update: Optional[dict] = None,
+    ) -> UploadJobID:
         """
         Update a job by its ID.
         """
         jobs = self._load_jobs()
+        if job is None:
+            job = jobs[job_id]
+        if update is not None:
+            for k, v in update.items():
+                setattr(job, k, v)
         jobs[job_id] = job
         self._save_jobs(jobs)
         return job.id

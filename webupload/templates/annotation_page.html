@@ -142,7 +142,11 @@
 
         function submitData() {
             paintPixels.loadPixels();
-            const pixels = paintPixels.canvas.toDataURL();
+            const maskPixels = paintPixels.canvas.toDataURL();
+
+            img.loadPixels();
+            const imagePixels = img.canvas.toDataURL();
+
             let jobId = window.location.pathname.split("/")[
                 window.location.pathname.split("/").length - 1
             ];
@@ -150,21 +154,22 @@
             fetch(`${BASE_URL}/api/annotate/${jobId}/data/submit`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ image: pixels }),
+                body: JSON.stringify({ mask: maskPixels, image: imagePixels }),
             }).then((res) => {
                 return res.json();
             }).then((data) => {
                 // There's a new image in data.prediction;
                 // b64 encoded png. Render it to paintPixels.
                 // img.src = `data:image/png;base64,${data.prediction}`;
-                loadImage('data:image/png;base64,' + data.prediction, img => {
-                    // Clear pixels by erasing:
-                    paintPixels.erase();
-                    paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
-                    paintPixels.noErase();
-                    // At half-size:
-                    paintPixels.image(img, 0, 0, img.width / 2, img.height / 2);
-                });
+                // loadImage('data:image/png;base64,' + data.prediction, img => {
+                //     // Clear pixels by erasing:
+                //     paintPixels.erase();
+                //     paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
+                //     paintPixels.noErase();
+                //     // At half-size:
+                //     paintPixels.image(img, 0, 0, img.width / 2, img.height / 2);
+                // });
+                window.location.reload();
             });
         }
 
@@ -422,7 +427,7 @@
         <button class="zoom-button" onclick="STATE.zoom -= 0.1">–</button>
         <br />
         <br />
-        <button class="zoom-button" onclick="backspace()">⌫</button>
+        <button class="zoom-button" onclick="skip()">→</button>
     </div>
 </body>
 

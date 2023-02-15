@@ -1,20 +1,22 @@
+import logging
 import pathlib
+import time
 from typing import Optional
+
+from config import CONFIG
+from job import JobStatus, JSONFileUploadJobManager, UploadJob
+
 from ml4paleo.volume_providers import ImageStackVolumeProvider
 from ml4paleo.volume_providers.io import export_zarr_array
-from config import CONFIG
-from job import UploadJob, JobStatus, JSONFileUploadJobManager
 
-import logging
-
-log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 def get_job_manager() -> JSONFileUploadJobManager:
     """
     Return the job manager.
     """
-    return JSONFileUploadJobManager("jobs.json")
+    return JSONFileUploadJobManager("volume/jobs.json")
 
 
 def get_next_uploaded_dataset_to_convert() -> Optional[UploadJob]:
@@ -33,12 +35,12 @@ def convert_next():
     Convert the next dataset that has been uploaded but not yet converted.
     """
     job_manager = get_job_manager()
-    log.info("Getting next dataset to convert...")
+    logging.info("Getting next dataset to convert...")
     next_job = get_next_uploaded_dataset_to_convert()
     if next_job is None:
-        log.info("No datasets to convert")
+        logging.info("No datasets to convert")
         return
-    log.info("Converting dataset %s", next_job.id)
+    logging.info("Converting dataset %s", next_job.id)
     next_job.start_convert()
     job_manager.update_job(next_job.id, next_job)
     volume_provider = ImageStackVolumeProvider(
@@ -49,11 +51,13 @@ def convert_next():
         pathlib.Path(CONFIG.chunked_directory) / next_job.id,
         chunk_size=CONFIG.chunk_size,
     )
-    log.info("Finished converting dataset %s", next_job.id)
+    logging.info("Finished converting dataset %s", next_job.id)
     next_job.complete_convert()
     job_manager.update_job(next_job.id, next_job)
-    log.info("Updating job %s", next_job.id)
+    logging.info("Updating job %s", next_job.id)
 
 
 if __name__ == "__main__":
-    convert_next()
+    while True:
+        convert_next()
+        time.sleep(10)

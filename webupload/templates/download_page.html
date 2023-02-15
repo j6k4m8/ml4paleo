@@ -1,0 +1,96 @@
+{% from "macros.html" import status_badge %}
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Wizard | ml4paleo</title>
+    <link rel="stylesheet" href="https://unpkg.com/@picocss/pico@1.*/css/pico.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.css">
+
+</head>
+
+<body>
+    {% include "navbar.html" %}
+    <div class="container">
+        <div class="row">
+            <div class="col">
+                <h1>Downloads for <a href="{{
+                    url_for('job_page', job_id=job.id)
+                }}"><i>{{job.name}}</i></a></h1>
+                {% if job.status | string not in ["JobStatus.SEGMENTED", "JobStatus.DONE"] %}
+                <div class="row">
+                    <div class="col">
+                        <div class="alert alert-warning">
+                            <p>
+                                <strong>Warning!</strong> This job is not yet done. The download links will not work
+                                until the job is done.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+                <div class="row">
+                    <div class="col">
+                        <details>
+                            <summary>
+                                Segmentation Zarr
+                            </summary>
+
+                            <article>
+                                Zarr is a format for storing large N-dimensional arrays. It is designed to be
+                                efficient for both reading and writing, and to be able to store data in a
+                                distributed manner. It is a good choice for storing large amounts of data, and
+                                is the format used by the ml4paleo web app. It is less easy to share and view
+                                than image formats.
+
+                                <footer>
+                                    <a class="download-button" onclick="disableDownloadButtons()" role="button"
+                                        style="width:100%" href="{{
+                                        url_for('download_zarr', job_id=job.id, seg_id=latest_seg_id)
+                                     }}">Download
+                                        <b>{{job.name}}</b> as Zarr</a>
+                                </footer>
+                            </article>
+                        </details>
+                        <details>
+                            <summary>
+                                Segmentation PNG Stacks
+                            </summary>
+                            <article>
+                                PNG images are a good choice for storing small datasets. PNG is not very
+                                efficient for storing large amounts of data, but it makes data very easy to
+                                share and view.
+                                <footer>
+                                    <a class="download-button" onclick="disableDownloadButtons()" role="button"
+                                        style="width:100%" href="{{
+                                        url_for('download_png', job_id=job.id, seg_id=latest_seg_id)
+                                     }}">Download
+                                        <b>{{job.name}}</b> as PNG (will take a long time)</a>
+                                </footer>
+                            </article>
+                        </details>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        function disableDownloadButtons() {
+            document.querySelectorAll(".download-button").forEach((button) => {
+                button.disabled = true;
+                // Add a spinner by updating aria-busy:
+                button.setAttribute("aria-busy", "true");
+            });
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"
+        integrity="sha512-WFN04846sdKMIP5LKNphMaWzU7YpMyCU245etK3g/2ARYbPK9Ub18eG+ljU96qKRCWh+quCY7yefSmlkQw1ANQ=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+</body>
+
+</html>

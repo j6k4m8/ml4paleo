@@ -26,14 +26,7 @@
 </head>
 
 <body>
-    <nav class="container">
-        <ul>
-            <li><strong>ml4paleo</strong></li>
-        </ul>
-        <ul>
-            <li><a href="#">About</a></li>
-        </ul>
-    </nav>
+    {% include "navbar.html" %}
     <div class="container">
         <div class="row">
             <div class="col">
@@ -44,7 +37,18 @@
                         </h1>
                     </header>
                     <p>
-                        blah blah blah what is this
+                    <h2>Automated image segmentation for synchrotron X-ray paleontology.</h2>
+                    <p>
+                        This is a web-based tool for automated image segmentation of synchrotron X-ray images of
+                        fossilized bones. The community is invited to upload images of fossilized bones and receive a
+                        segmentation of the bone. The segmentation is a binary image where the bone is white and the
+                        background is black. The segmentation is generated using a deep learning model trained on a
+                        large dataset of X-ray images of fossilized bones.
+                    </p>
+                    <p>
+                        The tool will also generate a 3D mesh (STL file) of the bone. The mesh can be used to
+                        reconstruct the bone in 3D. The mesh can also be used to generate a 3D print of the fossil data.
+                    </p>
                     </p>
                     <footer>
                         <button role="button" onclick="startNewJob()">Create a new job</button>

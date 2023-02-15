@@ -1,3 +1,5 @@
+{% from "macros.html" import status_badge %}
+
 <!DOCTYPE html>
 <html lang="en">
 
@@ -24,14 +26,7 @@
 </head>
 
 <body>
-    <nav class="container">
-        <ul>
-            <li><strong>ml4paleo</strong></li>
-        </ul>
-        <ul>
-            <li><a href="#">About</a></li>
-        </ul>
-    </nav>
+    {% include "navbar.html" %}
     <div class="container">
         <div class="row">
             <div class="col">
@@ -39,13 +34,29 @@
                     <header>
                         <h1>
                             {{ job.name }}
+                            <div style="float:right" data-tooltip="{{job.status}}">{{ status_badge(job.status) }}</div>
                         </h1>
+
+                        <p>
+                            <a role="button" href="{{ neuroglancer_link }}" target="_blank"
+                                data-tooltip="Open 3D view in a new tab">
+                                View in 3D
+                            </a>
+                        </p>
+                        <p>
+                            <small>
+                                {{job.created_at}}
+                            </small>
+                        </p>
                     </header>
 
+
+                    {% if job.status | string == "JobStatus.UPLOADED" %}
                     <div>
                         <label for="upload-progress">Upload Progress</label>
                         <progress value="100" max="100" id="upload-progress"></progress>
                     </div>
+                    {% endif %}
                     {% if job.status | string == "JobStatus.CONVERTING" %}
                     <div>
                         <label for="convert-progress">Conversion Progress</label>
@@ -63,30 +74,68 @@
                         </header>
                         <div>
                             <p>Segmentation will begin once you have annotated a handful of slices.</p>
-                            <p>Click <a href="{{ url_for('annotation_page', job_id=job.id) }}">here</a> to open the
+                            <p>Click <a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">here</a>
+                                to open the
                                 annotation tool.</p>
                         </div>
                     </article>
                     {% endif %}
-                    {% if job.status | string == "JobStatus.SEGMENTING" %}
+                    {% if job.status | string == "JobStatus.ANNOTATED" %}
                     <div>
                         <label for="convert-progress">Conversion Progress</label>
                         <progress value="100" max="100" id="convert-progress"></progress>
                     </div>
-                    <div>
-                        <label for="segment-progress">Segmentation Progress</label>
-                        <progress max="100" id="segment-progress"></progress>
-                    </div>
+                    <h2>Annotation</h2>
+                    <p><a target="_blank" role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue
+                            annotating</a>
+                    </p>
+                    <p>
+                        There are currently {{ num_annotations }} annotated slices.
+                    </p>
+                    <p>
+                        You can train a model with any number of annotated slices, but we recommend at least 10. (You
+                        can always annotate a bit more and then retrain!)
+                    </p>
+                    <p>To run your model, click the link below.</p>
+                    <p>
+                        <button onclick="triggerSegmentation()">Start segmenting</button>
+                    </p>
                     {% endif %}
-                    {% if job.status | string == "JobStatus.SEGMENTED" %}
-                    <div>
-                        <label for="convert-progress">Conversion Progress</label>
-                        <progress value="100" max="100" id="convert-progress"></progress>
-                    </div>
-                    <div>
-                        <label for="segment-progress">Segmentation Progress</label>
-                        <progress value="100" max="100" id="segment-progress"></progress>
-                    </div>
+                    {% if job.status | string in ["JobStatus.TRAINING_QUEUED", "JobStatus.SEGMENTING"] %}
+                    <h2>Annotation</h2>
+                    <p><a target="_blank" role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue
+                            annotating</a>
+                    </p>
+                    <p>
+                        There are currently {{ num_annotations }} annotated slices.
+                    </p>
+                    <p>
+                        You can train a model with any number of annotated slices, but we recommend at least 10. (You
+                        can always annotate a bit more and then retrain!)
+                    </p>
+                    <p>
+                        <button disabled aria-busy="true">Running segmentation...</button>
+                    </p>
+                    {% endif %}
+                    {% if job.status | string in ["JobStatus.SEGMENTED"] %}
+                    <h2>Segmentation complete!</h2>
+                    <p>
+                        The segmentation is complete! You can download the results below. If you would like to
+                        retrain the model, you can do so by clicking the button below.
+                    </p>
+                    <p>
+                        <a role="button" style="width:100%" href="
+                        {{ url_for('download_page', job_id=job.id) }}
+                        ">Download latest segmentation</a>
+                    </p>
+                    <hr />
+                    <p>
+                        There are currently {{ num_annotations }} annotated slices. You can train a model with any
+                        number of annotated slices, but we recommend at least 10. (You
+                        can always annotate a bit more and then retrain!)
+                    </p>
+                    <p><a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue annotating</a>
+                    </p>
                     {% endif %}
                 </article>
             </div>
@@ -105,6 +154,24 @@
             },
             dismissible: true,
         });
+
+        triggerSegmentation = () => {
+            // Disable the button
+            document.querySelector("button").disabled = true;
+            fetch("/api/job/{{ job.id }}/start", {
+                method: "POST",
+            })
+                .then((response) => {
+                    if (response.ok) {
+                        notyf.success("Segmentation started. You will receive an email when it is complete.");
+                    } else {
+                        notyf.error("There was an error starting segmentation. Please try again in a few minutes.");
+                    }
+                })
+                .catch((error) => {
+                    notyf.error("There was an error starting segmentation. Please try again in a few minutes.");
+                });
+        };
 
     </script>
 </body>

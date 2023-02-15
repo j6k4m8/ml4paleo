@@ -1,0 +1,54 @@
+<!-- Status Badge Macro -->
+<!-- Path: webupload/templates/macros.html -->
+
+{% macro status_badge(status) %}
+<style>
+    .badge {
+        padding: 0.25rem 0.5rem;
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        line-height: 1;
+        text-align: center;
+        white-space: nowrap;
+        vertical-align: baseline;
+        display: inline-block;
+    }
+
+    .badge--success {
+        background-color: #28a745;
+        color: #fff;
+    }
+
+    .badge--warning {
+        background-color: #ffc107;
+        color: #212529;
+    }
+
+    .badge--error {
+        background-color: #dc3545;
+        color: #fff;
+    }
+</style>
+{% if status | string == "JobStatus.UPLOADED" %}
+<span class="badge badge--success">Uploaded</span>
+{% elif status | string == "JobStatus.CONVERTING" %}
+<span class="badge badge--warning">Converting</span>
+{% elif status | string == "JobStatus.CONVERTED" %}
+<span class="badge badge--success">Converted</span>
+{% elif status | string == "JobStatus.ERROR" %}
+<span class="badge badge--error">Error</span>
+{% elif status | string == "JobStatus.ANNOTATED" %}
+<span class="badge badge--success">Annotated</span>
+{% elif status | string == "JobStatus.TRAINING_QUEUED" %}
+<span class="badge badge--warning">Queued</span>
+{% elif status | string == "JobStatus.TRAINING" %}
+<span class="badge badge--warning">Training</span>
+{% elif status | string == "JobStatus.SEGMENTING" %}
+<span class="badge badge--warning">Segmenting</span>
+{% elif status | string == "JobStatus.SEGMENTED" %}
+<span class="badge badge--success">Segmented</span>
+{% elif status | string == "JobStatus.READY" %}
+<span class="badge badge--success">Ready</span>
+{% endif %}
+{% endmacro %}

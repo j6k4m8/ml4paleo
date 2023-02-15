@@ -348,6 +348,18 @@ async = ["asgiref (>=3.2)"]
 dotenv = ["python-dotenv"]
 
 [[package]]
+name = "flask-cors"
+version = "3.0.10"
+description = "A Flask extension adding a decorator for CORS support"
+category = "main"
+optional = false
+python-versions = "*"
+
+[package.dependencies]
+Flask = ">=0.9"
+Six = "*"
+
+[[package]]
 name = "fonttools"
 version = "4.38.0"
 description = "Tools to manipulate font files"
@@ -1837,7 +1849,7 @@ testing = ["pytest (>=6)", "pytest-checkdocs (>=2.4)", "flake8 (<5)", "pytest-co
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.9"
-content-hash = "ec541971f098210adb743cd8a25964baa7c4a92dc073f9e002602ff6dfcec7ff"
+content-hash = "e128ce3096da5abdd92082ad5c820e8e8b763427c312df467ac66eb6088fc214"
 
 [metadata.files]
 anyio = []
@@ -1870,6 +1882,7 @@ executing = []
 fasteners = []
 fastjsonschema = []
 flask = []
+flask-cors = []
 fonttools = []
 fqdn = []
 idna = []
