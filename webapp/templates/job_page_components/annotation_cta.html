@@ -14,7 +14,7 @@
         You can train a model with any number of annotated slices, but we recommend at least 10. (You
         can always annotate a bit more and then retrain!)
     </p>
-    {% if job.status | string == "JobStatus.ANNOTATED" %}
+    {% if has_been_annotated %}
     <p>
         <button id="segmentation-trigger-button" onclick="triggerSegmentation()">Start automatic segmentation</button>
     </p>

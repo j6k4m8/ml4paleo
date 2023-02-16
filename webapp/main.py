@@ -245,6 +245,17 @@ class ML4PaleoWebApplication:
                 neuroglancer_link=_create_neuroglancer_link(job),
                 latest_segmentation_id=get_latest_segmentation_id(job),
                 # Status breakdown:
+                has_been_annotated=(
+                    job.status
+                    not in [
+                        JobStatus.PENDING,
+                        JobStatus.UPLOADING,
+                        JobStatus.UPLOADED,
+                        JobStatus.CONVERTING,
+                        JobStatus.CONVERTED,
+                        JobStatus.CONVERT_ERROR,
+                    ]
+                ),
                 annotation_ready=(
                     job.status
                     not in [
