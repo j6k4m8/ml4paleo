@@ -1,3 +1,17 @@
+"""
+This file contains the UploadJob and JobManager classes, which are responsible
+for tracking a single job and collections of jobs, respectively.
+
+This also contains the JobStatus enum, which is used to track the status of a
+job over the course of its lifecycle.
+This enum is a bit of a frustration, because it becomes very inconvenient to
+tell if a job has, say, segmentation ready... since the corresponding job
+statuses that indicate this are ANY post-segmentation status. In the future, it
+would be nice to have a status system that uses a bitfield or something to
+indicate which parts of the job are ready, and which parts are not.
+
+"""
+
 import datetime
 import abc
 import logging
@@ -97,6 +111,14 @@ def _new_job_id() -> UploadJobID:
 
 
 class UploadJob:
+    """
+    An UploadJob is a single job that a user has uploaded to the server.
+
+    The job is created in the UPLOADING state, and then transitions through the
+    other states as the job is processed.
+
+    """
+
     def __init__(
         self,
         id: Optional[UploadJobID] = None,
@@ -105,6 +127,24 @@ class UploadJob:
         created_at: Optional[str] = None,
         last_updated_at: Optional[str] = None,
     ):
+        """
+        Create a new job with the fieldwise constructor.
+
+        All arguments are optional, and will be filled in with default values.
+
+        Arguments:
+            id (UploadJobID): The ID of the job. If not provided, a random ID
+                will be generated.
+            name (str): The name of the job. If not provided, a default name
+                will be generated.
+            status (JobStatus): The status of the job. If not provided, the
+                status will be set to PENDING.
+            created_at (str): The time the job was created. If not provided,
+                the current time will be used.
+            last_updated_at (str): The time the job was last updated. If not
+                provided, the current time will be used (equal to created_at)
+
+        """
         created_at = created_at or datetime.datetime.now().isoformat()
         last_updated_at = last_updated_at or datetime.datetime.now().isoformat()
         self.status = status or JobStatus.PENDING
@@ -114,6 +154,13 @@ class UploadJob:
         self.last_updated_at = last_updated_at
 
     def set_status(self, status: JobStatus):
+        """
+        Set the status of the job, and update the last_updated_at field.
+
+        Arguments:
+            status (JobStatus): The new status of the job.
+
+        """
         self.status = status
         self.last_updated_at = datetime.datetime.now().isoformat()
 
@@ -167,7 +214,30 @@ class UploadJobManager(abc.ABC):
 
 
 class JSONFileUploadJobManager(UploadJobManager):
+    """
+    This class manages the upload jobs by storing them in a JSON file.
+
+    This is mostly production-ready, but is not thread safe, so updating the
+    file COULD be a problem if multiple processes are accessing it at the same
+    time. Practically this is rarely a problem, but it's something to be aware
+    of when scaling up.
+
+    To be consistent, this reads from the file every time a job is requested,
+    and writes to the file every time a job is updated. This is not the most
+    efficient way to do it, but it's the simplest, and it's not a problem for
+    the small number of jobs we expect to have.
+
+    """
+
     def __init__(self, file_path: str):
+        """
+        Create a new JSONFileUploadJobManager.
+
+        Arguments:
+            file_path (str): The path to the JSON file to use. If it does not
+                exist, it will be created.
+
+        """
         self.file_path = file_path
         if not os.path.exists(self.file_path):
             with open(self.file_path, "w") as f:
@@ -205,6 +275,13 @@ class JSONFileUploadJobManager(UploadJobManager):
     def new_job(self, job: UploadJob) -> UploadJobID:
         """
         Create a new job and return its ID.
+
+        Arguments:
+            job (UploadJob): The job to create.
+
+        Returns:
+            UploadJobID: The ID of the new job.
+
         """
         jobs = self._load_jobs()
         jobs[job.id] = job
@@ -214,6 +291,13 @@ class JSONFileUploadJobManager(UploadJobManager):
     def get_job(self, job_id: UploadJobID) -> UploadJob:
         """
         Get a job by its ID.
+
+        Arguments:
+            job_id (UploadJobID): The ID of the job to get.
+
+        Returns:
+            UploadJob: The job.
+
         """
         jobs = self._load_jobs()
         try:
@@ -230,6 +314,25 @@ class JSONFileUploadJobManager(UploadJobManager):
     ) -> UploadJobID:
         """
         Update a job by its ID.
+
+        In all uses, you must pass the `job_id` argument with the job's unique
+        identifier in the database. (It is not supported behavior to create a
+        new job by passing a new job ID, but it works in this implementation.)
+        There are two ways to use this function. The first is to pass in a Job
+        object with updated fields. The second is to pass in a dictionary of
+        ONLY the fields you want to update (not the whole job) under the
+        `update` argument. If you pass both, the `update` operation will be run
+        on the passed `job` object, which may or may not be what you want.
+
+        Arguments:
+            job_id (UploadJobID): The ID of the job to update.
+            job (UploadJob, optional): The job to update. Defaults to None.
+            update (dict, optional): A dictionary of fields to update. Defaults
+                to None.
+
+        Returns:
+            UploadJobID: The ID of the updated job.
+
         """
         jobs = self._load_jobs()
         if job is None:
@@ -246,6 +349,13 @@ class JSONFileUploadJobManager(UploadJobManager):
     def has_job(self, job_id: UploadJobID) -> bool:
         """
         Check if a job exists.
+
+        Arguments:
+            job_id (UploadJobID): The ID of the job to check.
+
+        Returns:
+            bool: True if the job exists, False otherwise.
+
         """
         jobs = self._load_jobs()
         return job_id in jobs.keys()
@@ -259,6 +369,13 @@ class JSONFileUploadJobManager(UploadJobManager):
     def get_jobs_by_status(self, status: JobStatus) -> List[UploadJob]:
         """
         Get all jobs with a given status.
+
+        Arguments:
+            status (JobStatus): The status to filter by.
+
+        Returns:
+            List[UploadJob]: A list of jobs with the given status.
+
         """
         jobs = {k: v.to_dict() for k, v in self._load_jobs().items()}
         qry = {"status": f"{status}"}

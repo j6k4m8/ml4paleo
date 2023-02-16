@@ -18,12 +18,14 @@ class ChunkedMesher:
         volume_provider: VolumeProvider,
         mesh_path: pathlib.Path,
         chunk_size: Tuple[int, int, int],
+        mip: int = 1,
     ):
         self.volume_provider = volume_provider
         self.mesh_path = mesh_path
         self.mesh_path.mkdir(parents=True, exist_ok=True)
         self.chunk_size = chunk_size
         self._ids = None
+        self.mip = mip
 
     def _add_id(self, obj_id: int):
         if self._ids is None:
@@ -54,8 +56,16 @@ class ChunkedMesher:
 
     def mesh_chunk(self, xs, ys, zs):
         labels = self.volume_provider[xs[0] : xs[1], ys[0] : ys[1], zs[0] : zs[1]]
-        mesher = Mesher((1, 1, 1))
-        mesher.mesh(labels, close=False)
+        m = 2**self.mip
+        mesher = Mesher((m, m, m))
+        mesher.mesh(
+            labels[
+                ::m,
+                ::m,
+                ::m,
+            ],
+            close=False,
+        )
         meshes = {}
         for obj_id in mesher.ids():
             self._add_id(obj_id)
@@ -78,7 +88,6 @@ class ChunkedMesher:
                 for j in range(3):
                     m.vectors[i][j] = mesh.vertices[f[j], :]
             # Offset the mesh to the correct position.
-            print(f"Offsetting mesh by {xs[0], ys[0], zs[0]}")
             m.x += zs[0]
             m.y += ys[0]
             m.z += xs[0]
@@ -88,7 +97,6 @@ class ChunkedMesher:
             )
 
     def combine_meshes(self, object_id: int):
-        logging.debug("Combining meshes for object %d", object_id)
         obj_meshes = list(self.mesh_path.glob(f"_{object_id}_*.stl"))
         if len(obj_meshes) == 0:
             return
@@ -104,3 +112,13 @@ class ChunkedMesher:
         combined_mesh.save(
             str(self.mesh_path / f"{object_id}.combined.stl"), mode=stl.Mode.BINARY
         )
+        write_obj(combined_mesh, str(self.mesh_path / f"{object_id}.combined.obj"))
+
+
+def write_obj(mesh, filename):
+    with open(filename, "w") as f:
+        for v in mesh.vectors:
+            for p in v:
+                f.write(f"v {p[0]} {p[1]} {p[2]}\n")
+        for i in range(len(mesh.vectors)):
+            f.write(f"f {3*i+1} {3*i+2} {3*i+3}\n")

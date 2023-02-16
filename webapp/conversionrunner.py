@@ -1,3 +1,20 @@
+"""
+The conversion runner is responsible for reading image stacks from upload jobs
+and converting them to chunked zarr arrays. The images are read from the
+upload directory (`CONFIG.upload_directory`) and the zarr arrays are written to
+the chunked directory (`CONFIG.chunked_directory`). The conversion runner polls
+every few seconds to get new jobs to convert.
+
+If a job is in the `JobStatus.UPLOADED` state, it will be queued for automatic
+conversion. The conversion runner uses the `ImageStackVolumeProvider` to read
+images from the upload directory, and the `export_zarr_array` function to write
+the zarr array to the chunked directory. The conversion runner will update the
+job status to `JobStatus.CONVERTING` when it starts converting a job, and to
+`JobStatus.CONVERTED` when it finishes converting a job. If the conversion job
+fails, the job status will be set to `JobStatus.CONVERT_ERROR`.
+
+"""
+
 import logging
 import pathlib
 import time
@@ -14,7 +31,17 @@ logging.basicConfig(level=logging.INFO)
 
 def get_job_manager() -> JSONFileUploadJobManager:
     """
-    Return the job manager.
+    Return the job manager that will be used to read and write jobs.
+
+    This is a convenience function so that we can easily change the job manager
+    implementation without having to change the rest of the code.
+
+    Arguments:
+        None
+
+    Returns:
+        JobManager: The job manager that will be used to read and write jobs.
+
     """
     return JSONFileUploadJobManager("volume/jobs.json")
 
@@ -22,6 +49,14 @@ def get_job_manager() -> JSONFileUploadJobManager:
 def get_next_uploaded_dataset_to_convert() -> Optional[UploadJob]:
     """
     Return the next dataset that has been uploaded but not yet converted.
+
+    Arguments:
+        None
+
+    Returns:
+        UploadJob: The next dataset that needs to be converted.
+        None: If there are no datasets that need to be converted.
+
     """
     job_manager = get_job_manager()
     next_job = job_manager.get_jobs_by_status(JobStatus.UPLOADED)
@@ -33,6 +68,15 @@ def get_next_uploaded_dataset_to_convert() -> Optional[UploadJob]:
 def convert_next():
     """
     Convert the next dataset that has been uploaded but not yet converted.
+
+    This is the function that actually performs the conversion.
+
+    Arguments:
+        None
+
+    Returns:
+        None
+
     """
     job_manager = get_job_manager()
     logging.info("Getting next dataset to convert...")
