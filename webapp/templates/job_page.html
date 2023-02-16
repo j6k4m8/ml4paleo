@@ -205,6 +205,27 @@
                     }
                 });
         }, 5000);
+
+
+        // When the page loads, get the job ID and name and put them
+        // in localstorage if they aren't already there.
+        let jobId = "{{ job.id }}";
+        let jobName = "{{ job.name }}";
+
+        if (jobId.trim() !== "" && jobName.trim() !== "") {
+            let jobs = JSON.parse(localStorage.getItem('jobs'));
+            if (jobs === null) {
+                jobs = [];
+            }
+            if (!jobs.some((job) => job.id === jobId)) {
+                jobs.push({
+                    id: jobId,
+                    name: jobName,
+                });
+                localStorage.setItem('jobs', JSON.stringify(jobs));
+            }
+        }
+
     </script>
 </body>
 

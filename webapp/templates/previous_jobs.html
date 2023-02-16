@@ -1,0 +1,27 @@
+<article>
+    <header>
+        <h3>Previous Jobs</h3>
+    </header>
+    <ul id="job-list"></ul>
+
+    <script>
+        // Check localStorage for `jobs` key.
+        const template = `
+            <li>
+                <a href="/job/<id>"><name></a>
+            </li>
+        `;
+        const jobs = JSON.parse(localStorage.getItem('jobs'));
+        if (jobs) {
+            const jobList = document.getElementById('job-list');
+            jobs.forEach(job => {
+                const html = template
+                    .replace('<id>', job.id)
+                    .replace('<name>', job.name);
+                console.log(html)
+                jobList.innerHTML += html;
+            });
+        }
+
+    </script>
+</article>
