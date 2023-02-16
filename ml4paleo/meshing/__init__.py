@@ -68,19 +68,20 @@ class ChunkedMesher:
             mesher.erase(obj_id)
         mesher.clear()
         for obj_id, mesh in meshes.items():
-            # Offset the mesh to the correct position.
-            mesh.vertices[:, 0] += xs[0]
-            mesh.vertices[:, 1] += ys[0]
-            mesh.vertices[:, 2] += zs[0]
-            with open(
-                str(self.mesh_path / f"_{obj_id}_{xs[0]}_{ys[0]}_{zs[0]}.obj"), "wb"
-            ) as f:
-                f.write(mesh.to_obj())
+            # with open(
+            #     str(self.mesh_path / f"_{obj_id}_{xs[0]}_{ys[0]}_{zs[0]}.obj"), "wb"
+            # ) as f:
+            #     f.write(mesh.to_obj())
 
             m = stl_mesh.Mesh(np.zeros(mesh.faces.shape[0], dtype=stl_mesh.Mesh.dtype))
             for i, f in enumerate(mesh.faces):
                 for j in range(3):
                     m.vectors[i][j] = mesh.vertices[f[j], :]
+            # Offset the mesh to the correct position.
+            print(f"Offsetting mesh by {xs[0], ys[0], zs[0]}")
+            m.x += zs[0]
+            m.y += ys[0]
+            m.z += xs[0]
             m.save(
                 str(self.mesh_path / f"_{obj_id}_{xs[0]}_{ys[0]}_{zs[0]}.stl"),
                 mode=stl.Mode.ASCII,
