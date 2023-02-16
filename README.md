@@ -60,3 +60,14 @@ In practice, the `Imagery` nodes are implementations of `VolumeProvider`s; the `
 All post-processing steps should implement the `Postprocessor` interface.
 
 The self-supervised feature extraction step is a TODO.
+
+## Running the web app with Docker
+
+```shell
+docker run -it -p 5000:5000 python:3.9 bash
+
+# inside the container
+poetry install
+cd webapp
+poetry run python main.py
+```

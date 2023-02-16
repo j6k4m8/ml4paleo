@@ -74,6 +74,7 @@ class UploadJobSchema(Schema):
     name = fields.Str()
     id = fields.Str()
     created_at = fields.Str()
+    last_updated_at = fields.Str()
 
 
 def _new_job_id() -> UploadJobID:
@@ -90,15 +91,19 @@ class UploadJob:
         name: Optional[str] = None,
         status: Optional[JobStatus] = None,
         created_at: Optional[str] = None,
+        last_updated_at: Optional[str] = None,
     ):
         created_at = created_at or datetime.datetime.now().isoformat()
+        last_updated_at = last_updated_at or datetime.datetime.now().isoformat()
         self.status = status or JobStatus.PENDING
         self.name = name or "Untitled Job created at " + created_at
         self.id = id or _new_job_id()
         self.created_at = created_at
+        self.last_updated_at = last_updated_at
 
     def set_status(self, status: JobStatus):
         self.status = status
+        self.last_updated_at = datetime.datetime.now().isoformat()
 
     def start_upload(self):
         self.set_status(JobStatus.UPLOADING)
@@ -126,6 +131,7 @@ class UploadJob:
             name=d["name"],
             status=JobStatus.from_string(d["status"]),
             created_at=d["created_at"],
+            last_updated_at=d.get("last_updated_at", d["created_at"]),
         )
         return res
 
@@ -219,6 +225,8 @@ class JSONFileUploadJobManager(UploadJobManager):
         if update is not None:
             for k, v in update.items():
                 setattr(job, k, v)
+        # Update the last_updated_at field:
+        job.last_updated_at = datetime.datetime.now().isoformat()
         jobs[job_id] = job
         self._save_jobs(jobs)
         return job.id

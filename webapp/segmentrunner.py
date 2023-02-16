@@ -6,14 +6,14 @@ from typing import Optional, Tuple
 from PIL import Image
 
 import numpy as np
-import tqdm
-import zarr
 from config import CONFIG
-from intern.utils.parallel import block_compute
 from job import JobStatus, JSONFileUploadJobManager, UploadJob
-from joblib import Parallel, delayed
 
-from ml4paleo.segmentation import RandomForest3DSegmenter, Segmenter3D
+from ml4paleo.segmentation import (
+    RandomForest3DSegmenter,
+    Segmenter3D,
+    segment_volume_to_zarr,
+)
 from ml4paleo.volume_providers import VolumeProvider, ZarrVolumeProvider
 
 logging.basicConfig(level=logging.INFO)
@@ -53,29 +53,6 @@ def get_next_dataset_to_segment() -> Optional[UploadJob]:
     if len(next_job) == 0:
         return None
     return next_job[0]
-
-
-def segment_chunk_and_write(
-    xs: Tuple[int, int],
-    ys: Tuple[int, int],
-    zs: Tuple[int, int],
-    volume_provider: VolumeProvider,
-    segmenter: Segmenter3D,
-    seg_path: str,
-) -> bool:
-    """
-    Segment a chunk of a job.
-    """
-    # Get the volume for the chunk:
-    volume = volume_provider[xs[0] : xs[1], ys[0] : ys[1], zs[0] : zs[1]]
-    # Segment the volume:
-    seg_volume = np.zeros(volume.shape, dtype=np.uint64)
-    for z in range(volume.shape[0]):
-        seg_volume[z] = segmenter.segment(np.expand_dims(volume[z], axis=-1))
-    # Write the seg to the seg path zarr:
-    seg_zarr = zarr.open(seg_path, mode="a")
-    seg_zarr[xs[0] : xs[1], ys[0] : ys[1], zs[0] : zs[1]] = seg_volume
-    return True
 
 
 def train_and_segment_job(job: UploadJob) -> None:
@@ -134,35 +111,14 @@ def train_and_segment_job(job: UploadJob) -> None:
     seg_path = (
         pathlib.Path(CONFIG.segmented_directory) / str(job.id) / (timestamp + ".zarr")
     )
-    seg_path.mkdir(parents=True, exist_ok=True)
 
-    # Create the Zarr file for the segmentation.
-    zarr.open(
-        str(seg_path),
-        mode="w",
-        dtype="uint64",
-        shape=vol_provider.shape,
-        chunks=CONFIG.segmentation_chunk_size,
-        write_empty_chunks=False,
-    )
-
-    # Now segment the job.
-    # We segment the job in chunks, and save the results in the
-    # CONFIG.segmentation_directory as another Zarr file.
-    chunks_to_segment = block_compute(
-        0,
-        vol_provider.shape[0],
-        0,
-        vol_provider.shape[1],
-        0,
-        vol_provider.shape[2],
-        block_size=CONFIG.segmentation_chunk_size,
-    )
-
-    # for xs, ys, zs in chunks_to_segment
-    _ = Parallel(n_jobs=CONFIG.segment_job_parallelism)(
-        delayed(segment_chunk_and_write)(xs, ys, zs, vol_provider, segmenter, seg_path)
-        for xs, ys, zs in tqdm.tqdm(chunks_to_segment)
+    segment_volume_to_zarr(
+        vol_provider,
+        seg_path,
+        segmenter=segmenter,
+        chunk_size=CONFIG.segmentation_chunk_size,
+        parallel=CONFIG.segment_job_parallelism,
+        progress=True,
     )
 
 

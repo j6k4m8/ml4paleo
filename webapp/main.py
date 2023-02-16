@@ -50,12 +50,12 @@ def _create_neuroglancer_link(job: UploadJob):
     """
     # Check for segmentation:
 
-    # jsondata = json.dumps(
+    protocol = request.url.split(":")[0]
     jsondata = {
         "layers": [
             {
                 "type": "image",
-                "source": f"zarr://http://{request.host}/api/job/{job.id}/zarr/",
+                "source": f"zarr://{protocol}://{request.host}/api/job/{job.id}/zarr/",
                 "tab": "source",
                 "name": "zarr",
             }
@@ -79,6 +79,31 @@ def _create_neuroglancer_link(job: UploadJob):
     jsondata = json.dumps(jsondata)
 
     return f"https://neuroglancer.bossdb.io/#!{jsondata}"
+
+
+def _transform_img_slice_for_annotation(img_slice):
+    """
+    Transform an image slice to be suitable for annotation.
+    """
+    # Get vmin and vmax, excluding anything within 0..2% of the dynamic range.
+    # If this is u8, ignore; if this is u16, then the dynamic range is 0..65535
+    # so chop off everything between 0 and (0.02 * 65535) ~= 1300
+    THRESH = 1300
+
+    img_out = img_slice.copy()
+    if img_out.dtype == np.uint8:
+        pass
+    elif img_out.dtype == np.uint16:
+        img_out[img_out < THRESH] = 0
+
+    # Get vmin and vmax as 3*stdev from the mean
+    vmin = img_out.mean() - 8 * img_out.std()
+    vmax = img_out.mean() + 8 * img_out.std()
+
+    # Normalize to 0..255
+    img_out = (img_out - vmin) / (vmax - vmin) * 255
+    img_out = img_out.astype(np.uint8)
+    return img_out
 
 
 class ML4PaleoWebApplication:
@@ -246,12 +271,13 @@ class ML4PaleoWebApplication:
                 )
             zarrvol = ZarrVolumeProvider(zarr_path)
             # Get a random slice from the dataset:
-            slice = get_random_tile(
+            imgslice = get_random_tile(
                 zarrvol,
                 CONFIG.annotation_shape,
             )
-            # Save the slice to bytesio:
-            img = Image.fromarray(slice)
+            imgslice = _transform_img_slice_for_annotation(imgslice)
+            # Save the imgslice to bytesio:
+            img = Image.fromarray(imgslice)
             img_bytes = io.BytesIO()
             img.save(img_bytes, format="JPEG")
             img_bytes.seek(0)
