@@ -1,0 +1,51 @@
+<article>
+    <header>
+        <h3>Segmentation complete!</h3>
+    </header>
+    <p>
+        The segmentation is complete! You can download the results below. If you would like to
+        retrain the model, you can do so by clicking the button below.
+    </p>
+    {% if not meshes_ready and (job.status | string not in ["JobStatus.MESHING", "JobStatus.MESHING_QUEUED",
+    "JobStatus.MESH_ERROR"]) %}
+    <p>
+        <button id="mesh-trigger-button" onClick="triggerMeshing()">Generate meshes</button>
+    </p>
+    {% endif %}
+    <p>
+        <a role="button" style="width:100%" href="{{ url_for('download_page', job_id=job.id) }}">
+            See all downloads
+        </a>
+    </p>
+    <hr />
+    <p>
+        There are currently {{ num_annotations }} annotated slices. You can train a model with any
+        number of annotated slices, but we recommend at least 10. (You
+        can always annotate a bit more and then retrain!)
+    </p>
+    <p>
+        <a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue annotating</a>
+    </p>
+
+    <script>
+        triggerMeshing = () => {
+            // Disable the button
+            document.getElementById('mesh-trigger-button').disabled = true;
+            // Set aria-busy to true
+            document.getElementById('mesh-trigger-button').setAttribute('aria-busy', true);
+            fetch("/api/job/{{ job.id }}/mesh", {
+                method: "POST",
+            })
+                .then((response) => {
+                    if (response.ok) {
+                        notyf.success("Meshing started. You will receive an email when it is complete.");
+                    } else {
+                        notyf.error("There was an error starting meshing. Please try again in a few minutes.");
+                    }
+                })
+                .catch((error) => {
+                    notyf.error("There was an error starting meshing. Please try again in a few minutes.");
+                });
+        };
+    </script>
+</article>

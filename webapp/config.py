@@ -1,6 +1,10 @@
 class CONFIG:
+    job_poll_sec = 10
+
+    # Uploads
     upload_directory = "volume/uploads"
     chunked_directory = "volume/chunks"
+    chunk_size = (300, 300, 300)
 
     # Training and annotation
     annotation_shape = (512, 512)
@@ -13,7 +17,8 @@ class CONFIG:
     segmentation_chunk_size = (64, 64, 64)
 
     segmented_directory = "volume/segmented"
+
     meshed_directory = "volume/meshed"
-    chunk_size = (300, 300, 300)
+    meshing_chunk_size = (512, 512, 512)
 
     download_cache = "volume/download_cache"

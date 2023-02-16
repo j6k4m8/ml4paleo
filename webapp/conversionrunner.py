@@ -60,4 +60,4 @@ def convert_next():
 if __name__ == "__main__":
     while True:
         convert_next()
-        time.sleep(10)
+        time.sleep(CONFIG.job_poll_sec)

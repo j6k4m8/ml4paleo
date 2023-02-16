@@ -52,10 +52,18 @@ class JobStatus(Enum):
     # process picks it up and converts it to TRAINING.
     TRAINING_QUEUED = "training_queued"
 
-    # Unused:
     SEGMENTING = "segmenting"
     SEGMENTED = "segmented"
     SEGMENT_ERROR = "segment_error"
+
+    # Any job that is "SEGMENTED" can be manually put into the MESHING_QUEUED
+    # state. This is the state it will be in until the meshing process picks
+    # it up and converts it to MESHING.
+    MESHING_QUEUED = "meshing_queued"
+    MESHING = "meshing"
+    MESHED = "meshed"
+    MESH_ERROR = "mesh_error"
+
     DONE = "done"
     ERROR = "error"
 

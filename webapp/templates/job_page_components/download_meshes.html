@@ -1,0 +1,11 @@
+<article>
+    <header>
+        <h3>Meshes are ready for download!</h3>
+    </header>
+    <p>
+        <a role="button" style="width:100%"
+            href="{{ url_for('download_meshes', job_id=job.id, seg_id=latest_segmentation_id) }}">
+            Download (STL)
+        </a>
+    </p>
+</article>

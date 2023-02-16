@@ -1123,6 +1123,18 @@ optional = false
 python-versions = ">=3.8"
 
 [[package]]
+name = "numpy-stl"
+version = "3.0.0"
+description = "Library to make reading, writing and modifying both binary and ascii STL files easy."
+category = "main"
+optional = false
+python-versions = ">3.6.0"
+
+[package.dependencies]
+numpy = "*"
+python-utils = ">=3.4.5"
+
+[[package]]
 name = "nvidia-cublas-cu11"
 version = "11.10.3.66"
 description = "CUBLAS native runtime libraries"
@@ -1341,6 +1353,19 @@ description = "A python library adding a json log formatter"
 category = "dev"
 optional = false
 python-versions = ">=3.5"
+
+[[package]]
+name = "python-utils"
+version = "3.5.2"
+description = "Python Utils is a module with some convenient utilities not included with the standard Python install"
+category = "main"
+optional = false
+python-versions = ">3.6.0"
+
+[package.extras]
+docs = ["mock", "sphinx", "python-utils"]
+loguru = ["loguru"]
+tests = ["flake8", "pytest", "pytest-cov", "pytest-mypy", "pytest-asyncio", "sphinx", "types-setuptools", "loguru"]
 
 [[package]]
 name = "pywavelets"
@@ -1846,10 +1871,21 @@ python-versions = ">=3.7"
 docs = ["sphinx (>=3.5)", "jaraco.packaging (>=9)", "rst.linker (>=1.9)", "furo", "sphinx-lint", "jaraco.tidelift (>=1.4)"]
 testing = ["pytest (>=6)", "pytest-checkdocs (>=2.4)", "flake8 (<5)", "pytest-cov", "pytest-enabler (>=1.3)", "jaraco.itertools", "func-timeout", "jaraco.functools", "more-itertools", "pytest-black (>=0.3.7)", "pytest-mypy (>=0.9.1)", "pytest-flake8"]
 
+[[package]]
+name = "zmesh"
+version = "1.6.2"
+description = "Multilabel marching cubes and simplification of volumetric data."
+category = "main"
+optional = false
+python-versions = ">=3.7"
+
+[package.dependencies]
+numpy = "*"
+
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.9"
-content-hash = "e128ce3096da5abdd92082ad5c820e8e8b763427c312df467ac66eb6088fc214"
+content-hash = "912b719046b90b67695276209700eeee76b5464a87141fcbd8b2bdbf5d0b5207"
 
 [metadata.files]
 anyio = []
@@ -1932,6 +1968,7 @@ notebook = []
 notebook-shim = []
 numcodecs = []
 numpy = []
+numpy-stl = []
 nvidia-cublas-cu11 = []
 nvidia-cuda-nvrtc-cu11 = []
 nvidia-cuda-runtime-cu11 = []
@@ -1958,6 +1995,7 @@ python-dateutil = [
     {file = "python_dateutil-2.8.2-py2.py3-none-any.whl", hash = "sha256:961d03dc3453ebbc59dbdea9e4e11c5651520a876d0f4db161e8674aae935da9"},
 ]
 python-json-logger = []
+python-utils = []
 pywavelets = []
 pywin32 = []
 pywinpty = []
@@ -2035,3 +2073,4 @@ werkzeug = []
 widgetsnbextension = []
 zarr = []
 zipp = []
+zmesh = []
