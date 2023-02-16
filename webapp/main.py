@@ -245,6 +245,17 @@ class ML4PaleoWebApplication:
                 neuroglancer_link=_create_neuroglancer_link(job),
                 latest_segmentation_id=get_latest_segmentation_id(job),
                 # Status breakdown:
+                has_been_annotated=(
+                    job.status
+                    not in [
+                        JobStatus.PENDING,
+                        JobStatus.UPLOADING,
+                        JobStatus.UPLOADED,
+                        JobStatus.CONVERTING,
+                        JobStatus.CONVERTED,
+                        JobStatus.CONVERT_ERROR,
+                    ]
+                ),
                 annotation_ready=(
                     job.status
                     not in [
@@ -383,7 +394,7 @@ class ML4PaleoWebApplication:
             # Load the latest model if it exists:
             modelpath = get_latest_segmentation_model(job)
             if modelpath is None:
-                jsonify({"prediction": None})
+                return jsonify({"prediction": None})
 
             # Predict the mask:
             model = RandomForest3DSegmenter()
