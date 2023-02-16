@@ -24,12 +24,12 @@ def model_factory() -> Tuple[Segmenter3D, dict]:
     Return a new instance of the model.
     """
     rf_kwargs = {
-        "n_estimators": 10,
+        "n_estimators": 8,
         "max_depth": 8,
         "n_jobs": -1,
     }
     return (
-        RandomForest3DSegmenter(rf_kwargs=rf_kwargs, features_fn=lambda x: x),
+        RandomForest3DSegmenter(rf_kwargs=rf_kwargs),
         {
             "rf_kwargs": rf_kwargs,
             "model_class": "RandomForest3DSegmenter",
@@ -80,11 +80,11 @@ def train_and_segment_job(job: UploadJob) -> None:
 
     # Train the model:
     segmenter, model_params = model_factory()
-    segs_np = np.expand_dims(segs_np, axis=-1)
-    imgs_np = np.expand_dims(imgs_np, axis=-1)
-    logging.info(
-        "Training with shapes (XYZF) img=%s and seg=%s", imgs_np.shape, segs_np.shape
-    )
+    # segs_np = np.expand_dims(segs_np, axis=-1)
+    # imgs_np = np.expand_dims(imgs_np, axis=-1)
+    # logging.info(
+    #     "Training with shapes (FXYZ) img=%s and seg=%s", imgs_np.shape, segs_np.shape
+    # )
     segmenter.fit(imgs_np, segs_np)
 
     # Save the model.

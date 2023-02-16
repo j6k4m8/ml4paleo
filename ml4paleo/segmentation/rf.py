@@ -58,13 +58,30 @@ class RandomForest3DSegmenter(Segmenter3D):
 
         """
         # Extract features:
-        features = self.features_fn(volume)
+        mask = np.zeros(volume.shape, dtype=np.uint64)
 
-        # Segment the volume:
+        for z in range(volume.shape[2]):
+            mask[:, :, z] = self._segment_slice(volume[:, :, z])
+
+        return mask
+
+    def _segment_slice(self, imgslice: np.ndarray) -> np.ndarray:
+        """
+        Segment the given slice.
+
+        Arguments:
+            slice (np.ndarray<any>): The slice to segment.
+
+        Returns:
+            np.ndarray<u64>: The segmentation mask.
+
+        """
+        # Extract features:
+        features = self.features_fn(imgslice)
+
+        # Segment the slice:
         mask = self._clf.predict(features.reshape(-1, features.shape[-1]))
-
-        # Reshape the mask:
-        mask = mask.reshape(features.shape[:-1])
+        mask = mask.reshape(features.shape[:2])
 
         return mask
 
@@ -78,10 +95,46 @@ class RandomForest3DSegmenter(Segmenter3D):
 
         """
         # Extract features:
-        features = self.features_fn(volume)
+        # features = self.features_fn(volume)
 
         # Train the classifier:
-        self._clf.fit(features.reshape(-1, features.shape[-1]), mask.reshape(-1))
+        # self._clf.fit(features.reshape(-1, features.shape[-1]), mask.reshape(-1))
+
+        # Extract features:
+        features = []
+        labels = []
+
+        for z in range(volume.shape[2]):
+            f, l = self._fit_slice(volume[:, :, z], mask[:, :, z])
+            features.append(f)
+            labels.append(l)
+
+        features = np.concatenate(features, axis=0)
+        labels = np.concatenate(labels, axis=0)
+
+        # Train the classifier:
+        self._clf.fit(features, labels)
+
+    def _fit_slice(self, imgslice: np.ndarray, mask: np.ndarray) -> tuple:
+        """
+        Train the segmentation algorithm on the given slice.
+
+        Arguments:
+            slice (np.ndarray<any>): The slice to segment.
+            mask (np.ndarray<u64>): The segmentation mask.
+
+        Returns:
+            tuple: The features and labels.
+
+        """
+        # Extract features:
+        features = self.features_fn(imgslice)
+
+        # Train the classifier:
+        features = features.reshape(-1, features.shape[-1])
+        mask = mask.reshape(-1)
+
+        return features, mask
 
     def save(self, path: str) -> None:
         """

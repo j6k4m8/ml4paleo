@@ -25,9 +25,8 @@ def segment_chunk_and_write(
     # Get the volume for the chunk:
     volume = volume_provider[xs[0] : xs[1], ys[0] : ys[1], zs[0] : zs[1]]
     # Segment the volume:
-    seg_volume = np.zeros(volume.shape, dtype=np.uint64)
-    for z in range(volume.shape[0]):
-        seg_volume[z] = segmenter.segment(np.expand_dims(volume[z], axis=-1))
+    # seg_volume = np.zeros(volume.shape, dtype=np.uint64)
+    seg_volume = segmenter.segment(volume)
     # Write the seg to the seg path zarr:
     seg_zarr = zarr.open(seg_path, mode="a")
     seg_zarr[xs[0] : xs[1], ys[0] : ys[1], zs[0] : zs[1]] = seg_volume
