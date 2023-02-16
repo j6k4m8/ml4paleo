@@ -1,3 +1,13 @@
+"""
+This is the main script of the web application. It is an absolute monster of a
+file, and will be split up into smaller files in the future.
+
+For now, the best way to find a function or process you're looking for is to
+search for the URL that corresponds to the action, and then look at the
+function that is decorated by the flask routing for that URL.
+
+"""
+
 import base64
 import io
 import json

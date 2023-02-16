@@ -1,3 +1,11 @@
+"""
+This script runs in the background and meshes segmented datasets upon user
+request. Users request a meshing operation by triggering the job status to be
+set to `MESHING_QUEUED`. This script will then pick up the job and mesh it,
+setting the status temporarily to `MESHING` and then to MES`HED when the
+meshing is complete.
+"""
+
 import logging
 import pathlib
 import time
@@ -34,7 +42,17 @@ def get_next_dataset_to_mesh() -> Optional[UploadJob]:
 
 def mesh_job(job: UploadJob) -> None:
     """
-    Mesh the job.
+    Mesh the job, updating the job status as we go.
+
+    Arguments:
+        job: The job to mesh.
+
+    Raises:
+        ValueError: If no segmentation is found for the job.
+
+    Returns:
+        None
+
     """
     # Get the latest segmentation ID:
     latest_seg = get_latest_segmentation_id(job)
@@ -56,6 +74,14 @@ def mesh_job(job: UploadJob) -> None:
 
 
 def main():
+    """
+    This is the main loop of the meshing script. It will look for a job to
+    mesh, and if it finds one, it will mesh it.
+
+    Returns:
+        None
+
+    """
     job_mgr = get_job_manager()
     logging.info("Looking for a job to mesh...")
     job = get_next_dataset_to_mesh()

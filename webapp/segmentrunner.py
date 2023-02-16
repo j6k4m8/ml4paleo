@@ -1,3 +1,22 @@
+"""
+This script is responsible for segmenting the datasets once the user has
+indicated that they are ready. The user indicates that the dataset should be
+segmented by setting the job status to `TRAINING_QUEUED`. This script will then
+pick up the job and segment it, setting the status temporarily to `SEGMENTING`,
+and then to `SEGMENTED` when the segmentation is complete. If the segmentation
+fails, the status will be set to `SEGMENT_ERROR`.
+
+The `model_factory` function is responsible for returning a new instance of the
+model that will be used to segment the dataset. This function is called each
+time a new dataset is to be segmented, so that the model is re-initialized
+before each segmentation. If you want to modify the type or parameters of the
+model that is used to perform segmentation, you should modify this function.
+
+Note that this could also be adapted in the future to allow the user to select
+the model that they want to use for segmentation, or to adapt the parameters of
+the model based on the dataset that is being segmented.
+"""
+
 import json
 import logging
 import pathlib
