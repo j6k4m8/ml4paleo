@@ -182,11 +182,11 @@ def export_to_img_stack(
         img_path = img_dir / f"{i:04d}.{img_format}"
         Image.fromarray(img).save(img_path, **kwargs)
 
+    _prog = tqdm.tqdm if progress else lambda x: x
     if parallel_jobs is False:
-        for i in tqdm.tqdm(range(volume_provider.shape[2])):
+        for i in _prog(range(volume_provider.shape[2])):
             _export_slice(i)
     else:
         _ = Parallel(n_jobs=parallel_jobs)(
-            delayed(_export_slice)(i)
-            for i in tqdm.tqdm(range(volume_provider.shape[2]))
+            delayed(_export_slice)(i) for i in _prog(range(volume_provider.shape[2]))
         )

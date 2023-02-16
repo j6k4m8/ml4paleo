@@ -26,20 +26,9 @@ from ml4paleo.volume_providers import ZarrVolumeProvider
 from ml4paleo.volume_providers.io import get_random_tile, export_to_img_stack
 
 from config import CONFIG
+from apputils import get_latest_segmentation_id
 
 log = logging.getLogger(__name__)
-
-
-def _get_latest_segmentation_id(job: UploadJob):
-    """
-    Get the latest segmentation for the job.
-    """
-    zarr_path = pathlib.Path(CONFIG.segmented_directory) / job.id
-    if not zarr_path.exists():
-        return None
-    # Get the latest segmentation (the last one in the list)
-    segmentation_path = sorted(zarr_path.glob("*.zarr"))[-1]
-    return segmentation_path.name
 
 
 def _create_neuroglancer_link(job: UploadJob):
@@ -66,7 +55,7 @@ def _create_neuroglancer_link(job: UploadJob):
         # Get the latest segmentation (the last one in the list)
         # segmentation_path = sorted(zarr_path.glob("*.zarr"))[-1]
         # seg_id = segmentation_path.name
-        seg_id = _get_latest_segmentation_id(job)
+        seg_id = get_latest_segmentation_id(job)
 
         # Create the neuroglancer layer:
         seg_layer = {
@@ -189,7 +178,7 @@ class ML4PaleoWebApplication:
             return make_response(("Chunk upload successful", 200))
 
         @self.app.route("/api/job/status", methods=["POST"])
-        def get_job_status():
+        def get_post_job_status():
             job_id = (request.get_json() or {}).get("job_id", None)
             if job_id is None:
                 return (
@@ -198,7 +187,18 @@ class ML4PaleoWebApplication:
                 )
 
             job = job_manager.get_job(job_id)
-            return jsonify({"job_id": job_id, "status": job.status})
+            return jsonify({"job_id": job_id, "status": str(job.status)})
+
+        @self.app.route("/api/job/<job_id>/status", methods=["GET"])
+        def get_job_status(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            return jsonify({"job_id": job_id, "status": str(job.status)})
 
         @self.app.route("/api/job/status/upload-complete", methods=["POST"])
         def upload_complete():
@@ -241,6 +241,27 @@ class ML4PaleoWebApplication:
                 job=job,
                 num_annotations=num_annotations,
                 neuroglancer_link=_create_neuroglancer_link(job),
+                latest_segmentation_id=get_latest_segmentation_id(job),
+                # Status breakdown:
+                annotation_ready=(
+                    job.status
+                    not in [
+                        JobStatus.CONVERTING,
+                        JobStatus.UPLOADING,
+                        JobStatus.CONVERT_ERROR,
+                    ]
+                ),
+                segmentation_ready=(
+                    job.status
+                    in [
+                        JobStatus.SEGMENTED,
+                        JobStatus.MESHING_QUEUED,
+                        JobStatus.MESHING_QUEUED,
+                        JobStatus.MESH_ERROR,
+                        JobStatus.MESHED,
+                    ]
+                ),
+                meshes_ready=job.status in [JobStatus.MESHED],
             )
 
         ############################
@@ -375,6 +396,30 @@ class ML4PaleoWebApplication:
 
         ###############################
         #
+        #  Meshing
+        #
+        ###############################
+
+        @self.app.route("/api/job/<job_id>/mesh", methods=["POST"])
+        def trigger_meshing(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+            # Update the job to the JobStatus.TRAINING state:
+            job_manager.update_job(job_id, update=dict(status=JobStatus.MESHING_QUEUED))
+            return jsonify({"status": "success"})
+
+        ###############################
+        #
         #  Visualization
         #
         ###############################
@@ -411,7 +456,7 @@ class ML4PaleoWebApplication:
             return render_template(
                 "download_page.html",
                 job=job,
-                latest_seg_id=_get_latest_segmentation_id(job),
+                latest_seg_id=get_latest_segmentation_id(job),
             )
 
         @self.app.route(
@@ -480,6 +525,42 @@ class ML4PaleoWebApplication:
                                 os.path.join(root, file),
                                 arcname=os.path.join(os.path.basename(root), file),
                             )
+
+            return send_file(zip_fname, as_attachment=True)
+
+        @self.app.route("/api/job/<job_id>/meshes/<seg_id>/download", methods=["GET"])
+        def download_meshes(job_id, seg_id):
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            # Create a zip file in CONFIG.download_cache:
+            zip_fname = (
+                pathlib.Path(CONFIG.download_cache) / f"{job_id}_{seg_id}.meshes.zip"
+            )
+            zip_fname.parent.mkdir(parents=True, exist_ok=True)
+            if not zip_fname.exists():
+                # Meshes are stored in CONFIG.meshes_directory / job_id / seg_id:
+                mesh_path = pathlib.Path(CONFIG.meshed_directory) / job_id / seg_id
+                # Check if the directory exists:
+                if not mesh_path.exists():
+                    return (
+                        jsonify({"status": "error", "message": "meshes do not exist"}),
+                        400,
+                    )
+
+                # Compress all .combined.stl files in the directory:
+                with zipfile.ZipFile(zip_fname, "w") as zf:
+                    for root, dirs, files in os.walk(mesh_path):
+                        for file in files:
+                            if file.endswith(".combined.stl"):
+                                zf.write(
+                                    os.path.join(root, file),
+                                    arcname=os.path.join(os.path.basename(root), file),
+                                )
 
             return send_file(zip_fname, as_attachment=True)
 

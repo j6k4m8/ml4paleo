@@ -82,9 +82,7 @@ def train_and_segment_job(job: UploadJob) -> None:
     segmenter, model_params = model_factory()
     # segs_np = np.expand_dims(segs_np, axis=-1)
     # imgs_np = np.expand_dims(imgs_np, axis=-1)
-    # logging.info(
-    #     "Training with shapes (FXYZ) img=%s and seg=%s", imgs_np.shape, segs_np.shape
-    # )
+    logging.info("Training with shapes img=%s and seg=%s", imgs_np.shape, segs_np.shape)
     segmenter.fit(imgs_np, segs_np)
 
     # Save the model.
@@ -150,4 +148,4 @@ def main():
 if __name__ == "__main__":
     while True:
         main()
-        time.sleep(1)
+        time.sleep(CONFIG.job_poll_sec)

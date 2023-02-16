@@ -33,147 +33,95 @@
     <div class="container">
         <div class="row">
             <div class="col">
-                <article id="intro-job">
-                    <header>
-                        <h1>
-                            {{ job.name }}
-                            <div style="float:right" data-tooltip="{{job.status}}">{{ status_badge(job.status) }}</div>
-                        </h1>
+                <header>
+                    <h1>
+                        {{ job.name }}
+                        <div style="float:right" data-tooltip="{{job.status}}">{{ status_badge(job.status) }}</div>
+                    </h1>
 
-                        <p>
-                            <a role="button" href="{{ neuroglancer_link }}" target="_blank"
-                                data-tooltip="Open 3D view in a new tab">
-                                View in 3D
-                            </a>
-                        </p>
-                        <p>
-                            <small>
-                                Created {{pretty_date(job.created_at)}}
-                            </small>
-                        </p>
-                        <p>
-                            <small>
-                                Last updated {{pretty_date(job.last_updated_at) }}
-                            </small>
-                        </p>
-                    </header>
+                    <p>
+                        <a role="button" href="{{ neuroglancer_link }}" target="_blank"
+                            data-tooltip="Open 3D view in a new tab">
+                            View in 3D
+                        </a>
+                    </p>
+                    <p>
+                        <small>
+                            Created {{pretty_date(job.created_at)}}
+                        </small>
+                    </p>
+                    <p>
+                        <small>
+                            Last updated {{pretty_date(job.last_updated_at) }}
+                        </small>
+                    </p>
+                </header>
+
+                {% if job.status | string == "JobStatus.UPLOADED" %}
+                <div>
+                    <label for="upload-progress">Upload Progress</label>
+                    <progress value="100" max="100" id="upload-progress"></progress>
+                </div>
+                {% endif %}
+                {% if job.status | string == "JobStatus.CONVERTING" %}
+                <div>
+                    <label for="convert-progress">Conversion Progress</label>
+                    <progress max="100" id="convert-progress"></progress>
+                </div>
+                {% endif %}
 
 
-                    {% if job.status | string == "JobStatus.UPLOADED" %}
-                    <div>
-                        <label for="upload-progress">Upload Progress</label>
-                        <progress value="100" max="100" id="upload-progress"></progress>
-                    </div>
-                    {% endif %}
-                    {% if job.status | string == "JobStatus.CONVERTING" %}
-                    <div>
-                        <label for="convert-progress">Conversion Progress</label>
-                        <progress max="100" id="convert-progress"></progress>
-                    </div>
-                    {% endif %}
-                    {% if job.status | string == "JobStatus.CONVERTED" %}
-                    <div>
-                        <label for="convert-progress">Conversion Progress</label>
-                        <progress value="100" max="100" id="convert-progress"></progress>
-                    </div>
-                    <article>
-                        <header>
-                            <h2>Annotation</h2>
-                        </header>
-                        <div>
-                            <p>Segmentation will begin once you have annotated a handful of slices.</p>
-                            <p>Click <a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">here</a>
-                                to open the
-                                annotation tool.</p>
-                        </div>
-                    </article>
-                    {% endif %}
-                    {% if job.status | string == "JobStatus.ANNOTATED" %}
-                    <div>
-                        <label for="convert-progress">Conversion Progress</label>
-                        <progress value="100" max="100" id="convert-progress"></progress>
-                    </div>
-                    <h2>Annotation</h2>
-                    <p><a target="_blank" role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue
-                            annotating</a>
-                    </p>
-                    <p>
-                        There are currently {{ num_annotations }} annotated slices.
-                    </p>
-                    <p>
-                        You can train a model with any number of annotated slices, but we recommend at least 10. (You
-                        can always annotate a bit more and then retrain!)
-                    </p>
-                    <p>To run your model, click the link below.</p>
-                    <p>
-                        <button onclick="triggerSegmentation()">Start segmenting</button>
-                    </p>
-                    {% endif %}
-                    {% if job.status | string in ["JobStatus.TRAINING_QUEUED", "JobStatus.SEGMENTING"] %}
-                    <h2>Annotation</h2>
-                    <p><a target="_blank" role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue
-                            annotating</a>
-                    </p>
-                    <p>
-                        There are currently {{ num_annotations }} annotated slices.
-                    </p>
-                    <p>
-                        You can train a model with any number of annotated slices, but we recommend at least 10. (You
-                        can always annotate a bit more and then retrain!)
-                    </p>
-                    <p>
-                        <button disabled aria-busy="true">Running segmentation...</button>
-                    </p>
-                    {% endif %}
-                    {% if job.status | string in ["JobStatus.SEGMENTED"] %}
-                    <h2>Segmentation complete!</h2>
-                    <p>
-                        The segmentation is complete! You can download the results below. If you would like to
-                        retrain the model, you can do so by clicking the button below.
-                    </p>
-                    <p>
-                        <a role="button" style="width:100%" href="
-                        {{ url_for('download_page', job_id=job.id) }}
-                        ">Download latest segmentation</a>
-                    </p>
-                    <hr />
-                    <p>
-                        There are currently {{ num_annotations }} annotated slices. You can train a model with any
-                        number of annotated slices, but we recommend at least 10. (You
-                        can always annotate a bit more and then retrain!)
-                    </p>
-                    <p><a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue annotating</a>
-                    </p>
-                    {% endif %}
-                    {% if job.status | string in ["JobStatus.SEGMENT_ERROR"] %}
-                    <h2>Segmentation failed.</h2>
-                    <p>
-                        The segmentation failed to run. This could be due to a few reasons:
-                    </p>
-                    <ul>
-                        <li>
-                            <b>There were not enough annotated slices to train a model.</b> Try annotating a few more
-                            slices.
-                        </li>
-                        <li>
-                            <b>The model failed to converge.</b> This could be because the model received conflicting
-                            annotations. Make sure you only annotate one type of material per job (i.e., only bone, or
-                            only enamel).
-                        </li>
-                    </ul>
-                    <p>
-                        There are currently {{ num_annotations }} annotated slices. You can train a model with
-                        any
-                        number of annotated slices, but we recommend at least 10. (You
-                        can always annotate a bit more and then retrain!)
-                    </p>
-                    <p><a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue
-                            annotating</a>
-                    </p>
-                    {% endif %}
+                {% if job.status | string == "JobStatus.SEGMENTING" %}
+                <article>
+                    <label for="segment-progress">Segmentation Progress</label>
+                    <progress max="100" id="segment-progress"></progress>
                 </article>
+                {% endif %}
+
+                {% if segmentation_ready %}
+                {% include "job_page_components/segmentation_results.html" %}
+                {% endif %}
+                {% if job.status | string in ["JobStatus.SEGMENT_ERROR"] %}
+                <h2>Segmentation failed.</h2>
+                <p>
+                    The segmentation failed to run. This could be due to a few reasons:
+                </p>
+                <ul>
+                    <li>
+                        <b>There were not enough annotated slices to train a model.</b> Try annotating a few more
+                        slices.
+                    </li>
+                    <li>
+                        <b>The model failed to converge.</b> This could be because the model received conflicting
+                        annotations. Make sure you only annotate one type of material per job (i.e., only bone, or
+                        only enamel).
+                    </li>
+                </ul>
+                <p>
+                    There are currently {{ num_annotations }} annotated slices. You can train a model with
+                    any
+                    number of annotated slices, but we recommend at least 10. (You
+                    can always annotate a bit more and then retrain!)
+                </p>
+                <p><a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue
+                        annotating</a>
+                </p>
+                {% endif %}
             </div>
         </div>
+        {% if meshes_ready %}
+        <div class="row">
+            <div class="col">
+                {% include 'job_page_components/download_meshes.html' %}
+            </div>
+        </div>
+        {% endif %}
+
+        {% if annotation_ready and job.status | string != "JobStatus.SEGMENTING" %}
+        <div class="row">
+            <div class="col">{% include "job_page_components/annotation_cta.html" %}</div>
+        </div>
+        {% endif %}
     </div>
     <script src="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"
@@ -191,7 +139,10 @@
 
         triggerSegmentation = () => {
             // Disable the button
-            document.querySelector("button").disabled = true;
+            document.getElementById("segmentation-trigger-button").disabled = true;
+            // Set aria-busy:
+            document.getElementById("segmentation-trigger-button").setAttribute("aria-busy", "true");
+
             fetch("/api/job/{{ job.id }}/start", {
                 method: "POST",
             })
@@ -207,6 +158,17 @@
                 });
         };
 
+
+        window.setInterval(() => {
+            fetch("/api/job/{{ job.id }}/status")
+                .then((response) => response.json())
+                .then((data) => {
+                    console.log(data, "{{job.status | string}}")
+                    if (data.status !== "{{job.status | string}}") {
+                        window.location.reload();
+                    }
+                });
+        }, 5000);
     </script>
 </body>
 
