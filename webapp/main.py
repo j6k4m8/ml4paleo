@@ -275,14 +275,14 @@ class ML4PaleoWebApplication:
                 zarrvol,
                 CONFIG.annotation_shape,
             )
-            imgslice = _transform_img_slice_for_annotation(imgslice)
+            # imgslice = _transform_img_slice_for_annotation(imgslice)
             # Save the imgslice to bytesio:
             img = Image.fromarray(imgslice)
             img_bytes = io.BytesIO()
-            img.save(img_bytes, format="JPEG")
+            img.save(img_bytes, format="PNG")
             img_bytes.seek(0)
             # Return the slice as a file:
-            return send_file(img_bytes, mimetype="image/jpeg")
+            return send_file(img_bytes, mimetype="image/png")
 
         @self.app.route("/api/annotate/<job_id>/data/submit", methods=["POST"])
         def submit_annotation(job_id):
