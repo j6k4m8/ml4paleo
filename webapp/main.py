@@ -457,6 +457,14 @@ class ML4PaleoWebApplication:
                 "download_page.html",
                 job=job,
                 latest_seg_id=get_latest_segmentation_id(job),
+                segmentation_done=job.status
+                in [
+                    JobStatus.SEGMENTED,
+                    JobStatus.MESHING_QUEUED,
+                    JobStatus.MESHING,
+                    JobStatus.MESHED,
+                    JobStatus.MESH_ERROR,
+                ],
             )
 
         @self.app.route(
