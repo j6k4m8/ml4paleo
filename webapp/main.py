@@ -67,6 +67,31 @@ def _create_neuroglancer_link(job: UploadJob):
             "name": f"segmentation {seg_id}",
         }
         jsondata["layers"].append(seg_layer)
+
+    mesh_path = pathlib.Path(CONFIG.meshed_directory) / job.id
+    if mesh_path.exists():
+        # Get the last (sorted) directory in the meshed directory
+        mesh_seg_id = sorted(mesh_path.glob("*"))[-1].name
+
+        mesh_layer = {
+            "type": "mesh",
+            # "source": f"obj://http://{request.host}/api/job/{job.id}/segmentation/{mesh_seg_id}/obj/255.combined.obj",
+            "source": {
+                "url": f"obj://http://{request.host}/api/job/{job.id}/segmentation/{mesh_seg_id}/obj/255.combined.obj",
+                "transform": {
+                    "matrix": [[0, 0, 1, 0], [0, 1, 0, 0], [1, 0, 0, 0]],
+                    "outputDimensions": {
+                        "d0": [1, "m"],
+                        "d1": [1, "m"],
+                        "d2": [1, "m"],
+                    },
+                    "inputDimensions": {"x": [1, "m"], "y": [1, "m"], "z": [1, "m"]},
+                },
+            },
+            "tab": "source",
+            "name": f"mesh",
+        }
+        jsondata["layers"].append(mesh_layer)
     jsondata = json.dumps(jsondata)
 
     return f"https://neuroglancer.bossdb.io/#!{jsondata}"
@@ -122,6 +147,12 @@ class ML4PaleoWebApplication:
             )
             job_id = job_manager.new_job(job)
             return jsonify({"job_id": job_id})
+
+        ############################
+        #
+        #  Uploading
+        #
+        ############################
 
         # https://codecalamity.com/uploading-large-files-by-chunking-featuring-python-flask-and-dropzone-js/
         @self.app.route("/api/upload", methods=["POST"])
@@ -521,6 +552,15 @@ class ML4PaleoWebApplication:
             # Just serve files from the zarr directory:
             return send_from_directory(
                 os.path.join(CONFIG.segmented_directory, job_id, seg_id), path
+            )
+
+        @self.app.route(
+            "/api/job/<job_id>/segmentation/<seg_id>/obj/<path>", methods=["GET"]
+        )
+        def serve_obj_mesh(job_id, path, seg_id):
+            # Just serve files from the zarr directory:
+            return send_from_directory(
+                os.path.join(CONFIG.meshed_directory, job_id, seg_id), path
             )
 
         ###############################

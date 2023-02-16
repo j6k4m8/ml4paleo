@@ -201,7 +201,6 @@ class NumpyVolumeProvider(VolumeProvider):
         return self.data.dtype
 
 
-
 class ZarrVolumeProvider(VolumeProvider):
     """
     A volume provider that provides a 3D volume of data from a zarr array.
@@ -307,11 +306,11 @@ class ImageStackVolumeProvider(VolumeProvider):
 
         """
         logger.debug(f"Reading image {path}")
-        return np.array(Image.open(path))
+        return np.array(Image.open(path)).T
 
     @property
     def shape(self) -> Tuple[int, int, int]:
-        return (*Image.open(self.paths[0]).size[::-1], len(self.paths))
+        return (*Image.open(self.paths[0]).size, len(self.paths))
 
     def __getitem__(self, key):
         """
@@ -342,7 +341,4 @@ class ImageStackVolumeProvider(VolumeProvider):
         return self[0:1, 0:1, 0].dtype
 
 
-
 __all__ = ["VolumeProvider", "NumpyVolumeProvider", "ImageStackVolumeProvider"]
-
-

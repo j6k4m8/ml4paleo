@@ -1,4 +1,18 @@
+"""
+This file stores configuration variables that are used throughout the web
+application. These variables are specific to the web tool and won't be needed
+if you're running your own workflow (e.g., in a Jupyter notebook).
+
+"""
+
+
 class CONFIG:
+    """
+    A configuration variable container for the ml4paleo web application.
+
+    """
+
+    #
     job_poll_sec = 10
 
     # Uploads
