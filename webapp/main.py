@@ -21,12 +21,14 @@ from werkzeug.utils import secure_filename
 
 from PIL import Image
 from job import JSONFileUploadJobManager, JobStatus, UploadJob
+from ml4paleo.segmentation.rf import RandomForest3DSegmenter
 
 from ml4paleo.volume_providers import ZarrVolumeProvider
 from ml4paleo.volume_providers.io import get_random_tile, export_to_img_stack
 
 from config import CONFIG
-from apputils import get_latest_segmentation_id
+from apputils import get_latest_segmentation_id, get_latest_segmentation_model
+from segmentrunner import train_job
 
 log = logging.getLogger(__name__)
 
@@ -357,6 +359,51 @@ class ML4PaleoWebApplication:
             f.seek(0)
             return jsonify({"prediction": base64.b64encode(f.read()).decode("utf-8")})
 
+        @self.app.route("/api/annotate/<job_id>/data/predict", methods=["POST"])
+        def predict_annotation(job_id):
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            # Get the annotation data from the request:
+            data = request.get_json()
+            if not data or "image" not in data:
+                return (
+                    jsonify({"status": "error", "message": "image not provided"}),
+                    400,
+                )
+            image_b64 = data.get("image", None)
+            img_np = np.array(
+                Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1])))
+            )
+
+            # Load the latest model if it exists:
+            modelpath = get_latest_segmentation_model(job)
+            if modelpath is None:
+                jsonify({"prediction": None})
+
+            # Predict the mask:
+            model = RandomForest3DSegmenter()
+            model.load(str(modelpath))
+            print("Loaded model: %s", modelpath)
+            print(img_np.shape)
+            mask = model._segment_slice(img_np[:, :, 0])
+            annos = np.array(Image.fromarray(mask).resize(CONFIG.annotation_shape))
+            # Convert to RGBA with annos as R:
+            mask = np.zeros((annos.shape[0], annos.shape[1], 4), dtype=np.uint8)
+            mask[:, :, 0] = annos
+            mask[:, :, 3] = annos
+
+            # Return the mask as a base64 encoded string:
+            # Return zeros the same size as the image:
+            f = io.BytesIO()
+            Image.fromarray(mask).save(f, format="PNG")
+            f.seek(0)
+            return jsonify({"prediction": base64.b64encode(f.read()).decode("utf-8")})
+
         @self.app.route("/job/annotate/<job_id>", methods=["GET"])
         def annotation_page(job_id):
             if job_id is None:
@@ -373,6 +420,32 @@ class ML4PaleoWebApplication:
         #  Training & Inference
         #
         ###############################
+
+        # /api/job/{{ job.id }}/retrain
+        @self.app.route("/api/job/<job_id>/retrain", methods=["POST"])
+        def retrain_model(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            # Update the job to the JobStatus.TRAINING state:
+            job_manager.update_job(job_id, update=dict(status=JobStatus.TRAINING))
+
+            # Start the training process:
+            train_job(job)
+
+            job_manager.update_job(job_id, update=dict(status=JobStatus.TRAINED))
+
+            return jsonify({"status": "success"})
 
         @self.app.route("/api/job/<job_id>/start", methods=["POST"])
         def trigger_training(job_id):

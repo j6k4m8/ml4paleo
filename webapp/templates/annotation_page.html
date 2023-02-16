@@ -106,6 +106,11 @@
                 max: 200,
             },
 
+            imageTransparency: {
+                min: 0,
+                max: 1,
+            },
+
             pan: {
                 smallIncrement: 10,
                 bigIncrement: 100,
@@ -182,16 +187,31 @@
             img = loadImage(
                 `${BASE_URL}/api/annotate/${jobId}/images/next${_cachebuster}`,
                 (f) => {
-                    STATE.imageLoaded = true;
+                    img.loadPixels();
+                    const imagePixels = img.canvas.toDataURL();
+                    fetch(`${BASE_URL}/api/annotate/${jobId}/data/predict`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ image: imagePixels }),
+                    }).then((res) => {
+                        return res.json();
+                    }).then((data) => {
+                        // There's a new image in data.prediction;
+                        // b64 encoded png. Render it to paintPixels.
+                        window.prediction = data.prediction;
+                        STATE.imageLoaded = true;
+                    });
                 }
             );
+
+
         }
 
         function setup() {
             createCanvas(windowWidth, windowHeight);
-            frameRate(8);
+            frameRate(20);
             paintPixels = createGraphics(img.width / 2, img.height / 2);
-            frameRate(60);
+            paintPixels.frameRate(1);
         }
 
         function keyPressed() {
@@ -202,8 +222,8 @@
                 STATE.zoom = 1;
             }
 
-            // Pressing A toggles annotation visibility:
-            if (keyCode === 65) {
+            // Pressing V toggles annotation visibility:
+            if (keyCode === 86) {
                 STATE.annosVisible = !STATE.annosVisible;
             }
 
@@ -263,6 +283,22 @@
                     STATE.brushSize = CONFIG.brushSize.max;
                 }
             }
+
+            // A and S to change image opacity:
+            if (keyCode === 65) {
+                STATE.imageTransparency -= .05;
+                if (keyIsDown(SHIFT)) { STATE.imageTransparency -= .05; }
+                if (STATE.imageTransparency > CONFIG.imageTransparency.max) {
+                    STATE.imageTransparency = CONFIG.imageTransparency.max;
+                }
+            }
+            if (keyCode === 83) {
+                STATE.imageTransparency += .05;
+                if (keyIsDown(SHIFT)) { STATE.imageTransparency += .05; }
+                if (STATE.imageTransparency < CONFIG.imageTransparency.min) {
+                    STATE.imageTransparency = CONFIG.imageTransparency.min;
+                }
+            }
         }
 
         function boundZoom() {
@@ -285,6 +321,21 @@
         }
 
         function draw() {
+
+            // If window.prediction is set, load it into paintPixels.
+            if (window.prediction) {
+                loadImage('data:image/png;base64,' + window.prediction, img => {
+                    // Clear pixels by erasing:
+                    console.log("hi")
+                    paintPixels.erase();
+                    paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
+                    paintPixels.noErase();
+                    // At half-size:
+                    paintPixels.image(img, 0, 0, img.width / 2, img.height / 2);
+                });
+                window.prediction = undefined;
+            }
+
             push();
             translate(
                 STATE.panX + (width / 2 - (STATE.zoom * img.width) / 2),

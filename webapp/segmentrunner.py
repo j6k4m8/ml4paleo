@@ -55,7 +55,7 @@ def get_next_dataset_to_segment() -> Optional[UploadJob]:
     return next_job[0]
 
 
-def train_and_segment_job(job: UploadJob) -> None:
+def train_job(job: UploadJob) -> Tuple[Segmenter3D, str]:
     # First train the segmenter on the available training data.
     # The training data live in the CONFIG.training_directory directory, with
     # CONFIG.training_img_prefix and CONFIG.training_seg_prefix.
@@ -102,6 +102,11 @@ def train_and_segment_job(job: UploadJob) -> None:
     )
     with open(model_params_path, "w") as f:
         json.dump(model_params, f)
+    return segmenter, timestamp
+
+
+def train_and_segment_job(job: UploadJob) -> None:
+    segmenter, timestamp = train_job(job)
 
     vol_provider = ZarrVolumeProvider(
         str(pathlib.Path(CONFIG.chunked_directory) / str(job.id))
