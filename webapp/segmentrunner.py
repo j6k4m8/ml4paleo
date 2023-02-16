@@ -14,7 +14,7 @@ from ml4paleo.segmentation import (
     Segmenter3D,
     segment_volume_to_zarr,
 )
-from ml4paleo.volume_providers import VolumeProvider, ZarrVolumeProvider
+from ml4paleo.volume_providers import ZarrVolumeProvider
 
 logging.basicConfig(level=logging.INFO)
 
