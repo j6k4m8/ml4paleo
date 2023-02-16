@@ -52,3 +52,18 @@
 <span class="badge badge--success">Ready</span>
 {% endif %}
 {% endmacro %}
+
+
+{% macro pretty_date(date) %}
+<abbr data-tooltip="{{date}}" date="{{date}}" class="date-pretty">
+    {{ date }}
+</abbr>
+<script>
+    Array.from(document.getElementsByClassName("date-pretty")).forEach((e) => {
+        let d = moment(new Date(e.getAttribute('date')));
+        // Convert UTC to local time
+        // d = d.add(d.utcOffset(), 'minutes');
+        e.innerHTML = d.calendar();
+    });
+</script>
+{% endmacro %}

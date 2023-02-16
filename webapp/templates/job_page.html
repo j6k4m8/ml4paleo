@@ -1,4 +1,5 @@
 {% from "macros.html" import status_badge %}
+{% from "macros.html" import pretty_date %}
 
 <!DOCTYPE html>
 <html lang="en">
@@ -7,9 +8,11 @@
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Upload Wizard | ml4paleo</title>
+    <title>{{ job.name }} | ml4paleo</title>
     <link rel="stylesheet" href="https://unpkg.com/@picocss/pico@1.*/css/pico.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js" crossorigin="anonymous"
+        referrerpolicy="no-referrer"></script>
     <style type="text/css">
         .dropzone {
             border: 4px dashed #0087F7;
@@ -45,7 +48,12 @@
                         </p>
                         <p>
                             <small>
-                                {{job.created_at}}
+                                Created {{pretty_date(job.created_at)}}
+                            </small>
+                        </p>
+                        <p>
+                            <small>
+                                Last updated {{pretty_date(job.last_updated_at) }}
                             </small>
                         </p>
                     </header>
@@ -140,15 +148,27 @@
                     {% if job.status | string in ["JobStatus.SEGMENT_ERROR"] %}
                     <h2>Segmentation failed.</h2>
                     <p>
-                        blah blah blah
-                        <!-- todo -->
+                        The segmentation failed to run. This could be due to a few reasons:
                     </p>
+                    <ul>
+                        <li>
+                            <b>There were not enough annotated slices to train a model.</b> Try annotating a few more
+                            slices.
+                        </li>
+                        <li>
+                            <b>The model failed to converge.</b> This could be because the model received conflicting
+                            annotations. Make sure you only annotate one type of material per job (i.e., only bone, or
+                            only enamel).
+                        </li>
+                    </ul>
                     <p>
-                        There are currently {{ num_annotations }} annotated slices. You can train a model with any
+                        There are currently {{ num_annotations }} annotated slices. You can train a model with
+                        any
                         number of annotated slices, but we recommend at least 10. (You
                         can always annotate a bit more and then retrain!)
                     </p>
-                    <p><a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue annotating</a>
+                    <p><a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue
+                            annotating</a>
                     </p>
                     {% endif %}
                 </article>
