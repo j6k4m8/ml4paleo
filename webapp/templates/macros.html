@@ -50,6 +50,24 @@
 <span class="badge badge--success">Segmented</span>
 {% elif status | string == "JobStatus.READY" %}
 <span class="badge badge--success">Ready</span>
+{% elif status | string == "JobStatus.MESHING_QUEUED" %}
+<span class="badge badge--warning">Queued</span>
+{% elif status | string == "JobStatus.MESHING" %}
+<span class="badge badge--warning">Meshing</span>
+{% elif status | string == "JobStatus.MESHED" %}
+<span class="badge badge--success">Meshed</span>
+{% elif status | string == "JobStatus.MESHING_ERROR" %}
+<span class="badge badge--error">Meshing Error</span>
+{% elif status | string == "JobStatus.SEGMENTING_ERROR" %}
+<span class="badge badge--error">Segmenting Error</span>
+{% elif status | string == "JobStatus.TRAINING_ERROR" %}
+<span class="badge badge--error">Training Error</span>
+{% elif status | string == "JobStatus.TRAINING" %}
+<span class="badge badge--warning">Training</span>
+{% elif status | string == "JobStatus.TRAINING_ERROR" %}
+<span class="badge badge--error">Training Error</span>
+{% elif status | string == "JobStatus.TRAINING_QUEUED" %}
+<span class="badge badge--warning">Queued</span>
 {% endif %}
 {% endmacro %}
 

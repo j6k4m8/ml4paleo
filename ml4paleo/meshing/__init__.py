@@ -68,6 +68,10 @@ class ChunkedMesher:
             mesher.erase(obj_id)
         mesher.clear()
         for obj_id, mesh in meshes.items():
+            # Offset the mesh to the correct position.
+            mesh.vertices[:, 0] += xs[0]
+            mesh.vertices[:, 1] += ys[0]
+            mesh.vertices[:, 2] += zs[0]
             with open(
                 str(self.mesh_path / f"_{obj_id}_{xs[0]}_{ys[0]}_{zs[0]}.obj"), "wb"
             ) as f:

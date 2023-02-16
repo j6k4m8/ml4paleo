@@ -394,7 +394,7 @@ class ML4PaleoWebApplication:
             # Load the latest model if it exists:
             modelpath = get_latest_segmentation_model(job)
             if modelpath is None:
-                jsonify({"prediction": None})
+                return jsonify({"prediction": None})
 
             # Predict the mask:
             model = RandomForest3DSegmenter()
