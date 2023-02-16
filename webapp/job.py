@@ -51,6 +51,10 @@ class JobStatus(Enum):
     # queued for training. This is the state it will be in until the training
     # process picks it up and converts it to TRAINING.
     TRAINING_QUEUED = "training_queued"
+    # The job is currently being trained.
+    TRAINING = "training"
+    # The job has been trained.
+    TRAINED = "trained"
 
     SEGMENTING = "segmenting"
     SEGMENTED = "segmented"

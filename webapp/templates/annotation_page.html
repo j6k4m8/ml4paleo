@@ -286,17 +286,17 @@
 
             // A and S to change image opacity:
             if (keyCode === 65) {
-                STATE.imageTransparency += .05;
-                if (keyIsDown(SHIFT)) { STATE.imageTransparency += .05; }
-                if (STATE.imageTransparency < CONFIG.imageTransparency.min) {
-                    STATE.imageTransparency = CONFIG.imageTransparency.min;
-                }
-            }
-            if (keyCode === 83) {
                 STATE.imageTransparency -= .05;
                 if (keyIsDown(SHIFT)) { STATE.imageTransparency -= .05; }
                 if (STATE.imageTransparency > CONFIG.imageTransparency.max) {
                     STATE.imageTransparency = CONFIG.imageTransparency.max;
+                }
+            }
+            if (keyCode === 83) {
+                STATE.imageTransparency += .05;
+                if (keyIsDown(SHIFT)) { STATE.imageTransparency += .05; }
+                if (STATE.imageTransparency < CONFIG.imageTransparency.min) {
+                    STATE.imageTransparency = CONFIG.imageTransparency.min;
                 }
             }
         }

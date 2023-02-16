@@ -32,29 +32,45 @@
     <div class="container">
         <div class="row">
             <div class="col">
-                <header>
-                    <h1>
-                        {{ job.name }}
-                        <div style="float:right" data-tooltip="{{job.status}}">{{ status_badge(job.status) }}</div>
-                    </h1>
-
-                    <p>
-                        <a role="button" href="{{ neuroglancer_link }}" target="_blank"
-                            data-tooltip="Open 3D view in a new tab">
-                            View in 3D
-                        </a>
-                    </p>
-                    <p>
-                        <small>
-                            Created {{pretty_date(job.created_at)}}
-                        </small>
-                    </p>
-                    <p>
-                        <small>
-                            Last updated {{pretty_date(job.last_updated_at) }}
-                        </small>
-                    </p>
-                </header>
+                <article>
+                    <header>
+                        <h1>
+                            {{ job.name }}
+                            <div style="float:right" data-tooltip="{{job.status}}">{{ status_badge(job.status) }}</div>
+                        </h1>
+                    </header>
+                    <!-- <p>
+                            <a role="button" href="{{ neuroglancer_link }}" target="_blank"
+                                data-tooltip="Open 3D view in a new tab">
+                                View in 3D
+                            </a>
+                        </p>
+                        <p>
+                            <small>
+                                Created {{pretty_date(job.created_at)}}
+                            </small>
+                            <small>
+                                Last updated {{pretty_date(job.last_updated_at) }}
+                            </small>
+                        </p> -->
+                    <table>
+                        <tr>
+                            <th>Creation Date</th>
+                            <th>Last Updated</th>
+                            <th>Latest Segmentation ID</th>
+                            <th></th>
+                        </tr>
+                        <tr>
+                            <td>{{pretty_date(job.created_at)}}</td>
+                            <td>{{pretty_date(job.last_updated_at) }}</td>
+                            <td>{{latest_segmentation_id}}</td>
+                            <td><a href="{{ neuroglancer_link }}" target="_blank"
+                                    data-tooltip="Open 3D view in a new tab">
+                                    View in 3D
+                                </a></td>
+                        </tr>
+                    </table>
+                </article>
 
                 {% if job.status | string == "JobStatus.UPLOADED" %}
                 <div>
@@ -154,6 +170,27 @@
                 })
                 .catch((error) => {
                     notyf.error("There was an error starting segmentation. Please try again in a few minutes.");
+                });
+        };
+
+        triggerTrainOnly = () => {
+            // Disable the button
+            document.getElementById("train-only-trigger-button").disabled = true;
+            // Set aria-busy:
+            document.getElementById("train-only-trigger-button").setAttribute("aria-busy", "true");
+
+            fetch("/api/job/{{ job.id }}/retrain", {
+                method: "POST",
+            })
+                .then((response) => {
+                    if (response.ok) {
+                        notyf.success("Training started.");
+                    } else {
+                        notyf.error("There was an error starting training. Please try again in a few minutes.");
+                    }
+                })
+                .catch((error) => {
+                    notyf.error("There was an error starting training. Please try again in a few minutes.");
                 });
         };
 

@@ -28,6 +28,7 @@ from ml4paleo.volume_providers.io import get_random_tile, export_to_img_stack
 
 from config import CONFIG
 from apputils import get_latest_segmentation_id, get_latest_segmentation_model
+from segmentrunner import train_job
 
 log = logging.getLogger(__name__)
 
@@ -419,6 +420,32 @@ class ML4PaleoWebApplication:
         #  Training & Inference
         #
         ###############################
+
+        # /api/job/{{ job.id }}/retrain
+        @self.app.route("/api/job/<job_id>/retrain", methods=["POST"])
+        def retrain_model(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            # Update the job to the JobStatus.TRAINING state:
+            job_manager.update_job(job_id, update=dict(status=JobStatus.TRAINING))
+
+            # Start the training process:
+            train_job(job)
+
+            job_manager.update_job(job_id, update=dict(status=JobStatus.TRAINED))
+
+            return jsonify({"status": "success"})
 
         @self.app.route("/api/job/<job_id>/start", methods=["POST"])
         def trigger_training(job_id):
