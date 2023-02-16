@@ -1,73 +1,12 @@
 # ml4paleo
 
-[Engineering Plan](https://docs.google.com/document/d/1BuTvtSXZQfS_Un_U-ajgUmIym87JF7aQ8JJHcVwQj_M/edit?usp=sharing)
+This repository contains code for automated segmentation of fossil X-ray tomography data. This is a companion repository to [_"Automated 3D image segmentation of synchrotron scanned fossils"_](#) by During, Gustafsson, and Matelsky et al. (2023).
 
-## Overview
+This codebase comprises two main components:
 
-The goal of this project is to build an image segmentation pipeline for fossil X-ray tomography. The pipeline will be packaged and available either as a standalone Python package or as a hosted web service, with data either from a local file or from a cloud-based data host such as BossDB.
+1. A Python package for volumetric imagery analysis, training, and evaluating segmentation models, as well as post-processing of segmentation results such as mesh generation and image-stack export.
+2. A web application for no-code image conversion, segmentation, and post-processing.
 
-## MVP
+The web application is contained in [`webapp/`](webapp/), and the Python package is contained in [`ml4paleo/`](ml4paleo/). The `ml4paleo` package is also available on PyPI as [`ml4paleo`](https://pypi.org/project/ml4paleo/), and can be installed with `pip install ml4paleo`.
 
-```mermaid
-graph TD
-
-subgraph Segmentation
-    UNet
-    %% CNN
-    RF
-end
-
-subgraph Imagery
-    %% BossDB
-    Static
-end
-
-%% Image Source to Seg groups:
-Imagery --> Segmentation
-%% Segmentation --> Meshing
-Segmentation --> Stack-Export
-```
-
-## Extended
-
-```mermaid
-graph TD
-
-subgraph Segmentation
-    UNet[U-Net]
-    CNN
-    RF[Random Forest]
-end
-
-subgraph Imagery
-    BossDB
-    Static[Static file]
-end
-
-%% Image Source to Seg groups:
-Imagery --> Segmentation[Piecewise Segmentation]
-Segmentation --> Stitching
-
-Stitching --> Meshing[Mesh Generation]
-Stitching --> StackExport[Image-Stack Export]
-
-Imagery --> SSLFeat[SSL Feature Extraction]
-SSLFeat --> Segmentation
-```
-
-In practice, the `Imagery` nodes are implementations of `VolumeProvider`s; the `Segmentation` nodes implement the `Segmentation3D` interface.
-
-All post-processing steps should implement the `Postprocessor` interface.
-
-The self-supervised feature extraction step is a TODO.
-
-## Running the web app with Docker
-
-```shell
-docker run -it -p 5000:5000 python:3.9 bash
-
-# inside the container
-poetry install
-cd webapp
-poetry run python main.py
-```
+For more details on each of the components, see the READMEs in their respective directories.
