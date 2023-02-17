@@ -18,7 +18,7 @@ fails, the job status will be set to `JobStatus.CONVERT_ERROR`.
 import logging
 import pathlib
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from config import CONFIG
 from job import JobStatus, JSONFileUploadJobManager, UploadJob
@@ -90,10 +90,19 @@ def convert_next():
     volume_provider = ImageStackVolumeProvider(
         pathlib.Path(CONFIG.upload_directory) / next_job.id, cache_size=0
     )
+
+    def _progress_callback(completed: int, item: Any, total: int) -> None:
+        logging.info(f"Converted {completed} / {total} for job {next_job.id}.")
+        job_mgr = get_job_manager()
+        job_mgr.update_job(
+            next_job.id, update={"current_job_progress": completed / total}
+        )
+
     export_zarr_array(
         volume_provider,
         pathlib.Path(CONFIG.chunked_directory) / next_job.id,
         chunk_size=CONFIG.chunk_size,
+        progress_callback=_progress_callback,
     )
     logging.info("Finished converting dataset %s", next_job.id)
     next_job.complete_convert()

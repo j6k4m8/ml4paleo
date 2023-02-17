@@ -21,7 +21,7 @@ import json
 import logging
 import pathlib
 import time
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 from PIL import Image
 
 import numpy as np
@@ -43,7 +43,7 @@ def model_factory() -> Tuple[Segmenter3D, dict]:
     Return a new instance of the model.
     """
     rf_kwargs = {
-        "n_estimators": 8,
+        "n_estimators": 25,
         "max_depth": 8,
         "n_jobs": -1,
     }
@@ -143,6 +143,13 @@ def train_and_segment_job(job: UploadJob) -> None:
         pathlib.Path(CONFIG.segmented_directory) / str(job.id) / (timestamp + ".zarr")
     )
 
+    def progress_callback(completed: int, item: Any, total: int) -> None:
+        logging.info(
+            f"Segmented {completed} / {total} chunks for job {job.id} (chunk {item})."
+        )
+        job_mgr = get_job_manager()
+        job_mgr.update_job(job.id, update={"current_job_progress": completed / total})
+
     segment_volume_to_zarr(
         vol_provider,
         seg_path,
@@ -150,6 +157,7 @@ def train_and_segment_job(job: UploadJob) -> None:
         chunk_size=CONFIG.segmentation_chunk_size,
         parallel=CONFIG.segment_job_parallelism,
         progress=True,
+        progress_callback=progress_callback,
     )
 
 
@@ -175,7 +183,11 @@ def main():
         job_mgr.update_job(job.id, update={"status": JobStatus.SEGMENT_ERROR})
         return
     # Update the job status:
-    job_mgr.update_job(job.id, update={"status": JobStatus.SEGMENTED})
+    try:
+        job_mgr.update_job(job.id, update={"status": JobStatus.SEGMENTED})
+    except Exception as e:
+        time.sleep(1)  # potential race condition with 100% update
+        job_mgr.update_job(job.id, update={"status": JobStatus.SEGMENTED})
 
 
 if __name__ == "__main__":
