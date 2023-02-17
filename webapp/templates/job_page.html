@@ -80,8 +80,10 @@
                 {% endif %}
                 {% if job.status | string == "JobStatus.CONVERTING" %}
                 <div>
-                    <label for="convert-progress">Conversion Progress</label>
-                    <progress max="100" id="convert-progress"></progress>
+                    <label for="convert-progress">Conversion Progress
+                        ({{ "%.2f" | format(job.current_job_progress*100) }}%)
+                    </label>
+                    <progress value="{{100 * job.current_job_progress}}" max="100" id="convert-progress"></progress>
                 </div>
                 {% endif %}
 
@@ -202,7 +204,7 @@
                 .then((response) => response.json())
                 .then((data) => {
                     console.log(data, "{{job.status | string}}")
-                    if (data.status !== "{{job.status | string}}" || data.status === "JobStatus.SEGMENTING") {
+                    if (data.status !== "{{job.status | string}}" || data.status in "JobStatus.SEGMENTING" || data.status in "JobStatus.CONVERTING") {
                         window.location.reload();
                     }
                 });

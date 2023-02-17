@@ -22,6 +22,7 @@ def export_zarr_array(
     progress: bool = False,
     parallel_jobs: int = False,
     cuboid_transform_fn=None,
+    progress_callback=None,
     **kwargs,
 ):
     """
@@ -77,8 +78,19 @@ def export_zarr_array(
         slice_count = 8
 
     prog_bar = tqdm.tqdm if progress else lambda x: x
+
+    if progress_callback is not None:
+        # Send the callback the current progress out of the total.
+        def _prog(x):
+            for i, y in prog_bar(enumerate(x)):
+                progress_callback(i, y, len(x))
+                yield y
+
+    else:
+        _prog = prog_bar  # type: ignore
+
     if parallel_jobs is False:
-        for i in prog_bar(range(0, volume_provider.shape[2], slice_count)):
+        for i in _prog(range(0, volume_provider.shape[2], slice_count)):
             zstart = i
             zend = min(i + slice_count, volume_provider.shape[2])
             vol = volume_provider[:, :, zstart:zend]
@@ -113,7 +125,7 @@ def export_zarr_array(
 
         _ = Parallel(n_jobs=parallel_jobs)(
             delayed(_racey_export_chunk_parallel)(zstart)
-            for zstart in prog_bar(range(0, volume_provider.shape[2], slice_count))
+            for zstart in _prog(range(0, volume_provider.shape[2], slice_count))
         )
 
     return zarr_array
