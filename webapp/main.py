@@ -349,10 +349,13 @@ class ML4PaleoWebApplication:
                 )
             zarrvol = ZarrVolumeProvider(zarr_path)
             # Get a random slice from the dataset:
-            imgslice = get_random_tile(
-                zarrvol,
-                CONFIG.annotation_shape,
-            )
+            imgslice = np.zeros(CONFIG.annotation_shape)
+            while np.sum(imgslice) == 0:
+                imgslice = get_random_tile(
+                    zarrvol,
+                    CONFIG.annotation_shape,
+                )
+                time.sleep(1)
             # imgslice = _transform_img_slice_for_annotation(imgslice)
             # Save the imgslice to bytesio:
             img = Image.fromarray(imgslice)
@@ -404,8 +407,14 @@ class ML4PaleoWebApplication:
                 CONFIG.annotation_shape
             ).save(mfname)
 
-            # Update the job to the JobStatus.ANNOTATED state:
-            job_manager.update_job(job_id, update=dict(status=JobStatus.ANNOTATED))
+            # If the job is CONVERTING, don't change the status (we need the
+            # daemon to continue to run the conversion process.)
+            # But we can allow the user to submit more annotations:
+            if job.status == JobStatus.CONVERTING:
+                pass
+            else:
+                # Update the job to the JobStatus.ANNOTATED state:
+                job_manager.update_job(job_id, update=dict(status=JobStatus.ANNOTATED))
 
             # Return the mask as a base64 encoded string:
             # Return zeros the same size as the image:

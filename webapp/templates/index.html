@@ -54,7 +54,6 @@
                         <button role="button" onclick="startNewJob()">Create a new job</button>
                     </footer>
                 </article>
-                {% include "previous_jobs.html" %}
             </div>
         </div>
         <div class="row">
@@ -117,6 +116,7 @@
                 </article>
             </div>
         </div>
+        {% include "previous_jobs.html" %}
     </div>
     <script src="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"
@@ -177,13 +177,13 @@
                     const dropzone = new Dropzone("div.dropzone", {
                         // https://github.com/dropzone/dropzone/blob/main/src/options.js
                         url: "/api/upload",
-                        parallelUploads: 4,
+                        parallelUploads: 16,
                         chunking: true,
                         forceChunking: true,
                         retryChunks: true,
-                        maxFilesize: 10000, // MiB: 10GB,
+                        retryChunksLimit: 10,
+                        chunkSize: 20000000,
                         createImageThumbnails: false,
-                        thumbnailHeight: 30,
                         headers: {
                             "X-Job-Namespace": "ml4paleo",
                             "X-Job-ID": data.job_id,

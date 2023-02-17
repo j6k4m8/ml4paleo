@@ -39,6 +39,8 @@ class RandomForest3DSegmenter(Segmenter3D):
         max_depth = self.rf_kwargs.pop("max_depth", 8)
         n_jobs = self.rf_kwargs.pop("n_jobs", -1)
 
+        self._training_subsample = self.rf_kwargs.pop("training_subsample", 500)
+
         self._clf = RandomForestClassifier(
             n_estimators=estimators,
             max_depth=max_depth,
@@ -131,8 +133,8 @@ class RandomForest3DSegmenter(Segmenter3D):
         features = self.features_fn(imgslice)
 
         # Train the classifier:
-        features = features.reshape(-1, features.shape[-1])
-        mask = mask.reshape(-1)
+        features = features.reshape(-1, features.shape[-1])[:: self._training_subsample]
+        mask = mask.reshape(-1)[:: self._training_subsample]
 
         return features, mask
 

@@ -134,13 +134,16 @@ def export_zarr_array(
 def get_random_tile(
     volume_provider,
     tile_size: Tuple[int, int],
-):
+) -> np.ndarray:
     """
     Get a random tile from the volume.
 
     Arguments:
         volume_provider: The volume provider to get the tile from.
         tile_size: The size of the tile to get.
+
+    Returns:
+        np.ndarray: A random tile from the volume.
 
     """
     x = np.random.randint(0, volume_provider.shape[0] - tile_size[0])

@@ -2,9 +2,15 @@
     <header>
         <h3>Segmentation Training</h3>
     </header>
+    {% if job.status | string == "JobStatus.CONVERTING" %}
+    <p>
+        Your job is still converting but you can start annotating now. Return to
+        this page to check in on progress.
+    </p>
+    {% endif %}
     <p>
         <a target="_blank" role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">
-            Continue annotating
+            Annotation Application
         </a>
     </p>
     <p>
