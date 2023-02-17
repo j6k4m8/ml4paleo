@@ -304,6 +304,7 @@ class ML4PaleoWebApplication:
                     not in [
                         JobStatus.CONVERTING,
                         JobStatus.UPLOADING,
+                        JobStatus.UPLOADED,
                         JobStatus.CONVERT_ERROR,
                     ]
                 ),

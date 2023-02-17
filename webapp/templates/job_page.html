@@ -204,7 +204,7 @@
                 .then((response) => response.json())
                 .then((data) => {
                     console.log(data, "{{job.status | string}}")
-                    if (data.status !== "{{job.status | string}}" || data.status in "JobStatus.SEGMENTING" || data.status in "JobStatus.CONVERTING") {
+                    if (data.status !== "{{job.status | string}}" || data.status === "JobStatus.SEGMENTING" || data.status === "JobStatus.CONVERTING") {
                         window.location.reload();
                     }
                 });
