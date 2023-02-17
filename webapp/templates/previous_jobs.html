@@ -2,25 +2,41 @@
     <header>
         <h3>Previous Jobs</h3>
     </header>
-    <ul id="job-list"></ul>
+    <table id="job-list">
+        Once you have submitted a job, it will appear here.
+    </table>
 
     <script>
         // Check localStorage for `jobs` key.
         const template = `
-            <li>
-                <a href="/job/<id>"><name></a>
-            </li>
+            <tr>
+                <td>
+                    <a href="/job/$ID">
+                        $NAME
+                    </a>
+                    <span data-tooltip="Remove from the list (will not delete)" style="float:right;cursor:pointer" class="link" onClick="deleteJobFromPrevList('$ID')">❌</span>
+                </td>
+            </tr>
         `;
         const jobs = JSON.parse(localStorage.getItem('jobs'));
         if (jobs) {
             const jobList = document.getElementById('job-list');
+            jobList.innerHTML = "";
             jobs.forEach(job => {
                 const html = template
-                    .replace('<id>', job.id)
-                    .replace('<name>', job.name);
+                    .replace('$ID', job.id)
+                    .replace('$ID', job.id)
+                    .replace('$NAME', job.name);
                 console.log(html)
                 jobList.innerHTML += html;
             });
+        }
+
+        function deleteJobFromPrevList(id) {
+            const jobs = JSON.parse(localStorage.getItem('jobs'));
+            const newJobs = jobs.filter(job => job.id !== id);
+            localStorage.setItem('jobs', JSON.stringify(newJobs));
+            window.location.reload();
         }
 
     </script>

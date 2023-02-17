@@ -65,8 +65,6 @@ def _create_neuroglancer_link(job: UploadJob):
     zarr_path = pathlib.Path(CONFIG.segmented_directory) / job.id
     if zarr_path.exists():
         # Get the latest segmentation (the last one in the list)
-        # segmentation_path = sorted(zarr_path.glob("*.zarr"))[-1]
-        # seg_id = segmentation_path.name
         seg_id = get_latest_segmentation_id(job)
 
         # Create the neuroglancer layer:
@@ -145,6 +143,10 @@ class ML4PaleoWebApplication:
         @self.app.route("/")
         def index():
             return render_template("index.html")
+
+        @self.app.route("/about")
+        def about():
+            return render_template("about.html")
 
         @self.app.route("/api/job/new", methods=["POST"])
         def new_job():

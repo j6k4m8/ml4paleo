@@ -84,23 +84,32 @@ def train_job(job: UploadJob) -> Tuple[Segmenter3D, str]:
     imgs_np = []
     segs_np = []
     for img_path, seg_path in zip(
-        (pathlib.Path(CONFIG.training_directory) / job.id).glob(
-            f"{CONFIG.training_img_prefix}*.png"
+        sorted(
+            (pathlib.Path(CONFIG.training_directory) / job.id).glob(
+                f"{CONFIG.training_img_prefix}*.png"
+            )
         ),
-        (pathlib.Path(CONFIG.training_directory) / job.id).glob(
-            f"{CONFIG.training_seg_prefix}*.png"
+        sorted(
+            (pathlib.Path(CONFIG.training_directory) / job.id).glob(
+                f"{CONFIG.training_seg_prefix}*.png"
+            )
         ),
     ):
         imgs_np.append(np.array(Image.open(img_path))[:, :, 0])
         segs_np.append(np.array(Image.open(seg_path))[:, :, 0])
-    logging.info(f"Loaded {len(imgs_np)} training images.")
+    training_count = len(imgs_np)
+    logging.info(f"Loaded {training_count} training images.")
     imgs_np = np.stack(imgs_np)
     segs_np = np.stack(segs_np)
 
     # Train the model:
     segmenter, model_params = model_factory()
-    # segs_np = np.expand_dims(segs_np, axis=-1)
-    # imgs_np = np.expand_dims(imgs_np, axis=-1)
+
+    # If there's only one training image, we need to add a dimension to the
+    # array, so that the model can be trained.
+    if training_count == 1:
+        imgs_np = np.expand_dims(imgs_np, axis=-1)
+        segs_np = np.expand_dims(segs_np, axis=-1)
     logging.info("Training with shapes img=%s and seg=%s", imgs_np.shape, segs_np.shape)
     segmenter.fit(imgs_np, segs_np)
 

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Wizard | ml4paleo</title>
+    <link href="https://unpkg.com/dropzone@6.0.0-beta.1/dist/dropzone.css" rel="stylesheet" type="text/css" />
+    <link rel="stylesheet" href="https://unpkg.com/@picocss/pico@1.*/css/pico.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.css">
+    <script src="https://unpkg.com/dropzone@6.0.0-beta.1/dist/dropzone-min.js"></script>
+    <style type="text/css">
+        .dropzone {
+            border: 4px dashed #0087F7;
+            border-radius: 5px;
+            background: white;
+            min-height: 250px;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+
+</head>
+
+<body>
+    {% include "navbar.html" %}
+    <div class="container">
+        <div class="row">
+            <div class="col">
+                <article>
+                    <header>
+                        <h3><b>ml4paleo</b> is a collaborative open-science project.</h3>
+                    </header>
+
+                    <p>
+                        The goal of this project is to develop simple and powerful
+                        machine learning models that can be used for paleontological
+                        research.
+                    </p>
+
+                    <h4>
+                        The Science
+                    </h4>
+
+                    <p>
+                        The following research has been completed thanks in part to the <b>ml4paleo</b>
+                        project:
+                    </p>
+
+                    <blockquote>
+                        <a href="#"><i>Automated 3D image segmentation of synchrotron scanned fossils.</i></a>
+                        Melanie A. D. During, Fredrik K. Gustafsson, Jordan K. Matelsky, et al. (In preparation, 2023)
+                    </blockquote>
+
+
+                    <h4>
+                        The Code
+                    </h4>
+
+                    <p>
+                        All code is open-source and licensed under an <a
+                            href="https://opensource.org/licenses/Apache-2.0">Apache 2.0 license</a>. The code is
+                        available on GitHub at <a href="https://github.com/j6k4m8/ml4paleo">@j6k4m8/ml4paleo</a>.
+                    </p>
+
+                    <h4>
+                        The Team
+                    </h4>
+
+                    <p>
+                        The project is co-led by <a href="">Melanie During</a>, <a href="">Fredrik Gustaffson</a>, and
+                        <a href="">Jordan Matelsky</a>.
+                    </p>
+
+                    <div class="grid" style="text-align: center;">
+                        <div>
+                            <img src="https://user-images.githubusercontent.com/693511/219598034-e9dddfa1-91f4-4961-8a22-1d11bd8a0cd9.png"
+                                alt="Melanie During" width="200" style="border-radius:50%" />
+                            <div><b>Melanie During</b></div>
+                            <div><small>University of Uppsala</small></div>
+                        </div>
+                        <div>
+                            <img src="https://user-images.githubusercontent.com/693511/219598185-644c731b-30d7-401d-8c04-66a0611a331a.png"
+                                alt="Fredrik Gustaffson" width="200" style="border-radius:50%" />
+                            <div><b>Fredrik Gustaffson</b></div>
+                            <div><small>University of Uppsala</small></div>
+                        </div>
+                        <div>
+                            <img src="https://user-images.githubusercontent.com/693511/219598677-e19717eb-01d4-4b87-93b7-3f70736d9970.png"
+                                alt="Jordan Matelsky" width="200" style="border-radius:50%" />
+                            <div><b>Jordan Matelsky</b></div>
+                            <div><small>University of Pennsylvania</small></div>
+                            <div><small>Johns Hopkins University Applied Physics Laboratory</small></div>
+                        </div>
+                    </div>
+
+                    <h4>With mentorship and guidance from</h4>
+
+                    <div class="grid" style="text-align:center">
+                        <div><img
+                                src="https://user-images.githubusercontent.com/693511/219599678-9a931490-ff19-4a5d-a8d4-a3bdfeeb8d2c.png"
+                                alt="Per Ahlberg" width="200" style="border-radius:50%" />
+                            <div><b>Per Ahlberg</b></div>
+                            <div><small>University of Uppsala</small></div>
+                        </div>
+                        <div><img
+                                src="https://user-images.githubusercontent.com/693511/219599797-50e4c92a-5f48-457a-a8f3-4a46be1ab997.png"
+                                alt="Thomas Schön" width="200" style="border-radius:50%" />
+                            <div><b>Thomas Schön</b></div>
+                            <div><small>University of Uppsala</small></div>
+                        </div>
+                        <div><img
+                                src="https://user-images.githubusercontent.com/693511/219599874-88f2ae7f-e19d-42f7-a6e2-8f3ab8ad9676.png"
+                                alt="Brock Wester" width="200" style="border-radius:50%" />
+                            <div><b>Brock Wester</b></div>
+                            <div><small>Johns Hopkins University Applied Physics Laboratory</small></div>
+                        </div>
+                    </div>
+                </article>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>
