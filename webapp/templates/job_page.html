@@ -88,8 +88,10 @@
 
                 {% if job.status | string == "JobStatus.SEGMENTING" %}
                 <article>
-                    <label for="segment-progress">Segmentation Progress</label>
-                    <progress max="100" id="segment-progress"></progress>
+                    <label for="segment-progress">Segmentation Progress ({{
+                        "%.2f" | format(job.current_job_progress*100)
+                        }}%)</label>
+                    <progress value="{{100 * job.current_job_progress}}" max="100" id="segment-progress"></progress>
                 </article>
                 {% endif %}
 
@@ -200,7 +202,7 @@
                 .then((response) => response.json())
                 .then((data) => {
                     console.log(data, "{{job.status | string}}")
-                    if (data.status !== "{{job.status | string}}") {
+                    if (data.status !== "{{job.status | string}}" || data.status === "JobStatus.SEGMENTING") {
                         window.location.reload();
                     }
                 });

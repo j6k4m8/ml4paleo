@@ -3,7 +3,6 @@
         <h3>Previous Jobs</h3>
     </header>
     <table id="job-list">
-        Once you have submitted a job, it will appear here.
     </table>
 
     <script>
@@ -19,9 +18,9 @@
             </tr>
         `;
         const jobs = JSON.parse(localStorage.getItem('jobs'));
+        const jobList = document.getElementById('job-list');
         if (jobs) {
-            const jobList = document.getElementById('job-list');
-            jobList.innerHTML = "";
+            jobList.innerHTML = " ";
             jobs.forEach(job => {
                 const html = template
                     .replace('$ID', job.id)
@@ -30,6 +29,8 @@
                 console.log(html)
                 jobList.innerHTML += html;
             });
+        } else {
+            jobList.innerHTML = "Once you have submitted a job, it will appear here."
         }
 
         function deleteJobFromPrevList(id) {

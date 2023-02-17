@@ -1,5 +1,5 @@
 import pathlib
-from typing import Tuple, Union
+from typing import Any, Callable, Iterable, Optional, Tuple, Union
 from intern.utils.parallel import block_compute
 import zarr
 import numpy as np
@@ -40,6 +40,7 @@ def segment_volume_to_zarr(
     chunk_size,
     parallel: Union[bool, int] = True,
     progress: bool = True,
+    progress_callback: Optional[Callable[[int, Any, int], Any]] = None,
 ):
     seg_path.mkdir(parents=True, exist_ok=True)
 
@@ -66,7 +67,16 @@ def segment_volume_to_zarr(
         block_size=chunk_size,
     )
 
-    _prog = tqdm.tqdm if progress else lambda x: x
+    _progfn = tqdm.tqdm if progress else lambda x: x
+    if progress_callback is not None:
+        # Send the callback the current progress out of the total.
+        def _prog(x):
+            for i, y in _progfn(enumerate(x)):
+                progress_callback(i, y, len(x))
+                yield y
+
+    else:
+        _prog = _progfn  # type: ignore
 
     # for xs, ys, zs in chunks_to_segment
     _ = Parallel(n_jobs=parallel)(

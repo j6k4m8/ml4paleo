@@ -101,6 +101,7 @@ class UploadJobSchema(Schema):
     id = fields.Str()
     created_at = fields.Str()
     last_updated_at = fields.Str()
+    current_job_progress = fields.Float()
 
 
 def _new_job_id() -> UploadJobID:
@@ -126,6 +127,7 @@ class UploadJob:
         status: Optional[JobStatus] = None,
         created_at: Optional[str] = None,
         last_updated_at: Optional[str] = None,
+        current_job_progress: Optional[float] = None,
     ):
         """
         Create a new job with the fieldwise constructor.
@@ -143,6 +145,8 @@ class UploadJob:
                 the current time will be used.
             last_updated_at (str): The time the job was last updated. If not
                 provided, the current time will be used (equal to created_at)
+            current_job_progress (float): The progress of the current operation
+                on the job. If not provided, the progress will be set to 0.
 
         """
         created_at = created_at or datetime.datetime.now().isoformat()
@@ -152,6 +156,7 @@ class UploadJob:
         self.id = id or _new_job_id()
         self.created_at = created_at
         self.last_updated_at = last_updated_at
+        self.current_job_progress = current_job_progress or 0.0
 
     def set_status(self, status: JobStatus):
         """
@@ -191,6 +196,7 @@ class UploadJob:
             status=JobStatus.from_string(d["status"]),
             created_at=d["created_at"],
             last_updated_at=d.get("last_updated_at", d["created_at"]),
+            current_job_progress=d.get("current_job_progress", 0.0),
         )
         return res
 
@@ -247,20 +253,28 @@ class JSONFileUploadJobManager(UploadJobManager):
         """
         Get all jobs from the file.
         """
-        try:
-            with open(self.file_path, "r") as f:
-                results = {
-                    k: (UploadJob.from_dict(v) if isinstance(v, dict) else v)
-                    for k, v in json.load(f).items()
-                }
-                return results
-        except json.JSONDecodeError as e:
-            # Move the corrupted file out of the way:
-            log.exception(
-                f"Corrupted jobs file: {self.file_path}, got error {e}. Moving to {self.file_path}.{time.time()}"
-            )
-            os.rename(self.file_path, f"{self.file_path}.{time.time()}")
-            return {}
+        retries = 3
+        for i in range(retries):
+            try:
+                with open(self.file_path, "r") as f:
+                    results = {
+                        k: (UploadJob.from_dict(v) if isinstance(v, dict) else v)
+                        for k, v in json.load(f).items()
+                    }
+                    return results
+            except json.JSONDecodeError as e:
+                time.sleep(0.5)
+            except Exception as e:
+                log.exception(f"Error loading jobs file: {self.file_path}")
+                raise e
+
+        # If we get here, we failed to load the file.
+        # Move the corrupted file out of the way:
+        log.exception(
+            f"Corrupted jobs file: {self.file_path}, got error {e}. Moving to {self.file_path}.{time.time()}"
+        )
+        os.rename(self.file_path, f"{self.file_path}.{time.time()}")
+        return {}
 
     def _save_jobs(self, jobs: Dict[UploadJobID, UploadJob]):
         """
