@@ -15,8 +15,11 @@ _default_features_func = functools.partial(
     edges=True,
     texture=True,
     sigma_min=1,
-    sigma_max=16,
+    sigma_max=32,
 )
+
+# one in every X voxels will be used for training
+_DEFAULT_TRAINING_SPARSITY = 500
 
 
 class RandomForest3DSegmenter(Segmenter3D):
@@ -35,11 +38,13 @@ class RandomForest3DSegmenter(Segmenter3D):
         self.rf_kwargs = rf_kwargs or {}
         self.features_fn = features_fn or (lambda x: x)
 
-        estimators = self.rf_kwargs.pop("n_estimators", 25)
-        max_depth = self.rf_kwargs.pop("max_depth", 8)
+        estimators = self.rf_kwargs.pop("n_estimators", 50)
+        max_depth = self.rf_kwargs.pop("max_depth", 12)
         n_jobs = self.rf_kwargs.pop("n_jobs", -1)
 
-        self._training_subsample = self.rf_kwargs.pop("training_subsample", 500)
+        self._training_subsample = self.rf_kwargs.pop(
+            "training_subsample", _DEFAULT_TRAINING_SPARSITY
+        )
 
         self._clf = RandomForestClassifier(
             n_estimators=estimators,

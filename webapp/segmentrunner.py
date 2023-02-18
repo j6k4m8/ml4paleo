@@ -43,8 +43,8 @@ def model_factory() -> Tuple[Segmenter3D, dict]:
     Return a new instance of the model.
     """
     rf_kwargs = {
-        "n_estimators": 25,
-        "max_depth": 8,
+        "n_estimators": 50,
+        "max_depth": 12,
         "n_jobs": -1,
     }
     return (
@@ -99,8 +99,8 @@ def train_job(job: UploadJob) -> Tuple[Segmenter3D, str]:
         segs_np.append(np.array(Image.open(seg_path))[:, :, 0])
     training_count = len(imgs_np)
     logging.info(f"Loaded {training_count} training images.")
-    imgs_np = np.stack(imgs_np)
-    segs_np = np.stack(segs_np)
+    imgs_np = np.stack(imgs_np, axis=-1)
+    segs_np = np.stack(segs_np, axis=-1)
 
     # Train the model:
     segmenter, model_params = model_factory()
