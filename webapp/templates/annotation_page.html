@@ -60,7 +60,7 @@
 <body>
     <script src="https://cdn.jsdelivr.net/npm/p5@1.4.1/lib/p5.js"></script>
     <script>
-        const STATE = {
+        let STATE = {
             // Image Rendering:
             imageLoaded: false,
             imageFilter: "invert",
@@ -142,6 +142,10 @@
         }
 
         function submitData() {
+
+            // Save STATE to localStorage.
+            localStorage.setItem("state", JSON.stringify(STATE));
+
             paintPixels.loadPixels();
             const maskPixels = paintPixels.canvas.toDataURL();
 
@@ -203,6 +207,17 @@
         let originalPixels;
         let maxPixelValue = 255;
         function preload() {
+
+            // If there's state in localStorage, use it.
+            if (localStorage.getItem("state")) {
+                try {
+                    STATE = JSON.parse(localStorage.getItem("state"));
+                    // Bump the histogram:
+                    STATE.histogram.pvmin = -1;
+                }
+                catch { console.log("Error loading state from localStorage."); }
+            }
+
             let _cachebuster = `?cachebuster=${Math.random()}`;
             let jobId = window.location.pathname.split("/")[
                 window.location.pathname.split("/").length - 1
@@ -352,7 +367,6 @@
             if (window.prediction) {
                 loadImage('data:image/png;base64,' + window.prediction, img => {
                     // Clear pixels by erasing:
-                    console.log("hi")
                     paintPixels.erase();
                     paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
                     paintPixels.noErase();
@@ -376,10 +390,10 @@
             }
             background(0);
             // Draw axes:
-            stroke("white");
-            strokeWeight(1);
-            line(0, 0, 0, 100 * STATE.zoom);
-            line(0, 0, 100 * STATE.zoom, 0);
+            // stroke("white");
+            // strokeWeight(1);
+            // line(0, 0, 0, 100 * STATE.zoom);
+            // line(0, 0, 100 * STATE.zoom, 0);
 
             if (STATE.imageLoaded) {
                 background(CONFIG.backgroundColor);
@@ -477,19 +491,22 @@
                 (STATE.histogram.pvmax != STATE.histogram.vmax)
                 || (STATE.histogram.pvmin != STATE.histogram.vmin)
             ) {
-                STATE.histogram.pvmax = STATE.histogram.vmax;
-                STATE.histogram.pvmin = STATE.histogram.vmin;
-                // adjustHistogram to match the current histogram:
-                console.log("adjusting")
-                adjustHistogram(
-                    STATE.histogram.vmin,
-                    STATE.histogram.vmax,
-                    img,
-                    originalPixels,
-                    maxPixelValue
-                );
-                img.updatePixels();
+                reloadHistogramSettings();
             }
+        }
+
+        function reloadHistogramSettings() {
+            STATE.histogram.pvmax = STATE.histogram.vmax;
+            STATE.histogram.pvmin = STATE.histogram.vmin;
+            // adjustHistogram to match the current histogram:
+            adjustHistogram(
+                STATE.histogram.vmin,
+                STATE.histogram.vmax,
+                img,
+                originalPixels,
+                maxPixelValue
+            );
+            img.updatePixels();
         }
 
         function mouseDragged() {
@@ -564,7 +581,7 @@
 
     <!-- UI to submit (floating bottom) -->
     <div class="submit-container">
-        <button class="skip-button" onclick="skip()">Skip</button>
+        <button class="skip-button" onclick="window.location.reload()">Skip</button>
         <button class="submit-button" onclick="submitData()">Submit</button>
     </div>
 </body>
