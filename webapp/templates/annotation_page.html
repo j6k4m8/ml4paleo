@@ -23,53 +23,35 @@
             position: fixed;
             bottom: 0;
             right: 0;
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 50px;
-            background-color: #fefefe;
+            border-radius: 25px;
+            border: none;
+            margin: 1em;
+            padding: 0.5em 1em;
+            background-color: #d1e7d1;
             border-top: 1px solid #e5e5e5;
             text-align: center;
             font-size: 20px;
-            line-height: 50px;
             cursor: pointer;
             text-transform: uppercase;
+            letter-spacing: 2pt;
             font-weight: bold;
-            /* opacity: 0.25; */
-            transition: opacity 0.15s ease-in-out;
         }
 
-        .submit-button:hover {
-            opacity: 1;
-        }
-
-        .zoom-in-button-container {
+        .skip-button {
             position: fixed;
-            top: 0;
-            right: 0;
-            margin: 0.1em;
-            padding: 0;
-            width: 4em;
-            text-align: center;
-            font-size: 20px;
-            cursor: pointer;
-            text-transform: uppercase;
-            font-weight: bold;
-        }
-
-        .zoom-in-button-container .zoom-button {
-            position: relative;
-            width: 3em;
-            height: 3em;
-            margin-right: 1em;
+            bottom: 0;
+            left: 0;
+            border-radius: 25px;
             border: none;
-            box-sizing: border-box;
-            border-radius: 1.5em;
-            background-color: #e8e8e8;
+            margin: 1em;
+            padding: 0.5em 1em;
+            background-color: #e8c7c7;
+            border-top: 1px solid #e5e5e5;
             text-align: center;
             font-size: 20px;
             cursor: pointer;
             text-transform: uppercase;
+            letter-spacing: 2pt;
             font-weight: bold;
         }
     </style>
@@ -78,7 +60,7 @@
 <body>
     <script src="https://cdn.jsdelivr.net/npm/p5@1.4.1/lib/p5.js"></script>
     <script>
-        const STATE = {
+        let STATE = {
             // Image Rendering:
             imageLoaded: false,
             imageFilter: "invert",
@@ -95,6 +77,13 @@
             zoom: 1,
             panX: 0,
             panY: 0,
+
+            histogram: {
+                vmin: 0,
+                vmax: 1.0,
+                pvmin: 0,
+                pvmax: 1.0,
+            }
         };
 
         const CONFIG = {
@@ -119,6 +108,11 @@
             },
 
             backgroundColor: "#333333",
+
+            histogram: {
+                width: 30,
+                height: 200,
+            }
         };
 
 
@@ -148,9 +142,18 @@
         }
 
         function submitData() {
+
+            // Save STATE to localStorage.
+            localStorage.setItem("state", JSON.stringify(STATE));
+
             paintPixels.loadPixels();
             const maskPixels = paintPixels.canvas.toDataURL();
 
+            // Set the image to the original image.
+            for (let i = 0; i < img.pixels.length; i++) {
+                img.pixels[i] = originalPixels[i];
+            }
+            img.updatePixels();
             img.loadPixels();
             const imagePixels = img.canvas.toDataURL();
 
@@ -180,7 +183,41 @@
             });
         }
 
+        function adjustHistogram(vmin, vmax, imageObject, originalPixels, maxPixValue = 255) {
+
+            for (let x = 0; x < imageObject.width; x++) {
+                for (let y = 0; y < imageObject.height; y++) {
+                    let i = (x + y * imageObject.width) * 4;
+
+                    let pixR = originalPixels[i];
+                    let pixG = pixR;//originalPixels[i+1];
+                    let pixB = pixR;//originalPixels[i+2];
+                    // let pixA = pixR;//originalPixels[i+3];
+
+                    pixR = maxPixelValue * ((pixR / maxPixelValue) - vmin) / (vmax - vmin);
+
+                    imageObject.pixels[i] = pixR;
+                    imageObject.pixels[i + 1] = pixR;
+                    imageObject.pixels[i + 2] = pixR;
+                    // imageObject.pixels[i + 3] = pixA;
+                }
+            }
+        }
+
+        let originalPixels;
+        let maxPixelValue = 255;
         function preload() {
+
+            // If there's state in localStorage, use it.
+            if (localStorage.getItem("state")) {
+                try {
+                    STATE = JSON.parse(localStorage.getItem("state"));
+                    // Bump the histogram:
+                    STATE.histogram.pvmin = -1;
+                }
+                catch { console.log("Error loading state from localStorage."); }
+            }
+
             let _cachebuster = `?cachebuster=${Math.random()}`;
             let jobId = window.location.pathname.split("/")[
                 window.location.pathname.split("/").length - 1
@@ -202,11 +239,13 @@
                         // b64 encoded png. Render it to paintPixels.
                         window.prediction = data.prediction;
                         STATE.imageLoaded = true;
+
+                        img.loadPixels();
+                        originalPixels = img.pixels.map((x) => x);
+                        maxPixelValue = originalPixels.reduce((a, b) => Math.max(a, b));
                     });
                 }
             );
-
-
         }
 
         function setup() {
@@ -328,7 +367,6 @@
             if (window.prediction) {
                 loadImage('data:image/png;base64,' + window.prediction, img => {
                     // Clear pixels by erasing:
-                    console.log("hi")
                     paintPixels.erase();
                     paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
                     paintPixels.noErase();
@@ -352,10 +390,10 @@
             }
             background(0);
             // Draw axes:
-            stroke("white");
-            strokeWeight(1);
-            line(0, 0, 0, 100 * STATE.zoom);
-            line(0, 0, 100 * STATE.zoom, 0);
+            // stroke("white");
+            // strokeWeight(1);
+            // line(0, 0, 0, 100 * STATE.zoom);
+            // line(0, 0, 100 * STATE.zoom, 0);
 
             if (STATE.imageLoaded) {
                 background(CONFIG.backgroundColor);
@@ -398,9 +436,26 @@
                 `Mouse: ${Math.round(imgcoords[0])}, ${Math.round(
                     imgcoords[1]
                 )}\nZoom: ${Math.round(STATE.zoom * 100)}%`,
-                10,
+                10 + CONFIG.histogram.width,
                 10
             );
+
+            // Draw the histogram, which is a gradient from black to white.
+            // The histogram is drawn in the top-left corner of the screen.
+            noStroke();
+            for (let i = 0; i < CONFIG.histogram.height; i++) {
+                fill((255 * i) / CONFIG.histogram.height);
+                rect(0, i, CONFIG.histogram.width, 1);
+            }
+
+            // Draw the histogram bounds:
+            stroke("red");
+            strokeWeight(1);
+            let vMinMapped = map(STATE.histogram.vmin, 0, 1, CONFIG.histogram.height, 0);
+            let vMaxMapped = map(STATE.histogram.vmax, 0, 1, CONFIG.histogram.height, 0
+            );
+            line(0, vMinMapped, CONFIG.histogram.width, vMinMapped);
+            line(0, vMaxMapped, CONFIG.histogram.width, vMaxMapped);
         }
 
         function inBounds(x, y) {
@@ -431,7 +486,62 @@
             }
         }
 
+        function mouseReleased() {
+            if (
+                (STATE.histogram.pvmax != STATE.histogram.vmax)
+                || (STATE.histogram.pvmin != STATE.histogram.vmin)
+            ) {
+                reloadHistogramSettings();
+            }
+        }
+
+        function reloadHistogramSettings() {
+            STATE.histogram.pvmax = STATE.histogram.vmax;
+            STATE.histogram.pvmin = STATE.histogram.vmin;
+            // adjustHistogram to match the current histogram:
+            adjustHistogram(
+                STATE.histogram.vmin,
+                STATE.histogram.vmax,
+                img,
+                originalPixels,
+                maxPixelValue
+            );
+            img.updatePixels();
+        }
+
         function mouseDragged() {
+            // First check if you're within H vertically of the global top
+            // left corner, and within W horizontally of the global top
+            // left corner. If so, then you're in the histogram, and you should
+            // interact with the histogram instead of the image:
+            if (mouseX < CONFIG.histogram.width && mouseY < CONFIG.histogram.height) {
+
+                // Are you closer to vmin or vmax?
+                let vMinMapped = map(
+                    STATE.histogram.vmin,
+                    0,
+                    1,
+                    CONFIG.histogram.height,
+                    0
+                );
+                let vMaxMapped = map(
+                    STATE.histogram.vmax,
+                    0,
+                    1,
+                    CONFIG.histogram.height,
+                    0
+                );
+                let vminDist = Math.abs(mouseY - vMinMapped);
+                let vmaxDist = Math.abs(mouseY - vMaxMapped);
+
+                if (vminDist < vmaxDist) {
+                    STATE.histogram.vmin = map(mouseY, CONFIG.histogram.height, 0, 0, 1);
+                } else {
+                    STATE.histogram.vmax = map(mouseY, CONFIG.histogram.height, 0, 0, 1);
+                }
+                return;
+            }
+
             // Pan when holding shift:
             if (keyIsDown(SHIFT) || !inBounds(mouseX, mouseY)) {
                 STATE.panX += movedX;
@@ -467,20 +577,12 @@
                 paintPixels.noStroke();
             }
         }
-
     </script>
 
     <!-- UI to submit (floating bottom) -->
     <div class="submit-container">
+        <button class="skip-button" onclick="window.location.reload()">Skip</button>
         <button class="submit-button" onclick="submitData()">Submit</button>
-    </div>
-    <!-- UI to zoom -->
-    <div class="zoom-in-button-container">
-        <button class="zoom-button" onclick="STATE.zoom += 0.1">+</button>
-        <button class="zoom-button" onclick="STATE.zoom -= 0.1">–</button>
-        <br />
-        <br />
-        <button class="zoom-button" onclick="skip()">→</button>
     </div>
 </body>
 
