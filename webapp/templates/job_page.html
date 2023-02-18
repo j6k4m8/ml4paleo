@@ -68,7 +68,7 @@
                 {% if job.status | string == "JobStatus.CONVERTING" %}
                 <div>
                     <label for="convert-progress">Conversion Progress
-                        ({{ "%.2f" | format(job.current_job_progress*100) }}%)
+                        ({{ "%.3f" | format(job.current_job_progress*100) }}%)
                     </label>
                     <progress value="{{100 * job.current_job_progress}}" max="100" id="convert-progress"></progress>
                 </div>
@@ -78,7 +78,7 @@
                 {% if job.status | string == "JobStatus.SEGMENTING" %}
                 <article>
                     <label for="segment-progress">Segmentation Progress ({{
-                        "%.2f" | format(job.current_job_progress*100)
+                        "%.3f" | format(job.current_job_progress*100)
                         }}%)</label>
                     <progress value="{{100 * job.current_job_progress}}" max="100" id="segment-progress"></progress>
                 </article>
