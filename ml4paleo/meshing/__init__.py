@@ -8,6 +8,7 @@ from zmesh import Mesher
 from stl import mesh as stl_mesh
 import stl
 import numpy as np
+import skimage.measure
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -57,13 +58,20 @@ class ChunkedMesher:
     def mesh_chunk(self, xs, ys, zs):
         labels = self.volume_provider[xs[0] : xs[1], ys[0] : ys[1], zs[0] : zs[1]]
         m = 2**self.mip
+        max_pooled_labels = skimage.measure.block_reduce(labels, (m, m, m), np.max)
+
+        # Don't mesh empty chunks:
+        if np.max(max_pooled_labels) == 0:
+            return
+
         mesher = Mesher((m, m, m))
+        # labels[
+        #     ::m,
+        #     ::m,
+        #     ::m,
+        # ],
         mesher.mesh(
-            labels[
-                ::m,
-                ::m,
-                ::m,
-            ],
+            max_pooled_labels,
             close=False,
         )
         meshes = {}

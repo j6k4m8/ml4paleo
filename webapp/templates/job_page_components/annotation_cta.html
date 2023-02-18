@@ -17,12 +17,17 @@
         There are currently {{ num_annotations }} annotated slices.
     </p>
     <p>
-        You can train a model with any number of annotated slices, but we recommend at least 10. (You
-        can always annotate a bit more and then retrain!)
+        You can train a model with any number of annotated slices, but you won't
+        get any interesting results with fewer than 5, and we recommend at least
+        50. (You can always annotate a more and retrain!)
     </p>
     {% if has_been_annotated %}
     <p>
+        {% if job.status | string == "JobStatus.TRAINING_QUEUED" %}
+        <button disabled aria-busy="true">Segmentation has been queued</button>
+        {% else %}
         <button id="segmentation-trigger-button" onclick="triggerSegmentation()">Start automatic segmentation</button>
+        {% endif %}
     </p>
     <p>
         If you would like to refresh the realtime segmentation that you're shown in the annotation tool but you <i>do
