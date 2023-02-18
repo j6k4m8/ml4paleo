@@ -107,7 +107,7 @@
                     <p>
                         Drag and drop your images below, or click in the box below to select files.
                     </p>
-                    <progress value="0" max="100" id="progress"></progress>
+                    <progress max="100" id="progress"></progress>
                     <small>
                         <span id="progress-text"></span>
                     </small>
@@ -167,9 +167,11 @@
                     document.getElementById("job-id").value = data.job_id;
                     // Set the Job ID in the Dropzone headers:
                     function updateProgressText(progress, totalBytes, totalBytesSent) {
-                        document.getElementById("progress").value = progress;
+                        // document.getElementById("progress").value = progress;
                         const roundedProgress = Math.round(100 * progress);
-                        document.getElementById("progress-text").innerHTML = `${roundedProgress / 100}%<br />${dropzone.getQueuedFiles().length} files remaining`;
+                        document.getElementById("progress-text").innerHTML = `
+                        ${dropzone.getQueuedFiles().length} files remaining`;
+                        `;
                     }
                     // throttled updateProgressText to run max once per second, on the trailing edge
                     const throttledUpdateProgressText = _.throttle(updateProgressText, 1000, { trailing: true });
@@ -192,7 +194,7 @@
                             throttledUpdateProgressText(progress, totalBytes, totalBytesSent);
                         },
                         queuecomplete: function () {
-                            fetch(`/api/job/status/upload-complete`, {
+                            fetch(`/ api / job / status / upload - complete`, {
                                 method: "POST",
                                 headers: {
                                     "Content-Type": "application/json",
@@ -208,20 +210,20 @@
                                     notyf.success("Upload completed!");
                                     document.getElementById("job-dropzone").innerHTML = `
                                     Your upload is complete.
-                                    <a role='button' style='width:100%' href="/job/${data.job_id}">Click here to view your job progress.</a>
-                                    `;
+                                    < a role = 'button' style = 'width:100%' href = "/job/${data.job_id}" > Click here to view your job progress.</a >
+                            `;
                                     document.getElementById("job-dropzone").classList.remove("dropzone");
                                 })
                                 .catch((error) => {
                                     console.error("Error:", error);
-                                    notyf.error(`Error submitting job: ${error}`);
+                                    notyf.error(`Error submitting job: ${ error } `);
                                 });
                         },
                     });
                 })
                 .catch((error) => {
                     console.error("Error:", error);
-                    notyf.error(`Error creating job: ${error}`);
+                    notyf.error(`Error creating job: ${ error }`);
                 });
         }
     </script>
