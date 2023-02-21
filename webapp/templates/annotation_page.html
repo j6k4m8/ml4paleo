@@ -190,10 +190,6 @@
                     let i = (x + y * imageObject.width) * 4;
 
                     let pixR = originalPixels[i];
-                    let pixG = pixR;//originalPixels[i+1];
-                    let pixB = pixR;//originalPixels[i+2];
-                    // let pixA = pixR;//originalPixels[i+3];
-
                     pixR = maxPixelValue * ((pixR / maxPixelValue) - vmin) / (vmax - vmin);
 
                     imageObject.pixels[i] = pixR;
