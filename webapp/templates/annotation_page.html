@@ -69,13 +69,184 @@
             letter-spacing: 2pt;
             font-weight: bold;
         }
+
+        #keymapOverlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            z-index: 100;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        kbd {
+            font-family: 'Courier New', Courier, monospace;
+            display: inline-block;
+            padding: 0.2em 0.8em;
+            font-size: 90%;
+            color: #444;
+            vertical-align: middle;
+            background-color: #f7f7f9;
+            border: 2px solid #cfcfcf;
+            border-bottom-color: #bbb;
+            border-radius: 3px;
+            box-shadow: inset 0 -1px 0 #bbb;
+        }
     </style>
 </head>
 
 <body>
+    <div id="keymapOverlay" class="hidden">
+        <div style="background: #fefefecc; max-width: 40em; margin: auto; padding: 2em;">
+            <h2>Keys</h2>
+            <div id="keymap-list"></div>
+        </div>
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/p5@1.4.1/lib/p5.js"></script>
     <script>
-        const IMG_WIDTH = 512;
+
+        const KEY_MAP = {
+            zScrollUp: {
+                keyCode: 188,
+                key: ',',
+
+                description: 'Scroll up in z', shift: false, ctrl: false, alt: false
+            },
+            zScrollDown: {
+                keyCode: 190,
+                key: '.',
+
+                description: 'Scroll down in z', shift: false, ctrl: false, alt: false
+            },
+
+            panUp: {
+                keyCode: 38,
+                key: 'ArrowUp',
+
+                description: 'Pan up', shift: false, ctrl: false, alt: false
+            },
+            panUpFast: {
+                keyCode: 38,
+                key: 'ArrowUp',
+                description: '(Fast) Pan up', shift: true, ctrl: false, alt: false
+            },
+            panDown: {
+                keyCode: 40,
+                key: 'ArrowDown',
+                description: 'Pan down', shift: false, ctrl: false, alt: false
+            },
+            panDownFast: {
+                keyCode: 40,
+                key: 'ArrowDown',
+                description: '(Fast) Pan down', shift: true, ctrl: false, alt: false
+            },
+            panLeft: {
+                keyCode: 37,
+                key: 'ArrowLeft',
+                description: 'Pan left', shift: false, ctrl: false, alt: false
+            },
+            panLeftFast: {
+                keyCode: 37,
+                key: 'ArrowLeft',
+                description: '(Fast) Pan left', shift: true, ctrl: false, alt: false
+            },
+            panRight: {
+                keyCode: 39,
+                key: 'ArrowRight',
+                description: 'Pan right', shift: false, ctrl: false, alt: false
+            },
+            panRightFast: {
+                keyCode: 39,
+                key: 'ArrowRight',
+                description: '(Fast) Pan right', shift: true, ctrl: false, alt: false
+            },
+
+            zoomIn: {
+                keyCode: 61,
+                key: "+",
+                description: 'Zoom in', shift: false, ctrl: false, alt: false
+            },
+            zoomInFast: {
+                keyCode: 61,
+                key: "+",
+                description: '(Fast) Zoom in', shift: true, ctrl: false, alt: false
+            },
+            zoomOut: {
+                keyCode: 173,
+                key: "-",
+                description: 'Zoom out', shift: false, ctrl: false, alt: false
+            },
+            zoomOutFast: {
+                keyCode: 173,
+                key: "-",
+                description: '(Fast) Zoom out', shift: true, ctrl: false, alt: false
+            },
+
+            brushSizeUp: {
+                keyCode: 87,
+                key: "w",
+                description: 'Increase brush size', shift: false, ctrl: false, alt: false
+            },
+            brushSizeUpFast: {
+                keyCode: 87,
+                key: "w",
+                description: '(Fast) Increase brush size', shift: true, ctrl: false, alt: false
+            },
+            brushSizeDown: {
+                keyCode: 81,
+                key: "q",
+                description: 'Decrease brush size', shift: false, ctrl: false, alt: false
+            },
+            brushSizeDownFast: {
+                keyCode: 81,
+                key: "q",
+                description: '(Fast) Decrease brush size', shift: true, ctrl: false, alt: false
+            },
+
+            imageTransparencyUp: {
+                keyCode: 83,
+                key: "w",
+                description: 'Increase annotation transparency', shift: false, ctrl: false, alt:
+                    false
+            },
+            imageTransparencyUpFast: {
+                keyCode: 83,
+                key: "w",
+                description: '(Fast) Increase annotation transparency', shift: true, ctrl:
+                    false, alt: false
+            },
+            imageTransparencyDown: {
+                keyCode: 65,
+                key: "a",
+                description: 'Decrease annotation transparency', shift: false, ctrl: false, alt:
+                    false
+            },
+            imageTransparencyDownFast: {
+                keyCode: 65,
+                key: "a",
+                description: '(Fast) Decrease annotation transparency', shift: true, ctrl:
+                    false, alt: false
+            },
+
+            toggleAnnotationVisibility: {
+                keyCode: 86,
+                key: "v",
+                description: 'Toggle annotation visibility', shift: false, ctrl: false, alt:
+                    false
+            },
+
+            toggleKeyMapOverlay: {
+                keyCode: 191,
+                key: "?",
+                description: 'Toggle key map overlay', shift: false, ctrl: false, alt: false
+            },
+        };
+
         let STATE = {
             // Image Rendering:
             imageLoaded: false,
@@ -291,10 +462,16 @@
                 STATE.panX = 0;
                 STATE.panY = 0;
                 STATE.zoom = 1;
+
+                // If also holding shift, also go back to the home slice:
+                if (keyIsDown(SHIFT)) {
+                    STATE.z.current = STATE.z.annotating;
+                }
             }
 
             // Pressing V toggles annotation visibility:
-            if (keyCode === 86) {
+            // if (keyCode === 86) {
+            if (key === "v") {
                 STATE.annosVisible = !STATE.annosVisible;
             }
 
@@ -318,7 +495,7 @@
             }
 
             // Pan with arrows:
-            if (keyCode === UP_ARROW) {
+            if (key === 'ArrowUp') {
                 STATE.panY += keyIsDown(SHIFT)
                     ? CONFIG.pan.bigIncrement
                     : CONFIG.pan.smallIncrement;
@@ -385,6 +562,10 @@
                 }
             }
 
+            // ? toggles the key map:
+            if (keyCode === 191) {
+                toggleKeyMapOverlay();
+            }
         }
 
         function boundZoom() {
@@ -406,8 +587,17 @@
             boundZoom();
         }
 
-        function draw() {
+        function doubleClicked() {
+            // Check for mouse pos in histogram:
+            if (mouseX < CONFIG.histogram.width && mouseY < CONFIG.histogram.height) {
+                // reset histogram:
+                STATE.histogram.vmax = 1;
+                STATE.histogram.vmin = 0;
+                reloadHistogramSettings();
+            }
+        }
 
+        function draw() {
             // If window.prediction is set, load it into paintPixels.
             if (window.prediction) {
                 loadImage('data:image/png;base64,' + window.prediction, img => {
@@ -419,6 +609,7 @@
                     paintPixels.image(img, 0, 0, img.width / 2, img.width / 2);
                 });
                 window.prediction = undefined;
+                reloadHistogramSettings();
             }
 
             push();
@@ -447,10 +638,13 @@
                 );
             }
 
-            if (STATE.annosVisible && STATE.z.current == STATE.z.annotating) {
+            if (STATE.annosVisible) {
                 imgcoords = screenToImage(mouseX, mouseY);
-                if (paintPixels && STATE.annosVisible) {
-                    tint(255, STATE.imageTransparency * 255);
+                if (paintPixels) {
+                    let homeSlice = STATE.z.current == STATE.z.annotating;
+                    tint(
+                        homeSlice ? 255 : 128,
+                        STATE.imageTransparency * 255);
                     image(paintPixels, 0, 0, paintPixels.width * 2 * STATE.zoom, paintPixels.height * 2 * STATE.zoom);
                 }
             }
@@ -591,29 +785,64 @@
             let mappedMouse = screenToImage(mouseX, mouseY);
             let pMappedMouse = screenToImage(pmouseX, pmouseY);
 
-            // If holding alt, then erase:
-            if (keyIsDown(OPTION) || keyIsDown(ALT)) {
-                paintPixels.erase();
-                paintPixels.ellipse(
-                    mappedMouse[0] / 2,
-                    mappedMouse[1] / 2,
-                    STATE.brushSize / 2,
-                    STATE.brushSize / 2
-                );
-                paintPixels.noErase();
-            } else {
-                paintPixels.ellipse(
-                    mappedMouse[0] / 2,
-                    mappedMouse[1] / 2,
-                    STATE.brushSize / 2,
-                    STATE.brushSize / 2
-                );
-                paintPixels.strokeWeight(STATE.brushSize / 2);
-                paintPixels.stroke(255, 0, 0)
-                paintPixels.line(pMappedMouse[0] / 2, pMappedMouse[1] / 2, mappedMouse[0] / 2, mappedMouse[1] / 2);
-                paintPixels.noStroke();
+            if (STATE.z.current == STATE.z.annotating) {
+                // If holding alt, then erase:
+                if (keyIsDown(OPTION) || keyIsDown(ALT)) {
+                    paintPixels.erase();
+                    paintPixels.ellipse(
+                        mappedMouse[0] / 2,
+                        mappedMouse[1] / 2,
+                        STATE.brushSize / 2,
+                        STATE.brushSize / 2
+                    );
+                    paintPixels.noErase();
+                } else {
+                    paintPixels.ellipse(
+                        mappedMouse[0] / 2,
+                        mappedMouse[1] / 2,
+                        STATE.brushSize / 2,
+                        STATE.brushSize / 2
+                    );
+                    paintPixels.strokeWeight(STATE.brushSize / 2);
+                    paintPixels.stroke(255, 0, 0)
+                    paintPixels.line(pMappedMouse[0] / 2, pMappedMouse[1] / 2, mappedMouse[0] / 2, mappedMouse[1] / 2);
+                    paintPixels.noStroke();
+                }
             }
         }
+
+        // Toggle keymap with ?:
+        function toggleKeyMapOverlay() {
+            let overlay = document.getElementById("keymapOverlay");
+            if (overlay.classList.contains("hidden")) {
+                overlay.classList.remove("hidden");
+            } else {
+                overlay.classList.add("hidden");
+            }
+        }
+
+        // Create the keymap list:
+        (() => {
+            let keymapList = document.getElementById("keymap-list");
+            // Create the table:
+            let table = document.createElement("table");
+            keymapList.appendChild(table);
+            let keymap = KEY_MAP;
+            for (let key in keymap) {
+                // Convert from keyCode to character:
+                let k = keymap[key].key;
+                // Ascii to character:
+                let keymapItem = document.createElement("tr");
+                keymapItem.innerHTML = `<td>
+                ${keymap[key].shift ? "<kbd>⇧</kbd>" : ""}
+                ${keymap[key].option ? "<kbd>⌥</kbd>" : ""}
+                ${keymap[key].control ? "<kbd>⌃</kbd>" : ""}
+                ${keymap[key].command ? "<kbd>⌘</kbd>" : ""}</td><td>
+                <kbd>${k}</kbd></td><td>${keymap[key].description} <small>(${key})</small></td>
+                `;
+                table.appendChild(keymapItem);
+            }
+        })()
     </script>
 
     <!-- UI to submit (floating bottom) -->
