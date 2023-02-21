@@ -28,7 +28,6 @@
             margin: 1em;
             padding: 0.5em 1em;
             background-color: #d1e7d1;
-            border-top: 1px solid #e5e5e5;
             text-align: center;
             font-size: 20px;
             cursor: pointer;
@@ -46,7 +45,23 @@
             margin: 1em;
             padding: 0.5em 1em;
             background-color: #e8c7c7;
-            border-top: 1px solid #e5e5e5;
+            text-align: center;
+            font-size: 20px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 2pt;
+            font-weight: bold;
+        }
+
+        .clear-button {
+            position: fixed;
+            top: 0;
+            right: 0;
+            border-radius: 25px;
+            border: none;
+            margin: 1em;
+            padding: 0.5em 1em;
+            background-color: #e8c7c7;
             text-align: center;
             font-size: 20px;
             cursor: pointer;
@@ -139,6 +154,12 @@
             // Accounting for zoom and the translate to the center of the image.
             d = [STATE.zoom * x, STATE.zoom * y];
             return d;
+        }
+
+        function clearAnnotations() {
+            paintPixels.erase()
+            paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
+            paintPixels.noErase();
         }
 
         function submitData() {
@@ -402,14 +423,12 @@
                 );
             }
 
-            if (!STATE.annosVisible) {
-                return;
-            }
-
-            imgcoords = screenToImage(mouseX, mouseY);
-            if (paintPixels && STATE.annosVisible) {
-                tint(255, STATE.imageTransparency * 255);
-                image(paintPixels, 0, 0, paintPixels.width * 2 * STATE.zoom, paintPixels.height * 2 * STATE.zoom);
+            if (STATE.annosVisible) {
+                imgcoords = screenToImage(mouseX, mouseY);
+                if (paintPixels && STATE.annosVisible) {
+                    tint(255, STATE.imageTransparency * 255);
+                    image(paintPixels, 0, 0, paintPixels.width * 2 * STATE.zoom, paintPixels.height * 2 * STATE.zoom);
+                }
             }
 
             pop();
@@ -428,6 +447,7 @@
             }
             textSize(12);
             fill("white");
+            noStroke();
             text(
                 `Mouse: ${Math.round(imgcoords[0])}, ${Math.round(
                     imgcoords[1]
@@ -577,9 +597,61 @@
 
     <!-- UI to submit (floating bottom) -->
     <div class="submit-container">
+        <button class="clear-button" onclick="clearAnnotations()">Clear</button>
         <button class="skip-button" onclick="window.location.reload()">Skip</button>
         <button class="submit-button" onclick="submitData()">Submit</button>
     </div>
+
+    <div id="p5_loading">
+        <!-- Loading screen for the annotation tool. -->
+        <div class="loading-container">
+            <div class="loading-dot">•</div>
+            <div class="loading-dot">•</div>
+            <div class="loading-dot">•</div>
+        </div>
+
+        <style>
+            .loading-container {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background-color: #000000;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }
+
+            /* Animated loading dots */
+            .loading-dot {
+                color: #ffffff;
+                font-size: 50px;
+                animation: loading-dot 1s infinite;
+            }
+
+            .loading-dot:nth-child(2) {
+                animation-delay: 0.2s;
+            }
+
+            .loading-dot:nth-child(3) {
+                animation-delay: 0.4s;
+            }
+
+            @keyframes loading-dot {
+                0% {
+                    opacity: 0;
+                }
+
+                50% {
+                    opacity: 1;
+                }
+
+                100% {
+                    opacity: 0;
+                }
+            }
+        </style>
 </body>
 
 </html>
