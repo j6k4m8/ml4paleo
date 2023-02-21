@@ -325,10 +325,23 @@ class ML4PaleoWebApplication:
             fname = _prefix / (CONFIG.training_img_prefix + tic + ".png")
             # Make sure the directory exists:
             fname.parent.mkdir(parents=True, exist_ok=True)
-            Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1]))).save(
-                fname
-            )
+            img = Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1])))
+            # Crop the image to the annotation shape:
+            img_height = img.height
+            img_slices = CONFIG.annotation_shape_xyz[2]
+            middle_slice = img_slices // 2
 
+            print(img_slices, middle_slice, img_height)
+            img = img.crop(
+                (
+                    # Left Up Right Lower
+                    0,
+                    int((img_height / img_slices) * middle_slice),
+                    int(img.width),
+                    int((img_height / img_slices) * (middle_slice + 1)),
+                )
+            )
+            img.save(fname)
             mfname = _prefix / (CONFIG.training_seg_prefix + tic + ".png")
             Image.open(io.BytesIO(base64.b64decode(mask_b64.split(",")[1]))).resize(
                 CONFIG.annotation_shape_xyz[:-1]
