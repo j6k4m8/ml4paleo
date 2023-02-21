@@ -291,6 +291,11 @@
                 STATE.panX = 0;
                 STATE.panY = 0;
                 STATE.zoom = 1;
+
+                // If also holding shift, also go back to the home slice:
+                if (keyIsDown(SHIFT)) {
+                    STATE.z.current = STATE.z.annotating;
+                }
             }
 
             // Pressing V toggles annotation visibility:
@@ -447,10 +452,14 @@
                 );
             }
 
-            if (STATE.annosVisible && STATE.z.current == STATE.z.annotating) {
+            if (STATE.annosVisible) {
                 imgcoords = screenToImage(mouseX, mouseY);
-                if (paintPixels && STATE.annosVisible) {
-                    tint(255, STATE.imageTransparency * 255);
+                if (paintPixels) {
+                    tint(
+                        STATE.z.current == STATE.z.annotating ? 255 : 128,
+                        STATE.z.current == STATE.z.annotating ? 255 : 0,
+                        STATE.z.current == STATE.z.annotating ? 255 : 128,
+                        STATE.imageTransparency * 255);
                     image(paintPixels, 0, 0, paintPixels.width * 2 * STATE.zoom, paintPixels.height * 2 * STATE.zoom);
                 }
             }
@@ -591,27 +600,29 @@
             let mappedMouse = screenToImage(mouseX, mouseY);
             let pMappedMouse = screenToImage(pmouseX, pmouseY);
 
-            // If holding alt, then erase:
-            if (keyIsDown(OPTION) || keyIsDown(ALT)) {
-                paintPixels.erase();
-                paintPixels.ellipse(
-                    mappedMouse[0] / 2,
-                    mappedMouse[1] / 2,
-                    STATE.brushSize / 2,
-                    STATE.brushSize / 2
-                );
-                paintPixels.noErase();
-            } else {
-                paintPixels.ellipse(
-                    mappedMouse[0] / 2,
-                    mappedMouse[1] / 2,
-                    STATE.brushSize / 2,
-                    STATE.brushSize / 2
-                );
-                paintPixels.strokeWeight(STATE.brushSize / 2);
-                paintPixels.stroke(255, 0, 0)
-                paintPixels.line(pMappedMouse[0] / 2, pMappedMouse[1] / 2, mappedMouse[0] / 2, mappedMouse[1] / 2);
-                paintPixels.noStroke();
+            if (STATE.z.current == STATE.z.annotating) {
+                // If holding alt, then erase:
+                if (keyIsDown(OPTION) || keyIsDown(ALT)) {
+                    paintPixels.erase();
+                    paintPixels.ellipse(
+                        mappedMouse[0] / 2,
+                        mappedMouse[1] / 2,
+                        STATE.brushSize / 2,
+                        STATE.brushSize / 2
+                    );
+                    paintPixels.noErase();
+                } else {
+                    paintPixels.ellipse(
+                        mappedMouse[0] / 2,
+                        mappedMouse[1] / 2,
+                        STATE.brushSize / 2,
+                        STATE.brushSize / 2
+                    );
+                    paintPixels.strokeWeight(STATE.brushSize / 2);
+                    paintPixels.stroke(255, 0, 0)
+                    paintPixels.line(pMappedMouse[0] / 2, pMappedMouse[1] / 2, mappedMouse[0] / 2, mappedMouse[1] / 2);
+                    paintPixels.noStroke();
+                }
             }
         }
     </script>
