@@ -89,7 +89,6 @@ class RandomForest3DSegmenter(Segmenter3D):
         # Segment the slice:
         mask = self._clf.predict(features.reshape(-1, features.shape[-1]))
         mask = mask.reshape(features.shape[:2])
-
         return mask
 
     def fit(self, volume: np.ndarray, mask: np.ndarray) -> None:
