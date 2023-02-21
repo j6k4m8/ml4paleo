@@ -59,7 +59,7 @@ class CONFIG:
     # How large each chunk should be when segmenting. Note that this is smaller
     # than the storage chunk size, because we want to be able to segment the
     # data in parallel and therefore may need more space in RAM.
-    segmentation_chunk_size = (64, 64, 64)
+    segmentation_chunk_size = (256, 256, 256)
     # The directory where segmented arrays should be stored, as zarrs. The
     # segmentation will be stored with the name "[timestamp].zarr", where the
     # timestamp lines up with the model that was used to generate it.
