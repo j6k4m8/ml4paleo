@@ -152,6 +152,31 @@ def get_random_tile(
     return volume_provider[x : x + tile_size[0], y : y + tile_size[1], z]
 
 
+def get_random_zyx_subvolume(
+    volume_provider,
+    subvolume_size_zyx: Tuple[int, int, int],
+) -> np.ndarray:
+    """
+    Get a random subvolume from the volume.
+
+    Arguments:
+        volume_provider: The volume provider to get the subvolume from.
+        subvolume_size: The size of the subvolume to get.
+
+    Returns:
+        np.ndarray: A random subvolume from the volume.
+
+    """
+    z = np.random.randint(0, volume_provider.shape[2] - subvolume_size_zyx[0])
+    y = np.random.randint(0, volume_provider.shape[1] - subvolume_size_zyx[1])
+    x = np.random.randint(0, volume_provider.shape[0] - subvolume_size_zyx[2])
+    return volume_provider[
+        x : x + subvolume_size_zyx[2],
+        y : y + subvolume_size_zyx[1],
+        z : z + subvolume_size_zyx[0],
+    ].swapaxes(0, 2)
+
+
 def export_to_img_stack(
     volume_provider: VolumeProvider,
     img_dir: Union[str, pathlib.Path],

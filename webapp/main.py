@@ -34,100 +34,22 @@ from job import JSONFileUploadJobManager, JobStatus, UploadJob
 from ml4paleo.segmentation.rf import RandomForest3DSegmenter
 
 from ml4paleo.volume_providers import ZarrVolumeProvider
-from ml4paleo.volume_providers.io import get_random_tile, export_to_img_stack
+from ml4paleo.volume_providers.io import (
+    get_random_tile,
+    export_to_img_stack,
+    get_random_zyx_subvolume,
+)
 
 from config import CONFIG
-from apputils import get_latest_segmentation_id, get_latest_segmentation_model
+from apputils import (
+    get_latest_segmentation_id,
+    get_latest_segmentation_model,
+    create_neuroglancer_link,
+)
 from segmentrunner import train_job
+from webapp.apputils import get_png_filmstrip
 
 log = logging.getLogger(__name__)
-
-
-def _create_neuroglancer_link(job: UploadJob):
-    """
-    Create a neuroglancer link for the images.
-
-    TODO: If there's segmentation available, include it as a layer.
-    """
-    # Check for segmentation:
-
-    protocol = request.url.split(":")[0]
-    jsondata = {
-        "layers": [
-            {
-                "type": "image",
-                "source": f"zarr://{protocol}://{request.host}/api/job/{job.id}/zarr/",
-                "tab": "source",
-                "name": "zarr",
-            }
-        ]
-    }
-    zarr_path = pathlib.Path(CONFIG.segmented_directory) / job.id
-    if zarr_path.exists():
-        # Get the latest segmentation (the last one in the list)
-        seg_id = get_latest_segmentation_id(job)
-
-        # Create the neuroglancer layer:
-        seg_layer = {
-            "type": "segmentation",
-            "source": f"zarr://http://{request.host}/api/job/{job.id}/segmentation/{seg_id}/zarr/",
-            "tab": "source",
-            "name": f"segmentation {seg_id}",
-        }
-        jsondata["layers"].append(seg_layer)
-
-    mesh_path = pathlib.Path(CONFIG.meshed_directory) / job.id
-    if mesh_path.exists():
-        # Get the last (sorted) directory in the meshed directory
-        mesh_seg_id = sorted(mesh_path.glob("*"))[-1].name
-
-        mesh_layer = {
-            "type": "mesh",
-            # "source": f"obj://http://{request.host}/api/job/{job.id}/segmentation/{mesh_seg_id}/obj/255.combined.obj",
-            "source": {
-                "url": f"obj://http://{request.host}/api/job/{job.id}/segmentation/{mesh_seg_id}/obj/255.combined.obj",
-                "transform": {
-                    "matrix": [[0, 0, 1, 0], [0, 1, 0, 0], [1, 0, 0, 0]],
-                    "outputDimensions": {
-                        "d0": [1, "m"],
-                        "d1": [1, "m"],
-                        "d2": [1, "m"],
-                    },
-                    "inputDimensions": {"x": [1, "m"], "y": [1, "m"], "z": [1, "m"]},
-                },
-            },
-            "tab": "source",
-            "name": f"mesh",
-        }
-        jsondata["layers"].append(mesh_layer)
-    jsondata = json.dumps(jsondata)
-
-    return f"https://neuroglancer.bossdb.io/#!{jsondata}"
-
-
-def _transform_img_slice_for_annotation(img_slice):
-    """
-    Transform an image slice to be suitable for annotation.
-    """
-    # Get vmin and vmax, excluding anything within 0..2% of the dynamic range.
-    # If this is u8, ignore; if this is u16, then the dynamic range is 0..65535
-    # so chop off everything between 0 and (0.02 * 65535) ~= 1300
-    THRESH = 1300
-
-    img_out = img_slice.copy()
-    if img_out.dtype == np.uint8:
-        pass
-    elif img_out.dtype == np.uint16:
-        img_out[img_out < THRESH] = 0
-
-    # Get vmin and vmax as 3*stdev from the mean
-    vmin = img_out.mean() - 8 * img_out.std()
-    vmax = img_out.mean() + 8 * img_out.std()
-
-    # Normalize to 0..255
-    img_out = (img_out - vmin) / (vmax - vmin) * 255
-    img_out = img_out.astype(np.uint8)
-    return img_out
 
 
 class ML4PaleoWebApplication:
@@ -285,7 +207,7 @@ class ML4PaleoWebApplication:
                 "job_page.html",
                 job=job,
                 num_annotations=num_annotations,
-                neuroglancer_link=_create_neuroglancer_link(job),
+                neuroglancer_link=create_neuroglancer_link(job),
                 latest_segmentation_id=get_latest_segmentation_id(job),
                 # Status breakdown:
                 has_been_annotated=(
@@ -349,21 +271,26 @@ class ML4PaleoWebApplication:
                 )
             zarrvol = ZarrVolumeProvider(zarr_path)
             # Get a random slice from the dataset:
-            imgslice = np.zeros(CONFIG.annotation_shape)
-            while np.sum(imgslice) == 0:
-                imgslice = get_random_tile(
-                    zarrvol,
-                    CONFIG.annotation_shape,
-                )
-                time.sleep(1)
-            # imgslice = _transform_img_slice_for_annotation(imgslice)
-            # Save the imgslice to bytesio:
-            img = Image.fromarray(imgslice)
+            vol_zyx = get_random_zyx_subvolume(
+                zarrvol, CONFIG.annotation_shape_xyz[::-1]
+            )
+            # Get the slice as a PIL image:
+            img = get_png_filmstrip(vol_zyx)
             img_bytes = io.BytesIO()
             img.save(img_bytes, format="PNG")
             img_bytes.seek(0)
             # Return the slice as a file:
-            return send_file(img_bytes, mimetype="image/png")
+            resp = make_response(send_file(img_bytes, mimetype="image/png"))
+            resp.headers["zInfo"] = json.dumps(
+                {
+                    "zInfo": {
+                        "min": 0,
+                        "max": 0,
+                        "current": 0,
+                    },
+                }
+            )
+            return resp
 
         @self.app.route("/api/annotate/<job_id>/data/submit", methods=["POST"])
         def submit_annotation(job_id):
@@ -398,13 +325,26 @@ class ML4PaleoWebApplication:
             fname = _prefix / (CONFIG.training_img_prefix + tic + ".png")
             # Make sure the directory exists:
             fname.parent.mkdir(parents=True, exist_ok=True)
-            Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1]))).save(
-                fname
-            )
+            img = Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1])))
+            # Crop the image to the annotation shape:
+            img_height = img.height
+            img_slices = CONFIG.annotation_shape_xyz[2]
+            middle_slice = img_slices // 2
 
+            print(img_slices, middle_slice, img_height)
+            img = img.crop(
+                (
+                    # Left Up Right Lower
+                    0,
+                    int((img_height / img_slices) * middle_slice),
+                    int(img.width),
+                    int((img_height / img_slices) * (middle_slice + 1)),
+                )
+            )
+            img.save(fname)
             mfname = _prefix / (CONFIG.training_seg_prefix + tic + ".png")
             Image.open(io.BytesIO(base64.b64decode(mask_b64.split(",")[1]))).resize(
-                CONFIG.annotation_shape
+                CONFIG.annotation_shape_xyz[:-1]
             ).save(mfname)
 
             # If the job is CONVERTING, don't change the status (we need the
@@ -421,7 +361,11 @@ class ML4PaleoWebApplication:
             f = io.BytesIO()
             Image.open(mfname).save(f, format="PNG")
             f.seek(0)
-            return jsonify({"prediction": base64.b64encode(f.read()).decode("utf-8")})
+            return jsonify(
+                {
+                    "prediction": base64.b64encode(f.read()).decode("utf-8"),
+                }
+            )
 
         @self.app.route("/api/annotate/<job_id>/data/predict", methods=["POST"])
         def predict_annotation(job_id):
@@ -443,11 +387,13 @@ class ML4PaleoWebApplication:
             img_np = np.array(
                 Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1])))
             )
+            # Reshape from (x, y*z) to (x, y, z):
+            img_np = img_np.reshape(img_np.shape[0], CONFIG.annotation_shape_xyz[0], -1)
 
             # Load the latest model if it exists:
             modelpath = get_latest_segmentation_model(job)
-            if modelpath is None:
-                return jsonify({"prediction": None})
+            return jsonify({"prediction": None})
+            # if modelpath is None:
 
             # Predict the mask:
             model = RandomForest3DSegmenter()
