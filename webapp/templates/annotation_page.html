@@ -447,7 +447,7 @@
                 );
             }
 
-            if (STATE.annosVisible) {
+            if (STATE.annosVisible && STATE.z.current == STATE.z.annotating) {
                 imgcoords = screenToImage(mouseX, mouseY);
                 if (paintPixels && STATE.annosVisible) {
                     tint(255, STATE.imageTransparency * 255);
@@ -472,7 +472,7 @@
             textSize(12);
             fill("white");
             noStroke();
-            text(`Mouse: ${Math.round(imgcoords[0])}, ${Math.round(imgcoords[1])}, ${STATE.z.current}\nZoom: ${Math.round(STATE.zoom * 100)}%`,
+            text(`Mouse: ${Math.round(imgcoords[0])}, ${Math.round(imgcoords[1])}, ${STATE.z.current - STATE.z.annotating}\nZoom: ${Math.round(STATE.zoom * 100)}%`,
                 10 + CONFIG.histogram.width,
                 10
             );
