@@ -75,6 +75,7 @@
 <body>
     <script src="https://cdn.jsdelivr.net/npm/p5@1.4.1/lib/p5.js"></script>
     <script>
+        const IMG_WIDTH = 512;
         let STATE = {
             // Image Rendering:
             imageLoaded: false,
@@ -98,6 +99,13 @@
                 vmax: 1.0,
                 pvmin: 0,
                 pvmax: 1.0,
+            },
+
+            z: {
+                current: 0,
+                annotating: undefined,
+                min: 0,
+                max: 0,
             }
         };
 
@@ -130,7 +138,6 @@
             }
         };
 
-
         let img;
         let paintPixels;
 
@@ -142,7 +149,7 @@
                 (x - width / 2 + (STATE.zoom * img.width) / 2) /
                 STATE.zoom -
                 STATE.panX / STATE.zoom,
-                (y - height / 2 + (STATE.zoom * img.height) / 2) /
+                (y - height / 2 + (STATE.zoom * img.width) / 2) /
                 STATE.zoom -
                 STATE.panY / STATE.zoom,
             ];
@@ -163,7 +170,6 @@
         }
 
         function submitData() {
-
             // Save STATE to localStorage.
             localStorage.setItem("state", JSON.stringify(STATE));
 
@@ -243,7 +249,14 @@
             img = loadImage(
                 `${BASE_URL}/api/annotate/${jobId}/images/next${_cachebuster}`,
                 (f) => {
+                    // Set the z info:
+                    STATE.z = {};
+                    STATE.z.max = (f.height / f.width) - 1;
+                    STATE.z.min = 0;
+                    STATE.z.current = Math.round((STATE.z.max - STATE.z.min) / 2);
+                    STATE.z.annotating = STATE.z.current;
                     img.loadPixels();
+                    STATE.imageLoaded = true;
                     const imagePixels = img.canvas.toDataURL();
                     fetch(`${BASE_URL}/api/annotate/${jobId}/data/predict`, {
                         method: "POST",
@@ -254,7 +267,7 @@
                     }).then((data) => {
                         // There's a new image in data.prediction;
                         // b64 encoded png. Render it to paintPixels.
-                        window.prediction = data.prediction;
+                        // window.prediction = data.prediction;
                         STATE.imageLoaded = true;
 
                         img.loadPixels();
@@ -268,7 +281,7 @@
         function setup() {
             createCanvas(windowWidth, windowHeight);
             frameRate(20);
-            paintPixels = createGraphics(img.width / 2, img.height / 2);
+            paintPixels = createGraphics(img.width / 2, img.width / 2);
             paintPixels.frameRate(1);
         }
 
@@ -357,6 +370,21 @@
                     STATE.imageTransparency = CONFIG.imageTransparency.min;
                 }
             }
+
+            // , and . to scroll in z:
+            if (keyCode === 188) {
+                STATE.z.current -= 1;
+                if (STATE.z.current < 0) {
+                    STATE.z.current = 0;
+                }
+            }
+            if (keyCode === 190) {
+                STATE.z.current += 1;
+                if (STATE.z.current > STATE.z.max) {
+                    STATE.z.current = STATE.z.max;
+                }
+            }
+
         }
 
         function boundZoom() {
@@ -388,7 +416,7 @@
                     paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
                     paintPixels.noErase();
                     // At half-size:
-                    paintPixels.image(img, 0, 0, img.width / 2, img.height / 2);
+                    paintPixels.image(img, 0, 0, img.width / 2, img.width / 2);
                 });
                 window.prediction = undefined;
             }
@@ -396,7 +424,7 @@
             push();
             translate(
                 STATE.panX + (width / 2 - (STATE.zoom * img.width) / 2),
-                STATE.panY + (height / 2 - (STATE.zoom * img.height) / 2)
+                STATE.panY + (height / 2 - (STATE.zoom * img.width) / 2)
             );
             // If mouse is over the image, switch to cursor=CROSS.
             // Otherwise, draw cursor=ARROW.
@@ -406,20 +434,16 @@
                 cursor(ARROW);
             }
             background(0);
-            // Draw axes:
-            // stroke("white");
-            // strokeWeight(1);
-            // line(0, 0, 0, 100 * STATE.zoom);
-            // line(0, 0, 100 * STATE.zoom, 0);
 
             if (STATE.imageLoaded) {
                 background(CONFIG.backgroundColor);
+                // image(img, dx, dy, dWidth, dHeight, sx, sy, [sWidth], [sHeight], [fit], [xAlign], [yAlign])
                 image(
                     img,
-                    0,
-                    0,
-                    img.width * STATE.zoom,
-                    img.height * STATE.zoom
+                    0, 0,
+                    img.width * STATE.zoom, img.width * STATE.zoom,
+                    0, (img.width * STATE.z.current),
+                    img.width, img.width,
                 );
             }
 
@@ -448,10 +472,7 @@
             textSize(12);
             fill("white");
             noStroke();
-            text(
-                `Mouse: ${Math.round(imgcoords[0])}, ${Math.round(
-                    imgcoords[1]
-                )}\nZoom: ${Math.round(STATE.zoom * 100)}%`,
+            text(`Mouse: ${Math.round(imgcoords[0])}, ${Math.round(imgcoords[1])}, ${STATE.z.current}\nZoom: ${Math.round(STATE.zoom * 100)}%`,
                 10 + CONFIG.histogram.width,
                 10
             );
@@ -486,7 +507,7 @@
                 imgcoords[0] >= 0 &&
                 imgcoords[0] < img.width &&
                 imgcoords[1] >= 0 &&
-                imgcoords[1] < img.height
+                imgcoords[1] < img.width
             );
         }
 

@@ -36,7 +36,7 @@ class CONFIG:
     # Note that this should be large enough that you can tell what's going on
     # in the image, but small enough that you can interactively run inference
     # on it (for online annotation).
-    annotation_shape = (512, 512)
+    annotation_shape_xyz = (512, 512, 7)
     # The directory where the training dataset is stored. This directory will
     # be populated with the training images and segmentation masks, with the
     # prefixes specified below. For example, with the default settings, you'll
