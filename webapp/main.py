@@ -387,21 +387,35 @@ class ML4PaleoWebApplication:
             img_np = np.array(
                 Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1])))
             )
-            # Reshape from (x, y*z) to (x, y, z):
-            img_np = img_np.reshape(img_np.shape[0], CONFIG.annotation_shape_xyz[0], -1)
+            print(img_np.shape)
+            # img_np = img_np.reshape(*CONFIG.annotation_shape_xyz, 4)
+            # Crop the image to the center slice.
+            slice_count = CONFIG.annotation_shape_xyz[2]
+            # This is an odd number, so we want the middle slice:
+            middle_slice = slice_count // 2
+            start_x = int((img_np.shape[0] / slice_count) * middle_slice)
 
+            img_np = img_np[
+                start_x : start_x + CONFIG.annotation_shape_xyz[0],
+                :,
+                0,
+            ]
+
+            print(img_np.shape)
             # Load the latest model if it exists:
             modelpath = get_latest_segmentation_model(job)
-            return jsonify({"prediction": None})
-            # if modelpath is None:
+            if modelpath is None:
+                return jsonify({"prediction": None})
 
             # Predict the mask:
             model = RandomForest3DSegmenter()
             model.load(str(modelpath))
             print("Loaded model: %s", modelpath)
             print(img_np.shape)
-            mask = model._segment_slice(img_np[:, :, 0])
-            annos = np.array(Image.fromarray(mask).resize(CONFIG.annotation_shape))
+            mask = model._segment_slice(img_np)
+            annos = np.array(
+                Image.fromarray(mask).resize(CONFIG.annotation_shape_xyz[:-1])
+            )
             # Convert to RGBA with annos as R:
             mask = np.zeros((annos.shape[0], annos.shape[1], 4), dtype=np.uint8)
             mask[:, :, 0] = annos

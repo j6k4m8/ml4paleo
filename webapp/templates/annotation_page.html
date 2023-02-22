@@ -438,7 +438,7 @@
                     }).then((data) => {
                         // There's a new image in data.prediction;
                         // b64 encoded png. Render it to paintPixels.
-                        // window.prediction = data.prediction;
+                        window.prediction = data.prediction;
                         STATE.imageLoaded = true;
 
                         img.loadPixels();
