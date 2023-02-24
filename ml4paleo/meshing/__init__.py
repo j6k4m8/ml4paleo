@@ -80,8 +80,8 @@ class ChunkedMesher:
             meshes[obj_id] = mesher.get_mesh(
                 obj_id,
                 normals=False,
-                simplification_factor=100,
-                max_simplification_error=20,
+                simplification_factor=50,
+                max_simplification_error=10,
             )
             mesher.erase(obj_id)
         mesher.clear()
