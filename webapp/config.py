@@ -6,6 +6,23 @@ if you're running your own workflow (e.g., in a Jupyter notebook).
 """
 
 
+def _get_number_of_cores():
+    try:
+        import multiprocessing
+
+        return multiprocessing.cpu_count()
+    except:
+        return 1
+
+
+# This is a convenience variable to make it easy to make parallelism a function
+# of the number of cores on the machine. Most parallel jobs should be an
+# integer smaller than this number. It is not recommended to use all cores to
+# run parallel jobs, since you'll want to leave some cores for the web server
+# and other processes.
+_NUMBER_OF_CORES = _get_number_of_cores()
+
+
 class CONFIG:
     """
     A configuration variable container for the ml4paleo web application.
@@ -29,6 +46,10 @@ class CONFIG:
     # for u8, and ~40 MB files for u16. Any larger than this, you should
     # make sure you can handle each chunk in RAM in your workflow.
     chunk_size = (300, 300, 300)
+    # The number of parallel jobs to run when converting uploaded data to zarr.
+    # This can be roughly the number of cores on your machine, since the main
+    # bottleneck is the disk IO.
+    conversion_job_parallelism = _NUMBER_OF_CORES - 2
 
     # Training and Annotation
     #
@@ -58,7 +79,7 @@ class CONFIG:
     # segmenters, this can be dangerous to set too high — i.e., if you're using
     # the same GPU for all of the jobs. Also be wary of, e.g., sklearn models,
     # which have their own parallelism settings.
-    segment_job_parallelism = 4
+    segment_job_parallelism = min(_NUMBER_OF_CORES // 2, 2)
     # How large each chunk should be when segmenting. Note that this is smaller
     # than the storage chunk size, because we want to be able to segment the
     # data in parallel and therefore may need more space in RAM.
