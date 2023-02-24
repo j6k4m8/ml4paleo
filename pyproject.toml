@@ -31,6 +31,10 @@ black = "^23.1.0"
 jupyter = "^1.0.0"
 ipython = "^8.9.0"
 
+[tool.poetry.extras]
+dicom = ["pydicom"]
+bossdb = ["intern"]
+
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"

@@ -101,7 +101,7 @@
 </head>
 
 <body>
-    <div id="keymapOverlay" class="hidden">
+    <div id="keymapOverlay" class="hidden" onclick="toggleKeyMapOverlay()">
         <div style="background: #fefefecc; max-width: 40em; margin: auto; padding: 2em;">
             <h2>Keys</h2>
             <div id="keymap-list"></div>
@@ -210,13 +210,13 @@
 
             imageTransparencyUp: {
                 keyCode: 83,
-                key: "w",
+                key: "s",
                 description: 'Increase annotation transparency', shift: false, ctrl: false, alt:
                     false
             },
             imageTransparencyUpFast: {
                 keyCode: 83,
-                key: "w",
+                key: "s",
                 description: '(Fast) Increase annotation transparency', shift: true, ctrl:
                     false, alt: false
             },
@@ -438,7 +438,7 @@
                     }).then((data) => {
                         // There's a new image in data.prediction;
                         // b64 encoded png. Render it to paintPixels.
-                        // window.prediction = data.prediction;
+                        window.prediction = data.prediction;
                         STATE.imageLoaded = true;
 
                         img.loadPixels();
@@ -569,12 +569,17 @@
         }
 
         function boundZoom() {
+            // Returns true if the zoom is still valid:
             if (STATE.zoom > CONFIG.zoom.max) {
                 STATE.zoom = CONFIG.zoom.max;
             }
-            if (STATE.zoom < CONFIG.zoom.min) {
+            else if (STATE.zoom < CONFIG.zoom.min) {
                 STATE.zoom = CONFIG.zoom.min;
             }
+            else {
+                return true;
+            }
+            return false;
         }
 
         function windowResized() {
@@ -583,8 +588,16 @@
 
         function mouseWheel(event) {
             // Zoom in/out with mouse wheel:
-            STATE.zoom -= event.delta / 1000;
-            boundZoom();
+            const zDelta = event.delta / 1000;
+            STATE.zoom -= zDelta;
+            // If all we do is change zoom, then we are going to zoom in and
+            // out of the CANVAS center point, not the viewport centerpoint.
+            // This is because we zoom by rescaling the image, and the image
+            // is always centered in the canvas.
+            if (boundZoom()) {
+                STATE.panX -= zDelta * (STATE.panX / STATE.zoom);
+                STATE.panY -= zDelta * (STATE.panY / STATE.zoom);
+            }
         }
 
         function doubleClicked() {
@@ -666,7 +679,10 @@
             textSize(12);
             fill("white");
             noStroke();
-            text(`Mouse: ${Math.round(imgcoords[0])}, ${Math.round(imgcoords[1])}, ${STATE.z.current - STATE.z.annotating}\nZoom: ${Math.round(STATE.zoom * 100)}%`,
+            text(
+                `Mouse: ${Math.round(imgcoords[0])}, ${Math.round(imgcoords[1])}, ${STATE.z.current - STATE.z.annotating}\n` +
+                `Zoom: ${Math.round(STATE.zoom * 100)}%\n` +
+                `Viewport: ${Math.round(STATE.panX)}, ${Math.round(STATE.panY)}\n`,
                 10 + CONFIG.histogram.width,
                 10
             );
