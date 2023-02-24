@@ -271,7 +271,7 @@ class JSONFileUploadJobManager(UploadJobManager):
         # If we get here, we failed to load the file.
         # Move the corrupted file out of the way:
         log.exception(
-            f"Corrupted jobs file: {self.file_path}, got error {e}. Moving to {self.file_path}.{time.time()}"
+            f"Corrupted jobs file: {self.file_path}, moving to {self.file_path}.{time.time()}"
         )
         os.rename(self.file_path, f"{self.file_path}.{time.time()}")
         return {}

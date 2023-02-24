@@ -75,7 +75,10 @@ def export_zarr_array(
 
     # Write the data
     if slice_count is None:
-        slice_count = 8
+        if parallel_jobs:
+            slice_count = chunk_size[-1]
+        else:
+            slice_count = 8
 
     prog_bar = tqdm.tqdm if progress else lambda x: x
 
