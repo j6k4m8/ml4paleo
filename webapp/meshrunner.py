@@ -68,7 +68,7 @@ def mesh_job(job: UploadJob) -> None:
         volume_provider,
         pathlib.Path(CONFIG.meshed_directory) / job.id / latest_seg,
         chunk_size=CONFIG.meshing_chunk_size,
-        mip=3,
+        mip=1,
     )
     # Mesh everything:
     mesher.mesh_all()
