@@ -103,6 +103,11 @@ def convert_next():
         pathlib.Path(CONFIG.chunked_directory) / next_job.id,
         chunk_size=CONFIG.chunk_size,
         progress_callback=_progress_callback,
+        parallel_jobs=CONFIG.conversion_job_parallelism,
+        # This needs to be set to the chunk size to avoid multiple jobs trying
+        # to write to the same chunk in memory at once, which COULD result in
+        # missing data.
+        slice_count=CONFIG.chunk_size[2],
     )
     logging.info("Finished converting dataset %s", next_job.id)
     next_job.complete_convert()
