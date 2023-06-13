@@ -9,14 +9,9 @@ services:
     build: .
     volumes:
       - webapp-volume:/ml4paleo/webapp/volume
-    entrypoint: poetry run flask run
+    entrypoint: poetry run pip3 install gunicorn && poetry run gunicorn --bind :5000 --access-logfile - --error-logfile - --log-level info main:app --timeout 300
     ports:
       - "5000:5000"
-    environment:
-      - FLASK_APP=main:app
-      - FLASK_ENV=production
-      - FLASK_RUN_PORT=5000
-      - FLASK_RUN_HOST=0.0.0.0
 
   conversionrunner:
     image: ml4paleo
