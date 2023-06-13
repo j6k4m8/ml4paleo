@@ -682,12 +682,12 @@ class ML4PaleoWebApplication:
         self.app.run(host="0.0.0.0", **kwargs)
 
 
+app = Flask(__name__)
+CORS(app)
+
+# Create the ML4Paleo server:
+server = ML4PaleoWebApplication(app)
+
 if __name__ == "__main__":
-    app = Flask(__name__)
-    CORS(app)
-
-    # Create the ML4Paleo server:
-    server = ML4PaleoWebApplication(app)
-
     # Run the server:
     server.run(debug=True, port=5000)

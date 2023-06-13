@@ -73,7 +73,7 @@ class ImageStackVolumeProvider(VolumeProvider):
         self._cache_size = cache_size
 
         # Decorate the read function with a cache.
-        self._read_image = lru_cache(maxsize=self._cache_size)(self._read_image)
+        # self._read_image = lru_cache(maxsize=self._cache_size)(self._read_image)
 
     def _read_image(self, path: pathlib.Path) -> np.ndarray:
         """
@@ -86,7 +86,10 @@ class ImageStackVolumeProvider(VolumeProvider):
             np.ndarray: The image data.
 
         """
-        return np.array(Image.open(path)).T
+        try:
+            return np.array(Image.open(path)).T
+        except:
+            return np.zeros(self.shape[:2], dtype=self.dtype)
 
     @property
     def shape(self) -> Tuple[int, int, int]:
