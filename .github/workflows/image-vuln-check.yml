@@ -5,10 +5,10 @@ name: Scan Image
 on:
   push:
     branches:
-      - main
+      - master
   pull_request:
     branches:
-      - main
+      - master
 
 jobs:
   # Build the image and check it for vulnerabilities using Trivy
