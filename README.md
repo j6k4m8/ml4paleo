@@ -10,3 +10,9 @@ This codebase comprises two main components:
 The web application is contained in [`webapp/`](webapp/), and the Python package is contained in [`ml4paleo/`](ml4paleo/). The `ml4paleo` package is also available on PyPI as [`ml4paleo`](https://pypi.org/project/ml4paleo/), and can be installed with `pip install ml4paleo`.
 
 For more details on each of the components, see the READMEs in their respective directories.
+
+## To eject poetry to requirements.txt
+
+```bash
+poetry export -f requirements.txt --output requirements.txt --without-hashes
+```

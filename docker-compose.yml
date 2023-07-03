@@ -9,7 +9,7 @@ services:
     build: .
     volumes:
       - webapp-volume:/ml4paleo/webapp/volume
-    entrypoint: poetry run pip3 install gunicorn && poetry run gunicorn --bind :5000 --access-logfile - --error-logfile - --log-level info main:app --timeout 300
+    entrypoint: gunicorn --bind :5000 --access-logfile - --error-logfile - --log-level info main:app --timeout 300
     ports:
       - "5000:5000"
 
@@ -18,7 +18,7 @@ services:
     build: .
     volumes:
       - webapp-volume:/ml4paleo/webapp/volume
-    entrypoint: poetry run python3 ./conversionrunner.py
+    entrypoint: python3 ./conversionrunner.py
     depends_on:
       - backend
 
@@ -27,7 +27,7 @@ services:
     build: .
     volumes:
       - webapp-volume:/ml4paleo/webapp/volume
-    entrypoint: poetry run python3 ./segmentrunner.py
+    entrypoint: python3 ./segmentrunner.py
     depends_on:
       - backend
 
@@ -36,6 +36,6 @@ services:
     build: .
     volumes:
       - webapp-volume:/ml4paleo/webapp/volume
-    entrypoint: poetry run python3 ./meshrunner.py
+    entrypoint: python3 ./meshrunner.py
     depends_on:
       - backend
