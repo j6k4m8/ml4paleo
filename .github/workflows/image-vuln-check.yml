@@ -1,0 +1,31 @@
+# Build the image and check it for vulnerabilities using Trivy
+name: Scan Image
+
+# On pushes to main, and PRs to main
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  # Build the image and check it for vulnerabilities using Trivy
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Build the Docker image
+        run: docker build --tag ml4paleo .
+      
+      - name: Check the Docker image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ml4paleo
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
