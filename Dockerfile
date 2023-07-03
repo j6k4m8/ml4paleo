@@ -31,8 +31,13 @@ WORKDIR /ml4paleo
 # Install the library.
 # RUN poetry install
 
+# Install the library.
+RUN pip install -e ./
+
 WORKDIR /ml4paleo/webapp
 RUN mkdir -p volume
 
+RUN pip install gunicorn
+
 # Set the entrypoint to the command passed in.
-ENTRYPOINT ["/bin/bash", "-c"]
+ENTRYPOINT ["/bin/sh", "-c"]
