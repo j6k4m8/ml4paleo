@@ -49,7 +49,7 @@ class CONFIG:
     # The number of parallel jobs to run when converting uploaded data to zarr.
     # This can be roughly the number of cores on your machine, since the main
     # bottleneck is the disk IO.
-    conversion_job_parallelism = _NUMBER_OF_CORES - 2
+    conversion_job_parallelism = max(1, _NUMBER_OF_CORES - 2)
 
     # Training and Annotation
     #
@@ -79,7 +79,7 @@ class CONFIG:
     # segmenters, this can be dangerous to set too high — i.e., if you're using
     # the same GPU for all of the jobs. Also be wary of, e.g., sklearn models,
     # which have their own parallelism settings.
-    segment_job_parallelism = min(_NUMBER_OF_CORES // 2, 2)
+    segment_job_parallelism = max(_NUMBER_OF_CORES // 2, 2)
     # How large each chunk should be when segmenting. Note that this is smaller
     # than the storage chunk size, because we want to be able to segment the
     # data in parallel and therefore may need more space in RAM.
