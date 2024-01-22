@@ -12,6 +12,7 @@ services:
     entrypoint: gunicorn --bind :5000 --access-logfile - --error-logfile - --log-level info main:app --timeout 300
     ports:
       - "5000:5000"
+    restart: always
 
   conversionrunner:
     image: ml4paleo
@@ -21,6 +22,7 @@ services:
     entrypoint: python3 ./conversionrunner.py
     depends_on:
       - backend
+    restart: always
 
   segmentrunner:
     image: ml4paleo
@@ -30,6 +32,7 @@ services:
     entrypoint: python3 ./segmentrunner.py
     depends_on:
       - backend
+    restart: always
 
   meshrunner:
     image: ml4paleo
@@ -39,3 +42,4 @@ services:
     entrypoint: python3 ./meshrunner.py
     depends_on:
       - backend
+    restart: always
