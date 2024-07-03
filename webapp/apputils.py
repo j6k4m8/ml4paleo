@@ -109,7 +109,7 @@ def create_neuroglancer_link(job: UploadJob, return_state: bool = False):
         # Create the neuroglancer layer:
         seg_layer = {
             "type": "segmentation",
-            "source": f"zarr://http://{request.host}/api/job/{job.id}/segmentation/{seg_id}/zarr/",
+            "source": f"zarr://{protocol}://{request.host}/api/job/{job.id}/segmentation/{seg_id}/zarr/",
             "tab": "source",
             "name": f"segmentation {seg_id}",
         }
@@ -123,7 +123,7 @@ def create_neuroglancer_link(job: UploadJob, return_state: bool = False):
         mesh_layer = {
             "type": "mesh",
             "source": {
-                "url": f"obj://http://{request.host}/api/job/{job.id}/segmentation/{mesh_seg_id}/obj/255.combined.obj",
+                "url": f"obj://{protocol}://{request.host}/api/job/{job.id}/segmentation/{mesh_seg_id}/obj/255.combined.obj",
                 "transform": {
                     "matrix": [[0, 0, 1, 0], [0, 1, 0, 0], [1, 0, 0, 0]],
                     "outputDimensions": {
