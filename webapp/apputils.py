@@ -90,7 +90,7 @@ def create_neuroglancer_link(job: UploadJob, return_state: bool = False):
     """
     # Check for segmentation:
 
-    protocol = request.url.split(":")[0]
+    protocol = "https" # request.url.split(":")[0]
     jsondata = {
         "layers": [
             {
