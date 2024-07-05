@@ -27,18 +27,16 @@ WORKDIR /ml4paleo
 # Install the library.
 RUN poetry install
 RUN poetry run pip install scikit-image scikit-learn
-RUN poetry run pip install zmesh
+RUN poetry run pip install zmesh gunicorn
 
 # Copy in the rest of the code:
 COPY . /ml4paleo
 
 # Install the library.
-# RUN pip install -e ./
+RUN poetry run pip install -e ./
 
 WORKDIR /ml4paleo/webapp
 RUN mkdir -p volume
-
-RUN pip install gunicorn
 
 # Set the entrypoint to the command passed in.
 ENTRYPOINT ["/bin/sh", "-c"]
