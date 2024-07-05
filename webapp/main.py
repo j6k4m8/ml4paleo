@@ -410,7 +410,7 @@ class ML4PaleoWebApplication:
             # Predict the mask:
             model = RandomForest3DSegmenter()
             model.load(str(modelpath))
-            print("Loaded model: %s", modelpath)
+            print("Loaded model: ", modelpath)
             print(img_np.shape)
             mask = model._segment_slice(img_np)
             annos = np.array(
@@ -422,7 +422,6 @@ class ML4PaleoWebApplication:
             mask[:, :, 3] = annos
 
             # Return the mask as a base64 encoded string:
-            # Return zeros the same size as the image:
             f = io.BytesIO()
             Image.fromarray(mask).save(f, format="PNG")
             f.seek(0)

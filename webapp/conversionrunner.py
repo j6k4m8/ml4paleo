@@ -111,6 +111,7 @@ def convert_next():
     )
     logging.info("Finished converting dataset %s", next_job.id)
     next_job.complete_convert()
+    next_job.shape = volume_provider.shape
     job_manager.update_job(next_job.id, next_job)
     logging.info("Updating job %s", next_job.id)
 

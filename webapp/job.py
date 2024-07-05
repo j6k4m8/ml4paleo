@@ -102,6 +102,7 @@ class UploadJobSchema(Schema):
     created_at = fields.Str()
     last_updated_at = fields.Str()
     current_job_progress = fields.Float()
+    shape = fields.List(fields.Int(), allow_none=True)
 
 
 def _new_job_id() -> UploadJobID:
@@ -128,6 +129,7 @@ class UploadJob:
         created_at: Optional[str] = None,
         last_updated_at: Optional[str] = None,
         current_job_progress: Optional[float] = None,
+        shape: Optional[List[int]] = None,
     ):
         """
         Create a new job with the fieldwise constructor.
@@ -147,11 +149,14 @@ class UploadJob:
                 provided, the current time will be used (equal to created_at)
             current_job_progress (float): The progress of the current operation
                 on the job. If not provided, the progress will be set to 0.
+            shape (List[int]): The shape of the data in the job. If not
+                provided, the shape will be set to None.
 
         """
         created_at = created_at or datetime.datetime.now().isoformat()
         last_updated_at = last_updated_at or datetime.datetime.now().isoformat()
         self.status = status or JobStatus.PENDING
+        self.shape = shape
         self.name = name or "Untitled Job created at " + created_at
         self.id = id or _new_job_id()
         self.created_at = created_at
@@ -197,6 +202,7 @@ class UploadJob:
             created_at=d["created_at"],
             last_updated_at=d.get("last_updated_at", d["created_at"]),
             current_job_progress=d.get("current_job_progress", 0.0),
+            shape=d.get("shape", None),
         )
         return res
 
