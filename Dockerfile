@@ -20,8 +20,8 @@ ENV PATH="${PATH}:/root/.local/bin"
 WORKDIR /ml4paleo
 RUN poetry config virtualenvs.create false
 
-# Copy in the code:
-COPY . /ml4paleo
+# Copy in the poetry files and install the dependencies.
+COPY poetry.lock pyproject.toml /ml4paleo/
 WORKDIR /ml4paleo
 
 # Install the library.
@@ -29,8 +29,11 @@ RUN poetry install
 RUN poetry run pip install scikit-image scikit-learn
 RUN poetry run pip install zmesh
 
+# Copy in the rest of the code:
+COPY . /ml4paleo
+
 # Install the library.
-RUN pip install -e ./
+# RUN pip install -e ./
 
 WORKDIR /ml4paleo/webapp
 RUN mkdir -p volume
