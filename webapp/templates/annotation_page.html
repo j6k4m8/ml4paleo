@@ -69,6 +69,10 @@
             background-color: #e8c7c7;
         }
 
+        .return-button {
+            background-color: #c7e8e6;
+        }
+
         #keymapOverlay {
             position: fixed;
             top: 0;
@@ -354,9 +358,21 @@
         }
 
         function clearAnnotations() {
-            paintPixels.erase()
-            paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
-            paintPixels.noErase();
+            if (confirm("Are you sure you want to clear this annotation?")) {
+                // Clear pixels by erasing:
+                paintPixels.erase()
+                paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
+                paintPixels.noErase();
+            }
+        }
+
+        function quit() {
+            if (confirm("Are you sure you want to quit?")) {
+                let jobId = window.location.pathname.split("/")[
+                    window.location.pathname.split("/").length - 1
+                ];
+                window.location.href = `/job/${jobId}`;
+            }
         }
 
         function submitData() {
@@ -886,6 +902,7 @@
         <div class="top-right-controls">
             <button class="pill-button clear-button" onclick="clearAnnotations()">Clear</button>
             <button class="pill-button skip-button" onclick="window.location.reload()">Skip</button>
+            <button class="pill-button return-button" onclick="quit()">Quit</button>
         </div>
         <div class="bottom-left-controls">
             <button class="pill-button" onclick="toggleKeyMapOverlay()">?</button>
