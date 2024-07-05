@@ -19,55 +19,58 @@
             overflow: hidden;
         }
 
+        .pill-button {
+            border-radius: 25px;
+            border: none;
+            margin: 1em;
+            padding: 0.5em 1em;
+            text-align: center;
+            font-size: 20px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 2pt;
+            font-weight: bold;
+        }
+
         .submit-button {
             position: fixed;
             bottom: 0;
             right: 0;
-            border-radius: 25px;
-            border: none;
-            margin: 1em;
-            padding: 0.5em 1em;
             background-color: #d1e7d1;
-            text-align: center;
-            font-size: 20px;
-            cursor: pointer;
-            text-transform: uppercase;
-            letter-spacing: 2pt;
-            font-weight: bold;
         }
 
-        .skip-button {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            border-radius: 25px;
-            border: none;
-            margin: 1em;
-            padding: 0.5em 1em;
-            background-color: #e8c7c7;
-            text-align: center;
-            font-size: 20px;
-            cursor: pointer;
-            text-transform: uppercase;
-            letter-spacing: 2pt;
-            font-weight: bold;
-        }
-
-        .clear-button {
+        .top-right-controls {
             position: fixed;
             top: 0;
             right: 0;
-            border-radius: 25px;
-            border: none;
-            margin: 1em;
-            padding: 0.5em 1em;
+            display: flex;
+            flex-direction: row;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1em;
+        }
+
+        .bottom-left-controls {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            display: flex;
+            flex-direction: row;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1em;
+        }
+
+        .skip-button {
             background-color: #e8c7c7;
-            text-align: center;
-            font-size: 20px;
-            cursor: pointer;
-            text-transform: uppercase;
-            letter-spacing: 2pt;
-            font-weight: bold;
+        }
+
+        .clear-button {
+            background-color: #e8c7c7;
+        }
+
+        .return-button {
+            background-color: #c7e8e6;
         }
 
         #keymapOverlay {
@@ -103,6 +106,10 @@
 <body>
     <div id="keymapOverlay" class="hidden" onclick="toggleKeyMapOverlay()">
         <div style="background: #fefefecc; max-width: 40em; margin: auto; padding: 2em;">
+            <h2>Usage</h2>
+            Click and drag to paint. Hold <kbd>alt (⌥)</kbd> to erase. Hold <kbd>shift (⇧)</kbd> to pan. Scroll to zoom
+            in and
+            out.
             <h2>Keys</h2>
             <div id="keymap-list"></div>
         </div>
@@ -245,6 +252,22 @@
                 key: "?",
                 description: 'Toggle key map overlay', shift: false, ctrl: false, alt: false
             },
+
+            returnHome: {
+                keyCode: 27,
+                key: "esc",
+                description: 'Return to home slice', shift: false, ctrl: false, alt: false
+            },
+
+            returnHomePan: {
+                keyCode: 27,
+                key: "esc",
+                description: 'Return to home slice and reset pan and zoom',
+                // Shift if not firefox, otherwise control:
+                shift: !navigator.userAgent.toLowerCase().includes('firefox'),
+                ctrl: navigator.userAgent.toLowerCase().includes('firefox'),
+                alt: false
+            },
         };
 
         let STATE = {
@@ -335,9 +358,21 @@
         }
 
         function clearAnnotations() {
-            paintPixels.erase()
-            paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
-            paintPixels.noErase();
+            if (confirm("Are you sure you want to clear this annotation?")) {
+                // Clear pixels by erasing:
+                paintPixels.erase()
+                paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
+                paintPixels.noErase();
+            }
+        }
+
+        function quit() {
+            if (confirm("Are you sure you want to quit?")) {
+                let jobId = window.location.pathname.split("/")[
+                    window.location.pathname.split("/").length - 1
+                ];
+                window.location.href = `/job/${jobId}`;
+            }
         }
 
         function submitData() {
@@ -464,7 +499,7 @@
                 STATE.zoom = 1;
 
                 // If also holding shift, also go back to the home slice:
-                if (keyIsDown(SHIFT)) {
+                if (keyIsDown(SHIFT) || keyIsDown(CONTROL) || keyIsDown(COMMAND) || keyIsDown(OPTION) || keyIsDown(ALT)) {
                     STATE.z.current = STATE.z.annotating;
                 }
             }
@@ -705,7 +740,7 @@
             line(0, vMaxMapped, CONFIG.histogram.width, vMaxMapped);
         }
 
-        function inBounds(x, y) {
+        function inBounds(x, y, radius = 0) {
             // return true if x, y screenspace coordinates are inside the
             // image, accounting for pan and zoom
 
@@ -714,10 +749,10 @@
 
             // Check if in bounds
             return (
-                imgcoords[0] >= 0 &&
-                imgcoords[0] < img.width &&
-                imgcoords[1] >= 0 &&
-                imgcoords[1] < img.width
+                imgcoords[0] >= (0 - radius) &&
+                imgcoords[0] < (img.width + radius) &&
+                imgcoords[1] >= (0 - radius) &&
+                imgcoords[1] < (img.width + radius)
             );
         }
 
@@ -790,7 +825,7 @@
             }
 
             // Pan when holding shift:
-            if (keyIsDown(SHIFT) || !inBounds(mouseX, mouseY)) {
+            if (keyIsDown(SHIFT) || !inBounds(mouseX, mouseY, radius = STATE.brushSize)) {
                 STATE.panX += movedX;
                 STATE.panY += movedY;
                 return;
@@ -851,9 +886,10 @@
                 let keymapItem = document.createElement("tr");
                 keymapItem.innerHTML = `<td>
                 ${keymap[key].shift ? "<kbd>⇧</kbd>" : ""}
-                ${keymap[key].option ? "<kbd>⌥</kbd>" : ""}
-                ${keymap[key].control ? "<kbd>⌃</kbd>" : ""}
-                ${keymap[key].command ? "<kbd>⌘</kbd>" : ""}</td><td>
+                ${keymap[key].alt ? "<kbd>⌥</kbd>" : ""}
+                ${keymap[key].opt ? "<kbd>⌥</kbd>" : ""}
+                ${keymap[key].ctrl ? "<kbd>⌃</kbd>" : ""}
+                ${keymap[key].cmd ? "<kbd>⌘</kbd>" : ""}</td><td>
                 <kbd>${k}</kbd></td><td>${keymap[key].description} <small>(${key})</small></td>
                 `;
                 table.appendChild(keymapItem);
@@ -863,9 +899,15 @@
 
     <!-- UI to submit (floating bottom) -->
     <div class="submit-container">
-        <button class="clear-button" onclick="clearAnnotations()">Clear</button>
-        <button class="skip-button" onclick="window.location.reload()">Skip</button>
-        <button class="submit-button" onclick="submitData()">Submit</button>
+        <div class="top-right-controls">
+            <button class="pill-button clear-button" onclick="clearAnnotations()">Clear</button>
+            <button class="pill-button skip-button" onclick="window.location.reload()">Skip</button>
+            <button class="pill-button return-button" onclick="quit()">Quit</button>
+        </div>
+        <div class="bottom-left-controls">
+            <button class="pill-button" onclick="toggleKeyMapOverlay()">?</button>
+        </div>
+        <button class="pill-button submit-button" onclick="submitData()">Submit</button>
     </div>
 
     <div id="p5_loading">
