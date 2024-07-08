@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ job.name }} | ml4paleo</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js" crossorigin="anonymous"
+        referrerpolicy="no-referrer"></script>
+</head>
+
+<body>
+    {% include "navbar.html" %}
+    <div class="container">
+        <div class="row">
+            <div class="col">
+                <article>
+                    <header>
+                        <h1>Gallery</h1>
+                    </header>
+
+                    <p>
+                        <a role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue Annotating</a>
+                    </p>
+                    <p>
+                        There are currently <b>{{ num_annotations }}</b> annotated slices.
+                    </p>
+
+                    <table>
+                        <tr>
+                            <th>Image</th>
+                            <th>Segmentation</th>
+                        </tr>
+                        {% for img_path, seg_path in img_seg_pairs %}
+                        <tr>
+                            <td>
+                                <img src="/job/{{ job.id }}/annotations/{{ img_path }}" alt="Image">
+                            </td>
+                            <td>
+                                <img src="/job/{{ job.id }}/annotations/{{ seg_path }}" alt="Segmentation">
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </table>
+
+                </article>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

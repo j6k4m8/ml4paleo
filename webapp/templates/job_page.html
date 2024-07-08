@@ -52,17 +52,21 @@
                         <tr>
                             <th>Creation Date</th>
                             <th>Last Updated</th>
+                            <th>Size</th>
                             <th>Latest Segmentation ID</th>
                             <th></th>
                         </tr>
                         <tr>
                             <td>{{pretty_date(job.created_at)}}</td>
                             <td>{{pretty_date(job.last_updated_at) }}</td>
+                            <td>{{job.shape}}</td>
                             <td>{{latest_segmentation_id}}</td>
-                            <td><a href="{{ neuroglancer_link }}" target="_blank"
+                            <td>
+                                <a href="{{ neuroglancer_link }}" target="_blank"
                                     data-tooltip="Open 3D view in a new tab">
                                     View in 3D
-                                </a></td>
+                                </a>
+                            </td>
                         </tr>
                     </table>
                 </article>
