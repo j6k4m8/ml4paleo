@@ -438,6 +438,53 @@ class ML4PaleoWebApplication:
             job = job_manager.get_job(job_id)
             return render_template("annotation_page.html", job=job)
 
+        @self.app.route("/job/<job_id>/annotations", methods=["GET"])
+        def annotation_gallery(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+
+            all_annotation_files = [
+                f
+                for f in (
+                    pathlib.Path(CONFIG.training_directory) / job.id
+                ).glob("*")
+                if f.is_file()
+            ]
+
+            img_seg_pairs = []
+            for img_file in all_annotation_files:
+                if img_file.name.startswith(CONFIG.training_img_prefix):
+                    seg_file = img_file.with_name(
+                        img_file.name.replace(CONFIG.training_img_prefix, "seg")
+                    )
+                    if seg_file in all_annotation_files:
+                        img_seg_pairs.append((
+                            img_file.name,
+                            seg_file.name
+                        ))
+
+            return render_template(
+                "annotation_gallery.html",
+                job=job,
+                num_annotations=len(all_annotation_files) // 2,
+                img_seg_pairs=img_seg_pairs,
+            )
+
+        # Satisfy requests for /job/<job_id>/annotations/img1720204733.png
+        @self.app.route("/job/<job_id>/annotations/<filename>", methods=["GET"])
+        def annotation_image(job_id, filename):
+            # Rewrite to /volume/training/<job_id>/<filename>
+            return send_from_directory(
+                os.path.join(CONFIG.training_directory, job_id), filename
+            )
+
+
+
         ###############################
         #
         #  Training & Inference

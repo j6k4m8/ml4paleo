@@ -10,12 +10,18 @@
     {% endif %}
     <p>
         <a target="_blank" role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">
-            Open Annotation Application
+            Continue Annotating
         </a>
     </p>
     <p>
         There are currently <b>{{ num_annotations }}</b> annotated slices.
     </p>
+    {% if num_annotations > 0 %}
+    <p>
+        Go to the <a href="{{ url_for('annotation_gallery', job_id=job.id) }}">annotation gallery</a>
+        to see or delete your annotations.
+    </p>
+    {% endif %}
     <p>
         You can train a model with any number of annotated slices, but you won't
         get any interesting results with fewer than 5, and we recommend at least
