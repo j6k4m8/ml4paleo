@@ -87,9 +87,13 @@ class ImageStackVolumeProvider(VolumeProvider):
 
         """
         try:
-            return np.array(Image.open(path)).T
+            res = np.array(Image.open(path)).T
         except:
-            return np.zeros(self.shape[:2], dtype=self.dtype)
+            res = np.zeros(self.shape[:2], dtype=self.dtype)
+        # If dim is CHW, chop off the C dimension.
+        if len(res.shape) == 3:
+            res = res[0]
+        return res
 
     @property
     def shape(self) -> Tuple[int, int, int]:
