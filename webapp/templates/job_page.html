@@ -59,7 +59,8 @@
                         <tr>
                             <td>{{pretty_date(job.created_at)}}</td>
                             <td>{{pretty_date(job.last_updated_at) }}</td>
-                            <td>{{job.shape}}</td>
+                            <td>{{job.shape}} (<abbr title="{{voxel_count}} voxels">{{voxel_count_localized}}</abbr>)
+                            </td>
                             <td>{{latest_segmentation_id}}</td>
                             <td>
                                 <a href="{{ neuroglancer_link }}" target="_blank"
