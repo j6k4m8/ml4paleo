@@ -164,7 +164,13 @@ class ML4PaleoWebApplication:
                     400,
                 )
 
-            job = job_manager.get_job(job_id)
+            try:
+                job = job_manager.get_job(job_id)
+            except IndexError:
+                return (
+                    jsonify({"status": "error", "message": f"Job ID {job_id} not found."}),
+                    400,
+                )
             return jsonify({"job_id": job_id, "status": str(job.status)})
 
         @self.app.route("/api/job/status/upload-complete", methods=["POST"])
@@ -203,9 +209,22 @@ class ML4PaleoWebApplication:
                 )
                 // 2
             )
+
+            voxel_count = (job.shape[0] * job.shape[1] * job.shape[2]) if job.shape else 0
+            # Replace voxels with KV, MV, GV, etc.
+            if voxel_count:
+                voxel_count_localized = voxel_count
+                for unit in ["", "K", "M", "G", "T", "P", "E", "Z"]:
+                    if voxel_count_localized < 1024:
+                        break
+                    voxel_count_localized /= 1024
+                voxel_count_localized = f"{voxel_count_localized:.2f} {unit}V"
+
             return render_template(
                 "job_page.html",
                 job=job,
+                voxel_count=voxel_count,
+                voxel_count_localized=voxel_count_localized,
                 num_annotations=num_annotations,
                 neuroglancer_link=create_neuroglancer_link(job),
                 latest_segmentation_id=get_latest_segmentation_id(job),
