@@ -1,12 +1,17 @@
 volumes:
-  webapp-volume:
+  ml4paleo-webapp-volume:
+    driver: local
+    driver_opts:
+      device: '/home/ubuntu/ml4paleo-webapp-volume/'
+      o: 'bind'
+      type: none
 
 services:
   backend:
     image: ml4paleo
     build: .
     volumes:
-      - webapp-volume:/ml4paleo/webapp/volume
+      - ml4paleo-webapp-volume:/ml4paleo/webapp/volume
     entrypoint: gunicorn --bind :5000 --access-logfile - --error-logfile - --log-level info main:app --timeout 300
     ports:
       - "5000:5000"
@@ -16,7 +21,7 @@ services:
     image: ml4paleo
     build: .
     volumes:
-      - webapp-volume:/ml4paleo/webapp/volume
+      - ml4paleo-webapp-volume:/ml4paleo/webapp/volume
     entrypoint: python3 ./conversionrunner.py
     depends_on:
       - backend
@@ -26,7 +31,7 @@ services:
     image: ml4paleo
     build: .
     volumes:
-      - webapp-volume:/ml4paleo/webapp/volume
+      - ml4paleo-webapp-volume:/ml4paleo/webapp/volume
     entrypoint: python3 ./segmentrunner.py
     depends_on:
       - backend
@@ -36,7 +41,7 @@ services:
     image: ml4paleo
     build: .
     volumes:
-      - webapp-volume:/ml4paleo/webapp/volume
+      - ml4paleo-webapp-volume:/ml4paleo/webapp/volume
     entrypoint: python3 ./meshrunner.py
     depends_on:
       - backend

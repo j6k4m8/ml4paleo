@@ -21,7 +21,8 @@ WORKDIR /ml4paleo
 RUN poetry config virtualenvs.create false
 
 # Copy in the poetry files and install the dependencies.
-COPY poetry.lock pyproject.toml /ml4paleo/
+# COPY poetry.lock pyproject.toml /ml4paleo/
+COPY . /ml4paleo
 WORKDIR /ml4paleo
 
 # Install the library.
@@ -29,8 +30,6 @@ RUN poetry install
 RUN poetry run pip install scikit-image scikit-learn
 RUN poetry run pip install zmesh gunicorn
 
-# Copy in the rest of the code:
-COPY . /ml4paleo
 
 # Install the library.
 RUN poetry run pip install -e ./
