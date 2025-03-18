@@ -23,8 +23,7 @@ poetry export -f requirements.txt --output requirements.txt --without-hashes
 If this work is useful to your research, please cite:
 
 > **Automated segmentation of synchrotron-scanned fossils**
-> Melanie A.D. During, Jordan K. Matelsky, Fredrik K. Gustafsson, Dennis F.A.E. Voeten, Donglei Chen, Brock A. Wester, Konrad Paul Kording, Per E. Ahlberg, Thomas B Schön
-> bioRxiv 2024.10.23.619778; doi: https://doi.org/10.1101/2024.10.23.619778 
+> During MAD, Matelsky JK, Gustafsson FK, Voeten DFAE, Chen D, Wester BA, Kording KP, Ahlberg PE, Schön TB (2025) Automated segmentation of synchrotron-scanned fossils. Fossil Record 28(1): 103-114. https://doi.org/10.3897/fr.28.e139379 
 
 ```bibtex
 @article {During2024.10.23.619778,
