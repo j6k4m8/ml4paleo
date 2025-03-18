@@ -90,6 +90,7 @@ def convert_next():
     volume_provider = ImageStackVolumeProvider(
         pathlib.Path(CONFIG.upload_directory) / next_job.id, cache_size=0
     )
+    logging.info(f"Got dataset with shape {volume_provider.shape}.")
 
     def _progress_callback(completed: int, item: Any, total: int) -> None:
         logging.info(f"Converted {completed} / {total} for job {next_job.id}.")
@@ -111,7 +112,9 @@ def convert_next():
     )
     logging.info("Finished converting dataset %s", next_job.id)
     next_job.complete_convert()
-    next_job.shape = volume_provider.shape
+    # Take only the last three dimensions of the shape, since the first
+    # dimension is the channel dimension, which we don't want to include
+    next_job.shape = volume_provider.shape[-3:]
     job_manager.update_job(next_job.id, next_job)
     logging.info("Updating job %s", next_job.id)
 
