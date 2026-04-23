@@ -58,6 +58,104 @@ from segmentrunner import train_job
 
 log = logging.getLogger(__name__)
 
+TIMELINE_STEPS = ("Upload", "Convert", "Annotate", "Train", "Segment", "Mesh")
+SOURCE_LABELS = {
+    "image_stack": "Image stack",
+    "dicom": "DICOM series",
+}
+
+
+def _timeline_position_for_status(status: JobStatus) -> tuple[int | None, int | None]:
+    """
+    Return the current timeline index and optional error index for a job status.
+    """
+    if status in [JobStatus.PENDING, JobStatus.UPLOADING]:
+        return 0, None
+    if status in [JobStatus.UPLOADED, JobStatus.CONVERTING]:
+        return 1, None
+    if status == JobStatus.CONVERT_ERROR:
+        return 1, 1
+    if status == JobStatus.CONVERTED:
+        return 2, None
+    if status in [JobStatus.ANNOTATED, JobStatus.TRAINING_QUEUED, JobStatus.TRAINING]:
+        return 3, None
+    if status in [JobStatus.TRAINED, JobStatus.SEGMENTING]:
+        return 4, None
+    if status == JobStatus.SEGMENT_ERROR:
+        return 4, 4
+    if status in [JobStatus.SEGMENTED, JobStatus.MESHING_QUEUED, JobStatus.MESHING]:
+        return 5, None
+    if status == JobStatus.MESH_ERROR:
+        return 5, 5
+    if status in [JobStatus.MESHED, JobStatus.DONE]:
+        return None, None
+    return 0, 0
+
+
+def build_job_timeline(job: UploadJob) -> list[dict[str, str]]:
+    """
+    Build the rendered timeline state for the job page.
+    """
+    current_index, error_index = _timeline_position_for_status(job.status)
+    steps: list[dict[str, str]] = []
+    for idx, label in enumerate(TIMELINE_STEPS):
+        if error_index == idx:
+            state = "error"
+        elif current_index is None:
+            state = "done"
+        elif idx < current_index:
+            state = "done"
+        elif idx == current_index:
+            state = "current"
+        else:
+            state = "upcoming"
+        steps.append({"label": label, "state": state})
+    return steps
+
+
+def build_job_timeline_caption(job: UploadJob, num_annotations: int) -> str:
+    """
+    Return a short status line for the page timeline.
+    """
+    progress_pct = job.current_job_progress * 100
+    if job.status == JobStatus.PENDING:
+        return "Waiting for upload to begin."
+    if job.status == JobStatus.UPLOADING:
+        return "Uploading source files."
+    if job.status == JobStatus.UPLOADED:
+        return "Upload complete. Conversion is next."
+    if job.status == JobStatus.CONVERTING:
+        return f"Converting source data into the project volume ({progress_pct:.1f}%)."
+    if job.status == JobStatus.CONVERT_ERROR:
+        return "Conversion failed."
+    if job.status == JobStatus.CONVERTED:
+        return "Volume ready for annotation."
+    if job.status == JobStatus.ANNOTATED:
+        return f"{num_annotations} annotation sample(s) saved. Training is next."
+    if job.status == JobStatus.TRAINING_QUEUED:
+        return "Training is queued."
+    if job.status == JobStatus.TRAINING:
+        return "Training the segmentation model."
+    if job.status == JobStatus.TRAINED:
+        return "Model is trained. Segmentation is next."
+    if job.status == JobStatus.SEGMENTING:
+        return f"Running segmentation across the full volume ({progress_pct:.1f}%)."
+    if job.status == JobStatus.SEGMENT_ERROR:
+        return "Segmentation failed."
+    if job.status == JobStatus.SEGMENTED:
+        return "Segmentation complete. Mesh generation is available."
+    if job.status == JobStatus.MESHING_QUEUED:
+        return "Meshing is queued."
+    if job.status == JobStatus.MESHING:
+        return "Generating surface meshes."
+    if job.status == JobStatus.MESH_ERROR:
+        return "Mesh generation failed."
+    if job.status == JobStatus.MESHED:
+        return "Meshes are ready."
+    if job.status == JobStatus.DONE:
+        return "Processing complete."
+    return "Project state unavailable."
+
 
 class ML4PaleoWebApplication:
     """
@@ -257,47 +355,73 @@ class ML4PaleoWebApplication:
 
             latest_segmentation_id = get_latest_segmentation_id(job)
             latest_mesh_seg_id = get_latest_mesh_id(job)
+            has_been_annotated = job.status not in [
+                JobStatus.PENDING,
+                JobStatus.UPLOADING,
+                JobStatus.UPLOADED,
+                JobStatus.CONVERTING,
+                JobStatus.CONVERTED,
+                JobStatus.CONVERT_ERROR,
+            ]
+            annotation_ready = job.status not in [
+                JobStatus.CONVERTING,
+                JobStatus.UPLOADING,
+                JobStatus.UPLOADED,
+                JobStatus.CONVERT_ERROR,
+            ]
+            segmentation_ready = job.status in [
+                JobStatus.SEGMENTED,
+                JobStatus.MESHING_QUEUED,
+                JobStatus.MESHING,
+                JobStatus.MESH_ERROR,
+                JobStatus.MESHED,
+            ]
+            meshes_ready = latest_mesh_seg_id is not None
+            show_annotation_cta = (
+                (annotation_ready and job.status != JobStatus.SEGMENTING)
+                or (
+                    job.status == JobStatus.CONVERTING
+                    and job.current_job_progress > 0.4
+                )
+            )
             return render_template(
                 "job_page.html",
                 job=job,
+                job_status_str=str(job.status),
+                source_label=SOURCE_LABELS.get(
+                    job.source_type,
+                    job.source_type.replace("_", " ").title(),
+                ),
+                timeline_steps=build_job_timeline(job),
+                timeline_status_text=build_job_timeline_caption(job, num_annotations),
                 voxel_count=voxel_count,
                 voxel_count_localized=voxel_count_localized,
                 num_annotations=num_annotations,
                 neuroglancer_link=create_neuroglancer_link(job),
                 latest_segmentation_id=latest_segmentation_id,
                 latest_mesh_seg_id=latest_mesh_seg_id,
+                show_annotation_cta=show_annotation_cta,
+                is_converting=job.status == JobStatus.CONVERTING,
+                is_training=job.status in [
+                    JobStatus.TRAINING_QUEUED,
+                    JobStatus.TRAINING,
+                ],
+                is_segmenting=job.status == JobStatus.SEGMENTING,
+                is_meshing=job.status in [
+                    JobStatus.MESHING_QUEUED,
+                    JobStatus.MESHING,
+                ],
+                has_error=job.status in [
+                    JobStatus.CONVERT_ERROR,
+                    JobStatus.SEGMENT_ERROR,
+                    JobStatus.MESH_ERROR,
+                    JobStatus.ERROR,
+                ],
                 # Status breakdown:
-                has_been_annotated=(
-                    job.status
-                    not in [
-                        JobStatus.PENDING,
-                        JobStatus.UPLOADING,
-                        JobStatus.UPLOADED,
-                        JobStatus.CONVERTING,
-                        JobStatus.CONVERTED,
-                        JobStatus.CONVERT_ERROR,
-                    ]
-                ),
-                annotation_ready=(
-                    job.status
-                    not in [
-                        JobStatus.CONVERTING,
-                        JobStatus.UPLOADING,
-                        JobStatus.UPLOADED,
-                        JobStatus.CONVERT_ERROR,
-                    ]
-                ),
-                segmentation_ready=(
-                    job.status
-                    in [
-                        JobStatus.SEGMENTED,
-                        JobStatus.MESHING_QUEUED,
-                        JobStatus.MESHING_QUEUED,
-                        JobStatus.MESH_ERROR,
-                        JobStatus.MESHED,
-                    ]
-                ),
-                meshes_ready=latest_mesh_seg_id is not None,
+                has_been_annotated=has_been_annotated,
+                annotation_ready=annotation_ready,
+                segmentation_ready=segmentation_ready,
+                meshes_ready=meshes_ready,
             )
 
         ############################

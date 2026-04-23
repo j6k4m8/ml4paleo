@@ -1,38 +1,38 @@
-<article>
-    <header>
-        <h3>Segmentation complete!</h3>
-    </header>
-    <p>
-        The segmentation is complete! You can download the results below. If you would like to
-        retrain the model, you can do so by clicking the button below.
+<section class="job-card job-card--wide">
+    <div class="job-card-header">
+        <div>
+            <p class="job-kicker">Outputs</p>
+            <h3>Segmentation ready</h3>
+        </div>
+        {% if latest_segmentation_id %}
+        <span class="job-inline-token">{{ latest_segmentation_id }}</span>
+        {% endif %}
+    </div>
+    <p class="job-card-copy">
+        The latest segmentation is available for download and inspection. If you want cleaner results, keep
+        annotating, retrain, and rerun the full segmentation pass.
     </p>
-    {% if not meshes_ready and (job.status | string not in ["JobStatus.MESHING", "JobStatus.MESHING_QUEUED",
-    "JobStatus.MESH_ERROR"]) %}
-    <p>
-        <button id="mesh-trigger-button" onClick="triggerMeshing()">Generate meshes</button>
-    </p>
-    {% endif %}
-    <p>
-        <a role="button" style="width:100%" href="{{ url_for('download_page', job_id=job.id) }}">
+    <div class="job-card-actions">
+        <a role="button" href="{{ url_for('download_page', job_id=job.id) }}">
             See all downloads
         </a>
-    </p>
-    <hr />
-    <p>
-        There are currently <b>{{ num_annotations }}</b> annotated slices. You can train a model with any
-        number of annotated slices, but we recommend at least 10. (You
-        can always annotate a bit more and then retrain!)
-    </p>
-    <p>
-        <a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">Continue annotating</a>
+        {% if not meshes_ready and (job_status_str not in ["JobStatus.MESHING", "JobStatus.MESHING_QUEUED", "JobStatus.MESH_ERROR"]) %}
+        <button id="mesh-trigger-button" class="secondary" onClick="triggerMeshing()">
+            Generate meshes
+        </button>
+        {% endif %}
+        <a target="_blank" class="secondary outline" href="{{ url_for('annotation_page', job_id=job.id) }}">
+            Annotate more
+        </a>
+    </div>
+    <p class="job-card-meta">
+        There are currently <b>{{ num_annotations }}</b> annotated slices associated with this project.
     </p>
 
     <script>
         triggerMeshing = () => {
-            // Disable the button
-            document.getElementById('mesh-trigger-button').disabled = true;
-            // Set aria-busy to true
-            document.getElementById('mesh-trigger-button').setAttribute('aria-busy', true);
+            document.getElementById("mesh-trigger-button").disabled = true;
+            document.getElementById("mesh-trigger-button").setAttribute("aria-busy", true);
             fetch("/api/job/{{ job.id }}/mesh", {
                 method: "POST",
             })
@@ -43,9 +43,9 @@
                         notyf.error("There was an error starting meshing. Please try again in a few minutes.");
                     }
                 })
-                .catch((error) => {
+                .catch(() => {
                     notyf.error("There was an error starting meshing. Please try again in a few minutes.");
                 });
         };
     </script>
-</article>
+</section>

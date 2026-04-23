@@ -1,11 +1,24 @@
-<article>
-    <header>
-        <h3>Meshes are ready for download!</h3>
-    </header>
-    <p>
-        <a role="button" style="width:100%"
-            href="{{ url_for('download_meshes', job_id=job.id, seg_id=(latest_mesh_seg_id or latest_segmentation_id)) }}">
-            Download (STL)
-        </a>
+<section class="job-card">
+    <div class="job-card-header">
+        <div>
+            <p class="job-kicker">Meshes</p>
+            <h3>Mesh bundle ready</h3>
+        </div>
+        {% if latest_mesh_seg_id %}
+        <span class="job-inline-token">{{ latest_mesh_seg_id }}</span>
+        {% endif %}
+    </div>
+    <p class="job-card-copy">
+        The latest mesh run produced STL output. Download the bundle directly or open the downloads page for the full
+        artifact list.
     </p>
-</article>
+    <div class="job-card-actions">
+        <a role="button"
+            href="{{ url_for('download_meshes', job_id=job.id, seg_id=(latest_mesh_seg_id or latest_segmentation_id)) }}">
+            Download STL bundle
+        </a>
+        <a class="secondary outline" href="{{ url_for('download_page', job_id=job.id) }}">
+            All downloads
+        </a>
+    </div>
+</section>
