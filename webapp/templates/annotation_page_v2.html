@@ -1,0 +1,2291 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Polygon Annotation | ml4paleo</title>
+    <style>
+        :root {
+            --app-bg: #eef3f6;
+            --panel-bg: rgba(255, 255, 255, 0.92);
+            --panel-strong: #ffffff;
+            --line: rgba(29, 47, 62, 0.12);
+            --line-strong: rgba(29, 47, 62, 0.22);
+            --text: #233443;
+            --muted: #677d90;
+            --primary: #1095c1;
+            --primary-strong: #0b7396;
+            --primary-soft: rgba(16, 149, 193, 0.12);
+            --danger: #bf4a58;
+            --danger-soft: rgba(191, 74, 88, 0.12);
+            --positive: #1095c1;
+            --negative: #bf4a58;
+            --shadow: 0 1.2rem 3rem rgba(24, 39, 54, 0.08);
+            --radius: 1.05rem;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            min-height: 100%;
+            margin: 0;
+            padding: 0;
+            background:
+                radial-gradient(circle at top left, rgba(16, 149, 193, 0.09), transparent 22rem),
+                linear-gradient(180deg, #f5f9fb 0%, var(--app-bg) 100%);
+            color: var(--text);
+            font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+        }
+
+        body {
+            min-height: 100vh;
+        }
+
+        a,
+        button,
+        input {
+            font: inherit;
+        }
+
+        button,
+        input[type="range"],
+        input[type="checkbox"] {
+            accent-color: var(--primary);
+        }
+
+        .anno-shell {
+            min-height: 100vh;
+            display: grid;
+            grid-template-rows: auto 1fr;
+            gap: 1rem;
+            padding: 1rem;
+        }
+
+        .anno-topbar {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: 1.1rem 1.2rem;
+            border: 1px solid var(--line);
+            border-radius: calc(var(--radius) + 0.1rem);
+            background: var(--panel-bg);
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(12px);
+        }
+
+        .anno-kicker,
+        .sidebar-kicker {
+            margin: 0 0 0.35rem;
+            color: var(--muted);
+            font-size: 0.76rem;
+            font-weight: 700;
+            letter-spacing: 0.09em;
+            text-transform: uppercase;
+        }
+
+        .anno-title-row {
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+
+        .anno-title-row h1 {
+            margin: 0;
+            font-size: clamp(1.75rem, 4vw, 2.45rem);
+            line-height: 1.02;
+        }
+
+        .anno-job-id {
+            color: var(--muted);
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+
+        .anno-subtitle {
+            margin: 0.55rem 0 0;
+            max-width: 46rem;
+            color: var(--muted);
+            font-size: 1rem;
+            line-height: 1.45;
+        }
+
+        .anno-top-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+            gap: 0.65rem;
+            max-width: 28rem;
+        }
+
+        .ghost-button,
+        .secondary-button,
+        .primary-button,
+        .text-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.4rem;
+            min-height: 2.75rem;
+            padding: 0.72rem 0.95rem;
+            border-radius: 0.72rem;
+            border: 1px solid var(--line-strong);
+            background: var(--panel-strong);
+            color: var(--text);
+            text-decoration: none;
+            font-size: 0.94rem;
+            font-weight: 700;
+            line-height: 1.1;
+            cursor: pointer;
+            transition: border-color 120ms ease, background 120ms ease, color 120ms ease, transform 120ms ease;
+        }
+
+        .ghost-button:hover,
+        .ghost-button:focus-visible,
+        .secondary-button:hover,
+        .secondary-button:focus-visible {
+            border-color: rgba(16, 149, 193, 0.36);
+            color: var(--primary-strong);
+            text-decoration: none;
+            transform: translateY(-1px);
+        }
+
+        .secondary-button {
+            background: var(--panel-strong);
+        }
+
+        .primary-button {
+            border-color: transparent;
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 0.7rem 1.4rem rgba(16, 149, 193, 0.18);
+        }
+
+        .primary-button:hover,
+        .primary-button:focus-visible {
+            background: var(--primary-strong);
+            transform: translateY(-1px);
+        }
+
+        .ghost-button.danger {
+            color: var(--danger);
+            border-color: rgba(191, 74, 88, 0.22);
+            background: white;
+        }
+
+        .ghost-button.danger:hover,
+        .ghost-button.danger:focus-visible {
+            border-color: rgba(191, 74, 88, 0.4);
+            background: var(--danger-soft);
+            color: #8d3240;
+        }
+
+        .ghost-button:disabled,
+        .secondary-button:disabled,
+        .primary-button:disabled,
+        .text-button:disabled {
+            opacity: 0.55;
+            transform: none;
+            cursor: not-allowed;
+        }
+
+        .anno-workspace {
+            min-height: 0;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 21rem;
+            gap: 1rem;
+            align-items: start;
+        }
+
+        .viewer-card,
+        .sidebar-card {
+            border: 1px solid var(--line);
+            border-radius: calc(var(--radius) + 0.1rem);
+            background: var(--panel-bg);
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(12px);
+        }
+
+        .viewer-card {
+            min-height: calc(100vh - 9rem);
+            display: grid;
+            grid-template-rows: auto auto minmax(28rem, 1fr) auto;
+            gap: 0.8rem;
+            padding: 1rem;
+        }
+
+        .viewer-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+        }
+
+        .viewer-toolbar-block {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+        }
+
+        .viewer-toolbar-block--end {
+            justify-content: flex-end;
+        }
+
+        .mode-toggle {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.2rem;
+            border: 1px solid var(--line);
+            border-radius: 0.82rem;
+            background: rgba(248, 251, 253, 0.94);
+            gap: 0.2rem;
+        }
+
+        .mode-toggle button {
+            min-height: 2.45rem;
+            padding: 0.5rem 0.8rem;
+            border: 0;
+            border-radius: 0.62rem;
+            background: transparent;
+            color: var(--muted);
+            font-size: 0.9rem;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .mode-toggle button.is-active {
+            background: var(--panel-strong);
+            color: var(--text);
+            box-shadow: 0 0.5rem 1rem rgba(24, 39, 54, 0.08);
+        }
+
+        .mode-toggle button[data-mode="positive"].is-active {
+            color: var(--primary-strong);
+        }
+
+        .mode-toggle button[data-mode="negative"].is-active {
+            color: #a03e4b;
+        }
+
+        .slice-controls {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.65rem;
+        }
+
+        .slice-controls button {
+            min-width: 5.1rem;
+        }
+
+        .slice-readout {
+            display: grid;
+            gap: 0.08rem;
+        }
+
+        .slice-readout strong,
+        .slice-readout span {
+            font-size: 0.96rem;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+
+        .slice-readout small {
+            color: var(--muted);
+            font-size: 0.84rem;
+            font-weight: 600;
+        }
+
+        .slice-rail {
+            display: grid;
+            gap: 0.55rem;
+        }
+
+        .slice-rail input[type="range"] {
+            width: 100%;
+            margin: 0;
+        }
+
+        .slice-chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem;
+        }
+
+        .slice-chip {
+            min-width: 2.25rem;
+            min-height: 2rem;
+            padding: 0.25rem 0.55rem;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.82);
+            color: var(--muted);
+            font-size: 0.82rem;
+            font-weight: 700;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .slice-chip.is-active {
+            border-color: rgba(16, 149, 193, 0.4);
+            background: var(--primary-soft);
+            color: var(--primary-strong);
+        }
+
+        .slice-chip.has-positive::after,
+        .slice-chip.has-negative::before {
+            content: "";
+            position: absolute;
+            top: 0.18rem;
+            width: 0.42rem;
+            height: 0.42rem;
+            border-radius: 999px;
+        }
+
+        .slice-chip.has-positive::after {
+            right: 0.22rem;
+            background: var(--positive);
+        }
+
+        .slice-chip.has-negative::before {
+            left: 0.22rem;
+            background: var(--negative);
+        }
+
+        .canvas-wrap {
+            position: relative;
+            min-height: 30rem;
+            height: 100%;
+            border-radius: 1rem;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            background:
+                linear-gradient(180deg, rgba(245, 250, 252, 0.9), rgba(232, 239, 243, 0.95)),
+                repeating-linear-gradient(45deg, rgba(35, 52, 67, 0.02), rgba(35, 52, 67, 0.02) 12px, transparent 12px, transparent 24px);
+        }
+
+        #annotation-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            cursor: crosshair;
+        }
+
+        .canvas-wrap.is-panning #annotation-canvas {
+            cursor: grabbing;
+        }
+
+        .canvas-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            background: rgba(239, 245, 248, 0.76);
+            backdrop-filter: blur(2px);
+            transition: opacity 140ms ease;
+        }
+
+        .canvas-overlay[hidden] {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .canvas-overlay-card {
+            display: grid;
+            gap: 0.35rem;
+            padding: 1rem 1.15rem;
+            border: 1px solid var(--line);
+            border-radius: 1rem;
+            background: rgba(255, 255, 255, 0.95);
+            box-shadow: 0 0.85rem 1.85rem rgba(24, 39, 54, 0.1);
+            text-align: center;
+        }
+
+        .canvas-overlay-card strong {
+            font-size: 1rem;
+            line-height: 1.2;
+        }
+
+        .canvas-overlay-card span {
+            color: var(--muted);
+            font-size: 0.92rem;
+            line-height: 1.4;
+        }
+
+        .viewer-footer {
+            display: grid;
+            gap: 0.32rem;
+        }
+
+        .viewer-footer-status,
+        .viewer-footer-help {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.7rem 1rem;
+        }
+
+        .viewer-footer-status span,
+        .viewer-footer-help span {
+            color: var(--muted);
+            font-size: 0.86rem;
+            font-weight: 600;
+            line-height: 1.35;
+        }
+
+        .viewer-footer-help span::before {
+            content: "•";
+            margin-right: 0.35rem;
+            color: rgba(16, 149, 193, 0.45);
+        }
+
+        .viewer-footer-help span:first-child::before {
+            content: "";
+            margin-right: 0;
+        }
+
+        .anno-sidebar {
+            display: grid;
+            gap: 0.85rem;
+        }
+
+        .sidebar-card {
+            display: grid;
+            gap: 0.75rem;
+            padding: 0.95rem 1rem;
+        }
+
+        .sidebar-metric-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.7rem;
+        }
+
+        .sidebar-metric-grid>div {
+            display: grid;
+            gap: 0.18rem;
+            padding: 0.65rem 0.7rem;
+            border: 1px solid var(--line);
+            border-radius: 0.82rem;
+            background: rgba(248, 251, 253, 0.94);
+        }
+
+        .metric-label {
+            color: var(--muted);
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .metric-value {
+            font-size: 0.98rem;
+            font-weight: 700;
+            line-height: 1.25;
+        }
+
+        .sidebar-button-stack {
+            display: grid;
+            gap: 0.55rem;
+        }
+
+        .toggle-row,
+        .range-row {
+            display: grid;
+            gap: 0.42rem;
+            color: var(--text);
+            font-size: 0.92rem;
+            font-weight: 600;
+        }
+
+        .toggle-row {
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+        }
+
+        .range-row input[type="range"] {
+            width: 100%;
+            margin: 0;
+        }
+
+        .sidebar-list {
+            display: grid;
+            gap: 0.6rem;
+            margin: 0;
+        }
+
+        .sidebar-list div {
+            display: grid;
+            gap: 0.18rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid rgba(29, 47, 62, 0.08);
+        }
+
+        .sidebar-list div:last-child {
+            padding-bottom: 0;
+            border-bottom: 0;
+        }
+
+        .sidebar-list dt {
+            color: var(--muted);
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .sidebar-list dd {
+            margin: 0;
+            color: var(--text);
+            font-size: 0.9rem;
+            font-weight: 600;
+            line-height: 1.45;
+            overflow-wrap: anywhere;
+        }
+
+        .shortcut-list {
+            display: grid;
+            gap: 0.45rem;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .shortcut-list li {
+            color: var(--muted);
+            font-size: 0.88rem;
+            font-weight: 600;
+            line-height: 1.45;
+        }
+
+        .shortcut-list strong {
+            color: var(--text);
+            font-weight: 700;
+        }
+
+        .toast {
+            position: fixed;
+            right: 1rem;
+            bottom: 1rem;
+            max-width: min(28rem, calc(100vw - 2rem));
+            padding: 0.85rem 1rem;
+            border-radius: 0.85rem;
+            border: 1px solid var(--line);
+            background: rgba(255, 255, 255, 0.95);
+            color: var(--text);
+            font-size: 0.92rem;
+            font-weight: 700;
+            box-shadow: 0 0.9rem 2rem rgba(24, 39, 54, 0.16);
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(0.75rem);
+            transition: opacity 140ms ease, transform 140ms ease;
+        }
+
+        .toast.is-visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .toast.is-error {
+            border-color: rgba(191, 74, 88, 0.22);
+            background: rgba(255, 248, 249, 0.96);
+            color: #8d3240;
+        }
+
+        @media (max-width: 1180px) {
+            .anno-workspace {
+                grid-template-columns: 1fr;
+            }
+
+            .anno-sidebar {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                align-items: start;
+            }
+        }
+
+        @media (max-width: 860px) {
+            .anno-shell {
+                padding: 0.75rem;
+            }
+
+            .anno-topbar {
+                flex-direction: column;
+            }
+
+            .anno-top-actions {
+                max-width: none;
+                justify-content: flex-start;
+            }
+
+            .viewer-card {
+                min-height: 0;
+                grid-template-rows: auto auto minmax(24rem, 56vh) auto;
+            }
+
+            .anno-sidebar {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 640px) {
+
+            .viewer-toolbar,
+            .viewer-toolbar-block,
+            .viewer-toolbar-block--end {
+                align-items: stretch;
+            }
+
+            .viewer-toolbar-block,
+            .viewer-toolbar-block--end {
+                width: 100%;
+            }
+
+            .mode-toggle,
+            .slice-controls,
+            .viewer-toolbar-block--end {
+                width: 100%;
+            }
+
+            .mode-toggle button,
+            .slice-controls button {
+                flex: 1 1 auto;
+            }
+
+            .slice-controls {
+                justify-content: space-between;
+            }
+
+            .viewer-toolbar-block--end {
+                justify-content: stretch;
+            }
+
+            .viewer-toolbar-block--end .ghost-button {
+                flex: 1 1 calc(50% - 0.4rem);
+            }
+
+            .sidebar-metric-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="anno-shell">
+        <header class="anno-topbar">
+            <div>
+                <p class="anno-kicker">Polygon Annotator v2</p>
+                <div class="anno-title-row">
+                    <h1>{{ job.name }}</h1>
+                    <span class="anno-job-id">Project {{ job.id }}</span>
+                </div>
+                <p class="anno-subtitle">
+                    Polygon annotation
+                </p>
+            </div>
+            <div class="anno-top-actions">
+                <a class="ghost-button" href="{{ url_for('job_page', job_id=job.id) }}">Back to project</a>
+                <a class="ghost-button" href="{{ url_for('annotation_page', job_id=job.id) }}" target="_blank"
+                    rel="noopener">
+                    Legacy annotator
+                </a>
+                <button class="secondary-button" type="button" id="skip-sample-button">Next sample</button>
+                <button class="primary-button" type="button" id="submit-button">Submit annotated slices</button>
+            </div>
+        </header>
+
+        <main class="anno-workspace">
+            <section class="viewer-card">
+                <div class="viewer-toolbar">
+                    <div class="viewer-toolbar-block">
+                        <div class="mode-toggle" aria-label="Polygon mode">
+                            <button type="button" data-mode="positive" class="is-active">Positive</button>
+                            <button type="button" data-mode="negative">Erase / hole</button>
+                        </div>
+                        <div class="slice-controls">
+                            <button type="button" class="ghost-button" id="prev-slice-button">Previous</button>
+                            <div class="slice-readout">
+                                <span id="slice-readout">Slice 1 / 1</span>
+                                <small id="slice-z-readout">Z not set</small>
+                            </div>
+                            <button type="button" class="ghost-button" id="next-slice-button">Next</button>
+                        </div>
+                    </div>
+                    <div class="viewer-toolbar-block viewer-toolbar-block--end">
+                        <button type="button" class="ghost-button" id="undo-vertex-button">Undo vertex</button>
+                        <button type="button" class="ghost-button" id="finish-polygon-button">Finish polygon</button>
+                        <button type="button" class="ghost-button" id="clear-draft-button">Clear draft</button>
+                    </div>
+                </div>
+
+                <div class="slice-rail">
+                    <input id="slice-slider" type="range" min="0" max="0" value="0" />
+                    <div id="slice-chip-row" class="slice-chip-row" aria-label="Slice shortcuts"></div>
+                </div>
+
+                <div id="canvas-wrap" class="canvas-wrap">
+                    <canvas id="annotation-canvas" aria-label="Polygon annotation canvas"></canvas>
+                    <div id="canvas-overlay" class="canvas-overlay">
+                        <div class="canvas-overlay-card">
+                            <strong id="overlay-title">Loading sample…</strong>
+                            <span id="overlay-copy">Preparing the next cutout and prediction overlay.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="viewer-footer">
+                    <div class="viewer-footer-status">
+                        <span id="pointer-readout">x -, y -</span>
+                        <span id="zoom-readout">100%</span>
+                        <span id="prediction-status">Prediction unavailable</span>
+                    </div>
+                    <div class="viewer-footer-help">
+                        <span>Click for precise vertices.</span>
+                        <span>Drag to trace a path.</span>
+                        <span>Click the first point or press Enter to close.</span>
+                        <span>Wheel to zoom. Hold Space and drag to pan.</span>
+                    </div>
+                </div>
+            </section>
+
+            <aside class="anno-sidebar">
+                <section class="sidebar-card">
+                    <p class="sidebar-kicker">Current slice</p>
+                    <div class="sidebar-metric-grid">
+                        <div>
+                            <span class="metric-label">Positive regions</span>
+                            <span class="metric-value" id="positive-count">0</span>
+                        </div>
+                        <div>
+                            <span class="metric-label">Negative regions</span>
+                            <span class="metric-value" id="negative-count">0</span>
+                        </div>
+                        <div>
+                            <span class="metric-label">Draft vertices</span>
+                            <span class="metric-value" id="draft-count">0</span>
+                        </div>
+                        <div>
+                            <span class="metric-label">Selected</span>
+                            <span class="metric-value" id="selected-region-readout">None</span>
+                        </div>
+                        <div>
+                            <span class="metric-label">Prediction</span>
+                            <span class="metric-value" id="prediction-badge">Unavailable</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="sidebar-card">
+                    <p class="sidebar-kicker">Actions</p>
+                    <div class="sidebar-button-stack">
+                        <button type="button" class="secondary-button" id="delete-selected-region-button" disabled>Delete
+                            selected region</button>
+                        <button type="button" class="ghost-button" id="clear-current-mode-button">Clear current mode on
+                            this slice</button>
+                        <button type="button" class="ghost-button danger" id="clear-current-slice-button">Clear
+                            slice</button>
+                        <button type="button" class="ghost-button" id="refresh-prediction-button">Refresh
+                            prediction</button>
+                        <button type="button" class="ghost-button" id="reset-view-button">Reset view</button>
+                    </div>
+                </section>
+
+                <section class="sidebar-card">
+                    <p class="sidebar-kicker">Overlay</p>
+                    <label class="toggle-row">
+                        <span>Show model prediction</span>
+                        <input type="checkbox" id="prediction-visible-toggle" checked />
+                    </label>
+                    <label class="range-row" for="prediction-opacity">
+                        <span>Prediction opacity</span>
+                        <input type="range" id="prediction-opacity" min="0" max="100" value="55" />
+                    </label>
+                    <label class="toggle-row">
+                        <span>Show filled polygons</span>
+                        <input type="checkbox" id="fill-visible-toggle" checked />
+                    </label>
+                </section>
+
+                <section class="sidebar-card">
+                    <p class="sidebar-kicker">Sample metadata</p>
+                    <dl class="sidebar-list">
+                        <div>
+                            <dt>Intensity window</dt>
+                            <dd id="window-readout">-</dd>
+                        </div>
+                        <div>
+                            <dt>Cutout origin</dt>
+                            <dd id="origin-readout">-</dd>
+                        </div>
+                        <div>
+                            <dt>Cutout shape</dt>
+                            <dd id="shape-readout">-</dd>
+                        </div>
+                        <div>
+                            <dt>Padding</dt>
+                            <dd id="padding-readout">-</dd>
+                        </div>
+                        <div>
+                            <dt>Saved as</dt>
+                            <dd>Legacy training PNGs and metadata JSON.</dd>
+                        </div>
+                    </dl>
+                </section>
+
+                <section class="sidebar-card">
+                    <p class="sidebar-kicker">Shortcuts</p>
+                    <ul class="shortcut-list">
+                        <li><strong>Left / Right</strong> move between slices</li>
+                        <li><strong>P</strong> positive polygon mode</li>
+                        <li><strong>N</strong> negative polygon mode</li>
+                        <li><strong>Drag</strong> sample vertices along the cursor path</li>
+                        <li><strong>Right-click</strong> select a region under the cursor</li>
+                        <li><strong>Delete</strong> remove the selected region</li>
+                        <li><strong>Enter</strong> close the current polygon</li>
+                        <li><strong>Backspace</strong> remove the last vertex</li>
+                        <li><strong>Escape</strong> clear the draft polygon</li>
+                        <li><strong>Space + drag</strong> pan the view</li>
+                    </ul>
+                </section>
+            </aside>
+        </main>
+
+        <div id="toast" class="toast" aria-live="polite"></div>
+    </div>
+
+    <script>
+        const JOB_ID = {{ job.id | tojson }};
+        const BASE_URL = "";
+
+        const refs = {
+            canvasWrap: document.getElementById("canvas-wrap"),
+            canvas: document.getElementById("annotation-canvas"),
+            overlay: document.getElementById("canvas-overlay"),
+            overlayTitle: document.getElementById("overlay-title"),
+            overlayCopy: document.getElementById("overlay-copy"),
+            submitButton: document.getElementById("submit-button"),
+            skipSampleButton: document.getElementById("skip-sample-button"),
+            prevSliceButton: document.getElementById("prev-slice-button"),
+            nextSliceButton: document.getElementById("next-slice-button"),
+            sliceSlider: document.getElementById("slice-slider"),
+            sliceChipRow: document.getElementById("slice-chip-row"),
+            undoVertexButton: document.getElementById("undo-vertex-button"),
+            finishPolygonButton: document.getElementById("finish-polygon-button"),
+            clearDraftButton: document.getElementById("clear-draft-button"),
+            deleteSelectedRegionButton: document.getElementById("delete-selected-region-button"),
+            clearCurrentModeButton: document.getElementById("clear-current-mode-button"),
+            clearCurrentSliceButton: document.getElementById("clear-current-slice-button"),
+            refreshPredictionButton: document.getElementById("refresh-prediction-button"),
+            resetViewButton: document.getElementById("reset-view-button"),
+            predictionVisibleToggle: document.getElementById("prediction-visible-toggle"),
+            predictionOpacity: document.getElementById("prediction-opacity"),
+            fillVisibleToggle: document.getElementById("fill-visible-toggle"),
+            pointerReadout: document.getElementById("pointer-readout"),
+            zoomReadout: document.getElementById("zoom-readout"),
+            predictionStatus: document.getElementById("prediction-status"),
+            sliceReadout: document.getElementById("slice-readout"),
+            sliceZReadout: document.getElementById("slice-z-readout"),
+            positiveCount: document.getElementById("positive-count"),
+            negativeCount: document.getElementById("negative-count"),
+            draftCount: document.getElementById("draft-count"),
+            selectedRegionReadout: document.getElementById("selected-region-readout"),
+            predictionBadge: document.getElementById("prediction-badge"),
+            windowReadout: document.getElementById("window-readout"),
+            originReadout: document.getElementById("origin-readout"),
+            shapeReadout: document.getElementById("shape-readout"),
+            paddingReadout: document.getElementById("padding-readout"),
+            toast: document.getElementById("toast"),
+            modeButtons: Array.from(document.querySelectorAll(".mode-toggle button")),
+        };
+
+        const ctx = refs.canvas.getContext("2d");
+
+        const state = {
+            filmstripImage: null,
+            filmstripDataUrl: null,
+            sliceSize: 0,
+            sliceCount: 0,
+            currentSlice: 0,
+            polygonsBySlice: {},
+            currentMode: "positive",
+            draft: {
+                mode: "positive",
+                points: [],
+            },
+            selection: {
+                sliceIndex: null,
+                regionType: null,
+                regionIndex: null,
+            },
+            drag: {
+                isDrawing: false,
+                didSample: false,
+                suppressClickUntil: 0,
+            },
+            sampleMetadata: null,
+            intensityWindow: null,
+            predictionImage: null,
+            predictionAvailable: false,
+            predictionVisible: true,
+            predictionOpacity: 0.55,
+            fillVisible: true,
+            loadingSample: false,
+            loadingPrediction: false,
+            dirty: false,
+            pointer: {
+                canvasX: null,
+                canvasY: null,
+                imageX: null,
+                imageY: null,
+                inside: false,
+            },
+            view: {
+                scale: 1,
+                fitScale: 1,
+                offsetX: 0,
+                offsetY: 0,
+                isPanning: false,
+                panStartX: 0,
+                panStartY: 0,
+                offsetStartX: 0,
+                offsetStartY: 0,
+            },
+            canvasWidth: 0,
+            canvasHeight: 0,
+            devicePixelRatio: window.devicePixelRatio || 1,
+            spacePressed: false,
+            predictRequestId: 0,
+            toastTimer: null,
+        };
+
+        function clamp(value, min, max) {
+            return Math.min(max, Math.max(min, value));
+        }
+
+        function deepClone(value) {
+            return JSON.parse(JSON.stringify(value));
+        }
+
+        function distanceBetweenCanvasPoints(ax, ay, bx, by) {
+            const dx = ax - bx;
+            const dy = ay - by;
+            return Math.sqrt((dx * dx) + (dy * dy));
+        }
+
+        function showToast(message, kind = "info") {
+            refs.toast.textContent = message;
+            refs.toast.classList.toggle("is-error", kind === "error");
+            refs.toast.classList.add("is-visible");
+            if (state.toastTimer) {
+                clearTimeout(state.toastTimer);
+            }
+            state.toastTimer = window.setTimeout(() => {
+                refs.toast.classList.remove("is-visible");
+            }, 2400);
+        }
+
+        function setOverlay(visible, title = "Loading…", copy = "") {
+            refs.overlay.hidden = !visible;
+            refs.overlayTitle.textContent = title;
+            refs.overlayCopy.textContent = copy;
+        }
+
+        function setPredictionStatus(text, available = false) {
+            refs.predictionStatus.textContent = text;
+            refs.predictionBadge.textContent = available ? "Ready" : text;
+            refs.predictionBadge.style.color = available ? "var(--primary-strong)" : "var(--muted)";
+        }
+
+        function createEmptySliceRegions() {
+            return {
+                positive_regions: [],
+                negative_regions: [],
+            };
+        }
+
+        function clearSelection(redraw = false) {
+            state.selection = {
+                sliceIndex: null,
+                regionType: null,
+                regionIndex: null,
+            };
+            if (redraw) {
+                updateUi();
+                draw();
+            }
+        }
+
+        function getSelectedRegionEntry() {
+            const selection = state.selection;
+            if (
+                selection.sliceIndex === null ||
+                selection.regionType === null ||
+                selection.regionIndex === null
+            ) {
+                return null;
+            }
+            const sliceRegions = state.polygonsBySlice[selection.sliceIndex];
+            if (!sliceRegions || !Array.isArray(sliceRegions[selection.regionType])) {
+                return null;
+            }
+            const regions = sliceRegions[selection.regionType];
+            if (
+                selection.regionIndex < 0 ||
+                selection.regionIndex >= regions.length
+            ) {
+                return null;
+            }
+            return {
+                sliceIndex: selection.sliceIndex,
+                regionType: selection.regionType,
+                regionIndex: selection.regionIndex,
+                region: regions[selection.regionIndex],
+                regions,
+            };
+        }
+
+        function hasSelectedRegion() {
+            return getSelectedRegionEntry() !== null;
+        }
+
+        function isRegionSelected(regionType, regionIndex, sliceIndex = state.currentSlice) {
+            const selection = getSelectedRegionEntry();
+            return Boolean(
+                selection &&
+                selection.sliceIndex === sliceIndex &&
+                selection.regionType === regionType &&
+                selection.regionIndex === regionIndex
+            );
+        }
+
+        function pointInPolygon(point, region) {
+            if (!Array.isArray(region) || region.length < 3) {
+                return false;
+            }
+            let inside = false;
+            for (let i = 0, j = region.length - 1; i < region.length; j = i, i += 1) {
+                const xi = Number(region[i][0]);
+                const yi = Number(region[i][1]);
+                const xj = Number(region[j][0]);
+                const yj = Number(region[j][1]);
+                const intersects = ((yi > point.y) !== (yj > point.y))
+                    && (point.x < ((xj - xi) * (point.y - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+                if (intersects) {
+                    inside = !inside;
+                }
+            }
+            return inside;
+        }
+
+        function findRegionAtImagePoint(point, sliceIndex = state.currentSlice) {
+            const sliceRegions = state.polygonsBySlice[sliceIndex];
+            if (!sliceRegions) {
+                return null;
+            }
+
+            for (const regionType of ["negative_regions", "positive_regions"]) {
+                const regions = Array.isArray(sliceRegions[regionType]) ? sliceRegions[regionType] : [];
+                for (let regionIndex = regions.length - 1; regionIndex >= 0; regionIndex -= 1) {
+                    if (pointInPolygon(point, regions[regionIndex])) {
+                        return {
+                            sliceIndex,
+                            regionType,
+                            regionIndex,
+                        };
+                    }
+                }
+            }
+            return null;
+        }
+
+        function selectRegionAtPointer() {
+            if (!state.pointer.inside) {
+                clearSelection(true);
+                return false;
+            }
+            const hit = findRegionAtImagePoint({
+                x: state.pointer.imageX,
+                y: state.pointer.imageY,
+            });
+            if (!hit) {
+                clearSelection(true);
+                return false;
+            }
+            state.selection = hit;
+            updateUi();
+            draw();
+            return true;
+        }
+
+        function getSliceRegions(sliceIndex = state.currentSlice) {
+            if (!state.polygonsBySlice[sliceIndex]) {
+                state.polygonsBySlice[sliceIndex] = createEmptySliceRegions();
+            }
+            return state.polygonsBySlice[sliceIndex];
+        }
+
+        function currentRegions() {
+            const sliceRegions = getSliceRegions(state.currentSlice);
+            return {
+                positive_regions: sliceRegions.positive_regions || [],
+                negative_regions: sliceRegions.negative_regions || [],
+            };
+        }
+
+        function hasUnsavedWork() {
+            return state.dirty || state.draft.points.length > 0;
+        }
+
+        function formatTriplet(value) {
+            return Array.isArray(value) ? value.join(", ") : "-";
+        }
+
+        function updatedSampleMetadata() {
+            if (!state.sampleMetadata) {
+                return null;
+            }
+
+            const metadata = deepClone(state.sampleMetadata);
+            const requestedShape = Array.isArray(metadata.requested_shape_xyz)
+                ? metadata.requested_shape_xyz
+                : [state.sliceSize, state.sliceSize, state.sliceCount];
+            const paddingBefore = Array.isArray(metadata.padding_before_xyz)
+                ? metadata.padding_before_xyz
+                : [0, 0, 0];
+            const cutoutOrigin = Array.isArray(metadata.cutout_origin_xyz)
+                ? metadata.cutout_origin_xyz
+                : [0, 0, 0];
+            const cutoutShape = Array.isArray(metadata.cutout_shape_xyz)
+                ? metadata.cutout_shape_xyz
+                : [requestedShape[0], requestedShape[1], requestedShape[2]];
+
+            const requestedZ = Math.max(1, Number(requestedShape[2] || state.sliceCount || 1));
+            const clampedLocalZ = clamp(state.currentSlice, 0, requestedZ - 1);
+            const actualZ = Number(cutoutShape[2] || requestedZ);
+            const sourceLocalZ = clampedLocalZ - Number(paddingBefore[2] || 0);
+
+            metadata.annotated_local_z_index = clampedLocalZ;
+            metadata.annotated_global_z_index = sourceLocalZ >= 0 && sourceLocalZ < actualZ
+                ? Number(cutoutOrigin[2] || 0) + sourceLocalZ
+                : null;
+            metadata.intensity_window = state.intensityWindow ? deepClone(state.intensityWindow) : undefined;
+            metadata.annotation_ui = "polygon_v2";
+            metadata.annotation_format = "positive_negative_regions_v1";
+            metadata.selected_z_index = clampedLocalZ;
+            metadata.region_mode = state.currentMode;
+
+            return metadata;
+        }
+
+        function imagePointToCanvas(point) {
+            return {
+                x: state.view.offsetX + point[0] * state.view.scale,
+                y: state.view.offsetY + point[1] * state.view.scale,
+            };
+        }
+
+        function canvasPointToImage(canvasX, canvasY) {
+            return {
+                x: (canvasX - state.view.offsetX) / state.view.scale,
+                y: (canvasY - state.view.offsetY) / state.view.scale,
+            };
+        }
+
+        function isInsideImage(point) {
+            return Boolean(
+                state.sliceSize &&
+                point.x >= 0 &&
+                point.y >= 0 &&
+                point.x <= state.sliceSize &&
+                point.y <= state.sliceSize
+            );
+        }
+
+        function updatePointerFromEvent(event) {
+            const rect = refs.canvas.getBoundingClientRect();
+            const canvasX = event.clientX - rect.left;
+            const canvasY = event.clientY - rect.top;
+            const imagePoint = canvasPointToImage(canvasX, canvasY);
+
+            state.pointer.canvasX = canvasX;
+            state.pointer.canvasY = canvasY;
+            state.pointer.imageX = imagePoint.x;
+            state.pointer.imageY = imagePoint.y;
+            state.pointer.inside = isInsideImage(imagePoint);
+
+            if (state.pointer.inside) {
+                refs.pointerReadout.textContent = `x ${Math.round(imagePoint.x)}, y ${Math.round(imagePoint.y)}`;
+            } else {
+                refs.pointerReadout.textContent = "x -, y -";
+            }
+        }
+
+        function resetPointer() {
+            state.pointer.canvasX = null;
+            state.pointer.canvasY = null;
+            state.pointer.imageX = null;
+            state.pointer.imageY = null;
+            state.pointer.inside = false;
+            refs.pointerReadout.textContent = "x -, y -";
+        }
+
+        function resizeCanvas() {
+            const rect = refs.canvasWrap.getBoundingClientRect();
+            state.canvasWidth = rect.width;
+            state.canvasHeight = rect.height;
+            state.devicePixelRatio = window.devicePixelRatio || 1;
+            refs.canvas.width = Math.max(1, Math.round(rect.width * state.devicePixelRatio));
+            refs.canvas.height = Math.max(1, Math.round(rect.height * state.devicePixelRatio));
+            refs.canvas.style.width = `${rect.width}px`;
+            refs.canvas.style.height = `${rect.height}px`;
+            if (state.sliceSize) {
+                resetView(false);
+            } else {
+                draw();
+            }
+        }
+
+        function resetView(redraw = true) {
+            if (!state.sliceSize || !state.canvasWidth || !state.canvasHeight) {
+                return;
+            }
+            const padding = 30;
+            const fitScale = Math.min(
+                (state.canvasWidth - padding * 2) / state.sliceSize,
+                (state.canvasHeight - padding * 2) / state.sliceSize,
+            );
+            state.view.fitScale = Math.max(0.2, fitScale);
+            state.view.scale = state.view.fitScale;
+            state.view.offsetX = (state.canvasWidth - state.sliceSize * state.view.scale) / 2;
+            state.view.offsetY = (state.canvasHeight - state.sliceSize * state.view.scale) / 2;
+            refs.zoomReadout.textContent = `${Math.round(state.view.scale * 100)}%`;
+            if (redraw) {
+                draw();
+            }
+        }
+
+        function drawPolygonPath(context, region) {
+            if (!Array.isArray(region) || region.length < 2) {
+                return false;
+            }
+            context.beginPath();
+            context.moveTo(region[0][0], region[0][1]);
+            for (let i = 1; i < region.length; i += 1) {
+                context.lineTo(region[i][0], region[i][1]);
+            }
+            context.closePath();
+            return true;
+        }
+
+        function drawStoredRegions(context, regions, type) {
+            if (!Array.isArray(regions)) {
+                return;
+            }
+
+            const stroke = type === "positive" ? "rgba(16, 149, 193, 0.95)" : "rgba(191, 74, 88, 0.95)";
+            const fill = type === "positive" ? "rgba(16, 149, 193, 0.26)" : "rgba(191, 74, 88, 0.16)";
+            const lineWidth = 2 / state.view.scale;
+            const dash = type === "negative" ? [7 / state.view.scale, 5 / state.view.scale] : [];
+
+            context.save();
+            context.lineWidth = lineWidth;
+            context.strokeStyle = stroke;
+            context.fillStyle = fill;
+            context.setLineDash(dash);
+
+            for (let regionIndex = 0; regionIndex < regions.length; regionIndex += 1) {
+                const region = regions[regionIndex];
+                if (!drawPolygonPath(context, region)) {
+                    continue;
+                }
+                if (state.fillVisible) {
+                    context.fill();
+                }
+                context.stroke();
+
+                if (isRegionSelected(type, regionIndex)) {
+                    context.save();
+                    context.setLineDash([]);
+                    context.lineWidth = 4.5 / state.view.scale;
+                    context.strokeStyle = "rgba(255, 255, 255, 0.95)";
+                    context.stroke();
+                    context.lineWidth = 2.6 / state.view.scale;
+                    context.strokeStyle = stroke;
+                    context.stroke();
+
+                    for (const point of region) {
+                        context.beginPath();
+                        context.arc(point[0], point[1], 1.5 / state.view.scale, 0, Math.PI * 2);
+                        context.fillStyle = "#ffffff";
+                        context.fill();
+                        context.lineWidth = 0.9 / state.view.scale;
+                        context.strokeStyle = stroke;
+                        context.stroke();
+                    }
+                    context.restore();
+                }
+            }
+
+            context.restore();
+        }
+
+        function drawDraft(context) {
+            if (!state.draft.points.length) {
+                return;
+            }
+
+            const isPositive = state.draft.mode === "positive";
+            const stroke = isPositive ? "rgba(16, 149, 193, 1)" : "rgba(191, 74, 88, 1)";
+            const fill = isPositive ? "rgba(16, 149, 193, 0.18)" : "rgba(191, 74, 88, 0.12)";
+            const lineWidth = 2 / state.view.scale;
+            const radius = 1.75 / state.view.scale;
+
+            context.save();
+            context.lineWidth = lineWidth;
+            context.strokeStyle = stroke;
+            context.fillStyle = fill;
+            context.setLineDash(isPositive ? [] : [7 / state.view.scale, 5 / state.view.scale]);
+
+            context.beginPath();
+            context.moveTo(state.draft.points[0][0], state.draft.points[0][1]);
+            for (let i = 1; i < state.draft.points.length; i += 1) {
+                context.lineTo(state.draft.points[i][0], state.draft.points[i][1]);
+            }
+            if (state.pointer.inside) {
+                context.lineTo(state.pointer.imageX, state.pointer.imageY);
+            }
+            context.stroke();
+
+            if (state.fillVisible && state.draft.points.length >= 3) {
+                context.beginPath();
+                context.moveTo(state.draft.points[0][0], state.draft.points[0][1]);
+                for (let i = 1; i < state.draft.points.length; i += 1) {
+                    context.lineTo(state.draft.points[i][0], state.draft.points[i][1]);
+                }
+                if (state.pointer.inside) {
+                    context.lineTo(state.pointer.imageX, state.pointer.imageY);
+                }
+                context.closePath();
+                context.fill();
+            }
+
+            for (let i = 0; i < state.draft.points.length; i += 1) {
+                const point = state.draft.points[i];
+                context.beginPath();
+                context.arc(point[0], point[1], i === 0 ? radius * 1.2 : radius, 0, Math.PI * 2);
+                context.fillStyle = i === 0 ? "#ffffff" : stroke;
+                context.fill();
+                context.lineWidth = 1 / state.view.scale;
+                context.strokeStyle = stroke;
+                context.stroke();
+            }
+
+            context.restore();
+        }
+
+        function draw() {
+            ctx.setTransform(state.devicePixelRatio, 0, 0, state.devicePixelRatio, 0, 0);
+            ctx.clearRect(0, 0, state.canvasWidth, state.canvasHeight);
+
+            if (!state.filmstripImage || !state.sliceSize) {
+                ctx.fillStyle = "rgba(103, 125, 144, 0.7)";
+                ctx.font = "600 16px \"Avenir Next\", Avenir, sans-serif";
+                ctx.fillText("Loading annotation sample…", 28, 40);
+                return;
+            }
+
+            ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
+            ctx.fillRect(0, 0, state.canvasWidth, state.canvasHeight);
+
+            ctx.save();
+            ctx.translate(state.view.offsetX, state.view.offsetY);
+            ctx.scale(state.view.scale, state.view.scale);
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(
+                state.filmstripImage,
+                0,
+                state.currentSlice * state.sliceSize,
+                state.sliceSize,
+                state.sliceSize,
+                0,
+                0,
+                state.sliceSize,
+                state.sliceSize,
+            );
+
+            if (state.predictionVisible && state.predictionImage) {
+                ctx.save();
+                ctx.globalAlpha = state.predictionOpacity;
+                ctx.drawImage(state.predictionImage, 0, 0, state.sliceSize, state.sliceSize);
+                ctx.restore();
+            }
+
+            const regions = currentRegions();
+            drawStoredRegions(ctx, regions.positive_regions, "positive");
+            drawStoredRegions(ctx, regions.negative_regions, "negative");
+            drawDraft(ctx);
+
+            ctx.save();
+            ctx.lineWidth = 1.2 / state.view.scale;
+            ctx.strokeStyle = "rgba(35, 52, 67, 0.24)";
+            ctx.strokeRect(0, 0, state.sliceSize, state.sliceSize);
+            ctx.restore();
+            ctx.restore();
+        }
+
+        function updateModeButtons() {
+            refs.modeButtons.forEach((button) => {
+                button.classList.toggle("is-active", button.dataset.mode === state.currentMode);
+            });
+        }
+
+        function renderSliceChips() {
+            refs.sliceChipRow.innerHTML = "";
+            for (let index = 0; index < state.sliceCount; index += 1) {
+                const regions = getSliceRegions(index);
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "slice-chip";
+                if (index === state.currentSlice) {
+                    button.classList.add("is-active");
+                }
+                if ((regions.positive_regions || []).length > 0) {
+                    button.classList.add("has-positive");
+                }
+                if ((regions.negative_regions || []).length > 0) {
+                    button.classList.add("has-negative");
+                }
+                button.textContent = `${index + 1}`;
+                button.setAttribute("aria-label", `Select slice ${index + 1}`);
+                button.addEventListener("click", () => {
+                    setCurrentSlice(index);
+                });
+                refs.sliceChipRow.appendChild(button);
+            }
+        }
+
+        function updateSidebar() {
+            const regions = currentRegions();
+            refs.positiveCount.textContent = String((regions.positive_regions || []).length);
+            refs.negativeCount.textContent = String((regions.negative_regions || []).length);
+            refs.draftCount.textContent = String(state.draft.points.length);
+            const selectedRegion = getSelectedRegionEntry();
+            if (selectedRegion && selectedRegion.sliceIndex === state.currentSlice) {
+                const regionLabel = selectedRegion.regionType === "negative_regions" ? "Negative" : "Positive";
+                refs.selectedRegionReadout.textContent = `${regionLabel} #${selectedRegion.regionIndex + 1}`;
+            } else {
+                refs.selectedRegionReadout.textContent = "None";
+            }
+            refs.deleteSelectedRegionButton.disabled = !selectedRegion || selectedRegion.sliceIndex !== state.currentSlice;
+            refs.deleteSelectedRegionButton.textContent = selectedRegion && selectedRegion.sliceIndex === state.currentSlice
+                ? "Delete selected region"
+                : "Delete selected region";
+
+            const metadata = updatedSampleMetadata();
+            if (!metadata) {
+                refs.windowReadout.textContent = "-";
+                refs.originReadout.textContent = "-";
+                refs.shapeReadout.textContent = "-";
+                refs.paddingReadout.textContent = "-";
+                refs.sliceZReadout.textContent = "Z not set";
+                return;
+            }
+
+            const windowInfo = state.intensityWindow || metadata.intensity_window;
+            refs.windowReadout.textContent = windowInfo
+                ? `${Number(windowInfo.window_min).toFixed(1)} → ${Number(windowInfo.window_max).toFixed(1)}`
+                : "-";
+            refs.originReadout.textContent = formatTriplet(metadata.cutout_origin_xyz);
+            refs.shapeReadout.textContent = formatTriplet(metadata.cutout_shape_xyz);
+            const before = Array.isArray(metadata.padding_before_xyz) ? metadata.padding_before_xyz : [0, 0, 0];
+            const after = Array.isArray(metadata.padding_after_xyz) ? metadata.padding_after_xyz : [0, 0, 0];
+            refs.paddingReadout.textContent = `before ${before.join(", ")} / after ${after.join(", ")}`;
+
+            if (metadata.annotated_global_z_index === null || metadata.annotated_global_z_index === undefined) {
+                refs.sliceZReadout.textContent = `Slice ${state.currentSlice + 1} is padded`;
+            } else {
+                refs.sliceZReadout.textContent = `Global Z ${metadata.annotated_global_z_index}`;
+            }
+        }
+
+        function updateSliceControls() {
+            refs.sliceSlider.max = String(Math.max(0, state.sliceCount - 1));
+            refs.sliceSlider.value = String(state.currentSlice);
+            refs.sliceReadout.textContent = `Slice ${state.currentSlice + 1} / ${state.sliceCount}`;
+            refs.prevSliceButton.disabled = state.currentSlice <= 0;
+            refs.nextSliceButton.disabled = state.currentSlice >= state.sliceCount - 1;
+            renderSliceChips();
+        }
+
+        function updateUi() {
+            updateModeButtons();
+            updateSliceControls();
+            updateSidebar();
+            refs.zoomReadout.textContent = `${Math.round(state.view.scale * 100)}%`;
+            refs.predictionVisibleToggle.checked = state.predictionVisible;
+            refs.predictionOpacity.value = String(Math.round(state.predictionOpacity * 100));
+            refs.fillVisibleToggle.checked = state.fillVisible;
+            refs.canvasWrap.classList.toggle("is-panning", state.view.isPanning);
+        }
+
+        function setCurrentMode(mode) {
+            if (mode !== "positive" && mode !== "negative") {
+                return;
+            }
+            if (state.draft.points.length > 0 && state.draft.mode !== mode) {
+                const discard = window.confirm("Discard the current polygon draft and switch modes?");
+                if (!discard) {
+                    updateModeButtons();
+                    return;
+                }
+                clearDraft(false);
+            }
+            state.currentMode = mode;
+            if (!state.draft.points.length) {
+                state.draft.mode = mode;
+            }
+            updateUi();
+            draw();
+        }
+
+        function clearDraft(redraw = true) {
+            state.draft = {
+                mode: state.currentMode,
+                points: [],
+            };
+            state.drag.isDrawing = false;
+            state.drag.didSample = false;
+            state.drag.suppressClickUntil = 0;
+            if (redraw) {
+                updateUi();
+                draw();
+            }
+        }
+
+        function undoVertex() {
+            if (!state.draft.points.length) {
+                return;
+            }
+            state.draft.points.pop();
+            updateUi();
+            draw();
+        }
+
+        function finishPolygon() {
+            if (state.draft.points.length < 3) {
+                showToast("A polygon needs at least three vertices.", "error");
+                return;
+            }
+
+            const sliceRegions = getSliceRegions(state.currentSlice);
+            const key = state.draft.mode === "negative" ? "negative_regions" : "positive_regions";
+            sliceRegions[key].push(state.draft.points.map((point) => [
+                Math.round(point[0] * 100) / 100,
+                Math.round(point[1] * 100) / 100,
+            ]));
+            state.dirty = true;
+            clearSelection(false);
+            clearDraft(false);
+            updateUi();
+            draw();
+        }
+
+        function deleteSelectedRegion() {
+            const selectedRegion = getSelectedRegionEntry();
+            if (!selectedRegion || selectedRegion.sliceIndex !== state.currentSlice) {
+                return;
+            }
+            selectedRegion.regions.splice(selectedRegion.regionIndex, 1);
+            state.dirty = true;
+            clearSelection(false);
+            updateUi();
+            draw();
+        }
+
+        function clearCurrentMode() {
+            const sliceRegions = getSliceRegions(state.currentSlice);
+            const key = state.currentMode === "negative" ? "negative_regions" : "positive_regions";
+            if (!sliceRegions[key].length && !state.draft.points.length) {
+                return;
+            }
+            sliceRegions[key] = [];
+            if (state.selection.sliceIndex === state.currentSlice && state.selection.regionType === key) {
+                clearSelection(false);
+            }
+            clearDraft(false);
+            state.dirty = true;
+            updateUi();
+            draw();
+        }
+
+        function clearCurrentSlice() {
+            const sliceRegions = getSliceRegions(state.currentSlice);
+            const hasRegions = (sliceRegions.positive_regions || []).length || (sliceRegions.negative_regions || []).length || state.draft.points.length;
+            if (!hasRegions) {
+                return;
+            }
+            if (!window.confirm("Clear all polygons on the current slice?")) {
+                return;
+            }
+            state.polygonsBySlice[state.currentSlice] = createEmptySliceRegions();
+            clearSelection(false);
+            clearDraft(false);
+            state.dirty = true;
+            updateUi();
+            draw();
+        }
+
+        function maybeDiscardDraftForSliceChange() {
+            if (!state.draft.points.length) {
+                return true;
+            }
+            const discard = window.confirm("Discard the current polygon draft before changing slices?");
+            if (!discard) {
+                return false;
+            }
+            clearDraft(false);
+            return true;
+        }
+
+        function setCurrentSlice(sliceIndex) {
+            if (!state.sliceCount) {
+                return;
+            }
+            const clamped = clamp(sliceIndex, 0, state.sliceCount - 1);
+            if (clamped === state.currentSlice) {
+                return;
+            }
+            if (!maybeDiscardDraftForSliceChange()) {
+                updateUi();
+                return;
+            }
+            state.currentSlice = clamped;
+            state.predictionImage = null;
+            state.predictionAvailable = false;
+            clearSelection(false);
+            setPredictionStatus("Prediction loading…", false);
+            updateUi();
+            draw();
+            requestPrediction();
+        }
+
+        function maybeAddDraftPointFromPointer(options = {}) {
+            if (!state.pointer.inside) {
+                return false;
+            }
+
+            const {
+                allowAutoClose = false,
+                minCanvasDistance = 0,
+            } = options;
+
+            const imagePoint = [state.pointer.imageX, state.pointer.imageY];
+            if (!state.draft.points.length) {
+                state.draft.mode = state.currentMode;
+            }
+
+            if (allowAutoClose && state.draft.points.length >= 3) {
+                const first = imagePointToCanvas(state.draft.points[0]);
+                if (
+                    distanceBetweenCanvasPoints(
+                        first.x,
+                        first.y,
+                        state.pointer.canvasX,
+                        state.pointer.canvasY,
+                    ) <= 12
+                ) {
+                    finishPolygon();
+                    return "closed";
+                }
+            }
+
+            if (state.draft.points.length && minCanvasDistance > 0) {
+                const last = imagePointToCanvas(state.draft.points[state.draft.points.length - 1]);
+                if (
+                    distanceBetweenCanvasPoints(
+                        last.x,
+                        last.y,
+                        state.pointer.canvasX,
+                        state.pointer.canvasY,
+                    ) < minCanvasDistance
+                ) {
+                    return false;
+                }
+            }
+
+            state.draft.points.push([
+                Math.round(imagePoint[0] * 100) / 100,
+                Math.round(imagePoint[1] * 100) / 100,
+            ]);
+            updateUi();
+            draw();
+            return true;
+        }
+
+        function serializeRegionsForSlice(sliceIndex = state.currentSlice) {
+            const sliceRegions = getSliceRegions(sliceIndex);
+            return {
+                positive_regions: deepClone(sliceRegions.positive_regions || []),
+                negative_regions: deepClone(sliceRegions.negative_regions || []),
+            };
+        }
+
+        function serializeRegionsBySlice() {
+            const payload = {};
+            Object.keys(state.polygonsBySlice).forEach((sliceKey) => {
+                const sliceIndex = Number(sliceKey);
+                payload[sliceKey] = serializeRegionsForSlice(sliceIndex);
+            });
+            return payload;
+        }
+
+        function buildMaskDataUrl() {
+            const offscreen = document.createElement("canvas");
+            offscreen.width = state.sliceSize;
+            offscreen.height = state.sliceSize;
+            const offscreenContext = offscreen.getContext("2d");
+            const regions = currentRegions();
+
+            offscreenContext.clearRect(0, 0, offscreen.width, offscreen.height);
+            offscreenContext.fillStyle = "rgba(255, 0, 0, 1)";
+
+            for (const region of regions.positive_regions || []) {
+                if (!drawPolygonPath(offscreenContext, region)) {
+                    continue;
+                }
+                offscreenContext.fill();
+            }
+
+            offscreenContext.save();
+            offscreenContext.globalCompositeOperation = "destination-out";
+            offscreenContext.fillStyle = "rgba(0, 0, 0, 1)";
+            for (const region of regions.negative_regions || []) {
+                if (!drawPolygonPath(offscreenContext, region)) {
+                    continue;
+                }
+                offscreenContext.fill();
+            }
+            offscreenContext.restore();
+
+            return offscreen.toDataURL("image/png");
+        }
+
+        function buildSubmissionFilmstripDataUrl() {
+            if (!state.filmstripImage || !state.sliceSize) {
+                return null;
+            }
+
+            const middleSlice = Math.floor(state.sliceCount / 2);
+            if (state.currentSlice === middleSlice && state.filmstripDataUrl) {
+                return state.filmstripDataUrl;
+            }
+
+            const offscreen = document.createElement("canvas");
+            offscreen.width = state.sliceSize;
+            offscreen.height = state.sliceSize * state.sliceCount;
+            const offscreenContext = offscreen.getContext("2d");
+            offscreenContext.drawImage(state.filmstripImage, 0, 0);
+            offscreenContext.drawImage(
+                state.filmstripImage,
+                0,
+                state.currentSlice * state.sliceSize,
+                state.sliceSize,
+                state.sliceSize,
+                0,
+                middleSlice * state.sliceSize,
+                state.sliceSize,
+                state.sliceSize,
+            );
+            return offscreen.toDataURL("image/png");
+        }
+
+        function buildPredictPayload() {
+            const metadata = updatedSampleMetadata();
+            const regionPayload = serializeRegionsForSlice();
+            return {
+                image: buildSubmissionFilmstripDataUrl(),
+                sample_metadata: metadata,
+                annotated_local_z_index: metadata ? metadata.annotated_local_z_index : state.currentSlice,
+                intensity_window: state.intensityWindow ? deepClone(state.intensityWindow) : null,
+                positive_regions: regionPayload.positive_regions,
+                negative_regions: regionPayload.negative_regions,
+                polygons: regionPayload,
+            };
+        }
+
+        function buildSubmitPayload() {
+            const metadata = updatedSampleMetadata();
+            const regionPayload = serializeRegionsForSlice();
+            return {
+                image: buildSubmissionFilmstripDataUrl(),
+                mask: buildMaskDataUrl(),
+                sample_metadata: metadata,
+                annotated_local_z_index: metadata ? metadata.annotated_local_z_index : state.currentSlice,
+                intensity_window: state.intensityWindow ? deepClone(state.intensityWindow) : null,
+                positive_regions: regionPayload.positive_regions,
+                negative_regions: regionPayload.negative_regions,
+                polygons: regionPayload,
+                regions_by_slice: serializeRegionsBySlice(),
+            };
+        }
+
+        function blobToDataUrl(blob) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            });
+        }
+
+        function loadImage(url) {
+            return new Promise((resolve, reject) => {
+                const image = new Image();
+                image.onload = () => resolve(image);
+                image.onerror = reject;
+                image.src = url;
+            });
+        }
+
+        async function loadPredictionImage(predictionB64) {
+            if (!predictionB64) {
+                return null;
+            }
+            return loadImage(`data:image/png;base64,${predictionB64}`);
+        }
+
+        async function requestPrediction() {
+            if (!state.sampleMetadata) {
+                state.predictionImage = null;
+                state.predictionAvailable = false;
+                setPredictionStatus("Prediction unavailable", false);
+                draw();
+                return;
+            }
+
+            state.loadingPrediction = true;
+            state.predictRequestId += 1;
+            const requestId = state.predictRequestId;
+            setPredictionStatus("Prediction loading…", false);
+
+            try {
+                const response = await fetch(`${BASE_URL}/api/annotate/${JOB_ID}/data/predict`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(buildPredictPayload()),
+                });
+                const payload = await response.json();
+                if (requestId !== state.predictRequestId) {
+                    return;
+                }
+
+                if (!payload.prediction) {
+                    state.predictionImage = null;
+                    state.predictionAvailable = false;
+                    setPredictionStatus("Prediction unavailable", false);
+                } else {
+                    state.predictionImage = await loadPredictionImage(payload.prediction);
+                    state.predictionAvailable = true;
+                    setPredictionStatus("Prediction ready", true);
+                }
+            } catch (error) {
+                console.error("Failed to load prediction overlay.", error);
+                if (requestId !== state.predictRequestId) {
+                    return;
+                }
+                state.predictionImage = null;
+                state.predictionAvailable = false;
+                setPredictionStatus("Prediction error", false);
+            } finally {
+                if (requestId === state.predictRequestId) {
+                    state.loadingPrediction = false;
+                    updateUi();
+                    draw();
+                }
+            }
+        }
+
+        async function loadNextSample(force = false) {
+            if (!force && hasUnsavedWork()) {
+                const confirmed = window.confirm("Discard the current draft and load a different sample?");
+                if (!confirmed) {
+                    return;
+                }
+            }
+
+            state.loadingSample = true;
+            state.predictRequestId += 1;
+            setOverlay(true, "Loading sample…", "Preparing the next cutout and prediction overlay.");
+            refs.submitButton.disabled = true;
+            refs.skipSampleButton.disabled = true;
+
+            try {
+                const response = await fetch(`${BASE_URL}/api/annotate/${JOB_ID}/images/next?cachebuster=${Math.random()}`);
+                const imageInfoHeader = response.headers.get("zInfo");
+                let imageInfo = {};
+                if (imageInfoHeader) {
+                    try {
+                        imageInfo = JSON.parse(imageInfoHeader);
+                    } catch (error) {
+                        console.warn("Failed to parse zInfo header.", error);
+                    }
+                }
+
+                const blob = await response.blob();
+                const objectUrl = URL.createObjectURL(blob);
+                const image = await loadImage(objectUrl);
+                URL.revokeObjectURL(objectUrl);
+
+                state.filmstripImage = image;
+                state.filmstripDataUrl = await blobToDataUrl(blob);
+                state.sliceSize = image.naturalWidth || image.width;
+                state.sliceCount = Math.max(1, Math.round((image.naturalHeight || image.height) / state.sliceSize));
+                const zInfo = imageInfo.zInfo || {};
+                state.currentSlice = clamp(
+                    Number(zInfo.current ?? Math.floor(state.sliceCount / 2)),
+                    0,
+                    state.sliceCount - 1,
+                );
+                state.polygonsBySlice = {};
+                state.currentMode = "positive";
+                state.draft = {
+                    mode: "positive",
+                    points: [],
+                };
+                clearSelection(false);
+                state.drag = {
+                    isDrawing: false,
+                    didSample: false,
+                    suppressClickUntil: 0,
+                };
+                state.sampleMetadata = imageInfo.sampleMetadata || null;
+                state.intensityWindow = imageInfo.intensityWindow || null;
+                state.predictionImage = null;
+                state.predictionAvailable = false;
+                state.dirty = false;
+                resetPointer();
+                resizeCanvas();
+                updateUi();
+                draw();
+                setPredictionStatus("Prediction loading…", false);
+                await requestPrediction();
+            } catch (error) {
+                console.error("Failed to load next annotation sample.", error);
+                showToast("Unable to load the next sample.", "error");
+            } finally {
+                state.loadingSample = false;
+                refs.submitButton.disabled = false;
+                refs.skipSampleButton.disabled = false;
+                setOverlay(false);
+                updateUi();
+                draw();
+            }
+        }
+
+        function addVertexFromPointer() {
+            maybeAddDraftPointFromPointer({
+                allowAutoClose: true,
+                minCanvasDistance: 4,
+            });
+        }
+
+        function sampleDragVertexFromPointer() {
+            const added = maybeAddDraftPointFromPointer({
+                allowAutoClose: false,
+                minCanvasDistance: state.drag.didSample ? 6 : 0,
+            });
+            if (added === true) {
+                state.drag.didSample = true;
+            }
+        }
+
+        async function submitCurrentAnnotation() {
+            const regionsBySlice = serializeRegionsBySlice();
+            const hasStoredRegions = Object.values(regionsBySlice).some((sliceRegions) => {
+                return ((sliceRegions.positive_regions || []).length + (sliceRegions.negative_regions || []).length) > 0;
+            });
+            if (!(hasStoredRegions || state.draft.points.length)) {
+                showToast("Add at least one polygon before submitting.", "error");
+                return;
+            }
+
+            if (state.draft.points.length) {
+                const closeDraft = window.confirm("Close the current draft polygon before submitting?");
+                if (!closeDraft) {
+                    return;
+                }
+                if (state.draft.points.length < 3) {
+                    showToast("The draft polygon needs at least three vertices.", "error");
+                    return;
+                }
+                finishPolygon();
+            }
+
+            refs.submitButton.disabled = true;
+            refs.skipSampleButton.disabled = true;
+            setOverlay(true, "Submitting sample…", "Rasterizing annotated slices and saving legacy training PNGs.");
+
+            try {
+                const response = await fetch(`${BASE_URL}/api/annotate/${JOB_ID}/data/submit`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(buildSubmitPayload()),
+                });
+                if (!response.ok) {
+                    throw new Error(`Submit failed with ${response.status}`);
+                }
+                const payload = await response.json();
+                const savedCount = Array.isArray(payload.saved_samples) ? payload.saved_samples.length : 1;
+                showToast(`Saved ${savedCount} annotated slice${savedCount === 1 ? "" : "s"}. Loading a new sample.`);
+                await loadNextSample(true);
+            } catch (error) {
+                console.error("Failed to submit annotation.", error);
+                showToast("Unable to submit this slice.", "error");
+            } finally {
+                refs.submitButton.disabled = false;
+                refs.skipSampleButton.disabled = false;
+                setOverlay(false);
+            }
+        }
+
+        refs.modeButtons.forEach((button) => {
+            button.addEventListener("click", () => {
+                setCurrentMode(button.dataset.mode);
+            });
+        });
+
+        refs.prevSliceButton.addEventListener("click", () => setCurrentSlice(state.currentSlice - 1));
+        refs.nextSliceButton.addEventListener("click", () => setCurrentSlice(state.currentSlice + 1));
+        refs.sliceSlider.addEventListener("input", (event) => {
+            setCurrentSlice(Number(event.target.value));
+        });
+        refs.undoVertexButton.addEventListener("click", undoVertex);
+        refs.finishPolygonButton.addEventListener("click", finishPolygon);
+        refs.clearDraftButton.addEventListener("click", () => {
+            if (!state.draft.points.length) {
+                return;
+            }
+            clearDraft();
+        });
+        refs.deleteSelectedRegionButton.addEventListener("click", deleteSelectedRegion);
+        refs.clearCurrentModeButton.addEventListener("click", clearCurrentMode);
+        refs.clearCurrentSliceButton.addEventListener("click", clearCurrentSlice);
+        refs.refreshPredictionButton.addEventListener("click", requestPrediction);
+        refs.resetViewButton.addEventListener("click", () => resetView(true));
+        refs.submitButton.addEventListener("click", submitCurrentAnnotation);
+        refs.skipSampleButton.addEventListener("click", () => loadNextSample(false));
+
+        refs.predictionVisibleToggle.addEventListener("change", (event) => {
+            state.predictionVisible = event.target.checked;
+            draw();
+        });
+
+        refs.predictionOpacity.addEventListener("input", (event) => {
+            state.predictionOpacity = clamp(Number(event.target.value) / 100, 0, 1);
+            draw();
+        });
+
+        refs.fillVisibleToggle.addEventListener("change", (event) => {
+            state.fillVisible = event.target.checked;
+            draw();
+        });
+
+        refs.canvas.addEventListener("mousemove", (event) => {
+            updatePointerFromEvent(event);
+            if (state.view.isPanning) {
+                state.view.offsetX = state.view.offsetStartX + (event.clientX - state.view.panStartX);
+                state.view.offsetY = state.view.offsetStartY + (event.clientY - state.view.panStartY);
+                refs.zoomReadout.textContent = `${Math.round(state.view.scale * 100)}%`;
+                draw();
+            } else if (state.drag.isDrawing && (event.buttons & 1) === 1) {
+                sampleDragVertexFromPointer();
+            } else if (state.draft.points.length) {
+                draw();
+            }
+        });
+
+        refs.canvas.addEventListener("mouseleave", () => {
+            resetPointer();
+            if (!state.view.isPanning) {
+                draw();
+            }
+        });
+
+        refs.canvas.addEventListener("mousedown", (event) => {
+            updatePointerFromEvent(event);
+            state.drag.suppressClickUntil = 0;
+            if (event.button === 1 || state.spacePressed) {
+                event.preventDefault();
+                state.view.isPanning = true;
+                state.view.panStartX = event.clientX;
+                state.view.panStartY = event.clientY;
+                state.view.offsetStartX = state.view.offsetX;
+                state.view.offsetStartY = state.view.offsetY;
+                refs.canvasWrap.classList.add("is-panning");
+            } else if (event.button === 0 && state.pointer.inside) {
+                state.drag.isDrawing = true;
+                state.drag.didSample = false;
+            }
+        });
+
+        window.addEventListener("mouseup", () => {
+            if (state.drag.didSample) {
+                state.drag.suppressClickUntil = window.performance.now() + 240;
+            }
+            state.drag.isDrawing = false;
+            state.drag.didSample = false;
+            state.view.isPanning = false;
+            refs.canvasWrap.classList.remove("is-panning");
+        });
+
+        refs.canvas.addEventListener("click", (event) => {
+            if (window.performance.now() < state.drag.suppressClickUntil) {
+                state.drag.suppressClickUntil = 0;
+                return;
+            }
+            state.drag.suppressClickUntil = 0;
+            if (state.view.isPanning || event.button !== 0 || state.spacePressed) {
+                return;
+            }
+            updatePointerFromEvent(event);
+            addVertexFromPointer();
+        });
+
+        refs.canvas.addEventListener("dblclick", (event) => {
+            event.preventDefault();
+            if (state.draft.points.length >= 3) {
+                finishPolygon();
+            }
+        });
+
+        refs.canvas.addEventListener("contextmenu", (event) => {
+            event.preventDefault();
+            updatePointerFromEvent(event);
+            selectRegionAtPointer();
+        });
+
+        refs.canvas.addEventListener("wheel", (event) => {
+            if (!state.sliceSize) {
+                return;
+            }
+            event.preventDefault();
+            const rect = refs.canvas.getBoundingClientRect();
+            const pointerX = event.clientX - rect.left;
+            const pointerY = event.clientY - rect.top;
+            const imagePoint = canvasPointToImage(pointerX, pointerY);
+            const zoomFactor = event.deltaY < 0 ? 1.1 : 0.9;
+            const nextScale = clamp(state.view.scale * zoomFactor, state.view.fitScale * 0.7, state.view.fitScale * 12);
+            state.view.scale = nextScale;
+            state.view.offsetX = pointerX - imagePoint.x * state.view.scale;
+            state.view.offsetY = pointerY - imagePoint.y * state.view.scale;
+            refs.zoomReadout.textContent = `${Math.round(state.view.scale * 100)}%`;
+            draw();
+        }, { passive: false });
+
+        window.addEventListener("keydown", (event) => {
+            const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : "";
+            if (["input", "textarea", "select", "button"].includes(tag)) {
+                return;
+            }
+
+            if (event.code === "Space") {
+                state.spacePressed = true;
+                return;
+            }
+
+            if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                setCurrentSlice(state.currentSlice - 1);
+                return;
+            }
+
+            if (event.key === "ArrowRight") {
+                event.preventDefault();
+                setCurrentSlice(state.currentSlice + 1);
+                return;
+            }
+
+            if (event.key === "Enter") {
+                event.preventDefault();
+                finishPolygon();
+                return;
+            }
+
+            if (event.key === "Backspace") {
+                event.preventDefault();
+                if (!state.draft.points.length && hasSelectedRegion()) {
+                    deleteSelectedRegion();
+                } else {
+                    undoVertex();
+                }
+                return;
+            }
+
+            if (event.key === "Delete") {
+                event.preventDefault();
+                deleteSelectedRegion();
+                return;
+            }
+
+            if (event.key === "Escape") {
+                event.preventDefault();
+                if (hasSelectedRegion()) {
+                    clearSelection(true);
+                } else {
+                    clearDraft();
+                }
+                return;
+            }
+
+            if (event.key.toLowerCase() === "p") {
+                event.preventDefault();
+                setCurrentMode("positive");
+                return;
+            }
+
+            if (event.key.toLowerCase() === "n") {
+                event.preventDefault();
+                setCurrentMode("negative");
+            }
+        });
+
+        window.addEventListener("keyup", (event) => {
+            if (event.code === "Space") {
+                state.spacePressed = false;
+                state.view.isPanning = false;
+                refs.canvasWrap.classList.remove("is-panning");
+            }
+        });
+
+        window.addEventListener("beforeunload", (event) => {
+            if (!hasUnsavedWork()) {
+                return;
+            }
+            event.preventDefault();
+            event.returnValue = "";
+        });
+
+        window.addEventListener("resize", resizeCanvas);
+
+        resizeCanvas();
+        updateUi();
+        loadNextSample(true);
+    </script>
+</body>
+
+</html>

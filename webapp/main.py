@@ -42,9 +42,16 @@ from ml4paleo.volume_providers.io import (
 
 from config import CONFIG
 from apputils import (
+    annotation_canvas_size_xy,
+    annotation_display_image,
+    annotation_mask_to_rgba,
+    annotation_polygon_source_size_xy,
+    annotation_sample_metadata_for_z,
     build_model_metric_chart_svg,
     count_annotation_samples,
+    extract_annotation_image_slice,
     get_annotation_pairs,
+    get_job_artifact_freshness,
     get_latest_segmentation_id,
     get_latest_mesh_id,
     get_mesh_directory,
@@ -56,6 +63,7 @@ from apputils import (
     create_neuroglancer_link,
     get_png_filmstrip,
     normalize_annotation_volume,
+    rasterize_annotation_regions,
 )
 from segmentrunner import train_job
 
@@ -163,6 +171,191 @@ def build_job_timeline_caption(job: UploadJob, num_annotations: int) -> str:
     if job.status == JobStatus.DONE:
         return "Processing complete."
     return "Project state unavailable."
+
+
+def _payload_field(payload, snake_name: str, camel_name: str | None = None):
+    """
+    Return a payload value, accepting either snake_case or camelCase keys.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if snake_name in payload:
+        return payload.get(snake_name)
+    if camel_name is not None and camel_name in payload:
+        return payload.get(camel_name)
+    return None
+
+
+def _coerce_annotation_regions(payload) -> tuple[list, list]:
+    """
+    Extract positive/negative polygon regions from a submit payload.
+    """
+    polygon_payload = _payload_field(payload, "polygons")
+    if isinstance(polygon_payload, dict):
+        positive_regions = _payload_field(
+            polygon_payload, "positive_regions", "positiveRegions"
+        )
+        negative_regions = _payload_field(
+            polygon_payload, "negative_regions", "negativeRegions"
+        )
+    else:
+        positive_regions = _payload_field(payload, "positive_regions", "positiveRegions")
+        negative_regions = _payload_field(payload, "negative_regions", "negativeRegions")
+
+    if not isinstance(positive_regions, list):
+        positive_regions = []
+    if not isinstance(negative_regions, list):
+        negative_regions = []
+    return positive_regions, negative_regions
+
+
+def _submission_uses_polygon_regions(payload) -> bool:
+    """
+    Return True when a submit payload contains polygon geometry.
+    """
+    positive_regions, negative_regions = _coerce_annotation_regions(payload)
+    polygon_payload = _payload_field(payload, "polygons")
+    regions_by_slice = _payload_field(payload, "regions_by_slice", "regionsBySlice")
+    return (
+        isinstance(polygon_payload, dict)
+        or (isinstance(regions_by_slice, dict) and len(regions_by_slice) > 0)
+        or "positive_regions" in payload
+        or "positiveRegions" in payload
+        or "negative_regions" in payload
+        or "negativeRegions" in payload
+        or len(positive_regions) > 0
+        or len(negative_regions) > 0
+    )
+
+
+def _coerce_regions_by_slice(
+    payload: dict,
+    *,
+    default_slice_index: int,
+) -> dict[int, dict[str, list]]:
+    """
+    Normalize one polygon payload into a per-slice region mapping.
+    """
+    normalized: dict[int, dict[str, list]] = {}
+    regions_by_slice = _payload_field(payload, "regions_by_slice", "regionsBySlice")
+    if isinstance(regions_by_slice, dict):
+        for raw_slice_index, raw_region_payload in regions_by_slice.items():
+            try:
+                slice_index = int(raw_slice_index)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(raw_region_payload, dict):
+                continue
+            positive_regions, negative_regions = _coerce_annotation_regions(
+                raw_region_payload
+            )
+            if positive_regions or negative_regions:
+                normalized[slice_index] = {
+                    "positive_regions": positive_regions,
+                    "negative_regions": negative_regions,
+                }
+    if normalized:
+        return normalized
+
+    positive_regions, negative_regions = _coerce_annotation_regions(payload)
+    if positive_regions or negative_regions:
+        normalized[int(default_slice_index)] = {
+            "positive_regions": positive_regions,
+            "negative_regions": negative_regions,
+        }
+    return normalized
+
+
+def _updated_sample_metadata(payload) -> dict | None:
+    """
+    Return normalized sample metadata with optional z/window updates applied.
+    """
+    sample_metadata = _payload_field(payload, "sample_metadata", "sampleMetadata")
+    if not isinstance(sample_metadata, dict):
+        return None
+
+    annotated_local_z_index = _payload_field(
+        payload,
+        "annotated_local_z_index",
+        "annotatedLocalZIndex",
+    )
+    if annotated_local_z_index is None:
+        annotated_local_z_index = sample_metadata.get("annotated_local_z_index")
+
+    intensity_window = _payload_field(payload, "intensity_window", "intensityWindow")
+    if not isinstance(intensity_window, dict):
+        intensity_window = sample_metadata.get("intensity_window")
+
+    return annotation_sample_metadata_for_z(
+        sample_metadata,
+        annotated_local_z_index=annotated_local_z_index,
+        intensity_window=intensity_window if isinstance(intensity_window, dict) else None,
+    )
+
+
+def _decode_data_url_image(data_url: str) -> Image.Image:
+    """
+    Decode one `data:image/...;base64,...` payload into a PIL image.
+    """
+    encoded = data_url.split(",", 1)[1] if "," in data_url else data_url
+    return Image.open(io.BytesIO(base64.b64decode(encoded)))
+
+
+def _legacy_rgba_image(img_xy: np.ndarray) -> Image.Image:
+    """
+    Convert one grayscale display slice into a legacy-style RGBA PNG.
+    """
+    img_uint8 = np.asarray(img_xy, dtype=np.uint8)
+    rgba = np.zeros((img_uint8.shape[0], img_uint8.shape[1], 4), dtype=np.uint8)
+    rgba[:, :, 0] = img_uint8
+    rgba[:, :, 1] = img_uint8
+    rgba[:, :, 2] = img_uint8
+    rgba[:, :, 3] = 255
+    return Image.fromarray(rgba)
+
+
+def _legacy_rgba_mask(mask_xy: np.ndarray) -> Image.Image:
+    """
+    Convert one binary mask into the legacy red-plus-alpha PNG style.
+    """
+    mask_uint8 = np.asarray(mask_xy, dtype=np.uint8)
+    rgba = np.zeros((mask_uint8.shape[0], mask_uint8.shape[1], 4), dtype=np.uint8)
+    rgba[:, :, 0] = mask_uint8
+    rgba[:, :, 3] = mask_uint8
+    return Image.fromarray(rgba)
+
+
+def _polygon_source_size_xy(
+    payload: dict,
+    sample_metadata: dict | None = None,
+    fallback_size_xy: tuple[int, int] | None = None,
+) -> tuple[int, int]:
+    """
+    Resolve the XY coordinate space used by polygon points in one payload.
+    """
+    polygon_payload = _payload_field(payload, "polygons")
+    canvas_size_xy = _payload_field(payload, "canvas_size_xy", "canvasSizeXY")
+    if canvas_size_xy is None:
+        canvas_size_xy = _payload_field(
+            payload,
+            "displayed_image_shape_xy",
+            "displayedImageShapeXY",
+        )
+    if canvas_size_xy is None and isinstance(polygon_payload, dict):
+        canvas_size_xy = _payload_field(
+            polygon_payload, "canvas_size_xy", "canvasSizeXY"
+        )
+    if canvas_size_xy is None and isinstance(polygon_payload, dict):
+        canvas_size_xy = _payload_field(
+            polygon_payload,
+            "displayed_image_shape_xy",
+            "displayedImageShapeXY",
+        )
+    return annotation_polygon_source_size_xy(
+        sample_metadata,
+        canvas_size_xy=canvas_size_xy,
+        fallback_size_xy=fallback_size_xy,
+    )
 
 
 class ML4PaleoWebApplication:
@@ -361,30 +554,36 @@ class ML4PaleoWebApplication:
                     voxel_count_localized /= 1024
                 voxel_count_localized = f"{voxel_count_localized:.2f} {unit}V"
 
-            latest_segmentation_id = get_latest_segmentation_id(job)
-            latest_mesh_seg_id = get_latest_mesh_id(job)
-            has_been_annotated = job.status not in [
-                JobStatus.PENDING,
-                JobStatus.UPLOADING,
-                JobStatus.UPLOADED,
-                JobStatus.CONVERTING,
-                JobStatus.CONVERTED,
-                JobStatus.CONVERT_ERROR,
-            ]
+            artifact_freshness = get_job_artifact_freshness(job)
+            latest_segmentation_id = artifact_freshness["latest_segmentation_id"]
+            latest_mesh_seg_id = artifact_freshness["latest_mesh_seg_id"]
+            segmentation_output_available = latest_segmentation_id is not None
+            mesh_output_available = latest_mesh_seg_id is not None
+            segmentation_stale = bool(artifact_freshness["segmentation_stale"])
+            mesh_stale = bool(artifact_freshness["mesh_stale"])
+            has_been_annotated = num_annotations > 0
             annotation_ready = job.status not in [
                 JobStatus.CONVERTING,
                 JobStatus.UPLOADING,
                 JobStatus.UPLOADED,
                 JobStatus.CONVERT_ERROR,
             ]
-            segmentation_ready = job.status in [
-                JobStatus.SEGMENTED,
+            segmentation_ready = segmentation_output_available and not segmentation_stale
+            meshes_ready = mesh_output_available and not mesh_stale
+            can_trigger_segmentation = has_been_annotated and job.status not in [
+                JobStatus.TRAINING_QUEUED,
+                JobStatus.TRAINING,
+                JobStatus.SEGMENTING,
+            ]
+            can_trigger_meshing = latest_segmentation_id is not None and (
+                not segmentation_stale
+            ) and job.status not in [
                 JobStatus.MESHING_QUEUED,
                 JobStatus.MESHING,
-                JobStatus.MESH_ERROR,
-                JobStatus.MESHED,
             ]
-            meshes_ready = latest_mesh_seg_id is not None
+            should_offer_mesh_regeneration = can_trigger_meshing and (
+                (not mesh_output_available) or mesh_stale
+            )
             show_annotation_cta = (
                 (annotation_ready and job.status != JobStatus.SEGMENTING)
                 or (
@@ -408,6 +607,7 @@ class ML4PaleoWebApplication:
                 neuroglancer_link=create_neuroglancer_link(job),
                 latest_segmentation_id=latest_segmentation_id,
                 latest_mesh_seg_id=latest_mesh_seg_id,
+                latest_model_id=artifact_freshness["latest_model_id"],
                 show_annotation_cta=show_annotation_cta,
                 is_converting=job.status == JobStatus.CONVERTING,
                 is_training=job.status in [
@@ -430,6 +630,18 @@ class ML4PaleoWebApplication:
                 annotation_ready=annotation_ready,
                 segmentation_ready=segmentation_ready,
                 meshes_ready=meshes_ready,
+                segmentation_output_available=segmentation_output_available,
+                mesh_output_available=mesh_output_available,
+                segmentation_stale=segmentation_stale,
+                segmentation_stale_reasons=artifact_freshness["segmentation_stale_reasons"],
+                mesh_stale=mesh_stale,
+                mesh_stale_reasons=artifact_freshness["mesh_stale_reasons"],
+                latest_model_annotation_count=artifact_freshness["latest_model_annotation_count"],
+                latest_segmentation_annotation_count=artifact_freshness["latest_segmentation_annotation_count"],
+                latest_mesh_annotation_count=artifact_freshness["latest_mesh_annotation_count"],
+                can_trigger_segmentation=can_trigger_segmentation,
+                can_trigger_meshing=can_trigger_meshing,
+                should_offer_mesh_regeneration=should_offer_mesh_regeneration,
             )
 
         ############################
@@ -496,63 +708,189 @@ class ML4PaleoWebApplication:
                 )
 
             # Get the annotation data from the request:
-            data = request.get_json()
-            if not data or "image" not in data or "mask" not in data:
+            data = request.get_json() or {}
+            uses_polygon_payload = _submission_uses_polygon_regions(data)
+            image_b64 = _payload_field(data, "image")
+            mask_b64 = _payload_field(data, "mask")
+            sample_metadata = _updated_sample_metadata(data)
+            if not uses_polygon_payload and (image_b64 is None or mask_b64 is None):
                 return (
                     jsonify(
                         {"status": "error", "message": "{mask, image} not provided"}
                     ),
                     400,
                 )
-            image_b64 = data.get("image", None)
-            mask_b64 = data.get("mask", None)
-            sample_metadata = data.get("sample_metadata", None)
-            if image_b64 is None or mask_b64 is None:
+            if uses_polygon_payload and image_b64 is None and sample_metadata is None:
                 return (
                     jsonify(
-                        {"status": "error", "message": "{mask, image} not provided"}
+                        {
+                            "status": "error",
+                            "message": "polygon submission requires image or sample_metadata",
+                        }
                     ),
                     400,
                 )
-            # Decode the image and mask:
+            default_slice_index = (
+                int(sample_metadata["annotated_local_z_index"])
+                if isinstance(sample_metadata, dict)
+                else int(CONFIG.annotation_shape_xyz[2] // 2)
+            )
+            polygon_regions_by_slice = _coerce_regions_by_slice(
+                data,
+                default_slice_index=default_slice_index,
+            )
+            if uses_polygon_payload and len(polygon_regions_by_slice) == 0:
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "polygon submission requires at least one region",
+                        }
+                    ),
+                    400,
+                )
+
             tic = str(int(time.time()))
             _prefix = pathlib.Path(CONFIG.training_directory) / job.id
-            fname = _prefix / (CONFIG.training_img_prefix + tic + ".png")
-            # Make sure the directory exists:
-            fname.parent.mkdir(parents=True, exist_ok=True)
-            img = Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1])))
-            # Crop the image to the annotation shape:
-            img_height = img.height
-            img_slices = CONFIG.annotation_shape_xyz[2]
-            middle_slice = img_slices // 2
-
-            img = img.crop(
-                (
-                    # Left Up Right Lower
-                    0,
-                    int((img_height / img_slices) * middle_slice),
-                    int(img.width),
-                    int((img_height / img_slices) * (middle_slice + 1)),
-                )
+            _prefix.mkdir(parents=True, exist_ok=True)
+            decoded_image = (
+                _decode_data_url_image(str(image_b64)) if image_b64 is not None else None
             )
-            img.save(fname)
-            mfname = _prefix / (CONFIG.training_seg_prefix + tic + ".png")
-            Image.open(io.BytesIO(base64.b64decode(mask_b64.split(",")[1]))).resize(
-                CONFIG.annotation_shape_xyz[:-1]
-            ).save(mfname)
-            if isinstance(sample_metadata, dict):
-                meta_fname = _prefix / (CONFIG.training_meta_prefix + tic + ".json")
-                metadata_to_save = dict(sample_metadata)
-                metadata_to_save.update(
+            response_mask_path: pathlib.Path | None = None
+            saved_samples: list[dict[str, str | int | None]] = []
+
+            if uses_polygon_payload:
+                if sample_metadata is None and len(polygon_regions_by_slice) > 1:
+                    keep_slice_index = (
+                        default_slice_index
+                        if default_slice_index in polygon_regions_by_slice
+                        else sorted(polygon_regions_by_slice.keys())[0]
+                    )
+                    polygon_regions_by_slice = {
+                        keep_slice_index: polygon_regions_by_slice[keep_slice_index]
+                    }
+
+                for slice_index in sorted(polygon_regions_by_slice):
+                    slice_regions = polygon_regions_by_slice[slice_index]
+                    sample_metadata_for_slice = (
+                        annotation_sample_metadata_for_z(
+                            sample_metadata,
+                            annotated_local_z_index=slice_index,
+                            intensity_window=sample_metadata.get("intensity_window"),
+                        )
+                        if sample_metadata is not None
+                        else None
+                    )
+                    if sample_metadata_for_slice is not None:
+                        training_image = annotation_display_image(
+                            job.id,
+                            sample_metadata_for_slice,
+                        )
+                    elif decoded_image is not None:
+                        training_image = extract_annotation_image_slice(decoded_image)
+                    else:
+                        return (
+                            jsonify(
+                                {
+                                    "status": "error",
+                                    "message": "image or sample_metadata is required",
+                                }
+                            ),
+                            400,
+                        )
+
+                    suffix = (
+                        tic
+                        if len(polygon_regions_by_slice) == 1
+                        else f"{tic}-z{int(slice_index):02d}"
+                    )
+                    fname = _prefix / (CONFIG.training_img_prefix + suffix + ".png")
+                    mfname = _prefix / (CONFIG.training_seg_prefix + suffix + ".png")
+                    training_image.save(fname)
+
+                    mask_np = rasterize_annotation_regions(
+                        annotation_canvas_size_xy(),
+                        positive_regions=slice_regions["positive_regions"],
+                        negative_regions=slice_regions["negative_regions"],
+                        source_size_xy=_polygon_source_size_xy(
+                            data,
+                            sample_metadata_for_slice or sample_metadata,
+                            fallback_size_xy=training_image.size,
+                        ),
+                    )
+                    annotation_mask_to_rgba(mask_np).save(mfname)
+                    if response_mask_path is None or slice_index == default_slice_index:
+                        response_mask_path = mfname
+
+                    metadata_to_save = dict(sample_metadata_for_slice or {})
+                    metadata_to_save.update(
+                        {
+                            "timestamp": suffix,
+                            "job_id": job.id,
+                            "training_image_filename": fname.name,
+                            "training_mask_filename": mfname.name,
+                            "annotation_source": "polygon_v2",
+                        }
+                    )
+                    meta_fname = _prefix / (CONFIG.training_meta_prefix + suffix + ".json")
+                    with open(meta_fname, "w") as f:
+                        json.dump(metadata_to_save, f)
+                    saved_samples.append(
+                        {
+                            "slice_index": int(slice_index),
+                            "image_filename": fname.name,
+                            "mask_filename": mfname.name,
+                            "metadata_filename": meta_fname.name,
+                        }
+                    )
+            else:
+                fname = _prefix / (CONFIG.training_img_prefix + tic + ".png")
+                mfname = _prefix / (CONFIG.training_seg_prefix + tic + ".png")
+                if decoded_image is not None:
+                    training_image = extract_annotation_image_slice(
+                        decoded_image,
+                        sample_metadata,
+                    )
+                elif sample_metadata is not None:
+                    training_image = annotation_display_image(job.id, sample_metadata)
+                else:
+                    return (
+                        jsonify(
+                            {
+                                "status": "error",
+                                "message": "image or sample_metadata is required",
+                            }
+                        ),
+                        400,
+                    )
+                training_image.save(fname)
+                _decode_data_url_image(str(mask_b64)).resize(
+                    CONFIG.annotation_shape_xyz[:-1]
+                ).save(mfname)
+                response_mask_path = mfname
+                meta_fname = None
+                if sample_metadata is not None:
+                    meta_fname = _prefix / (CONFIG.training_meta_prefix + tic + ".json")
+                    metadata_to_save = dict(sample_metadata)
+                    metadata_to_save.update(
+                        {
+                            "timestamp": tic,
+                            "job_id": job.id,
+                            "training_image_filename": fname.name,
+                            "training_mask_filename": mfname.name,
+                            "annotation_source": "legacy_raster",
+                        }
+                    )
+                    with open(meta_fname, "w") as f:
+                        json.dump(metadata_to_save, f)
+                saved_samples.append(
                     {
-                        "timestamp": tic,
-                        "job_id": job.id,
-                        "training_image_filename": fname.name,
-                        "training_mask_filename": mfname.name,
+                        "slice_index": int(default_slice_index),
+                        "image_filename": fname.name,
+                        "mask_filename": mfname.name,
+                        "metadata_filename": meta_fname.name if meta_fname else None,
                     }
                 )
-                with open(meta_fname, "w") as f:
-                    json.dump(metadata_to_save, f)
 
             # If the job is CONVERTING, don't change the status (we need the
             # daemon to continue to run the conversion process.)
@@ -566,11 +904,12 @@ class ML4PaleoWebApplication:
             # Return the mask as a base64 encoded string:
             # Return zeros the same size as the image:
             f = io.BytesIO()
-            Image.open(mfname).save(f, format="PNG")
+            Image.open(response_mask_path).save(f, format="PNG")
             f.seek(0)
             return jsonify(
                 {
                     "prediction": base64.b64encode(f.read()).decode("utf-8"),
+                    "saved_samples": saved_samples,
                 }
             )
 
@@ -584,28 +923,26 @@ class ML4PaleoWebApplication:
                 )
 
             # Get the annotation data from the request:
-            data = request.get_json()
-            if not data or "image" not in data:
+            data = request.get_json() or {}
+            sample_metadata = _updated_sample_metadata(data)
+            image_b64 = _payload_field(data, "image")
+            if sample_metadata is None and image_b64 is None:
                 return (
-                    jsonify({"status": "error", "message": "image not provided"}),
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "image or sample_metadata not provided",
+                        }
+                    ),
                     400,
                 )
-            image_b64 = data.get("image", None)
-            sample_metadata = data.get("sample_metadata", None)
-            if isinstance(sample_metadata, dict):
+            if sample_metadata is not None:
                 img_np = load_annotation_source_slice(job.id, sample_metadata)
             else:
-                img_np = np.array(
-                    Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1])))
+                display_image = extract_annotation_image_slice(
+                    _decode_data_url_image(str(image_b64))
                 )
-                slice_count = CONFIG.annotation_shape_xyz[2]
-                middle_slice = slice_count // 2
-                start_y = int((img_np.shape[0] / slice_count) * middle_slice)
-                img_np = img_np[
-                    start_y : start_y + CONFIG.annotation_shape_xyz[1],
-                    :,
-                    0,
-                ].T
+                img_np = np.asarray(display_image)[:, :, 0].T
             # Load the latest model if it exists:
             modelpath = get_latest_segmentation_model(job)
             if modelpath is None:
@@ -619,14 +956,10 @@ class ML4PaleoWebApplication:
             annos = np.array(
                 Image.fromarray(mask).resize(CONFIG.annotation_shape_xyz[:-1])
             )
-            # Convert to RGBA with annos as R:
-            mask = np.zeros((annos.shape[0], annos.shape[1], 4), dtype=np.uint8)
-            mask[:, :, 0] = annos
-            mask[:, :, 3] = annos
 
             # Return the mask as a base64 encoded string:
             f = io.BytesIO()
-            Image.fromarray(mask).save(f, format="PNG")
+            annotation_mask_to_rgba(annos).save(f, format="PNG")
             f.seek(0)
             return jsonify({"prediction": base64.b64encode(f.read()).decode("utf-8")})
 
@@ -640,6 +973,17 @@ class ML4PaleoWebApplication:
 
             job = job_manager.get_job(job_id)
             return render_template("annotation_page.html", job=job)
+
+        @self.app.route("/job/annotate-v2/<job_id>", methods=["GET"])
+        def annotation_page_v2(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            return render_template("annotation_page_v2.html", job=job)
 
         @self.app.route("/job/<job_id>/annotations", methods=["GET"])
         def annotation_gallery(job_id):

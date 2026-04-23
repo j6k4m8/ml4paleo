@@ -1,24 +1,63 @@
-<section class="job-card">
+<section class="job-card{% if mesh_stale %} job-card--warning{% endif %}">
     <div class="job-card-header">
         <div>
             <p class="job-kicker">Meshes</p>
-            <h3>Mesh bundle ready</h3>
+            <h3>{% if mesh_stale %}Mesh bundle stale{% else %}Mesh bundle ready{% endif %}</h3>
         </div>
-        {% if latest_mesh_seg_id %}
-        <span class="job-inline-token">{{ latest_mesh_seg_id }}</span>
-        {% endif %}
+        <div class="job-card-token-group">
+            {% if latest_mesh_seg_id %}
+            <span class="job-inline-token">{{ latest_mesh_seg_id }}</span>
+            {% endif %}
+            {% if mesh_stale %}
+            <span class="job-inline-token job-inline-token--warning">Stale</span>
+            {% endif %}
+        </div>
     </div>
     <p class="job-card-copy">
+        {% if mesh_stale and segmentation_stale %}
+        The stored STL bundle predates the current annotations because the underlying segmentation is stale. Refresh
+        segmentation first, then regenerate meshes.
+        {% elif mesh_stale %}
+        A newer segmentation exists for this project, so the stored STL bundle is behind the latest model output.
+        {% else %}
         The latest mesh run produced STL output. Download the bundle directly or open the downloads page for the full
         artifact list.
+        {% endif %}
     </p>
+    {% if mesh_stale_reasons %}
+    <ul class="job-stale-list">
+        {% for reason in mesh_stale_reasons %}
+        <li>{{ reason }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
     <div class="job-card-actions">
         <a role="button"
             href="{{ url_for('download_meshes', job_id=job.id, seg_id=(latest_mesh_seg_id or latest_segmentation_id)) }}">
-            Download STL bundle
+            {% if mesh_stale %}Download last STL bundle{% else %}Download STL bundle{% endif %}
         </a>
         <a class="secondary outline" href="{{ url_for('download_page', job_id=job.id) }}">
             All downloads
         </a>
+        {% if mesh_stale and segmentation_stale %}
+        {% if can_trigger_segmentation %}
+        <button id="mesh-rerun-segmentation-button" onclick="triggerSegmentation('mesh-rerun-segmentation-button')">
+            Rerun segmentation
+        </button>
+        {% endif %}
+        {% elif mesh_stale and can_trigger_meshing %}
+        <button id="mesh-regenerate-button" class="secondary" onclick="triggerMeshing('mesh-regenerate-button')">
+            Regenerate meshes
+        </button>
+        {% endif %}
     </div>
+    {% if mesh_stale %}
+    <p class="job-card-meta">
+        {% if latest_mesh_annotation_count is not none and latest_mesh_annotation_count != num_annotations %}
+        This bundle reflects <b>{{ latest_mesh_annotation_count }}</b> labeled slice{% if latest_mesh_annotation_count != 1 %}s{% endif %}; the project now has <b>{{ num_annotations }}</b>.
+        {% else %}
+        This stored mesh bundle remains downloadable, but it is not current.
+        {% endif %}
+    </p>
+    {% endif %}
 </section>

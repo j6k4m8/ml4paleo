@@ -19,7 +19,7 @@ import numpy as np
 from flask import request
 from config import CONFIG
 from job import UploadJob
-from PIL import Image
+from PIL import Image, ImageDraw
 from ml4paleo.volume_providers import ZarrVolumeProvider
 
 MODEL_METRIC_SECTION_KEYS = (
@@ -135,6 +135,7 @@ def load_annotation_source_slice(
     The returned slice uses the native volume XY orientation used by the batch
     segmenter. Browser-displayed annotation PNGs are the transpose of this.
     """
+    sample_metadata = annotation_sample_metadata_for_z(sample_metadata)
     requested_x, requested_y, _requested_z = tuple(
         int(v) for v in sample_metadata["requested_shape_xyz"]
     )
@@ -168,6 +169,284 @@ def load_annotation_source_slice(
         ] = raw_slice
 
     return source_slice
+
+
+def annotation_sample_metadata_for_z(
+    sample_metadata: dict[str, Any],
+    annotated_local_z_index: Optional[int] = None,
+    intensity_window: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """
+    Return a copied sample-metadata payload with optional z/window updates.
+    """
+    metadata = dict(sample_metadata)
+
+    requested_shape_xyz = metadata.get("requested_shape_xyz", [0, 0, 1])
+    padding_before_xyz = metadata.get("padding_before_xyz", [0, 0, 0])
+    cutout_origin_xyz = metadata.get("cutout_origin_xyz", [0, 0, 0])
+    cutout_shape_xyz = metadata.get("cutout_shape_xyz", [0, 0, 0])
+
+    try:
+        requested_z = max(1, int(requested_shape_xyz[2]))
+    except (IndexError, TypeError, ValueError):
+        requested_z = 1
+
+    if annotated_local_z_index is None:
+        annotated_local_z_index = metadata.get("annotated_local_z_index", requested_z // 2)
+
+    try:
+        clamped_local_z_index = max(
+            0,
+            min(int(annotated_local_z_index), requested_z - 1),
+        )
+    except (TypeError, ValueError):
+        clamped_local_z_index = requested_z // 2
+
+    metadata["annotated_local_z_index"] = clamped_local_z_index
+
+    try:
+        actual_z = int(cutout_shape_xyz[2])
+    except (IndexError, TypeError, ValueError):
+        actual_z = 0
+    try:
+        z_pad_before = int(padding_before_xyz[2])
+    except (IndexError, TypeError, ValueError):
+        z_pad_before = 0
+    try:
+        z_start = int(cutout_origin_xyz[2])
+    except (IndexError, TypeError, ValueError):
+        z_start = 0
+
+    source_local_z_index = clamped_local_z_index - z_pad_before
+    if 0 <= source_local_z_index < actual_z:
+        metadata["annotated_global_z_index"] = z_start + source_local_z_index
+    else:
+        metadata["annotated_global_z_index"] = None
+
+    if isinstance(intensity_window, dict):
+        metadata["intensity_window"] = dict(intensity_window)
+
+    return metadata
+
+
+def annotation_canvas_size_xy() -> tuple[int, int]:
+    """
+    Return the XY pixel dimensions used by saved training artifacts.
+    """
+    return int(CONFIG.annotation_shape_xyz[0]), int(CONFIG.annotation_shape_xyz[1])
+
+
+def _coerce_size_xy(value: Any) -> Optional[tuple[int, int]]:
+    """
+    Convert a payload value into a positive integer XY size tuple when possible.
+    """
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        width = int(value[0])
+        height = int(value[1])
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def annotation_polygon_source_size_xy(
+    sample_metadata: Optional[dict[str, Any]] = None,
+    *,
+    canvas_size_xy: Optional[Any] = None,
+    fallback_size_xy: Optional[tuple[int, int]] = None,
+) -> tuple[int, int]:
+    """
+    Resolve polygon-coordinate space into a concrete XY size.
+    """
+    for candidate in (
+        canvas_size_xy,
+        sample_metadata.get("displayed_image_shape_xy") if isinstance(sample_metadata, dict) else None,
+        sample_metadata.get("canvas_size_xy") if isinstance(sample_metadata, dict) else None,
+        sample_metadata.get("display_size_xy") if isinstance(sample_metadata, dict) else None,
+        fallback_size_xy,
+        annotation_canvas_size_xy(),
+    ):
+        size_xy = _coerce_size_xy(candidate)
+        if size_xy is not None:
+            return size_xy
+    return annotation_canvas_size_xy()
+
+
+def normalize_annotation_slice(
+    img_xy: np.ndarray,
+    intensity_window: Optional[dict[str, Any]] = None,
+) -> np.ndarray:
+    """
+    Normalize one raw XY slice into an 8-bit display image.
+    """
+    img_xy = np.asarray(img_xy)
+    if img_xy.size == 0:
+        return np.zeros(img_xy.shape, dtype=np.uint8)
+
+    if isinstance(intensity_window, dict):
+        try:
+            window_min = float(intensity_window["window_min"])
+            window_max = float(intensity_window["window_max"])
+        except (KeyError, TypeError, ValueError):
+            window_min = None
+            window_max = None
+        if window_min is not None and window_max is not None and window_max > window_min:
+            img_float = img_xy.astype(np.float32, copy=False)
+            normalized = np.clip(
+                (img_float - window_min) / (window_max - window_min),
+                0.0,
+                1.0,
+            )
+            return (normalized * 255.0).round().astype(np.uint8)
+
+    normalized, _stats = normalize_annotation_volume(img_xy[np.newaxis, ...])
+    return normalized[0]
+
+
+def annotation_display_image(
+    job_or_id: Union[UploadJob, str],
+    sample_metadata: dict[str, Any],
+) -> Image.Image:
+    """
+    Build the saved display PNG for one annotated slice from raw volume data.
+    """
+    sample_metadata = annotation_sample_metadata_for_z(sample_metadata)
+    display_xy = normalize_annotation_slice(
+        load_annotation_source_slice(job_or_id, sample_metadata),
+        intensity_window=sample_metadata.get("intensity_window"),
+    )
+    return annotation_image_to_rgba(display_xy.T)
+
+
+def annotation_image_to_rgba(image: Any) -> Image.Image:
+    """
+    Convert a grayscale or RGB annotation image into the legacy RGBA layout.
+    """
+    if isinstance(image, Image.Image):
+        image = image.copy()
+    else:
+        image = Image.fromarray(np.asarray(image))
+
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+
+    target_size = annotation_canvas_size_xy()
+    if image.size != target_size:
+        image = image.resize(target_size)
+    return image
+
+
+def annotation_mask_to_rgba(mask: Any) -> Image.Image:
+    """
+    Convert a 2D mask into the legacy red-plus-alpha RGBA PNG layout.
+    """
+    if isinstance(mask, Image.Image):
+        mask_arr = np.asarray(mask)
+    else:
+        mask_arr = np.asarray(mask)
+
+    if mask_arr.ndim == 3:
+        mask_arr = mask_arr[:, :, 0]
+    if mask_arr.dtype != np.uint8:
+        mask_arr = np.clip(mask_arr, 0, 255).astype(np.uint8)
+
+    target_width, target_height = annotation_canvas_size_xy()
+    if mask_arr.shape[:2] != (target_height, target_width):
+        mask_arr = np.asarray(
+            Image.fromarray(mask_arr).resize((target_width, target_height))
+        )
+
+    rgba = np.zeros((mask_arr.shape[0], mask_arr.shape[1], 4), dtype=np.uint8)
+    rgba[:, :, 0] = mask_arr
+    rgba[:, :, 3] = mask_arr
+    return Image.fromarray(rgba, mode="RGBA")
+
+
+def extract_annotation_image_slice(
+    image: Image.Image,
+    sample_metadata: Optional[dict[str, Any]] = None,
+) -> Image.Image:
+    """
+    Extract the selected slice from a legacy filmstrip image and return RGBA.
+    """
+    image = image.copy()
+    target_width, target_height = annotation_canvas_size_xy()
+    local_z_index = 0
+    if isinstance(sample_metadata, dict):
+        local_z_index = int(
+            annotation_sample_metadata_for_z(sample_metadata)["annotated_local_z_index"]
+        )
+    else:
+        local_z_index = CONFIG.annotation_shape_xyz[2] // 2
+
+    if image.height > 0 and image.height != target_height:
+        slice_count = max(1, int(round(image.height / max(image.width, 1))))
+        if image.height % slice_count == 0:
+            slice_height = image.height // slice_count
+            if slice_height > 0:
+                clamped_local_z_index = max(0, min(local_z_index, slice_count - 1))
+                top = slice_height * clamped_local_z_index
+                bottom = min(image.height, top + slice_height)
+                if bottom > top:
+                    image = image.crop((0, top, image.width, bottom))
+
+    return annotation_image_to_rgba(image)
+
+
+def rasterize_annotation_regions(
+    size_xy: tuple[int, int],
+    positive_regions: list[Any],
+    negative_regions: Optional[list[Any]] = None,
+    source_size_xy: Optional[tuple[int, int]] = None,
+) -> np.ndarray:
+    """
+    Rasterize polygon regions into a legacy 8-bit annotation mask.
+    """
+    width, height = int(size_xy[0]), int(size_xy[1])
+    if width <= 0 or height <= 0:
+        return np.zeros((0, 0), dtype=np.uint8)
+
+    if source_size_xy is None:
+        source_width, source_height = width, height
+    else:
+        source_width, source_height = int(source_size_xy[0]), int(source_size_xy[1])
+        if source_width <= 0 or source_height <= 0:
+            source_width, source_height = width, height
+    scale_x = width / source_width
+    scale_y = height / source_height
+
+    image = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(image)
+
+    def _coerce_region(region: Any) -> list[tuple[float, float]]:
+        if not isinstance(region, (list, tuple)):
+            return []
+        points: list[tuple[float, float]] = []
+        for point in region:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                continue
+            try:
+                px = float(point[0]) * scale_x
+                py = float(point[1]) * scale_y
+            except (TypeError, ValueError):
+                continue
+            points.append((px, py))
+        return points
+
+    for region in positive_regions or []:
+        points = _coerce_region(region)
+        if len(points) >= 3:
+            draw.polygon(points, fill=255)
+
+    for region in negative_regions or []:
+        points = _coerce_region(region)
+        if len(points) >= 3:
+            draw.polygon(points, fill=0)
+
+    return np.asarray(image, dtype=np.uint8)
 
 
 def normalize_model_id(model_id: str) -> str:
@@ -323,6 +602,50 @@ def _annotation_timestamp(annotation_img_path: pathlib.Path) -> Optional[int]:
     return int(timestamp) if timestamp.isdigit() else None
 
 
+def _annotation_sample_id_from_image_path(annotation_img_path: pathlib.Path) -> str:
+    """
+    Return the logical sample identifier from one saved annotation image path.
+    """
+    stem = annotation_img_path.stem
+    prefix = CONFIG.training_img_prefix
+    return stem.removeprefix(prefix) if stem.startswith(prefix) else stem
+
+
+def _annotation_sample_id_from_image_filename(filename: str) -> str:
+    """
+    Return the logical sample identifier from one saved annotation image filename.
+    """
+    return _annotation_sample_id_from_image_path(pathlib.Path(filename))
+
+
+def get_annotation_sample_ids(job_or_id: Union[UploadJob, str]) -> list[str]:
+    """
+    Return logical sample IDs for all current annotation pairs of a job.
+    """
+    return [
+        _annotation_sample_id_from_image_path(img_path)
+        for img_path, _seg_path, _meta_path in get_annotation_pairs(job_or_id)
+    ]
+
+
+def _training_sample_ids(training_samples: list[Any]) -> list[str]:
+    """
+    Return normalized sample IDs from stored model training-sample metadata.
+    """
+    sample_ids: list[str] = []
+    for sample in training_samples:
+        if not isinstance(sample, dict):
+            continue
+        sample_id = sample.get("sample_id")
+        if isinstance(sample_id, str) and sample_id:
+            sample_ids.append(sample_id)
+            continue
+        image_filename = sample.get("image_filename")
+        if isinstance(image_filename, str) and image_filename:
+            sample_ids.append(_annotation_sample_id_from_image_filename(image_filename))
+    return sample_ids
+
+
 def _annotation_count_for_model(job_or_id: Union[UploadJob, str], model_id: str) -> int:
     """
     Count annotation samples that would have existed when a timestamped model was trained.
@@ -475,6 +798,7 @@ def get_model_runs(
             training_samples_value = metadata.get("training_samples")
             if isinstance(training_samples_value, list):
                 training_samples = training_samples_value
+        training_sample_ids = _training_sample_ids(training_samples)
 
         if annotation_count is None:
             annotation_count = _annotation_count_for_model(job_or_id, model_id)
@@ -510,6 +834,7 @@ def get_model_runs(
                 "annotation_count": annotation_count,
                 "metadata_backed_sample_count": metadata_backed_sample_count,
                 "training_samples_count": len(training_samples) if len(training_samples) > 0 else None,
+                "training_sample_ids": training_sample_ids,
                 "model_class": model_class or "Unknown model",
                 "rf_kwargs": rf_kwargs,
                 "metrics": metrics,
@@ -544,6 +869,190 @@ def get_model_runs(
             }
         )
     return runs
+
+
+def _current_annotation_sample_ids(job_or_id: Union[UploadJob, str]) -> list[str]:
+    """
+    Return sorted, normalized current annotation sample IDs for a job.
+    """
+    return sorted(
+        sample_id
+        for sample_id in get_annotation_sample_ids(job_or_id)
+        if isinstance(sample_id, str) and sample_id
+    )
+
+
+def _model_run_annotation_count(
+    job_or_id: Union[UploadJob, str],
+    model_run: Optional[dict[str, Any]],
+    model_id: Optional[str] = None,
+) -> Optional[int]:
+    """
+    Return the annotation count associated with one model run when known.
+    """
+    if isinstance(model_run, dict):
+        annotation_count = model_run.get("annotation_count")
+        if isinstance(annotation_count, int):
+            return annotation_count
+    if model_id:
+        return _annotation_count_for_model(job_or_id, model_id)
+    return None
+
+
+def _model_run_matches_annotation_ids(
+    job_or_id: Union[UploadJob, str],
+    model_run: Optional[dict[str, Any]],
+    current_sample_ids: list[str],
+    model_id: Optional[str] = None,
+) -> bool:
+    """
+    Return True when a model run exactly records the current annotation set.
+    """
+    if isinstance(model_run, dict):
+        training_sample_ids = model_run.get("training_sample_ids")
+        if isinstance(training_sample_ids, list):
+            normalized_training_ids = sorted(
+                sample_id
+                for sample_id in training_sample_ids
+                if isinstance(sample_id, str) and sample_id
+            )
+            if len(normalized_training_ids) > 0:
+                return normalized_training_ids == current_sample_ids
+
+        annotation_count = model_run.get("annotation_count")
+        if isinstance(annotation_count, int):
+            return annotation_count == len(current_sample_ids)
+    if model_id:
+        return _annotation_count_for_model(job_or_id, model_id) == len(current_sample_ids)
+    return False
+
+
+def get_job_artifact_freshness(
+    job_or_id: Union[UploadJob, str],
+) -> dict[str, Any]:
+    """
+    Return freshness information for the latest segmentation and mesh outputs.
+    """
+    current_sample_ids = _current_annotation_sample_ids(job_or_id)
+    current_annotation_count = len(current_sample_ids)
+    model_runs = get_model_runs(job_or_id)
+    runs_by_model_id = {
+        normalize_model_id(str(run.get("model_id", ""))): run
+        for run in model_runs
+        if isinstance(run, dict) and run.get("model_id")
+    }
+
+    latest_model_run = model_runs[0] if len(model_runs) > 0 else None
+    latest_model_id = (
+        normalize_model_id(str(latest_model_run.get("model_id")))
+        if isinstance(latest_model_run, dict)
+        else None
+    )
+
+    latest_segmentation_id = get_latest_segmentation_id(job_or_id)
+    latest_segmentation_model_id = (
+        normalize_model_id(latest_segmentation_id) if latest_segmentation_id else None
+    )
+    latest_segmentation_run = (
+        runs_by_model_id.get(latest_segmentation_model_id)
+        if latest_segmentation_model_id
+        else None
+    )
+
+    latest_mesh_seg_id = get_latest_mesh_id(job_or_id)
+    latest_mesh_model_id = (
+        normalize_model_id(latest_mesh_seg_id) if latest_mesh_seg_id else None
+    )
+    latest_mesh_run = runs_by_model_id.get(latest_mesh_model_id) if latest_mesh_model_id else None
+
+    latest_model_annotation_count = _model_run_annotation_count(
+        job_or_id,
+        latest_model_run,
+        latest_model_id,
+    )
+    latest_segmentation_annotation_count = _model_run_annotation_count(
+        job_or_id,
+        latest_segmentation_run,
+        latest_segmentation_model_id,
+    )
+    latest_mesh_annotation_count = _model_run_annotation_count(
+        job_or_id,
+        latest_mesh_run,
+        latest_mesh_model_id,
+    )
+
+    segmentation_matches_current_annotations = _model_run_matches_annotation_ids(
+        job_or_id,
+        latest_segmentation_run,
+        current_sample_ids,
+        latest_segmentation_model_id,
+    )
+    segmentation_has_newer_model = bool(
+        latest_model_id
+        and latest_segmentation_model_id
+        and latest_model_id != latest_segmentation_model_id
+    )
+
+    segmentation_stale_reasons: list[str] = []
+    if latest_segmentation_id:
+        if segmentation_has_newer_model:
+            segmentation_stale_reasons.append(
+                "A newer trained model is available and has not been segmented yet."
+            )
+        if current_annotation_count > 0 and not segmentation_matches_current_annotations:
+            if isinstance(latest_segmentation_annotation_count, int) and (
+                latest_segmentation_annotation_count < current_annotation_count
+            ):
+                segmentation_stale_reasons.append(
+                    "New annotation samples were added after this segmentation was generated."
+                )
+            else:
+                segmentation_stale_reasons.append(
+                    "This segmentation does not reflect the current annotation set."
+                )
+
+    segmentation_stale = len(segmentation_stale_reasons) > 0
+
+    mesh_matches_latest_segmentation = bool(
+        latest_mesh_seg_id
+        and latest_segmentation_id
+        and latest_mesh_seg_id == latest_segmentation_id
+    )
+    mesh_stale_reasons: list[str] = []
+    if latest_mesh_seg_id:
+        if not mesh_matches_latest_segmentation and latest_segmentation_id:
+            if segmentation_stale:
+                mesh_stale_reasons.append(
+                    "The latest mesh predates the current annotations. Rerun segmentation before meshing again."
+                )
+            else:
+                mesh_stale_reasons.append(
+                    "A newer segmentation is available and has not been meshed yet."
+                )
+        elif segmentation_stale:
+            mesh_stale_reasons.append(
+                "The latest mesh was generated from a stale segmentation."
+            )
+
+    return {
+        "current_annotation_count": current_annotation_count,
+        "current_sample_ids": current_sample_ids,
+        "latest_model_id": latest_model_id,
+        "latest_model_annotation_count": latest_model_annotation_count,
+        "latest_segmentation_id": latest_segmentation_id,
+        "latest_segmentation_annotation_count": latest_segmentation_annotation_count,
+        "latest_segmentation_model_id": latest_segmentation_model_id,
+        "latest_mesh_seg_id": latest_mesh_seg_id,
+        "latest_mesh_annotation_count": latest_mesh_annotation_count,
+        "latest_mesh_model_id": latest_mesh_model_id,
+        "segmentation_matches_current_annotations": segmentation_matches_current_annotations,
+        "segmentation_has_newer_model": segmentation_has_newer_model,
+        "segmentation_stale": segmentation_stale,
+        "segmentation_stale_reasons": segmentation_stale_reasons,
+        "mesh_matches_latest_segmentation": mesh_matches_latest_segmentation,
+        "mesh_stale": len(mesh_stale_reasons) > 0,
+        "mesh_stale_reasons": mesh_stale_reasons,
+    }
 
 
 def _empty_metric_chart_svg(
@@ -718,28 +1227,28 @@ def build_model_metric_chart_svg(
     )
 
 
-def get_mesh_directory(job: UploadJob, seg_id: str) -> pathlib.Path:
+def get_mesh_directory(job_or_id: Union[UploadJob, str], seg_id: str) -> pathlib.Path:
     """
     Return the directory that stores mesh artifacts for a segmentation.
     """
-    return _mesh_directory(job) / seg_id
+    return _mesh_directory(job_or_id) / seg_id
 
 
 def get_mesh_files(
-    job: UploadJob,
+    job_or_id: Union[UploadJob, str],
     seg_id: str,
     pattern: str,
 ) -> list[pathlib.Path]:
     """
     Return sorted mesh artifact files for a segmentation.
     """
-    mesh_path = get_mesh_directory(job, seg_id)
+    mesh_path = get_mesh_directory(job_or_id, seg_id)
     if not mesh_path.exists():
         return []
     return sorted(path for path in mesh_path.glob(pattern) if path.is_file())
 
 
-def get_latest_segmentation_id(job: UploadJob) -> Optional[str]:
+def get_latest_segmentation_id(job_or_id: Union[UploadJob, str]) -> Optional[str]:
     """
     Get the latest segmentation for the job, or None if it doesn't exist.
 
@@ -750,14 +1259,15 @@ def get_latest_segmentation_id(job: UploadJob) -> Optional[str]:
     that should be used.
 
     Arguments:
-        job (UploadJob): The job for which to get the latest segmentation.
+        job_or_id (UploadJob | str): The job or job ID for which to get the
+            latest segmentation.
 
     Returns:
         str: The name of the latest segmentation file, like "1234.zarr".
         None: If no segmentation file exists for the job.
 
     """
-    zarr_path = _segmentation_directory(job)
+    zarr_path = _segmentation_directory(job_or_id)
     if not zarr_path.exists():
         return None
     segmentation_paths = sorted(zarr_path.glob("*.zarr"))
@@ -767,7 +1277,9 @@ def get_latest_segmentation_id(job: UploadJob) -> Optional[str]:
     return segmentation_path.name
 
 
-def get_latest_segmentation_model(job: UploadJob) -> Optional[pathlib.Path]:
+def get_latest_segmentation_model(
+    job_or_id: Union[UploadJob, str],
+) -> Optional[pathlib.Path]:
     """
     Get the latest segmentation model for the job.
 
@@ -783,27 +1295,28 @@ def get_latest_segmentation_model(job: UploadJob) -> Optional[pathlib.Path]:
     directory doesn't exist.
 
     Arguments:
-        job (UploadJob): The job for which to get the latest model.
+        job_or_id (UploadJob | str): The job or job ID for which to get the
+            latest model.
 
     Returns:
         pathlib.Path: The path to the latest segmentation model.
         None: if no model has been made yet.
 
     """
-    model_runs = get_model_runs(job)
+    model_runs = get_model_runs(job_or_id)
     if len(model_runs) == 0:
         return None
     return model_runs[0]["model_path"]
 
 
-def get_latest_mesh_id(job: UploadJob) -> Optional[str]:
+def get_latest_mesh_id(job_or_id: Union[UploadJob, str]) -> Optional[str]:
     """
     Get the latest meshed segmentation ID for the job, or None if absent.
 
     Meshes are stored under the meshed directory as one subdirectory per
     segmentation timestamp/ID.
     """
-    mesh_path = _mesh_directory(job)
+    mesh_path = _mesh_directory(job_or_id)
     if not mesh_path.exists():
         return None
 
@@ -814,15 +1327,17 @@ def get_latest_mesh_id(job: UploadJob) -> Optional[str]:
     return None
 
 
-def get_latest_mesh_obj_path(job: UploadJob) -> Optional[pathlib.Path]:
+def get_latest_mesh_obj_path(
+    job_or_id: Union[UploadJob, str],
+) -> Optional[pathlib.Path]:
     """
     Return one representative OBJ mesh for the latest valid mesh output.
     """
-    latest_mesh_id = get_latest_mesh_id(job)
+    latest_mesh_id = get_latest_mesh_id(job_or_id)
     if latest_mesh_id is None:
         return None
 
-    obj_files = get_mesh_files(job, latest_mesh_id, "*.combined.obj")
+    obj_files = get_mesh_files(job_or_id, latest_mesh_id, "*.combined.obj")
     if len(obj_files) == 0:
         return None
 

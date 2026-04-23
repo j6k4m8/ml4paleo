@@ -1,17 +1,34 @@
-<section class="job-card job-card--wide">
+<section class="job-card job-card--wide{% if segmentation_stale %} job-card--warning{% endif %}">
     <div class="job-card-header">
         <div>
             <p class="job-kicker">Outputs</p>
-            <h3>Segmentation ready</h3>
+            <h3>{% if segmentation_stale %}Segmentation stale{% else %}Segmentation ready{% endif %}</h3>
         </div>
-        {% if latest_segmentation_id %}
-        <span class="job-inline-token">{{ latest_segmentation_id }}</span>
-        {% endif %}
+        <div class="job-card-token-group">
+            {% if latest_segmentation_id %}
+            <span class="job-inline-token">{{ latest_segmentation_id }}</span>
+            {% endif %}
+            {% if segmentation_stale %}
+            <span class="job-inline-token job-inline-token--warning">Stale</span>
+            {% endif %}
+        </div>
     </div>
     <p class="job-card-copy">
+        {% if segmentation_stale %}
+        A segmentation is available for download and inspection, but it is behind the current project state. Rerun
+        segmentation to bring downstream outputs back in sync.
+        {% else %}
         The latest segmentation is available for download and inspection. If you want cleaner results, keep
         annotating, retrain, and rerun the full segmentation pass.
+        {% endif %}
     </p>
+    {% if segmentation_stale_reasons %}
+    <ul class="job-stale-list">
+        {% for reason in segmentation_stale_reasons %}
+        <li>{{ reason }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
     <div class="job-card-actions">
         <a role="button" class="secondary outline" href="{{ url_for('models_page', job_id=job.id) }}">
             Model history
@@ -19,36 +36,28 @@
         <a role="button" href="{{ url_for('download_page', job_id=job.id) }}">
             See all downloads
         </a>
-        {% if not meshes_ready and (job_status_str not in ["JobStatus.MESHING", "JobStatus.MESHING_QUEUED", "JobStatus.MESH_ERROR"]) %}
-        <button id="mesh-trigger-button" class="secondary" onClick="triggerMeshing()">
-            Generate meshes
+        {% if segmentation_stale %}
+        {% if can_trigger_segmentation %}
+        <button id="segmentation-stale-trigger-button" onclick="triggerSegmentation('segmentation-stale-trigger-button')">
+            Rerun segmentation
         </button>
         {% endif %}
-        <a target="_blank" class="secondary outline" href="{{ url_for('annotation_page', job_id=job.id) }}">
+        {% elif should_offer_mesh_regeneration %}
+        <button id="mesh-trigger-button" class="secondary" onClick="triggerMeshing('mesh-trigger-button')">
+            {% if mesh_output_available and mesh_stale %}Regenerate meshes{% else %}Generate meshes{% endif %}
+        </button>
+        {% endif %}
+        <a target="_blank" class="secondary outline" href="{{ url_for('annotation_page_v2', job_id=job.id) }}">
             Annotate more
         </a>
     </div>
     <p class="job-card-meta">
+        {% if segmentation_stale and latest_segmentation_annotation_count is not none and latest_segmentation_annotation_count != num_annotations %}
+        This segmentation used <b>{{ latest_segmentation_annotation_count }}</b> labeled slice{% if latest_segmentation_annotation_count != 1 %}s{% endif %}; the project now has <b>{{ num_annotations }}</b>.
+        {% elif segmentation_stale %}
+        This stored segmentation remains available to inspect, but it is not current.
+        {% else %}
         There are currently <b>{{ num_annotations }}</b> annotated slices associated with this project.
+        {% endif %}
     </p>
-
-    <script>
-        triggerMeshing = () => {
-            document.getElementById("mesh-trigger-button").disabled = true;
-            document.getElementById("mesh-trigger-button").setAttribute("aria-busy", true);
-            fetch("/api/job/{{ job.id }}/mesh", {
-                method: "POST",
-            })
-                .then((response) => {
-                    if (response.ok) {
-                        notyf.success("Meshing started. You will receive an email when it is complete.");
-                    } else {
-                        notyf.error("There was an error starting meshing. Please try again in a few minutes.");
-                    }
-                })
-                .catch(() => {
-                    notyf.error("There was an error starting meshing. Please try again in a few minutes.");
-                });
-        };
-    </script>
 </section>
