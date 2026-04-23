@@ -185,6 +185,33 @@ class ML4PaleoWebApplication:
                 )
             return jsonify({"job_id": job_id, "status": str(job.status)})
 
+        @self.app.route("/api/job/<job_id>/rename", methods=["POST"])
+        def rename_job(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            request_json = request.get_json() or {}
+            new_name = (request_json.get("name") or "").strip()
+            if not new_name:
+                return (
+                    jsonify({"status": "error", "message": "name is required"}),
+                    400,
+                )
+
+            try:
+                job_manager.get_job(job_id)
+            except IndexError:
+                return (
+                    jsonify({"status": "error", "message": f"Job ID {job_id} not found."}),
+                    400,
+                )
+
+            job_manager.update_job(job_id, update={"name": new_name})
+            return jsonify({"status": "success", "job_id": job_id, "name": new_name})
+
         @self.app.route("/api/job/status/upload-complete", methods=["POST"])
         def upload_complete():
             job_id = (request.get_json() or {}).get("job_id", None)
