@@ -80,7 +80,10 @@ def segment_volume_to_zarr(
         _prog = _progfn  # type: ignore
 
     # for xs, ys, zs in chunks_to_segment
-    _ = Parallel(n_jobs=parallel)(
+    # Use threads here rather than process workers. The chunk jobs share a live
+    # volume provider and model object, and process-based backends require all
+    # of those arguments to round-trip through pickling.
+    _ = Parallel(n_jobs=parallel, prefer="threads")(
         delayed(segment_chunk_and_write)(xs, ys, zs, vol_provider, segmenter, seg_path)
         for xs, ys, zs in _prog(chunks_to_segment)
     )

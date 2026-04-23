@@ -19,14 +19,16 @@ class ChunkedMesher:
         volume_provider: VolumeProvider,
         mesh_path: pathlib.Path,
         chunk_size: Tuple[int, int, int],
-        mip: int = 1,
+        downsample_factor: int = 1,
     ):
         self.volume_provider = volume_provider
         self.mesh_path = mesh_path
         self.mesh_path.mkdir(parents=True, exist_ok=True)
         self.chunk_size = chunk_size
         self._ids = None
-        self.mip = mip
+        if downsample_factor < 1:
+            raise ValueError("downsample_factor must be at least 1")
+        self.downsample_factor = int(downsample_factor)
 
     def _add_id(self, obj_id: int):
         if self._ids is None:
@@ -57,11 +59,14 @@ class ChunkedMesher:
 
     def mesh_chunk(self, xs, ys, zs):
         labels = self.volume_provider[xs[0] : xs[1], ys[0] : ys[1], zs[0] : zs[1]]
-        m = 2**self.mip
-        max_pooled_labels = skimage.measure.block_reduce(labels, (m, m, m), np.max)
+        m = self.downsample_factor
+        if m > 1:
+            mesh_labels = skimage.measure.block_reduce(labels, (m, m, m), np.max)
+        else:
+            mesh_labels = labels
 
         # Don't mesh empty chunks:
-        if np.max(max_pooled_labels) == 0:
+        if np.max(mesh_labels) == 0:
             return
 
         mesher = Mesher((m, m, m))
@@ -71,7 +76,7 @@ class ChunkedMesher:
         #     ::m,
         # ],
         mesher.mesh(
-            max_pooled_labels,
+            mesh_labels,
             close=False,
         )
         meshes = {}

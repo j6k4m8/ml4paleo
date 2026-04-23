@@ -176,7 +176,8 @@ def get_random_tile(
 def get_random_zyx_subvolume(
     volume_provider,
     subvolume_size_zyx: Tuple[int, int, int],
-) -> np.ndarray:
+    return_metadata: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict]:
     """
     Get a random subvolume from the volume.
 
@@ -186,6 +187,8 @@ def get_random_zyx_subvolume(
 
     Returns:
         np.ndarray: A random subvolume from the volume.
+        tuple[np.ndarray, dict]: The subvolume and metadata if
+            `return_metadata` is True.
 
     """
     requested_z, requested_y, requested_x = subvolume_size_zyx
@@ -206,21 +209,47 @@ def get_random_zyx_subvolume(
         z : z + actual_z,
     ].swapaxes(0, 2)
 
-    if subvolume.shape == subvolume_size_zyx:
-        return subvolume
-
     z_pad = requested_z - subvolume.shape[0]
     y_pad = requested_y - subvolume.shape[1]
     x_pad = requested_x - subvolume.shape[2]
-    return np.pad(
-        subvolume,
-        (
-            (z_pad // 2, z_pad - (z_pad // 2)),
-            (y_pad // 2, y_pad - (y_pad // 2)),
-            (x_pad // 2, x_pad - (x_pad // 2)),
-        ),
-        mode="constant",
-    )
+    z_pad_before = z_pad // 2
+    y_pad_before = y_pad // 2
+    x_pad_before = x_pad // 2
+    z_pad_after = z_pad - z_pad_before
+    y_pad_after = y_pad - y_pad_before
+    x_pad_after = x_pad - x_pad_before
+
+    if subvolume.shape != subvolume_size_zyx:
+        subvolume = np.pad(
+            subvolume,
+            (
+                (z_pad_before, z_pad_after),
+                (y_pad_before, y_pad_after),
+                (x_pad_before, x_pad_after),
+            ),
+            mode="constant",
+        )
+
+    if not return_metadata:
+        return subvolume
+
+    annotated_local_z_index = requested_z // 2
+    source_local_z_index = annotated_local_z_index - z_pad_before
+    if 0 <= source_local_z_index < actual_z:
+        annotated_global_z_index = int(z + source_local_z_index)
+    else:
+        annotated_global_z_index = None
+
+    sample_metadata = {
+        "cutout_origin_xyz": [int(x), int(y), int(z)],
+        "cutout_shape_xyz": [int(actual_x), int(actual_y), int(actual_z)],
+        "requested_shape_xyz": [int(requested_x), int(requested_y), int(requested_z)],
+        "padding_before_xyz": [int(x_pad_before), int(y_pad_before), int(z_pad_before)],
+        "padding_after_xyz": [int(x_pad_after), int(y_pad_after), int(z_pad_after)],
+        "annotated_local_z_index": int(annotated_local_z_index),
+        "annotated_global_z_index": annotated_global_z_index,
+    }
+    return subvolume, sample_metadata
 
 
 def export_to_img_stack(

@@ -27,6 +27,7 @@ from PIL import Image
 import numpy as np
 from config import CONFIG
 from job import JobStatus, JSONFileUploadJobManager, UploadJob
+from apputils import get_annotation_pairs, load_annotation_sample_metadata, load_annotation_source_slice
 
 from ml4paleo.segmentation import (
     RandomForest3DSegmenter,
@@ -36,6 +37,14 @@ from ml4paleo.segmentation import (
 from ml4paleo.volume_providers import ZarrVolumeProvider
 
 logging.basicConfig(level=logging.INFO)
+
+
+def _first_channel(img: Image.Image) -> np.ndarray:
+    """
+    Return the first image channel, or the grayscale image as-is.
+    """
+    arr = np.array(img)
+    return arr[:, :, 0] if arr.ndim == 3 else arr
 
 
 def model_factory() -> Tuple[Segmenter3D, dict]:
@@ -83,22 +92,26 @@ def train_job(job: UploadJob) -> Tuple[Segmenter3D, str]:
     # red channel of the PNG file.
     imgs_np = []
     segs_np = []
-    for img_path, seg_path in zip(
-        sorted(
-            (pathlib.Path(CONFIG.training_directory) / job.id).glob(
-                f"{CONFIG.training_img_prefix}*.png"
-            )
-        ),
-        sorted(
-            (pathlib.Path(CONFIG.training_directory) / job.id).glob(
-                f"{CONFIG.training_seg_prefix}*.png"
-            )
-        ),
-    ):
-        imgs_np.append(np.array(Image.open(img_path))[:, :, 0])
-        segs_np.append(np.array(Image.open(seg_path))[:, :, 0])
+    metadata_backed_samples = 0
+    for img_path, seg_path, meta_path in get_annotation_pairs(job):
+        sample_metadata = load_annotation_sample_metadata(meta_path)
+        if sample_metadata is not None:
+            img_xy = load_annotation_source_slice(job.id, sample_metadata)
+            metadata_backed_samples += 1
+        else:
+            img_xy = _first_channel(Image.open(img_path)).T
+        seg_xy = _first_channel(Image.open(seg_path)).T
+        imgs_np.append(img_xy)
+        segs_np.append(seg_xy)
     training_count = len(imgs_np)
+    if training_count == 0:
+        raise ValueError(f"No training image/mask pairs found for job {job.id}")
     logging.info(f"Loaded {training_count} training images.")
+    logging.info(
+        "Using raw-volume cutout metadata for %s / %s training samples.",
+        metadata_backed_samples,
+        training_count,
+    )
     imgs_np = np.stack(imgs_np, axis=-1)
     segs_np = np.stack(segs_np, axis=-1)
 

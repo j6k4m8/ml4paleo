@@ -334,10 +334,22 @@
 
         let img;
         let paintPixels;
+        let currentSampleMetadata = null;
 
         const BASE_URL = ``;
 
+        function setLoadingVisible(visible) {
+            const loading = document.getElementById("p5_loading");
+            if (!loading) {
+                return;
+            }
+            loading.style.display = visible ? "block" : "none";
+        }
+
         function screenToImage(x, y) {
+            if (!img) {
+                return [0, 0];
+            }
             // Return [x, y] in image coordinates;
             const d = [
                 (x - width / 2 + (STATE.zoom * img.width) / 2) /
@@ -397,7 +409,11 @@
             fetch(`${BASE_URL}/api/annotate/${jobId}/data/submit`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ mask: maskPixels, image: imagePixels }),
+                body: JSON.stringify({
+                    mask: maskPixels,
+                    image: imagePixels,
+                    sample_metadata: currentSampleMetadata,
+                }),
             }).then((res) => {
                 return res.json();
             }).then((data) => {
@@ -435,7 +451,79 @@
 
         let originalPixels;
         let maxPixelValue = 255;
-        function preload() {
+        function getJobId() {
+            return window.location.pathname.split("/")[
+                window.location.pathname.split("/").length - 1
+            ];
+        }
+
+        function loadPrediction(jobId) {
+            img.loadPixels();
+            const imagePixels = img.canvas.toDataURL();
+            fetch(`${BASE_URL}/api/annotate/${jobId}/data/predict`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    image: imagePixels,
+                    sample_metadata: currentSampleMetadata,
+                }),
+            }).then((res) => {
+                return res.json();
+            }).then((data) => {
+                window.prediction = data.prediction;
+                if (!window.prediction && paintPixels) {
+                    paintPixels.erase();
+                    paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
+                    paintPixels.noErase();
+                }
+                setLoadingVisible(false);
+            }).catch((err) => {
+                console.error("Error loading prediction.", err);
+                setLoadingVisible(false);
+            });
+        }
+
+        function loadNextImage(jobId) {
+            setLoadingVisible(true);
+            let _cachebuster = `?cachebuster=${Math.random()}`;
+            fetch(`${BASE_URL}/api/annotate/${jobId}/images/next${_cachebuster}`)
+                .then((res) => {
+                    const imageInfoHeader = res.headers.get("zInfo");
+                    const imageInfo = imageInfoHeader ? JSON.parse(imageInfoHeader) : {};
+                    return res.blob().then((blob) => ({ blob, imageInfo }));
+                })
+                .then(({ blob, imageInfo }) => {
+                    const objectUrl = URL.createObjectURL(blob);
+                    loadImage(objectUrl, (loadedImage) => {
+                        URL.revokeObjectURL(objectUrl);
+                        img = loadedImage;
+                        if (!paintPixels || paintPixels.width !== img.width / 2 || paintPixels.height !== img.width / 2) {
+                            paintPixels = createGraphics(img.width / 2, img.width / 2);
+                            paintPixels.frameRate(1);
+                        }
+
+                        const zInfo = imageInfo.zInfo || {};
+                        STATE.z = {
+                            min: zInfo.min ?? 0,
+                            max: zInfo.max ?? ((img.height / img.width) - 1),
+                            current: zInfo.current ?? Math.round(((img.height / img.width) - 1) / 2),
+                            annotating: zInfo.current ?? Math.round(((img.height / img.width) - 1) / 2),
+                        };
+                        currentSampleMetadata = imageInfo.sampleMetadata || null;
+                        img.loadPixels();
+                        originalPixels = img.pixels.map((x) => x);
+                        maxPixelValue = originalPixels.reduce((a, b) => Math.max(a, b), 0);
+                        STATE.imageLoaded = true;
+                        loadPrediction(jobId);
+                    });
+                })
+                .catch((err) => {
+                    console.error("Error loading next annotation image.", err);
+                    setLoadingVisible(false);
+                });
+        }
+
+        function setup() {
 
             // If there's state in localStorage, use it.
             if (localStorage.getItem("state")) {
@@ -446,49 +534,9 @@
                 }
                 catch { console.log("Error loading state from localStorage."); }
             }
-
-            let _cachebuster = `?cachebuster=${Math.random()}`;
-            let jobId = window.location.pathname.split("/")[
-                window.location.pathname.split("/").length - 1
-            ];
-
-            img = loadImage(
-                `${BASE_URL}/api/annotate/${jobId}/images/next${_cachebuster}`,
-                (f) => {
-                    // Set the z info:
-                    STATE.z = {};
-                    STATE.z.max = (f.height / f.width) - 1;
-                    STATE.z.min = 0;
-                    STATE.z.current = Math.round((STATE.z.max - STATE.z.min) / 2);
-                    STATE.z.annotating = STATE.z.current;
-                    img.loadPixels();
-                    STATE.imageLoaded = true;
-                    const imagePixels = img.canvas.toDataURL();
-                    fetch(`${BASE_URL}/api/annotate/${jobId}/data/predict`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ image: imagePixels }),
-                    }).then((res) => {
-                        return res.json();
-                    }).then((data) => {
-                        // There's a new image in data.prediction;
-                        // b64 encoded png. Render it to paintPixels.
-                        window.prediction = data.prediction;
-                        STATE.imageLoaded = true;
-
-                        img.loadPixels();
-                        originalPixels = img.pixels.map((x) => x);
-                        maxPixelValue = originalPixels.reduce((a, b) => Math.max(a, b));
-                    });
-                }
-            );
-        }
-
-        function setup() {
             createCanvas(windowWidth, windowHeight);
             frameRate(20);
-            paintPixels = createGraphics(img.width / 2, img.width / 2);
-            paintPixels.frameRate(1);
+            loadNextImage(getJobId());
         }
 
         function keyPressed() {
@@ -646,6 +694,10 @@
         }
 
         function draw() {
+            if (!img) {
+                background(CONFIG.backgroundColor);
+                return;
+            }
             // If window.prediction is set, load it into paintPixels.
             if (window.prediction) {
                 loadImage('data:image/png;base64,' + window.prediction, img => {
@@ -661,6 +713,7 @@
             }
 
             push();
+            let imgcoords = [0, 0];
             translate(
                 STATE.panX + (width / 2 - (STATE.zoom * img.width) / 2),
                 STATE.panY + (height / 2 - (STATE.zoom * img.width) / 2)
@@ -743,6 +796,9 @@
         function inBounds(x, y, radius = 0) {
             // return true if x, y screenspace coordinates are inside the
             // image, accounting for pan and zoom
+            if (!img) {
+                return false;
+            }
 
             // Convert to image coordinates
             let imgcoords = screenToImage(x, y);
