@@ -45,11 +45,11 @@ class CONFIG:
     # The size for zarr chunks. 300x300x300 sized chunks means ~20 MB files
     # for u8, and ~40 MB files for u16. Any larger than this, you should
     # make sure you can handle each chunk in RAM in your workflow.
-    chunk_size = (300, 300, 300)
+    chunk_size = (512, 512, 64)
     # The number of parallel jobs to run when converting uploaded data to zarr.
     # This can be roughly the number of cores on your machine, since the main
     # bottleneck is the disk IO.
-    conversion_job_parallelism = max(1, _NUMBER_OF_CORES - 2)
+    conversion_job_parallelism = max(1, _NUMBER_OF_CORES - 1)
 
     # Training and Annotation
     #
