@@ -11,30 +11,26 @@ The web application is contained in [`webapp/`](webapp/), and the Python package
 
 For more details on each of the components, see the READMEs in their respective directories.
 
-## To eject poetry to requirements.txt
-
-```bash
-poetry export -f requirements.txt --output requirements.txt --without-hashes
-```
-
-
 ## Citation
 
 If this work is useful to your research, please cite:
 
 > **Automated segmentation of synchrotron-scanned fossils**
-> During MAD, Matelsky JK, Gustafsson FK, Voeten DFAE, Chen D, Wester BA, Kording KP, Ahlberg PE, Schön TB (2025) Automated segmentation of synchrotron-scanned fossils. Fossil Record 28(1): 103-114. https://doi.org/10.3897/fr.28.e139379 
+> During MAD, Matelsky JK, Gustafsson FK, Voeten DFAE, Chen D, Wester BA, Kording KP, Ahlberg PE, Schön TB (2025) Automated segmentation of synchrotron-scanned fossils. Fossil Record 28(1): 103-114. https://doi.org/10.3897/fr.28.e139379
 
 ```bibtex
-@article {During2024.10.23.619778,
-	author = {During, Melanie A.D. and Matelsky, Jordan K. and Gustafsson, Fredrik K. and Voeten, Dennis F.A.E. and Chen, Donglei and Wester, Brock A. and Kording, Konrad Paul and Ahlberg, Per E. and Sch{\"o}n, Thomas B},
-	title = {Automated segmentation of synchrotron-scanned fossils},
-	elocation-id = {2024.10.23.619778},
-	year = {2024},
-	doi = {10.1101/2024.10.23.619778},
-	publisher = {Cold Spring Harbor Laboratory},
-	URL = {https://www.biorxiv.org/content/early/2024/10/25/2024.10.23.619778},
-	eprint = {https://www.biorxiv.org/content/early/2024/10/25/2024.10.23.619778.full.pdf},
-	journal = {bioRxiv}
+@article{DuringMatelsky2025,
+  title = {Automated segmentation of synchrotron-scanned fossils},
+  volume = {28},
+  ISSN = {2193-0066},
+  url = {http://dx.doi.org/10.3897/fr.28.139379},
+  DOI = {10.3897/fr.28.139379},
+  number = {1},
+  journal = {Fossil Record},
+  publisher = {Pensoft Publishers},
+  author = {During,  Melanie A. D. and Matelsky,  Jordan K. and Gustafsson,  Fredrik K. and Voeten,  Dennis F. A. E. and Chen,  Donglei and Wester,  Brock A. and Kording,  Konrad P. and Ahlberg,  Per E. and Sch\"{o}n,  Thomas B.},
+  year = {2025},
+  month = Mar,
+  pages = {103–114}
 }
 ```
