@@ -24,15 +24,157 @@
 
 <body>
     {% include "navbar.html" %}
+    <style>
+        .job-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+
+        .job-header-main {
+            min-width: 0;
+        }
+
+        .job-title-row {
+            display: flex;
+            align-items: baseline;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .job-title-row h1 {
+            margin: 0;
+        }
+
+        .job-rename-link {
+            color: var(--muted-color);
+            font-size: 0.95rem;
+            font-weight: 600;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        .job-rename-link:hover,
+        .job-rename-link:focus {
+            color: var(--primary);
+            text-decoration: underline;
+        }
+
+        .job-status-chip {
+            margin-top: 0.35rem;
+            flex-shrink: 0;
+        }
+
+        #rename-job-dialog {
+            padding: 1rem;
+            border: 0;
+            background: transparent;
+        }
+
+        #rename-job-dialog::backdrop {
+            background: rgba(17, 25, 31, 0.35);
+            backdrop-filter: blur(0.2rem);
+        }
+
+        .rename-dialog-card {
+            width: min(100%, 26rem);
+            margin: 0;
+            padding: 1.25rem;
+            border-radius: 0.75rem;
+            background: var(--card-background-color);
+            box-shadow: var(--card-box-shadow);
+        }
+
+        .rename-dialog-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .rename-dialog-title {
+            margin: 0;
+            font-size: 1.1rem;
+            line-height: 1.2;
+        }
+
+        .rename-dialog-close {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2rem;
+            height: 2rem;
+            margin: 0;
+            padding: 0;
+            border: 0;
+            border-radius: 999px;
+            background: transparent;
+            box-shadow: none;
+            color: var(--muted-color);
+            font-size: 1.35rem;
+            line-height: 1;
+        }
+
+        .rename-dialog-close:hover,
+        .rename-dialog-close:focus {
+            background: var(--code-background-color);
+            box-shadow: none;
+            color: var(--contrast);
+        }
+
+        .rename-dialog-form {
+            display: grid;
+            gap: 0.75rem;
+        }
+
+        .rename-dialog-form label,
+        .rename-dialog-form input {
+            margin: 0;
+        }
+
+        .rename-dialog-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+
+        .rename-dialog-actions button {
+            width: auto;
+            margin: 0;
+            padding: 0.6rem 1rem;
+        }
+
+        @media (max-width: 767px) {
+            .job-header {
+                flex-direction: column;
+            }
+
+            .job-status-chip {
+                margin-top: 0;
+            }
+        }
+    </style>
     <div class="container">
         <div class="row">
             <div class="col">
                 <article>
                     <header>
-                        <h1>
-                            {{ job.name }}
-                            <div style="float:right" data-tooltip="{{job.status}}">{{ status_badge(job.status) }}</div>
-                        </h1>
+                        <div class="job-header">
+                            <div class="job-header-main">
+                                <div class="job-title-row">
+                                    <h1>{{ job.name }}</h1>
+                                    <a href="#" class="job-rename-link" onclick="openRenameJobDialog(event)">
+                                        Rename
+                                    </a>
+                                </div>
+                            </div>
+                            <div class="job-status-chip" data-tooltip="{{job.status}}">
+                                {{ status_badge(job.status) }}
+                            </div>
+                        </div>
                     </header>
                     <!-- <p>
                             <a role="button" href="{{ neuroglancer_link }}" target="_blank"
@@ -76,6 +218,26 @@
                         </tr>
                     </table>
                 </article>
+
+                <dialog id="rename-job-dialog">
+                    <form id="rename-job-form" class="rename-dialog-card" onsubmit="submitRenameJob(event)">
+                        <div class="rename-dialog-header">
+                            <h3 class="rename-dialog-title">Rename project</h3>
+                            <button aria-label="Close rename dialog" class="rename-dialog-close" type="button"
+                                onclick="closeRenameJobDialog()">
+                                &times;
+                            </button>
+                        </div>
+                        <div class="rename-dialog-form">
+                            <label for="rename-job-input">Project name</label>
+                            <input id="rename-job-input" name="name" type="text" value="{{ job.name }}" required>
+                        </div>
+                        <div class="rename-dialog-actions">
+                            <button type="button" class="secondary outline" onclick="closeRenameJobDialog()">Cancel</button>
+                            <button type="submit" id="rename-job-submit">Save</button>
+                        </div>
+                    </form>
+                </dialog>
 
                 {% if job.status | string == "JobStatus.UPLOADED" %}
                 <div>
@@ -205,6 +367,95 @@
                 });
         };
 
+        const renameJobDialog = document.getElementById("rename-job-dialog");
+        const renameJobInput = document.getElementById("rename-job-input");
+        const renameJobSubmit = document.getElementById("rename-job-submit");
+
+        renameJobDialog.addEventListener("click", (event) => {
+            const bounds = renameJobDialog.getBoundingClientRect();
+            const clickedBackdrop =
+                event.clientX < bounds.left ||
+                event.clientX > bounds.right ||
+                event.clientY < bounds.top ||
+                event.clientY > bounds.bottom;
+            if (clickedBackdrop) {
+                closeRenameJobDialog();
+            }
+        });
+
+        openRenameJobDialog = (event) => {
+            if (event) {
+                event.preventDefault();
+            }
+            renameJobInput.value = jobName;
+            if (typeof renameJobDialog.showModal === "function") {
+                renameJobDialog.showModal();
+            } else {
+                renameJobDialog.setAttribute("open", "open");
+            }
+            window.setTimeout(() => {
+                renameJobInput.focus();
+                renameJobInput.select();
+            }, 0);
+        };
+
+        closeRenameJobDialog = () => {
+            if (typeof renameJobDialog.close === "function") {
+                renameJobDialog.close();
+            } else {
+                renameJobDialog.removeAttribute("open");
+            }
+        };
+
+        submitRenameJob = (event) => {
+            event.preventDefault();
+            const trimmedName = renameJobInput.value.trim();
+            if (trimmedName.length === 0) {
+                notyf.error("Project name cannot be empty.");
+                renameJobInput.focus();
+                return;
+            }
+
+            renameJobSubmit.disabled = true;
+            renameJobSubmit.setAttribute("aria-busy", "true");
+
+            fetch("/api/job/{{ job.id }}/rename", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: trimmedName }),
+            })
+                .then(async (response) => {
+                    const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(data.message || "Rename failed.");
+                    }
+                    return data;
+                })
+                .then((data) => {
+                    let jobs = JSON.parse(localStorage.getItem('jobs'));
+                    if (!Array.isArray(jobs)) {
+                        jobs = [];
+                    }
+                    const existingJob = jobs.find((job) => job.id === data.job_id);
+                    if (existingJob) {
+                        existingJob.name = data.name;
+                    } else {
+                        jobs.push({ id: data.job_id, name: data.name });
+                    }
+                    localStorage.setItem('jobs', JSON.stringify(jobs));
+                    jobName = data.name;
+                    closeRenameJobDialog();
+                    window.location.reload();
+                })
+                .catch((error) => {
+                    notyf.error(error.message || "There was an error renaming the project.");
+                })
+                .finally(() => {
+                    renameJobSubmit.disabled = false;
+                    renameJobSubmit.removeAttribute("aria-busy");
+                });
+        };
+
 
         window.setInterval(() => {
             fetch("/api/job/{{ job.id }}/status")
@@ -221,20 +472,23 @@
         // When the page loads, get the job ID and name and put them
         // in localstorage if they aren't already there.
         let jobId = "{{ job.id }}";
-        let jobName = "{{ job.name }}";
+        let jobName = {{ job.name | tojson }};
 
         if (jobId.trim() !== "" && jobName.trim() !== "") {
             let jobs = JSON.parse(localStorage.getItem('jobs'));
             if (jobs === null) {
                 jobs = [];
             }
-            if (!jobs.some((job) => job.id === jobId)) {
+            const existingJob = jobs.find((job) => job.id === jobId);
+            if (existingJob) {
+                existingJob.name = jobName;
+            } else {
                 jobs.push({
                     id: jobId,
                     name: jobName,
                 });
-                localStorage.setItem('jobs', JSON.stringify(jobs));
             }
+            localStorage.setItem('jobs', JSON.stringify(jobs));
         }
 
     </script>
