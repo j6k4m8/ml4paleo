@@ -12,7 +12,19 @@ services:
     build: .
     volumes:
       - ml4paleo-webapp-volume:/ml4paleo/webapp/volume
-    entrypoint: gunicorn --bind :5000 --access-logfile - --error-logfile - --log-level info main:app --timeout 300
+    command:
+      - gunicorn
+      - --bind
+      - :5000
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+      - --log-level
+      - info
+      - main:app
+      - --timeout
+      - "300"
     ports:
       - "5000:5000"
     restart: always
@@ -22,7 +34,9 @@ services:
     build: .
     volumes:
       - ml4paleo-webapp-volume:/ml4paleo/webapp/volume
-    entrypoint: python3 ./conversionrunner.py
+    command:
+      - python3
+      - ./conversionrunner.py
     depends_on:
       - backend
     restart: always
@@ -32,7 +46,9 @@ services:
     build: .
     volumes:
       - ml4paleo-webapp-volume:/ml4paleo/webapp/volume
-    entrypoint: python3 ./segmentrunner.py
+    command:
+      - python3
+      - ./segmentrunner.py
     depends_on:
       - backend
     restart: always
@@ -42,7 +58,9 @@ services:
     build: .
     volumes:
       - ml4paleo-webapp-volume:/ml4paleo/webapp/volume
-    entrypoint: python3 ./meshrunner.py
+    command:
+      - python3
+      - ./meshrunner.py
     depends_on:
       - backend
     restart: always

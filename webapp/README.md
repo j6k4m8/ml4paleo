@@ -14,27 +14,24 @@ This guide assumes that you have a completely new Ubuntu install.
 git clone https://github.com/j6k4m8/ml4paleo
 cd ml4paleo
 
-# Install poetry if it's not already installed:
-curl -sSL https://install.python-poetry.org | python3 -
-
-# Install dependencies:
-poetry install
+# Install uv:
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Run the web application:
 cd webapp
 mkdir volume/ # per your config.py file
-poetry run python3 ./main.py
+uv run python3 ./main.py
 ```
 
 You'll also need to run the three job runners in separate shells:
 
 ```shell
 # Shell 1:
-poetry run python3 ./conversionrunner.py
+uv run python3 ./conversionrunner.py
 # Shell 2:
-poetry run python3 ./segmentrunner.py
+uv run python3 ./segmentrunner.py
 # Shell 3:
-poetry run python3 ./meshrunner.py
+uv run python3 ./meshrunner.py
 ```
 
 ## Technical Overview
