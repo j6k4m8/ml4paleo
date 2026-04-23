@@ -11,12 +11,6 @@ The web application is contained in [`webapp/`](webapp/), and the Python package
 
 For more details on each of the components, see the READMEs in their respective directories.
 
-## To eject poetry to requirements.txt
-
-```bash
-poetry export -f requirements.txt --output requirements.txt --without-hashes
-```
-
 ## Citation
 
 If this work is useful to your research, please cite:

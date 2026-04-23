@@ -1,41 +1,40 @@
 # ml4paleo Base Image
-
-# This Dockerfile is used to build an image containing basic stuff to run a web
-# application version of ml4paleo.
-# This should be built from the top-level directory of the ml4paleo repository
-# which is available at https://github.com/j6k4m8/ml4paleo.
+#
+# Build a single image that can run the Flask web app plus the background job
+# runners used by docker-compose.
 
 FROM python:3.12-slim-bookworm
+
 LABEL maintainer="Jordan Matelsky <ml4paleo@matelsky.com>"
 LABEL description="ml4paleo: A web application for paleontological image segmentation."
 
-# Install dependencies (poetry etc) and copy in the code. We need curl to install poetry.
-RUN apt-get update
-RUN apt-get install -y curl gcc g++ zlib1g-dev libjpeg-dev
-RUN curl -sSL https://install.python-poetry.org | python3 -
-# Add poetry to the path:
-ENV PATH="${PATH}:/root/.local/bin"
+# Install uv from the official image and keep the system packages needed by
+# scientific Python wheels that may need local compilation.
+COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /bin/
 
-# Copy in JUST the poetry files, and install the dependencies.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc g++ zlib1g-dev libjpeg-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV UV_NO_DEV=1
+ENV UV_PYTHON_DOWNLOADS=never
+
 WORKDIR /ml4paleo
-RUN poetry config virtualenvs.create false
 
-# Copy in the poetry files and install the dependencies.
-# COPY poetry.lock pyproject.toml /ml4paleo/
+# Install third-party dependencies before copying the whole repo to improve
+# Docker layer reuse when application code changes.
+COPY pyproject.toml uv.lock /ml4paleo/
+RUN uv sync --locked --no-install-project
+
+# Copy the application source and install the project itself.
 COPY . /ml4paleo
-WORKDIR /ml4paleo
+RUN uv sync --locked \
+    && uv pip install --python .venv/bin/python gunicorn
 
-# Install the library.
-RUN poetry install
-RUN poetry run pip install scikit-image scikit-learn
-RUN poetry run pip install zmesh gunicorn
-
-
-# Install the library.
-RUN poetry run pip install -e ./
+# Expose the synced environment to the runtime entrypoints used in compose.
+ENV PATH="/ml4paleo/.venv/bin:$PATH"
 
 WORKDIR /ml4paleo/webapp
 RUN mkdir -p volume
 
-# Set the entrypoint to the command passed in.
-ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["gunicorn", "--bind", ":5000", "--access-logfile", "-", "--error-logfile", "-", "--log-level", "info", "main:app", "--timeout", "300"]
