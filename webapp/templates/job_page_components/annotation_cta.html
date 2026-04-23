@@ -1,47 +1,45 @@
-<article>
-    <header>
-        <h3>Segmentation Training</h3>
-    </header>
-    {% if job.status | string == "JobStatus.CONVERTING" %}
-    <p>
-        Your job is still converting but you can start annotating now. Return to
-        this page to check in on progress.
-    </p>
-    {% endif %}
-    <p>
-        <a target="_blank" role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">
-            Continue Annotating
-        </a>
-    </p>
-    <p>
-        There are currently <b>{{ num_annotations }}</b> annotated slices.
-    </p>
-    {% if num_annotations > 0 %}
-    <p>
-        Go to the <a href="{{ url_for('annotation_gallery', job_id=job.id) }}">annotation gallery</a>
-        to see or delete your annotations.
-    </p>
-    {% endif %}
-    <p>
-        You can train a model with any number of annotated slices, but you won't
-        get any interesting results with fewer than 5, and we recommend at least
-        50. (You can always annotate a bit more and retrain!)
-    </p>
-    {% if has_been_annotated %}
-    <p>
-        {% if job.status | string == "JobStatus.TRAINING_QUEUED" %}
-        <button disabled aria-busy="true">Segmentation has been queued</button>
+<section class="job-card training-card">
+    <p class="job-kicker">Training</p>
+    <div class="training-card-title-row">
+        <h3>Training set</h3>
+        <div class="training-card-count">
+            {{ num_annotations }} labeled slice{% if num_annotations != 1 %}s{% endif %}
+        </div>
+    </div>
+    <p class="job-card-copy">
+        {% if job_status_str == "JobStatus.CONVERTING" %}
+        The annotator is already usable for finished tiles, even while conversion is still running.
         {% else %}
-        <button id="segmentation-trigger-button" onclick="triggerSegmentation()">Start automatic segmentation</button>
+        Add labeled slices, review what you already have, then retrain or rerun segmentation when you want a better result.
         {% endif %}
     </p>
-    {% if num_annotations >= 2 %}
-    <p>
-        If you would like to refresh the realtime segmentation that you're shown in the annotation tool but you <i>do
-            not yet want to generate segmentation</i>, you can click to <a href="#" id="train-only-trigger-button"
-            onclick="triggerTrainOnly()">retrain
-            the model</a>.
-    </p>
-    {% endif %}
-    {% endif %}
-</article>
+    <div class="training-card-actions">
+        <a target="_blank" role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">
+            {% if num_annotations > 0 %}Continue annotating{% else %}Open annotator{% endif %}
+        </a>
+        {% if has_been_annotated %}
+        {% if job_status_str in ["JobStatus.TRAINING_QUEUED", "JobStatus.TRAINING"] %}
+        <button type="button" class="secondary outline" disabled aria-busy="true">
+            {% if job_status_str == "JobStatus.TRAINING" %}Training{% else %}Queued{% endif %}
+        </button>
+        {% else %}
+        <button id="segmentation-trigger-button" class="secondary outline" onclick="triggerSegmentation()">
+            Run segmentation
+        </button>
+        {% endif %}
+        {% endif %}
+    </div>
+    <div class="training-card-links">
+        {% if num_annotations >= 2 %}
+        <button type="button" class="training-card-link" id="train-only-trigger-button" onclick="triggerTrainOnly()">
+            Retrain model only
+        </button>
+        {% endif %}
+        {% if num_annotations > 0 %}
+        <a class="training-card-link" href="{{ url_for('annotation_gallery', job_id=job.id) }}">
+            Open gallery
+        </a>
+        {% endif %}
+    </div>
+    <p class="job-card-meta">Recommended coverage: roughly 5 to 10 representative slices.</p>
+</section>

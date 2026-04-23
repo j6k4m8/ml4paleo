@@ -42,6 +42,7 @@ from ml4paleo.volume_providers.io import (
 
 from config import CONFIG
 from apputils import (
+    build_model_metric_chart_svg,
     count_annotation_samples,
     get_annotation_pairs,
     get_latest_segmentation_id,
@@ -49,6 +50,8 @@ from apputils import (
     get_mesh_directory,
     get_mesh_files,
     get_latest_segmentation_model,
+    get_model_runs,
+    migrate_model_metadata_sidecar,
     load_annotation_source_slice,
     create_neuroglancer_link,
     get_png_filmstrip,
@@ -57,6 +60,109 @@ from apputils import (
 from segmentrunner import train_job
 
 log = logging.getLogger(__name__)
+
+TIMELINE_STEPS = ("Upload", "Convert", "Annotate", "Train", "Segment", "Mesh")
+SOURCE_LABELS = {
+    "image_stack": "Image stack",
+    "dicom": "DICOM series",
+}
+MODEL_PAGE_METRIC_OPTIONS = {
+    "train_foreground_dice": "Train Dice",
+    "train_loss": "Training Loss (1 - Dice)",
+    "train_foreground_iou": "Train IoU",
+}
+
+
+def _timeline_position_for_status(status: JobStatus) -> tuple[int | None, int | None]:
+    """
+    Return the current timeline index and optional error index for a job status.
+    """
+    if status in [JobStatus.PENDING, JobStatus.UPLOADING]:
+        return 0, None
+    if status in [JobStatus.UPLOADED, JobStatus.CONVERTING]:
+        return 1, None
+    if status == JobStatus.CONVERT_ERROR:
+        return 1, 1
+    if status == JobStatus.CONVERTED:
+        return 2, None
+    if status in [JobStatus.ANNOTATED, JobStatus.TRAINING_QUEUED, JobStatus.TRAINING]:
+        return 3, None
+    if status in [JobStatus.TRAINED, JobStatus.SEGMENTING]:
+        return 4, None
+    if status == JobStatus.SEGMENT_ERROR:
+        return 4, 4
+    if status in [JobStatus.SEGMENTED, JobStatus.MESHING_QUEUED, JobStatus.MESHING]:
+        return 5, None
+    if status == JobStatus.MESH_ERROR:
+        return 5, 5
+    if status in [JobStatus.MESHED, JobStatus.DONE]:
+        return None, None
+    return 0, 0
+
+
+def build_job_timeline(job: UploadJob) -> list[dict[str, str]]:
+    """
+    Build the rendered timeline state for the job page.
+    """
+    current_index, error_index = _timeline_position_for_status(job.status)
+    steps: list[dict[str, str]] = []
+    for idx, label in enumerate(TIMELINE_STEPS):
+        if error_index == idx:
+            state = "error"
+        elif current_index is None:
+            state = "done"
+        elif idx < current_index:
+            state = "done"
+        elif idx == current_index:
+            state = "current"
+        else:
+            state = "upcoming"
+        steps.append({"label": label, "state": state})
+    return steps
+
+
+def build_job_timeline_caption(job: UploadJob, num_annotations: int) -> str:
+    """
+    Return a short status line for the page timeline.
+    """
+    progress_pct = job.current_job_progress * 100
+    if job.status == JobStatus.PENDING:
+        return "Waiting for upload to begin."
+    if job.status == JobStatus.UPLOADING:
+        return "Uploading source files."
+    if job.status == JobStatus.UPLOADED:
+        return "Upload complete. Conversion is next."
+    if job.status == JobStatus.CONVERTING:
+        return f"Converting source data into the project volume ({progress_pct:.1f}%)."
+    if job.status == JobStatus.CONVERT_ERROR:
+        return "Conversion failed."
+    if job.status == JobStatus.CONVERTED:
+        return "Volume ready for annotation."
+    if job.status == JobStatus.ANNOTATED:
+        return f"{num_annotations} annotation sample(s) saved. Training is next."
+    if job.status == JobStatus.TRAINING_QUEUED:
+        return "Training is queued."
+    if job.status == JobStatus.TRAINING:
+        return "Training the segmentation model."
+    if job.status == JobStatus.TRAINED:
+        return "Model is trained. Segmentation is next."
+    if job.status == JobStatus.SEGMENTING:
+        return f"Running segmentation across the full volume ({progress_pct:.1f}%)."
+    if job.status == JobStatus.SEGMENT_ERROR:
+        return "Segmentation failed."
+    if job.status == JobStatus.SEGMENTED:
+        return "Segmentation complete. Mesh generation is available."
+    if job.status == JobStatus.MESHING_QUEUED:
+        return "Meshing is queued."
+    if job.status == JobStatus.MESHING:
+        return "Generating surface meshes."
+    if job.status == JobStatus.MESH_ERROR:
+        return "Mesh generation failed."
+    if job.status == JobStatus.MESHED:
+        return "Meshes are ready."
+    if job.status == JobStatus.DONE:
+        return "Processing complete."
+    return "Project state unavailable."
 
 
 class ML4PaleoWebApplication:
@@ -257,47 +363,73 @@ class ML4PaleoWebApplication:
 
             latest_segmentation_id = get_latest_segmentation_id(job)
             latest_mesh_seg_id = get_latest_mesh_id(job)
+            has_been_annotated = job.status not in [
+                JobStatus.PENDING,
+                JobStatus.UPLOADING,
+                JobStatus.UPLOADED,
+                JobStatus.CONVERTING,
+                JobStatus.CONVERTED,
+                JobStatus.CONVERT_ERROR,
+            ]
+            annotation_ready = job.status not in [
+                JobStatus.CONVERTING,
+                JobStatus.UPLOADING,
+                JobStatus.UPLOADED,
+                JobStatus.CONVERT_ERROR,
+            ]
+            segmentation_ready = job.status in [
+                JobStatus.SEGMENTED,
+                JobStatus.MESHING_QUEUED,
+                JobStatus.MESHING,
+                JobStatus.MESH_ERROR,
+                JobStatus.MESHED,
+            ]
+            meshes_ready = latest_mesh_seg_id is not None
+            show_annotation_cta = (
+                (annotation_ready and job.status != JobStatus.SEGMENTING)
+                or (
+                    job.status == JobStatus.CONVERTING
+                    and job.current_job_progress > 0.4
+                )
+            )
             return render_template(
                 "job_page.html",
                 job=job,
+                job_status_str=str(job.status),
+                source_label=SOURCE_LABELS.get(
+                    job.source_type,
+                    job.source_type.replace("_", " ").title(),
+                ),
+                timeline_steps=build_job_timeline(job),
+                timeline_status_text=build_job_timeline_caption(job, num_annotations),
                 voxel_count=voxel_count,
                 voxel_count_localized=voxel_count_localized,
                 num_annotations=num_annotations,
                 neuroglancer_link=create_neuroglancer_link(job),
                 latest_segmentation_id=latest_segmentation_id,
                 latest_mesh_seg_id=latest_mesh_seg_id,
+                show_annotation_cta=show_annotation_cta,
+                is_converting=job.status == JobStatus.CONVERTING,
+                is_training=job.status in [
+                    JobStatus.TRAINING_QUEUED,
+                    JobStatus.TRAINING,
+                ],
+                is_segmenting=job.status == JobStatus.SEGMENTING,
+                is_meshing=job.status in [
+                    JobStatus.MESHING_QUEUED,
+                    JobStatus.MESHING,
+                ],
+                has_error=job.status in [
+                    JobStatus.CONVERT_ERROR,
+                    JobStatus.SEGMENT_ERROR,
+                    JobStatus.MESH_ERROR,
+                    JobStatus.ERROR,
+                ],
                 # Status breakdown:
-                has_been_annotated=(
-                    job.status
-                    not in [
-                        JobStatus.PENDING,
-                        JobStatus.UPLOADING,
-                        JobStatus.UPLOADED,
-                        JobStatus.CONVERTING,
-                        JobStatus.CONVERTED,
-                        JobStatus.CONVERT_ERROR,
-                    ]
-                ),
-                annotation_ready=(
-                    job.status
-                    not in [
-                        JobStatus.CONVERTING,
-                        JobStatus.UPLOADING,
-                        JobStatus.UPLOADED,
-                        JobStatus.CONVERT_ERROR,
-                    ]
-                ),
-                segmentation_ready=(
-                    job.status
-                    in [
-                        JobStatus.SEGMENTED,
-                        JobStatus.MESHING_QUEUED,
-                        JobStatus.MESHING_QUEUED,
-                        JobStatus.MESH_ERROR,
-                        JobStatus.MESHED,
-                    ]
-                ),
-                meshes_ready=latest_mesh_seg_id is not None,
+                has_been_annotated=has_been_annotated,
+                annotation_ready=annotation_ready,
+                segmentation_ready=segmentation_ready,
+                meshes_ready=meshes_ready,
             )
 
         ############################
@@ -530,6 +662,80 @@ class ML4PaleoWebApplication:
                 img_seg_pairs=img_seg_pairs,
             )
 
+        @self.app.route("/job/<job_id>/models", methods=["GET"])
+        def models_page(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            metric_key = request.args.get("metric", "train_foreground_dice")
+            if metric_key not in MODEL_PAGE_METRIC_OPTIONS:
+                metric_key = "train_foreground_dice"
+            metric_label = MODEL_PAGE_METRIC_OPTIONS[metric_key]
+            models = get_model_runs(job, train_metric_key=metric_key)
+            chart_svg = build_model_metric_chart_svg(
+                models,
+                metric_key=metric_key,
+                metric_label=metric_label,
+            )
+            metric_count = sum(
+                1 for model in models if model.get("train_metric_value") is not None
+            )
+            return render_template(
+                "models_page.html",
+                job=job,
+                models=models,
+                chart_svg=chart_svg,
+                chart_metric_key=metric_key,
+                chart_metric_label=metric_label,
+                chart_metric_count=metric_count,
+                metric_options=MODEL_PAGE_METRIC_OPTIONS,
+            )
+
+        @self.app.route("/api/job/<job_id>/models/<model_id>/migrate", methods=["POST"])
+        def migrate_model_metadata(job_id, model_id):
+            if job_id is None or model_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id and model_id are required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job does not exist"}),
+                    400,
+                )
+
+            try:
+                metadata_path = migrate_model_metadata_sidecar(job, model_id)
+            except FileNotFoundError:
+                return (
+                    jsonify({"status": "error", "message": "model does not exist"}),
+                    400,
+                )
+            except Exception as exc:
+                log.exception(
+                    "Failed to migrate metadata for job %s model %s",
+                    job_id,
+                    model_id,
+                )
+                return (
+                    jsonify({"status": "error", "message": str(exc)}),
+                    500,
+                )
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "model_id": model_id,
+                    "metadata_file": metadata_path.name,
+                }
+            )
+
         # Satisfy requests for /job/<job_id>/annotations/img1720204733.png
         @self.app.route("/job/<job_id>/annotations/<filename>", methods=["GET"])
         def annotation_image(job_id, filename):
@@ -675,6 +881,44 @@ class ML4PaleoWebApplication:
                     JobStatus.MESH_ERROR,
                 ],
             )
+
+        @self.app.route("/api/job/<job_id>/models/<model_id>/download", methods=["GET"])
+        def download_model(job_id, model_id):
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            model_path = pathlib.Path(CONFIG.model_directory) / job_id / f"{model_id}.model"
+            if not model_path.exists():
+                return (
+                    jsonify({"status": "error", "message": "model does not exist"}),
+                    400,
+                )
+            return send_file(model_path, as_attachment=True)
+
+        @self.app.route(
+            "/api/job/<job_id>/models/<model_id>/download/json", methods=["GET"]
+        )
+        def download_model_metadata(job_id, model_id):
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            metadata_path = pathlib.Path(CONFIG.model_directory) / job_id / f"{model_id}.json"
+            if not metadata_path.exists():
+                return (
+                    jsonify(
+                        {"status": "error", "message": "model metadata does not exist"}
+                    ),
+                    400,
+                )
+            return send_file(metadata_path, as_attachment=True)
 
         @self.app.route(
             "/api/job/<job_id>/segmentation/<seg_id>/download/zarr", methods=["GET"]

@@ -1,0 +1,547 @@
+{% from "macros.html" import pretty_date %}
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Models | {{ job.name }} | ml4paleo</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js" crossorigin="anonymous"
+        referrerpolicy="no-referrer"></script>
+</head>
+
+<body>
+    {% include "navbar.html" %}
+    <style>
+        .models-page {
+            --models-border: rgba(28, 46, 61, 0.1);
+            --models-muted: #627789;
+            --models-soft: #f4f8fb;
+            --models-accent: var(--primary, #1095c1);
+            padding-bottom: 2rem;
+        }
+
+        .models-hero,
+        .models-chart-card,
+        .model-run-card {
+            border: 1px solid var(--models-border);
+            border-radius: 1rem;
+            background: var(--card-background-color);
+            box-shadow: 0 0.9rem 2rem rgba(24, 39, 54, 0.06);
+        }
+
+        .models-hero {
+            padding: 1.2rem 1.3rem 1.15rem;
+        }
+
+        .models-eyebrow {
+            margin: 0 0 0.35rem;
+            color: var(--models-muted);
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .models-hero-row {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+
+        .models-hero h1 {
+            margin: 0;
+            font-size: clamp(1.8rem, 4vw, 2.3rem);
+            line-height: 1.08;
+        }
+
+        .models-hero-copy {
+            margin: 0.6rem 0 0;
+            max-width: 44rem;
+            color: var(--models-muted);
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        .models-summary {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            margin-top: 0.9rem;
+        }
+
+        .models-summary-item {
+            padding: 0.45rem 0.7rem;
+            border: 1px solid var(--models-border);
+            border-radius: 0.45rem;
+            background: var(--models-soft);
+            color: var(--contrast);
+            font-size: 0.88rem;
+            font-weight: 600;
+        }
+
+        .models-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            margin-top: 0.95rem;
+        }
+
+        .models-actions a {
+            width: auto;
+            margin: 0;
+            padding: 0.5rem 0.8rem;
+            border-radius: 0.45rem;
+            font-size: 0.88rem;
+            font-weight: 600;
+            box-shadow: none;
+        }
+
+        .models-chart-card {
+            margin-top: 1rem;
+            padding: 1rem 1.1rem 1.05rem;
+        }
+
+        .models-chart-head {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 0.8rem;
+            margin-bottom: 0.85rem;
+        }
+
+        .models-chart-head h2 {
+            margin: 0;
+            font-size: 1.08rem;
+            line-height: 1.25;
+        }
+
+        .models-chart-copy {
+            margin: 0.2rem 0 0;
+            color: var(--models-muted);
+            font-size: 0.9rem;
+            line-height: 1.45;
+        }
+
+        .models-metric-switch {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+        }
+
+        .models-metric-switch a,
+        .models-metric-switch span {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.38rem 0.62rem;
+            border: 1px solid var(--models-border);
+            border-radius: 0.45rem;
+            font-size: 0.84rem;
+            font-weight: 600;
+            text-decoration: none;
+        }
+
+        .models-metric-switch a {
+            color: var(--models-muted);
+            background: transparent;
+        }
+
+        .models-metric-switch span {
+            background: var(--models-soft);
+            color: var(--contrast);
+        }
+
+        .models-chart-svg {
+            border: 1px solid var(--models-border);
+            border-radius: 0.8rem;
+            background: white;
+            overflow: hidden;
+        }
+
+        .models-chart-svg svg {
+            display: block;
+            width: 100%;
+            height: auto;
+        }
+
+        .models-list {
+            display: grid;
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .model-run-card {
+            padding: 1rem 1.1rem;
+        }
+
+        .model-run-head {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 0.8rem;
+        }
+
+        .model-run-head h3 {
+            margin: 0;
+            font-size: 1.02rem;
+            line-height: 1.25;
+        }
+
+        .model-run-subtitle {
+            margin: 0.2rem 0 0;
+            color: var(--models-muted);
+            font-size: 0.88rem;
+        }
+
+        .model-run-metric {
+            min-width: 10rem;
+            text-align: right;
+        }
+
+        .model-run-metric strong {
+            display: block;
+            font-size: 1.05rem;
+            line-height: 1.1;
+        }
+
+        .model-run-metric span {
+            color: var(--models-muted);
+            font-size: 0.82rem;
+            font-weight: 600;
+            line-height: 1.35;
+        }
+
+        .model-run-metric--legacy {
+            min-width: 14rem;
+        }
+
+        .model-run-metric-button {
+            width: auto;
+            margin: 0 0 0.35rem auto;
+            padding: 0.48rem 0.72rem;
+            border-radius: 0.45rem;
+            font-size: 0.84rem;
+            font-weight: 600;
+            line-height: 1.2;
+            box-shadow: none;
+        }
+
+        .model-run-note {
+            margin: 0.8rem 0 0;
+            color: var(--models-muted);
+            font-size: 0.9rem;
+            line-height: 1.48;
+            max-width: 46rem;
+        }
+
+        .model-run-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.9rem 1rem;
+            margin-top: 0.9rem;
+        }
+
+        .model-run-field {
+            min-width: 0;
+        }
+
+        .model-run-label {
+            display: block;
+            margin-bottom: 0.14rem;
+            color: var(--models-muted);
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .model-run-value {
+            display: block;
+            font-size: 0.94rem;
+            font-weight: 600;
+            line-height: 1.4;
+            overflow-wrap: anywhere;
+        }
+
+        .model-run-value code {
+            padding: 0;
+            background: transparent;
+            color: var(--contrast);
+            font-size: 0.94rem;
+        }
+
+        .model-run-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            margin-top: 0.95rem;
+        }
+
+        .model-run-actions a {
+            width: auto;
+            margin: 0;
+            padding: 0.5rem 0.78rem;
+            border-radius: 0.45rem;
+            font-size: 0.88rem;
+            font-weight: 600;
+            box-shadow: none;
+        }
+
+        .model-run-empty {
+            padding: 1rem 1.1rem;
+            border: 1px dashed var(--models-border);
+            border-radius: 1rem;
+            color: var(--models-muted);
+            font-size: 0.95rem;
+        }
+
+        @media (max-width: 900px) {
+            .model-run-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 767px) {
+            .models-hero-row,
+            .model-run-head {
+                flex-direction: column;
+            }
+
+            .model-run-metric {
+                min-width: 0;
+                text-align: left;
+            }
+
+            .model-run-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+    <div class="container models-page">
+        <article class="models-hero">
+            <div class="models-hero-row">
+                <div>
+                    <p class="models-eyebrow">Models</p>
+                    <h1>{{ job.name }}</h1>
+                </div>
+            </div>
+            <p class="models-hero-copy">
+                Review every trained model for this project, along with its stored training-set metric, related
+                segmentation, and any mesh output derived from the same run.
+            </p>
+            <div class="models-summary">
+                <span class="models-summary-item">{{ models | length }} model run{% if models|length != 1 %}s{% endif %}</span>
+                <span class="models-summary-item">
+                    {% if chart_metric_count == 0 %}
+                    No recorded {{ chart_metric_label }} yet
+                    {% else %}
+                    {{ chart_metric_count }} with {{ chart_metric_label }}
+                    {% endif %}
+                </span>
+            </div>
+            <div class="models-actions">
+                <a role="button" class="secondary outline" href="{{ url_for('job_page', job_id=job.id) }}">Back to project</a>
+                <a role="button" class="secondary outline" href="{{ url_for('download_page', job_id=job.id) }}">Downloads</a>
+            </div>
+        </article>
+
+        <article class="models-chart-card">
+            <div class="models-chart-head">
+                <div>
+                    <h2>{{ chart_metric_label }} Over Model Versions</h2>
+                    <p class="models-chart-copy">
+                        The chart uses the stored training-set metric captured when each model was created. Legacy runs
+                        without metrics are omitted from the line.
+                    </p>
+                </div>
+                <div class="models-metric-switch">
+                    {% for metric_key, metric_name in metric_options.items() %}
+                    {% if metric_key == chart_metric_key %}
+                    <span>{{ metric_name }}</span>
+                    {% else %}
+                    <a href="{{ url_for('models_page', job_id=job.id, metric=metric_key) }}">{{ metric_name }}</a>
+                    {% endif %}
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="models-chart-svg">{{ chart_svg | safe }}</div>
+        </article>
+
+        <div class="models-list">
+            {% if models %}
+            {% for model in models %}
+            <article class="model-run-card">
+                <div class="model-run-head">
+                    <div>
+                        <h3>Model <code>{{ model.model_id }}</code></h3>
+                        <p class="model-run-subtitle">
+                            {% if model.created_at %}
+                            Created {{ pretty_date(model.created_at) }}
+                            {% else %}
+                            Creation time unavailable
+                            {% endif %}
+                        </p>
+                    </div>
+                    <div class="model-run-metric{% if model.is_legacy %} model-run-metric--legacy{% endif %}">
+                        {% if model.has_training_metrics and model.train_metric_value is not none %}
+                        <strong>{{ "%.3f" | format(model.train_metric_value) }}</strong>
+                        <span>{{ chart_metric_label }}</span>
+                        {% elif model.needs_migration %}
+                        <button type="button" class="secondary outline model-run-metric-button"
+                            onclick="migrateModel('{{ model.model_id }}', this)">
+                            Migrate metadata
+                        </button>
+                        <span>Save inferred timestamps and annotation counts for this older run.</span>
+                        {% else %}
+                        <strong>Legacy run</strong>
+                        <span>Training metrics were not recorded for this model.</span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                {% if model.legacy_summary %}
+                <p class="model-run-note">{{ model.legacy_summary }}</p>
+                {% endif %}
+
+                <div class="model-run-grid">
+                    <div class="model-run-field">
+                        <span class="model-run-label">Annotations</span>
+                        <span class="model-run-value">
+                            {{ model.annotation_count if model.annotation_count is not none else "Unknown" }}
+                            {% if model.metadata_backed_sample_count %}
+                            <br><span class="model-run-subtitle">{{ model.metadata_backed_sample_count }} restored from raw volume metadata</span>
+                            {% endif %}
+                        </span>
+                    </div>
+                    <div class="model-run-field">
+                        <span class="model-run-label">Model Class</span>
+                        <span class="model-run-value">{{ model.model_class }}</span>
+                    </div>
+                    {% if model.has_rf_params %}
+                    <div class="model-run-field">
+                        <span class="model-run-label">RF Params</span>
+                        <span class="model-run-value">
+                            {{ model.rf_kwargs.get("n_estimators", "?") }} trees
+                            {% if model.rf_kwargs.get("max_depth") is not none %}
+                            <br><span class="model-run-subtitle">Max depth {{ model.rf_kwargs.get("max_depth") }}</span>
+                            {% endif %}
+                        </span>
+                    </div>
+                    {% endif %}
+                    {% if model.segmentation_ready %}
+                    <div class="model-run-field">
+                        <span class="model-run-label">Segmentation</span>
+                        <span class="model-run-value">
+                            <code>{{ model.segmentation_id }}</code>
+                        </span>
+                    </div>
+                    {% endif %}
+                    {% if model.mesh_ready %}
+                    <div class="model-run-field">
+                        <span class="model-run-label">Meshes</span>
+                        <span class="model-run-value">
+                            <code>{{ model.mesh_id }}</code>
+                        </span>
+                    </div>
+                    {% endif %}
+                    {% if model.has_training_metrics %}
+                    {% if model.train_dice_value is not none %}
+                    <div class="model-run-field">
+                        <span class="model-run-label">Train Dice</span>
+                        <span class="model-run-value">
+                            {{ "%.3f" | format(model.train_dice_value) }}
+                        </span>
+                    </div>
+                    {% endif %}
+                    {% if model.train_loss_value is not none %}
+                    <div class="model-run-field">
+                        <span class="model-run-label">Train Loss</span>
+                        <span class="model-run-value">
+                            {{ "%.3f" | format(model.train_loss_value) }}
+                        </span>
+                    </div>
+                    {% endif %}
+                    {% if model.train_iou_value is not none %}
+                    <div class="model-run-field">
+                        <span class="model-run-label">Train IoU</span>
+                        <span class="model-run-value">
+                            {{ "%.3f" | format(model.train_iou_value) }}
+                        </span>
+                    </div>
+                    {% endif %}
+                    <div class="model-run-field">
+                        <span class="model-run-label">Curve Status</span>
+                        <span class="model-run-value">{{ model.training_curve_status }}</span>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <div class="model-run-actions">
+                    <a role="button" class="secondary outline"
+                        href="{{ url_for('download_model', job_id=job.id, model_id=model.model_id) }}">
+                        Download model
+                    </a>
+                    {% if model.metadata_path and not model.needs_migration %}
+                    <a role="button" class="secondary outline"
+                        href="{{ url_for('download_model_metadata', job_id=job.id, model_id=model.model_id) }}">
+                        Download metadata
+                    </a>
+                    {% endif %}
+                    {% if model.segmentation_ready %}
+                    <a role="button" class="secondary outline"
+                        href="{{ url_for('download_zarr', job_id=job.id, seg_id=model.segmentation_id) }}">
+                        Segmentation zarr
+                    </a>
+                    {% endif %}
+                    {% if model.mesh_ready %}
+                    <a role="button" class="secondary outline"
+                        href="{{ url_for('download_meshes', job_id=job.id, seg_id=model.mesh_id) }}">
+                        Mesh STL
+                    </a>
+                    {% endif %}
+                </div>
+            </article>
+            {% endfor %}
+            {% else %}
+            <div class="model-run-empty">
+                No models have been trained for this project yet.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    <script>
+        async function migrateModel(modelId, button) {
+            const originalLabel = button.textContent;
+            button.disabled = true;
+            button.setAttribute("aria-busy", "true");
+            button.textContent = "Migrating...";
+            try {
+                const response = await fetch(`/api/job/{{ job.id }}/models/${encodeURIComponent(modelId)}/migrate`, {
+                    method: "POST",
+                });
+                let payload = null;
+                try {
+                    payload = await response.json();
+                } catch (error) {
+                    payload = null;
+                }
+                if (!response.ok) {
+                    throw new Error(payload?.message || "Could not migrate model metadata.");
+                }
+                window.location.reload();
+            } catch (error) {
+                window.alert(error.message || "Could not migrate model metadata.");
+                button.disabled = false;
+                button.removeAttribute("aria-busy");
+                button.textContent = originalLabel;
+            }
+        }
+    </script>
+</body>
+
+</html>

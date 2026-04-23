@@ -8,11 +8,9 @@
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    {% if (job.status | string in ["JobStatus.SEGMENTING", "JobStatus.CONVERTING"]) %}
+    {% if job_status_str in ["JobStatus.SEGMENTING", "JobStatus.CONVERTING"] %}
     <title>
-        {{ job.name }} ({{
-        "%.1f" | format(job.current_job_progress*100)
-        }}%) | ml4paleo
+        {{ job.name }} ({{ "%.1f" | format(job.current_job_progress * 100) }}%) | ml4paleo
     </title>
     {% else %}
     <title>{{ job.name }} | ml4paleo</title>
@@ -25,31 +23,65 @@
 <body>
     {% include "navbar.html" %}
     <style>
-        .job-header {
+        .job-page {
+            --job-border: rgba(28, 46, 61, 0.1);
+            --job-muted: #627789;
+            --job-soft: #f4f8fb;
+            --job-primary: var(--primary, #1095c1);
+            --job-error: #bf4a58;
+            --job-label-size: 0.74rem;
+            --job-text-size: 0.96rem;
+            --job-meta-size: 0.88rem;
+            --job-title-size: 1.08rem;
+            padding-bottom: 2rem;
+        }
+
+        .job-hero {
+            padding: 1.35rem 1.5rem 1.5rem;
+        }
+
+        .job-hero-top {
             display: flex;
             align-items: flex-start;
             justify-content: space-between;
             gap: 1rem;
         }
 
-        .job-header-main {
+        .job-title-block {
             min-width: 0;
+        }
+
+        .job-kicker {
+            margin: 0 0 0.35rem;
+            color: var(--job-muted);
+            font-size: var(--job-label-size);
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
         }
 
         .job-title-row {
             display: flex;
-            align-items: baseline;
-            gap: 0.75rem;
+            align-items: center;
+            gap: 0.8rem;
             flex-wrap: wrap;
         }
 
         .job-title-row h1 {
             margin: 0;
+            font-size: clamp(2rem, 5vw, 2.8rem);
+            line-height: 1.02;
         }
 
         .job-rename-link {
-            color: var(--muted-color);
-            font-size: 0.95rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.35rem 0.8rem;
+            border: 1px solid var(--job-border);
+            border-radius: 999px;
+            color: var(--job-muted);
+            font-size: 0.92rem;
             font-weight: 600;
             text-decoration: none;
             white-space: nowrap;
@@ -57,13 +89,374 @@
 
         .job-rename-link:hover,
         .job-rename-link:focus {
-            color: var(--primary);
-            text-decoration: underline;
+            color: var(--job-primary);
+            border-color: rgba(16, 149, 193, 0.35);
+            text-decoration: none;
         }
 
         .job-status-chip {
-            margin-top: 0.35rem;
             flex-shrink: 0;
+            margin-top: 0.25rem;
+        }
+
+        .job-timeline {
+            display: grid;
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+            gap: 0.4rem;
+            margin-top: 1.35rem;
+        }
+
+        .job-timeline-step {
+            position: relative;
+            padding-top: 1.65rem;
+            text-align: center;
+        }
+
+        .job-timeline-rail {
+            position: absolute;
+            top: 0.72rem;
+            left: 50%;
+            width: 100%;
+            height: 2px;
+            background: var(--job-border);
+        }
+
+        .job-timeline-dot {
+            position: absolute;
+            top: 0.3rem;
+            left: 50%;
+            width: 0.9rem;
+            height: 0.9rem;
+            border: 2px solid var(--job-border);
+            border-radius: 999px;
+            background: var(--card-background-color);
+            transform: translateX(-50%);
+            z-index: 1;
+        }
+
+        .job-timeline-label {
+            display: block;
+            color: var(--job-muted);
+            font-size: 0.86rem;
+            font-weight: 600;
+            line-height: 1.3;
+        }
+
+        .job-timeline-step--done .job-timeline-rail,
+        .job-timeline-step--done .job-timeline-dot {
+            background: var(--job-primary);
+            border-color: var(--job-primary);
+        }
+
+        .job-timeline-step--current .job-timeline-dot {
+            border-color: var(--job-primary);
+            box-shadow: 0 0 0 0.25rem rgba(16, 149, 193, 0.16);
+        }
+
+        .job-timeline-step--current .job-timeline-label {
+            color: var(--contrast);
+        }
+
+        .job-timeline-step--error .job-timeline-rail,
+        .job-timeline-step--error .job-timeline-dot {
+            background: var(--job-error);
+            border-color: var(--job-error);
+        }
+
+        .job-timeline-step--error .job-timeline-label {
+            color: var(--job-error);
+        }
+
+        .job-caption {
+            margin: 0.9rem 0 0;
+            color: var(--job-muted);
+            font-size: var(--job-meta-size);
+            line-height: 1.45;
+        }
+
+        .job-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.9rem 1.25rem;
+            margin-top: 1.15rem;
+            padding: 1rem 1.1rem;
+            border: 1px solid var(--job-border);
+            border-radius: 1rem;
+            background: linear-gradient(180deg, rgba(248, 251, 253, 0.92) 0%, rgba(255, 255, 255, 0.98) 100%);
+        }
+
+        .job-summary-item {
+            display: block;
+            min-width: 0;
+        }
+
+        .job-summary-label {
+            display: block;
+            margin: 0 0 0.18rem;
+            color: var(--job-muted);
+            font-size: var(--job-label-size);
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .job-summary-value {
+            display: block;
+            font-size: var(--job-text-size);
+            font-weight: 600;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+
+        .job-summary-value small {
+            display: block;
+            margin: 0.14rem 0 0;
+            color: var(--job-muted);
+            font-size: var(--job-meta-size);
+            font-weight: 600;
+        }
+
+        .job-summary-value code {
+            display: inline;
+            padding: 0;
+            overflow: hidden;
+            background: transparent;
+            color: var(--contrast);
+            font-size: var(--job-text-size);
+        }
+
+        .job-quick-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+            margin-top: 0.95rem;
+        }
+
+        .job-quick-actions a {
+            width: auto;
+            margin: 0;
+            padding: 0.5rem 0.8rem;
+            border-radius: 0.45rem;
+            font-size: var(--job-meta-size);
+            font-weight: 600;
+            box-shadow: none;
+        }
+
+        .job-card-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .job-card {
+            padding: 1.05rem 1.15rem 1.1rem;
+            border: 1px solid var(--job-border);
+            border-radius: 1rem;
+            background: var(--card-background-color);
+            box-shadow: 0 0.9rem 2rem rgba(24, 39, 54, 0.06);
+        }
+
+        .job-card--wide {
+            grid-column: span 2;
+        }
+
+        .job-card--accent {
+            background: linear-gradient(180deg, #f8fbfd 0%, #f2f8fb 100%);
+        }
+
+        .job-card--error {
+            border-color: rgba(191, 74, 88, 0.35);
+            background: linear-gradient(180deg, #fff7f8 0%, #fff 100%);
+        }
+
+        .job-card-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+
+        .job-card-header h3 {
+            margin: 0;
+            font-size: var(--job-title-size);
+            line-height: 1.28;
+        }
+
+        .job-card-copy {
+            margin: 0.55rem 0 0;
+            color: var(--job-muted);
+            font-size: var(--job-text-size);
+            line-height: 1.48;
+        }
+
+        .job-card-meta {
+            margin: 0.85rem 0 0;
+            color: var(--job-muted);
+            font-size: var(--job-meta-size);
+            line-height: 1.45;
+        }
+
+        .job-card-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-top: 0.95rem;
+        }
+
+        .job-card-actions a,
+        .job-card-actions button {
+            width: auto;
+            margin: 0;
+            padding: 0.58rem 0.9rem;
+            border-radius: 0.45rem;
+            font-size: var(--job-meta-size);
+            font-weight: 600;
+            line-height: 1.2;
+            box-shadow: none;
+        }
+
+        .job-card-meta-inline {
+            flex-shrink: 0;
+            color: var(--job-muted);
+            font-size: var(--job-meta-size);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            line-height: 1.3;
+        }
+
+        .training-card {
+            display: grid;
+            gap: 0.65rem;
+        }
+
+        .training-card-title-row {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            gap: 0.7rem;
+        }
+
+        .training-card .job-kicker {
+            margin-bottom: 0.05rem;
+        }
+
+        .training-card-count {
+            color: var(--job-muted);
+            font-size: var(--job-meta-size);
+            font-weight: 600;
+            line-height: 1.35;
+            white-space: nowrap;
+        }
+
+        .training-card .job-card-copy,
+        .training-card .job-card-meta {
+            margin: 0;
+            max-width: 44rem;
+        }
+
+        .training-card-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.7rem;
+            margin-top: 0.15rem;
+        }
+
+        .training-card-actions a,
+        .training-card-actions button {
+            width: auto;
+            flex: 0 0 auto;
+            margin: 0;
+            padding: 0.58rem 0.9rem;
+            border-radius: 0.45rem;
+            font-size: var(--job-meta-size);
+            font-weight: 600;
+            line-height: 1.2;
+            box-shadow: none;
+        }
+
+        .training-card-links {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.9rem;
+            align-items: center;
+            margin-top: -0.05rem;
+        }
+
+        a.training-card-link,
+        button.training-card-link {
+            display: inline-flex;
+            width: auto;
+            flex: 0 0 auto;
+            align-items: center;
+            margin: 0;
+            padding: 0;
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+            color: var(--contrast);
+            font-size: var(--job-meta-size);
+            font-weight: 600;
+            line-height: 1.35;
+            text-decoration: underline;
+            text-decoration-thickness: 0.08em;
+            text-underline-offset: 0.16em;
+            box-shadow: none;
+            appearance: none;
+            -webkit-appearance: none;
+            cursor: pointer;
+        }
+
+        a.training-card-link:visited {
+            color: var(--contrast);
+        }
+
+        a.training-card-link:hover,
+        a.training-card-link:focus,
+        button.training-card-link:hover,
+        button.training-card-link:focus {
+            background: transparent;
+            color: var(--job-primary);
+            text-decoration-thickness: 0.1em;
+            box-shadow: none;
+        }
+
+        .job-progress-meta {
+            margin-top: 0.95rem;
+        }
+
+        .job-progress-meta label {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-bottom: 0.45rem;
+            color: var(--job-muted);
+            font-size: var(--job-meta-size);
+            font-weight: 600;
+        }
+
+        .job-progress-meta progress {
+            margin: 0;
+            width: 100%;
+        }
+
+        .job-inline-token {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.2rem 0.55rem;
+            border-radius: 0.45rem;
+            background: var(--job-soft);
+            color: var(--contrast);
+            font-size: var(--job-meta-size);
+            font-weight: 700;
+            white-space: nowrap;
+        }
+
+        .job-error-list {
+            margin: 0.85rem 0 0;
+            padding-left: 1.1rem;
+            color: var(--job-muted);
         }
 
         #rename-job-dialog {
@@ -78,10 +471,10 @@
         }
 
         .rename-dialog-card {
-            width: min(100%, 26rem);
+            width: min(100%, 25rem);
             margin: 0;
-            padding: 1.25rem;
-            border-radius: 0.75rem;
+            padding: 1.1rem;
+            border-radius: 0.9rem;
             background: var(--card-background-color);
             box-shadow: var(--card-box-shadow);
         }
@@ -91,12 +484,12 @@
             align-items: center;
             justify-content: space-between;
             gap: 1rem;
-            margin-bottom: 1rem;
+            margin-bottom: 0.85rem;
         }
 
         .rename-dialog-title {
             margin: 0;
-            font-size: 1.1rem;
+            font-size: var(--job-title-size);
             line-height: 1.2;
         }
 
@@ -112,14 +505,14 @@
             border-radius: 999px;
             background: transparent;
             box-shadow: none;
-            color: var(--muted-color);
+            color: var(--job-muted);
             font-size: 1.35rem;
             line-height: 1;
         }
 
         .rename-dialog-close:hover,
         .rename-dialog-close:focus {
-            background: var(--code-background-color);
+            background: var(--job-soft);
             box-shadow: none;
             color: var(--contrast);
         }
@@ -138,7 +531,7 @@
             display: flex;
             justify-content: flex-end;
             gap: 0.75rem;
-            margin-top: 1rem;
+            margin-top: 0.9rem;
         }
 
         .rename-dialog-actions button {
@@ -147,169 +540,349 @@
             padding: 0.6rem 1rem;
         }
 
+        @media (max-width: 1024px) {
+            .job-summary-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .job-card-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .job-card--wide {
+                grid-column: auto;
+            }
+        }
+
         @media (max-width: 767px) {
-            .job-header {
+            .job-hero {
+                padding: 1.1rem;
+            }
+
+            .job-hero-top {
                 flex-direction: column;
             }
 
             .job-status-chip {
                 margin-top: 0;
             }
+
+            .job-timeline {
+                gap: 0.25rem;
+            }
+
+            .job-timeline-label {
+                font-size: 0.76rem;
+            }
+
+            .job-summary-grid {
+                grid-template-columns: 1fr;
+                gap: 0.8rem;
+            }
+
+            .job-card-header {
+                flex-direction: column;
+            }
+
+            .job-card-meta-inline {
+                font-size: 0.76rem;
+            }
+
+            .training-card-title-row {
+                align-items: flex-start;
+            }
         }
     </style>
-    <div class="container">
-        <div class="row">
-            <div class="col">
-                <article>
-                    <header>
-                        <div class="job-header">
-                            <div class="job-header-main">
-                                <div class="job-title-row">
-                                    <h1>{{ job.name }}</h1>
-                                    <a href="#" class="job-rename-link" onclick="openRenameJobDialog(event)">
-                                        Rename
-                                    </a>
-                                </div>
-                            </div>
-                            <div class="job-status-chip" data-tooltip="{{job.status}}">
-                                {{ status_badge(job.status) }}
-                            </div>
-                        </div>
-                    </header>
-                    <!-- <p>
-                            <a role="button" href="{{ neuroglancer_link }}" target="_blank"
-                                data-tooltip="Open 3D view in a new tab">
-                                View in 3D
-                            </a>
-                        </p>
-                        <p>
-                            <small>
-                                Created {{pretty_date(job.created_at)}}
-                            </small>
-                            <small>
-                                Last updated {{pretty_date(job.last_updated_at) }}
-                            </small>
-                        </p> -->
-                    <table>
-                        <tr>
-                            <th>Creation Date</th>
-                            <th>Last Updated</th>
-                            <th>Size</th>
-                            <th>Latest Segmentation ID</th>
-                            <th></th>
-                        </tr>
-                        <tr>
-                            <td>{{pretty_date(job.created_at)}}</td>
-                            <td>{{pretty_date(job.last_updated_at) }}</td>
-                            <td>
-                                {% if job.shape %}
-                                {{job.shape}} (<abbr title="{{voxel_count}} voxels">{{voxel_count_localized}}</abbr>)
-                                {% else %}
-                                Not available yet
-                                {% endif %}
-                            </td>
-                            <td>{{latest_segmentation_id}}</td>
-                            <td>
-                                <a href="{{ neuroglancer_link }}" target="_blank"
-                                    data-tooltip="Open 3D view in a new tab">
-                                    View in 3D
-                                </a>
-                            </td>
-                        </tr>
-                    </table>
-                </article>
+    <div class="container job-page">
+        <article class="job-hero">
+            <div class="job-hero-top">
+                <div class="job-title-block">
+                    <p class="job-kicker">Project</p>
+                    <div class="job-title-row">
+                        <h1>{{ job.name }}</h1>
+                        <a href="#" class="job-rename-link" onclick="openRenameJobDialog(event)">Rename</a>
+                    </div>
+                </div>
+                <div class="job-status-chip" data-tooltip="{{ job_status_str }}">
+                    {{ status_badge(job.status) }}
+                </div>
+            </div>
 
-                <dialog id="rename-job-dialog">
-                    <form id="rename-job-form" class="rename-dialog-card" onsubmit="submitRenameJob(event)">
-                        <div class="rename-dialog-header">
-                            <h3 class="rename-dialog-title">Rename project</h3>
-                            <button aria-label="Close rename dialog" class="rename-dialog-close" type="button"
-                                onclick="closeRenameJobDialog()">
-                                &times;
-                            </button>
-                        </div>
-                        <div class="rename-dialog-form">
-                            <label for="rename-job-input">Project name</label>
-                            <input id="rename-job-input" name="name" type="text" value="{{ job.name }}" required>
-                        </div>
-                        <div class="rename-dialog-actions">
-                            <button type="button" class="secondary outline" onclick="closeRenameJobDialog()">Cancel</button>
-                            <button type="submit" id="rename-job-submit">Save</button>
-                        </div>
-                    </form>
-                </dialog>
+            <div class="job-timeline" aria-label="Job status timeline">
+                {% for step in timeline_steps %}
+                <div class="job-timeline-step job-timeline-step--{{ step.state }}">
+                    {% if not loop.last %}
+                    <span class="job-timeline-rail" aria-hidden="true"></span>
+                    {% endif %}
+                    <span class="job-timeline-dot" aria-hidden="true"></span>
+                    <span class="job-timeline-label">{{ step.label }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            <p class="job-caption">{{ timeline_status_text }}</p>
 
-                {% if job.status | string == "JobStatus.UPLOADED" %}
-                <div>
-                    <label for="upload-progress">Upload Progress</label>
+            <div class="job-summary-grid">
+                <div class="job-summary-item">
+                    <span class="job-summary-label">Created</span>
+                    <span class="job-summary-value">{{ pretty_date(job.created_at) }}</span>
+                </div>
+                <div class="job-summary-item">
+                    <span class="job-summary-label">Updated</span>
+                    <span class="job-summary-value">{{ pretty_date(job.last_updated_at) }}</span>
+                </div>
+                <div class="job-summary-item">
+                    <span class="job-summary-label">Source</span>
+                    <span class="job-summary-value">{{ source_label }}</span>
+                </div>
+                <div class="job-summary-item">
+                    <span class="job-summary-label">Volume</span>
+                    <span class="job-summary-value">
+                        {% if job.shape %}
+                        {{ job.shape | join(" x ") }}
+                        <small>{{ voxel_count_localized }}</small>
+                        {% else %}
+                        Not available yet
+                        {% endif %}
+                    </span>
+                </div>
+                <div class="job-summary-item">
+                    <span class="job-summary-label">Annotations</span>
+                    <span class="job-summary-value">{{ num_annotations }}</span>
+                </div>
+                <div class="job-summary-item">
+                    <span class="job-summary-label">Segmentation</span>
+                    <span class="job-summary-value">
+                        {% if latest_segmentation_id %}
+                        <code>{{ latest_segmentation_id }}</code>
+                        {% else %}
+                        Not yet
+                        {% endif %}
+                    </span>
+                </div>
+            </div>
+
+            <div class="job-quick-actions">
+                {% if job.shape %}
+                <a role="button" class="secondary outline" href="{{ neuroglancer_link }}" target="_blank">
+                    View in 3D
+                </a>
+                {% endif %}
+                <a role="button" class="secondary outline" href="{{ url_for('models_page', job_id=job.id) }}">
+                    Models
+                </a>
+                <a role="button" class="secondary outline" href="{{ url_for('download_page', job_id=job.id) }}">
+                    See all downloads
+                </a>
+                {% if num_annotations > 0 %}
+                <a role="button" class="secondary outline" href="{{ url_for('annotation_gallery', job_id=job.id) }}">
+                    Annotation gallery
+                </a>
+                {% endif %}
+            </div>
+        </article>
+
+        <dialog id="rename-job-dialog">
+            <form id="rename-job-form" class="rename-dialog-card" onsubmit="submitRenameJob(event)">
+                <div class="rename-dialog-header">
+                    <h3 class="rename-dialog-title">Rename project</h3>
+                    <button aria-label="Close rename dialog" class="rename-dialog-close" type="button"
+                        onclick="closeRenameJobDialog()">
+                        &times;
+                    </button>
+                </div>
+                <div class="rename-dialog-form">
+                    <label for="rename-job-input">Project name</label>
+                    <input id="rename-job-input" name="name" type="text" value="{{ job.name }}" required>
+                </div>
+                <div class="rename-dialog-actions">
+                    <button type="button" class="secondary outline" onclick="closeRenameJobDialog()">Cancel</button>
+                    <button type="submit" id="rename-job-submit">Save</button>
+                </div>
+            </form>
+        </dialog>
+
+        <div class="job-card-grid">
+            {% if job_status_str == "JobStatus.UPLOADED" %}
+            <section class="job-card job-card--wide job-card--accent">
+                <div class="job-card-header">
+                    <div>
+                        <p class="job-kicker">Current Step</p>
+                        <h3>Upload complete</h3>
+                    </div>
+                </div>
+                <p class="job-card-copy">
+                    The source files are in place. Conversion will turn them into the chunked volume used by the
+                    viewer and annotator.
+                </p>
+                <div class="job-progress-meta">
+                    <label for="upload-progress">
+                        <span>Upload progress</span>
+                        <span>100%</span>
+                    </label>
                     <progress value="100" max="100" id="upload-progress"></progress>
                 </div>
-                {% endif %}
-                {% if job.status | string == "JobStatus.CONVERTING" %}
-                <div>
-                    <label for="convert-progress">Conversion Progress
-                        ({{ "%.3f" | format(job.current_job_progress*100) }}%)
-                    </label>
-                    <progress value="{{100 * job.current_job_progress}}" max="100" id="convert-progress"></progress>
+            </section>
+            {% endif %}
+
+            {% if is_converting %}
+            <section class="job-card job-card--wide job-card--accent">
+                <div class="job-card-header">
+                    <div>
+                        <p class="job-kicker">Current Step</p>
+                        <h3>Converting volume</h3>
+                    </div>
+                    <span class="job-inline-token">{{ "%.1f" | format(job.current_job_progress * 100) }}%</span>
                 </div>
-                {% endif %}
-
-
-                {% if job.status | string == "JobStatus.SEGMENTING" %}
-                <article>
-                    <label for="segment-progress">Segmentation Progress ({{
-                        "%.3f" | format(job.current_job_progress*100)
-                        }}%)</label>
-                    <progress value="{{100 * job.current_job_progress}}" max="100" id="segment-progress"></progress>
-                </article>
-                {% endif %}
-
-                {% if segmentation_ready %}
-                {% include "job_page_components/segmentation_results.html" %}
-                {% endif %}
-                {% if job.status | string in ["JobStatus.SEGMENT_ERROR"] %}
-                <h2>Segmentation failed.</h2>
-                <p>
-                    The segmentation failed to run. This could be due to a few reasons:
+                <p class="job-card-copy">
+                    The uploaded files are being normalized into the project volume. Once enough tiles are ready, you
+                    can start annotating without waiting for the whole job to finish.
                 </p>
-                <ul>
-                    <li>
-                        <b>There were not enough annotated slices to train a model.</b> Try annotating a few more
-                        slices.
-                    </li>
-                    <li>
-                        <b>The model failed to converge.</b> This could be because the model received conflicting
-                        annotations. Make sure you only annotate one type of material per job (i.e., only bone, or
-                        only enamel).
-                    </li>
+                <div class="job-progress-meta">
+                    <label for="convert-progress">
+                        <span>Conversion progress</span>
+                        <span>{{ "%.3f" | format(job.current_job_progress * 100) }}%</span>
+                    </label>
+                    <progress value="{{ 100 * job.current_job_progress }}" max="100" id="convert-progress"></progress>
+                </div>
+            </section>
+            {% endif %}
+
+            {% if is_training %}
+            <section class="job-card job-card--wide job-card--accent">
+                <div class="job-card-header">
+                    <div>
+                        <p class="job-kicker">Current Step</p>
+                        {% if job_status_str == "JobStatus.TRAINING_QUEUED" %}
+                        <h3>Training queued</h3>
+                        {% else %}
+                        <h3>Training model</h3>
+                        {% endif %}
+                    </div>
+                </div>
+                <p class="job-card-copy">
+                    The current annotation set is being used to fit a segmentation model. When training finishes, the
+                    full-volume segmentation step can run.
+                </p>
+            </section>
+            {% endif %}
+
+            {% if is_segmenting %}
+            <section class="job-card job-card--wide job-card--accent">
+                <div class="job-card-header">
+                    <div>
+                        <p class="job-kicker">Current Step</p>
+                        <h3>Running segmentation</h3>
+                    </div>
+                    <span class="job-inline-token">{{ "%.1f" | format(job.current_job_progress * 100) }}%</span>
+                </div>
+                <p class="job-card-copy">
+                    The trained model is being applied across the full volume. The page will refresh as chunks finish.
+                </p>
+                <div class="job-progress-meta">
+                    <label for="segment-progress">
+                        <span>Segmentation progress</span>
+                        <span>{{ "%.3f" | format(job.current_job_progress * 100) }}%</span>
+                    </label>
+                    <progress value="{{ 100 * job.current_job_progress }}" max="100" id="segment-progress"></progress>
+                </div>
+            </section>
+            {% endif %}
+
+            {% if is_meshing %}
+            <section class="job-card job-card--wide job-card--accent">
+                <div class="job-card-header">
+                    <div>
+                        <p class="job-kicker">Current Step</p>
+                        {% if job_status_str == "JobStatus.MESHING_QUEUED" %}
+                        <h3>Meshing queued</h3>
+                        {% else %}
+                        <h3>Generating meshes</h3>
+                        {% endif %}
+                    </div>
+                </div>
+                <p class="job-card-copy">
+                    Surface meshes are being generated from the latest segmentation output. STL downloads will appear
+                    here when the run finishes with non-empty geometry.
+                </p>
+            </section>
+            {% endif %}
+
+            {% if job_status_str == "JobStatus.CONVERT_ERROR" %}
+            <section class="job-card job-card--wide job-card--error">
+                <div class="job-card-header">
+                    <div>
+                        <p class="job-kicker">Needs Attention</p>
+                        <h3>Conversion failed</h3>
+                    </div>
+                </div>
+                <p class="job-card-copy">
+                    The server could not turn the uploaded files into a project volume. This usually means the upload
+                    was empty, mixed incompatible inputs, or contained unreadable files.
+                </p>
+            </section>
+            {% endif %}
+
+            {% if job_status_str == "JobStatus.SEGMENT_ERROR" %}
+            <section class="job-card job-card--wide job-card--error">
+                <div class="job-card-header">
+                    <div>
+                        <p class="job-kicker">Needs Attention</p>
+                        <h3>Segmentation failed</h3>
+                    </div>
+                </div>
+                <p class="job-card-copy">
+                    The training or full-volume segmentation run did not complete successfully.
+                </p>
+                <ul class="job-error-list">
+                    <li>Too few labeled slices can leave the model underfit.</li>
+                    <li>Conflicting annotations can make the classifier collapse.</li>
+                    <li>Adding more representative samples is usually the fastest recovery path.</li>
                 </ul>
-                <p>
-                    There are currently <b>{{ num_annotations }}</b> annotated slices. You can train a model with
-                    any
-                    number of annotated slices, but we recommend at least 10.
-                </p>
-                <p>
-                    <a target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">
+                <div class="job-card-actions">
+                    <a target="_blank" role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">
                         Continue annotating
                     </a>
-                </p>
-                {% endif %}
-            </div>
-        </div>
-        {% if meshes_ready %}
-        <div class="row">
-            <div class="col">
-                {% include 'job_page_components/download_meshes.html' %}
-            </div>
-        </div>
-        {% endif %}
+                    {% if num_annotations > 0 %}
+                    <a class="secondary outline" href="{{ url_for('annotation_gallery', job_id=job.id) }}">
+                        Review gallery
+                    </a>
+                    {% endif %}
+                </div>
+            </section>
+            {% endif %}
 
-        {% if (annotation_ready and job.status | string != "JobStatus.SEGMENTING") or (((job.status | string) ==
-        "JobStatus.CONVERTING") and job.current_job_progress > 0.4) %}
-        <div class="row">
-            <div class="col">{% include "job_page_components/annotation_cta.html" %}</div>
+            {% if job_status_str == "JobStatus.MESH_ERROR" %}
+            <section class="job-card job-card--wide job-card--error">
+                <div class="job-card-header">
+                    <div>
+                        <p class="job-kicker">Needs Attention</p>
+                        <h3>Mesh generation failed</h3>
+                    </div>
+                </div>
+                <p class="job-card-copy">
+                    The current segmentation did not produce a valid mesh bundle. If the segmentation looks thin or
+                    sparse, refine the annotations and rerun training before meshing again.
+                </p>
+                <div class="job-card-actions">
+                    <a role="button" class="secondary outline" href="{{ url_for('download_page', job_id=job.id) }}">
+                        Inspect downloads
+                    </a>
+                </div>
+            </section>
+            {% endif %}
+
+            {% if segmentation_ready %}
+            {% include "job_page_components/segmentation_results.html" %}
+            {% endif %}
+
+            {% if meshes_ready %}
+            {% include "job_page_components/download_meshes.html" %}
+            {% endif %}
+
+            {% if show_annotation_cta %}
+            {% include "job_page_components/annotation_cta.html" %}
+            {% endif %}
         </div>
-        {% endif %}
     </div>
     <script src="https://cdn.jsdelivr.net/npm/notyf@3/notyf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"
@@ -326,9 +899,7 @@
         });
 
         triggerSegmentation = () => {
-            // Disable the button
             document.getElementById("segmentation-trigger-button").disabled = true;
-            // Set aria-busy:
             document.getElementById("segmentation-trigger-button").setAttribute("aria-busy", "true");
 
             fetch("/api/job/{{ job.id }}/start", {
@@ -341,15 +912,13 @@
                         notyf.error("There was an error starting segmentation. Please try again in a few minutes.");
                     }
                 })
-                .catch((error) => {
+                .catch(() => {
                     notyf.error("There was an error starting segmentation. Please try again in a few minutes.");
                 });
         };
 
         triggerTrainOnly = () => {
-            // Disable the button
             document.getElementById("train-only-trigger-button").disabled = true;
-            // Set aria-busy:
             document.getElementById("train-only-trigger-button").setAttribute("aria-busy", "true");
 
             fetch("/api/job/{{ job.id }}/retrain", {
@@ -362,7 +931,7 @@
                         notyf.error("There was an error starting training. Please try again in a few minutes.");
                     }
                 })
-                .catch((error) => {
+                .catch(() => {
                     notyf.error("There was an error starting training. Please try again in a few minutes.");
                 });
         };
@@ -432,7 +1001,7 @@
                     return data;
                 })
                 .then((data) => {
-                    let jobs = JSON.parse(localStorage.getItem('jobs'));
+                    let jobs = JSON.parse(localStorage.getItem("jobs"));
                     if (!Array.isArray(jobs)) {
                         jobs = [];
                     }
@@ -442,7 +1011,7 @@
                     } else {
                         jobs.push({ id: data.job_id, name: data.name });
                     }
-                    localStorage.setItem('jobs', JSON.stringify(jobs));
+                    localStorage.setItem("jobs", JSON.stringify(jobs));
                     jobName = data.name;
                     closeRenameJobDialog();
                     window.location.reload();
@@ -456,26 +1025,25 @@
                 });
         };
 
-
         window.setInterval(() => {
             fetch("/api/job/{{ job.id }}/status")
                 .then((response) => response.json())
                 .then((data) => {
-                    console.log(data, "{{job.status | string}}")
-                    if (data.status !== "{{job.status | string}}" || data.status === "JobStatus.SEGMENTING" || data.status === "JobStatus.CONVERTING") {
+                    if (
+                        data.status !== "{{ job_status_str }}" ||
+                        data.status === "JobStatus.SEGMENTING" ||
+                        data.status === "JobStatus.CONVERTING"
+                    ) {
                         window.location.reload();
                     }
                 });
         }, 5000);
 
-
-        // When the page loads, get the job ID and name and put them
-        // in localstorage if they aren't already there.
         let jobId = "{{ job.id }}";
         let jobName = {{ job.name | tojson }};
 
         if (jobId.trim() !== "" && jobName.trim() !== "") {
-            let jobs = JSON.parse(localStorage.getItem('jobs'));
+            let jobs = JSON.parse(localStorage.getItem("jobs"));
             if (jobs === null) {
                 jobs = [];
             }
@@ -488,9 +1056,8 @@
                     name: jobName,
                 });
             }
-            localStorage.setItem('jobs', JSON.stringify(jobs));
+            localStorage.setItem("jobs", JSON.stringify(jobs));
         }
-
     </script>
 </body>
 
