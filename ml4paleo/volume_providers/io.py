@@ -150,10 +150,27 @@ def get_random_tile(
         np.ndarray: A random tile from the volume.
 
     """
-    x = np.random.randint(0, volume_provider.shape[0] - tile_size[0])
-    y = np.random.randint(0, volume_provider.shape[1] - tile_size[1])
+    tile_width = min(volume_provider.shape[0], tile_size[0])
+    tile_height = min(volume_provider.shape[1], tile_size[1])
+
+    x_high = volume_provider.shape[0] - tile_width
+    y_high = volume_provider.shape[1] - tile_height
+    x = np.random.randint(0, x_high + 1) if x_high > 0 else 0
+    y = np.random.randint(0, y_high + 1) if y_high > 0 else 0
     z = np.random.randint(0, volume_provider.shape[2])
-    return volume_provider[x : x + tile_size[0], y : y + tile_size[1], z]
+    tile = volume_provider[x : x + tile_width, y : y + tile_height, z]
+
+    if tile.shape == tile_size:
+        return tile
+
+    padded_tile = np.zeros(tile_size, dtype=tile.dtype)
+    x_pad = (tile_size[0] - tile.shape[0]) // 2
+    y_pad = (tile_size[1] - tile.shape[1]) // 2
+    padded_tile[
+        x_pad : x_pad + tile.shape[0],
+        y_pad : y_pad + tile.shape[1],
+    ] = tile
+    return padded_tile
 
 
 def get_random_zyx_subvolume(
@@ -171,14 +188,39 @@ def get_random_zyx_subvolume(
         np.ndarray: A random subvolume from the volume.
 
     """
-    z = np.random.randint(0, volume_provider.shape[2] - subvolume_size_zyx[0])
-    y = np.random.randint(0, volume_provider.shape[1] - subvolume_size_zyx[1])
-    x = np.random.randint(0, volume_provider.shape[0] - subvolume_size_zyx[2])
-    return volume_provider[
-        x : x + subvolume_size_zyx[2],
-        y : y + subvolume_size_zyx[1],
-        z : z + subvolume_size_zyx[0],
+    requested_z, requested_y, requested_x = subvolume_size_zyx
+    actual_x = min(volume_provider.shape[0], requested_x)
+    actual_y = min(volume_provider.shape[1], requested_y)
+    actual_z = min(volume_provider.shape[2], requested_z)
+
+    x_high = volume_provider.shape[0] - actual_x
+    y_high = volume_provider.shape[1] - actual_y
+    z_high = volume_provider.shape[2] - actual_z
+    x = np.random.randint(0, x_high + 1) if x_high > 0 else 0
+    y = np.random.randint(0, y_high + 1) if y_high > 0 else 0
+    z = np.random.randint(0, z_high + 1) if z_high > 0 else 0
+
+    subvolume = volume_provider[
+        x : x + actual_x,
+        y : y + actual_y,
+        z : z + actual_z,
     ].swapaxes(0, 2)
+
+    if subvolume.shape == subvolume_size_zyx:
+        return subvolume
+
+    z_pad = requested_z - subvolume.shape[0]
+    y_pad = requested_y - subvolume.shape[1]
+    x_pad = requested_x - subvolume.shape[2]
+    return np.pad(
+        subvolume,
+        (
+            (z_pad // 2, z_pad - (z_pad // 2)),
+            (y_pad // 2, y_pad - (y_pad // 2)),
+            (x_pad // 2, x_pad - (x_pad // 2)),
+        ),
+        mode="constant",
+    )
 
 
 def export_to_img_stack(
