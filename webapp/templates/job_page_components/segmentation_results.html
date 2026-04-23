@@ -13,6 +13,9 @@
         annotating, retrain, and rerun the full segmentation pass.
     </p>
     <div class="job-card-actions">
+        <a role="button" class="secondary outline" href="{{ url_for('models_page', job_id=job.id) }}">
+            Model history
+        </a>
         <a role="button" href="{{ url_for('download_page', job_id=job.id) }}">
             See all downloads
         </a>

@@ -667,6 +667,9 @@
                     View in 3D
                 </a>
                 {% endif %}
+                <a role="button" class="secondary outline" href="{{ url_for('models_page', job_id=job.id) }}">
+                    Models
+                </a>
                 <a role="button" class="secondary outline" href="{{ url_for('download_page', job_id=job.id) }}">
                     See all downloads
                 </a>

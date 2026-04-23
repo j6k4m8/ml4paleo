@@ -42,6 +42,7 @@ from ml4paleo.volume_providers.io import (
 
 from config import CONFIG
 from apputils import (
+    build_model_metric_chart_svg,
     count_annotation_samples,
     get_annotation_pairs,
     get_latest_segmentation_id,
@@ -49,6 +50,8 @@ from apputils import (
     get_mesh_directory,
     get_mesh_files,
     get_latest_segmentation_model,
+    get_model_runs,
+    migrate_model_metadata_sidecar,
     load_annotation_source_slice,
     create_neuroglancer_link,
     get_png_filmstrip,
@@ -62,6 +65,11 @@ TIMELINE_STEPS = ("Upload", "Convert", "Annotate", "Train", "Segment", "Mesh")
 SOURCE_LABELS = {
     "image_stack": "Image stack",
     "dicom": "DICOM series",
+}
+MODEL_PAGE_METRIC_OPTIONS = {
+    "train_foreground_dice": "Train Dice",
+    "train_loss": "Training Loss (1 - Dice)",
+    "train_foreground_iou": "Train IoU",
 }
 
 
@@ -654,6 +662,80 @@ class ML4PaleoWebApplication:
                 img_seg_pairs=img_seg_pairs,
             )
 
+        @self.app.route("/job/<job_id>/models", methods=["GET"])
+        def models_page(job_id):
+            if job_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            metric_key = request.args.get("metric", "train_foreground_dice")
+            if metric_key not in MODEL_PAGE_METRIC_OPTIONS:
+                metric_key = "train_foreground_dice"
+            metric_label = MODEL_PAGE_METRIC_OPTIONS[metric_key]
+            models = get_model_runs(job, train_metric_key=metric_key)
+            chart_svg = build_model_metric_chart_svg(
+                models,
+                metric_key=metric_key,
+                metric_label=metric_label,
+            )
+            metric_count = sum(
+                1 for model in models if model.get("train_metric_value") is not None
+            )
+            return render_template(
+                "models_page.html",
+                job=job,
+                models=models,
+                chart_svg=chart_svg,
+                chart_metric_key=metric_key,
+                chart_metric_label=metric_label,
+                chart_metric_count=metric_count,
+                metric_options=MODEL_PAGE_METRIC_OPTIONS,
+            )
+
+        @self.app.route("/api/job/<job_id>/models/<model_id>/migrate", methods=["POST"])
+        def migrate_model_metadata(job_id, model_id):
+            if job_id is None or model_id is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id and model_id are required"}),
+                    400,
+                )
+
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job does not exist"}),
+                    400,
+                )
+
+            try:
+                metadata_path = migrate_model_metadata_sidecar(job, model_id)
+            except FileNotFoundError:
+                return (
+                    jsonify({"status": "error", "message": "model does not exist"}),
+                    400,
+                )
+            except Exception as exc:
+                log.exception(
+                    "Failed to migrate metadata for job %s model %s",
+                    job_id,
+                    model_id,
+                )
+                return (
+                    jsonify({"status": "error", "message": str(exc)}),
+                    500,
+                )
+
+            return jsonify(
+                {
+                    "status": "success",
+                    "model_id": model_id,
+                    "metadata_file": metadata_path.name,
+                }
+            )
+
         # Satisfy requests for /job/<job_id>/annotations/img1720204733.png
         @self.app.route("/job/<job_id>/annotations/<filename>", methods=["GET"])
         def annotation_image(job_id, filename):
@@ -799,6 +881,44 @@ class ML4PaleoWebApplication:
                     JobStatus.MESH_ERROR,
                 ],
             )
+
+        @self.app.route("/api/job/<job_id>/models/<model_id>/download", methods=["GET"])
+        def download_model(job_id, model_id):
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            model_path = pathlib.Path(CONFIG.model_directory) / job_id / f"{model_id}.model"
+            if not model_path.exists():
+                return (
+                    jsonify({"status": "error", "message": "model does not exist"}),
+                    400,
+                )
+            return send_file(model_path, as_attachment=True)
+
+        @self.app.route(
+            "/api/job/<job_id>/models/<model_id>/download/json", methods=["GET"]
+        )
+        def download_model_metadata(job_id, model_id):
+            job = job_manager.get_job(job_id)
+            if job is None:
+                return (
+                    jsonify({"status": "error", "message": "job_id is required"}),
+                    400,
+                )
+
+            metadata_path = pathlib.Path(CONFIG.model_directory) / job_id / f"{model_id}.json"
+            if not metadata_path.exists():
+                return (
+                    jsonify(
+                        {"status": "error", "message": "model metadata does not exist"}
+                    ),
+                    400,
+                )
+            return send_file(metadata_path, as_attachment=True)
 
         @self.app.route(
             "/api/job/<job_id>/segmentation/<seg_id>/download/zarr", methods=["GET"]
