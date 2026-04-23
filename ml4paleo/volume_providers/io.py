@@ -66,6 +66,7 @@ def export_zarr_array(
     zarr_array = zarr.open(
         str(zarr_file),
         mode="w",
+        zarr_format=2,
         shape=shape,
         chunks=chunk_size,
         dtype=dtype,

@@ -48,6 +48,7 @@ def segment_volume_to_zarr(
     zarr.open(
         str(seg_path),
         mode="w",
+        zarr_format=2,
         dtype="uint64",
         shape=vol_provider.shape,
         chunks=chunk_size,

@@ -24,11 +24,11 @@ WORKDIR /ml4paleo
 # Install third-party dependencies before copying the whole repo to improve
 # Docker layer reuse when application code changes.
 COPY pyproject.toml uv.lock /ml4paleo/
-RUN uv sync --locked --no-install-project
+RUN uv sync --locked --group dicom --no-install-project
 
 # Copy the application source and install the project itself.
 COPY . /ml4paleo
-RUN uv sync --locked \
+RUN uv sync --locked --group dicom \
     && uv pip install --python .venv/bin/python gunicorn
 
 # Expose the synced environment to the runtime entrypoints used in compose.

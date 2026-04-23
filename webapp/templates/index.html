@@ -89,8 +89,19 @@
                         will not share your email with anyone else.)
                     </small>
 
+                    <label for="job-source-type">Upload Format</label>
+                    <select id="job-source-type">
+                        <option value="image_stack">Image stack</option>
+                        <option value="dicom">DICOM series</option>
+                    </select>
+                    <small>
+                        Use <code>Image stack</code> for PNG, TIFF, JPG, or similar slice images.
+                        Use <code>DICOM series</code> for one study or series of DICOM slice files.
+                        Both formats may also be uploaded as a <code>.zip</code> archive.
+                    </small>
+
                     <footer>
-                        <button role="button" onclick="submitJob()">Continue to Image Upload</button>
+                        <button role="button" onclick="submitJob()">Continue to Upload</button>
                     </footer>
                 </article>
             </div>
@@ -104,7 +115,7 @@
                     <p id="job-id-readout">
                         Something went wrong with the upload. Please refresh this page and try again.
                     </p>
-                    <p>
+                    <p id="upload-type-description">
                         Drag and drop your images below, or click in the box below to select files.
                     </p>
                     <progress max="100" id="progress"></progress>
@@ -141,6 +152,7 @@
         }
 
         function submitJob() {
+            const sourceType = document.getElementById("job-source-type").value;
             fetch(`/api/job/new`, {
                 method: "POST",
                 headers: {
@@ -149,6 +161,7 @@
                 body: JSON.stringify({
                     namespace: "ml4paleo",
                     name: document.getElementById("job-name").value,
+                    source_type: sourceType,
                 }),
             })
                 .then((response) => response.json())
@@ -161,6 +174,10 @@
                     document.getElementById("job-id-readout").innerHTML = `
                     Your job has been created with the ID <code id="rendered-job-id">${data.job_id}</code>.
                     `;
+                    document.getElementById("upload-type-description").innerText =
+                        sourceType === "dicom"
+                            ? "Drag and drop the DICOM files from a single series below, or upload one .zip archive containing that series."
+                            : "Drag and drop your image slices below, or upload one .zip archive containing the stack. Image stacks are ordered lexicographically by filename.";
                     // hide the job creation form
                     document.getElementById("zone-job").classList.add("hidden");
                     // Set the Job ID in the hidden form field

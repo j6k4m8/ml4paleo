@@ -72,13 +72,18 @@ class ML4PaleoWebApplication:
 
         @self.app.route("/api/job/new", methods=["POST"])
         def new_job():
-            job = UploadJob(
-                status=JobStatus.UPLOADING,
-                name=(request.get_json() or {}).get("name", "Untitled Job")
-                # These fields will be automatically populated:
-                # id=None,
-                # created_at=None,
-            )
+            request_json = request.get_json() or {}
+            try:
+                job = UploadJob(
+                    status=JobStatus.UPLOADING,
+                    name=request_json.get("name", "Untitled Job"),
+                    source_type=request_json.get("source_type", "image_stack"),
+                    # These fields will be automatically populated:
+                    # id=None,
+                    # created_at=None,
+                )
+            except ValueError as exc:
+                return jsonify({"status": "error", "message": str(exc)}), 400
             job_id = job_manager.new_job(job)
             return jsonify({"job_id": job_id})
 
@@ -183,6 +188,12 @@ class ML4PaleoWebApplication:
                 )
 
             job = job_manager.get_job(job_id)
+            upload_dir = pathlib.Path(CONFIG.upload_directory) / job_id
+            if not upload_dir.exists() or not any(upload_dir.iterdir()):
+                return (
+                    jsonify({"status": "error", "message": "No uploaded files found"}),
+                    400,
+                )
             job.complete_upload()
             job_manager.update_job(job_id, job)
             return jsonify({"job_id": job_id, "status": str(job.status)})
@@ -211,6 +222,7 @@ class ML4PaleoWebApplication:
             )
 
             voxel_count = (job.shape[0] * job.shape[1] * job.shape[2]) if job.shape else 0
+            voxel_count_localized = "Not available yet"
             # Replace voxels with KV, MV, GV, etc.
             if voxel_count:
                 voxel_count_localized = voxel_count
