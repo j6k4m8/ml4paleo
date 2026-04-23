@@ -31,6 +31,34 @@ log = logging.getLogger(__name__)
 
 # Types:
 UploadJobID = str
+DEFAULT_SOURCE_TYPE = "image_stack"
+ALLOWED_SOURCE_TYPES = ("image_stack", "dicom")
+
+
+def normalize_source_type(source_type: Optional[str]) -> str:
+    """
+    Normalize user-provided upload source types into stable internal values.
+    """
+    if source_type is None:
+        return DEFAULT_SOURCE_TYPE
+
+    normalized = source_type.strip().lower()
+    aliases = {
+        "image": "image_stack",
+        "images": "image_stack",
+        "image-stack": "image_stack",
+        "image_stack": "image_stack",
+        "dicom": "dicom",
+        "dicom-series": "dicom",
+        "dicom_series": "dicom",
+        "dcm": "dicom",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in ALLOWED_SOURCE_TYPES:
+        raise ValueError(
+            f"Invalid source type: {source_type}. Must be one of {ALLOWED_SOURCE_TYPES}."
+        )
+    return normalized
 
 
 class JobStatus(Enum):
@@ -99,6 +127,7 @@ class UploadJobSchema(Schema):
     status = fields.Str()
     name = fields.Str()
     id = fields.Str()
+    source_type = fields.Str()
     created_at = fields.Str()
     last_updated_at = fields.Str()
     current_job_progress = fields.Float()
@@ -126,6 +155,7 @@ class UploadJob:
         id: Optional[UploadJobID] = None,
         name: Optional[str] = None,
         status: Optional[JobStatus] = None,
+        source_type: Optional[str] = None,
         created_at: Optional[str] = None,
         last_updated_at: Optional[str] = None,
         current_job_progress: Optional[float] = None,
@@ -157,6 +187,7 @@ class UploadJob:
         last_updated_at = last_updated_at or datetime.datetime.now().isoformat()
         self.status = status or JobStatus.PENDING
         self.shape = shape
+        self.source_type = normalize_source_type(source_type)
         self.name = name or "Untitled Job created at " + created_at
         self.id = id or _new_job_id()
         self.created_at = created_at
@@ -199,6 +230,7 @@ class UploadJob:
             id=d["id"],
             name=d["name"],
             status=JobStatus.from_string(d["status"]),
+            source_type=d.get("source_type", DEFAULT_SOURCE_TYPE),
             created_at=d["created_at"],
             last_updated_at=d.get("last_updated_at", d["created_at"]),
             current_job_progress=d.get("current_job_progress", 0.0),

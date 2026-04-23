@@ -42,12 +42,19 @@ from ml4paleo.volume_providers.io import (
 
 from config import CONFIG
 from apputils import (
+    count_annotation_samples,
+    get_annotation_pairs,
     get_latest_segmentation_id,
+    get_latest_mesh_id,
+    get_mesh_directory,
+    get_mesh_files,
     get_latest_segmentation_model,
+    load_annotation_source_slice,
     create_neuroglancer_link,
+    get_png_filmstrip,
+    normalize_annotation_volume,
 )
 from segmentrunner import train_job
-from webapp.apputils import get_png_filmstrip
 
 log = logging.getLogger(__name__)
 
@@ -72,13 +79,18 @@ class ML4PaleoWebApplication:
 
         @self.app.route("/api/job/new", methods=["POST"])
         def new_job():
-            job = UploadJob(
-                status=JobStatus.UPLOADING,
-                name=(request.get_json() or {}).get("name", "Untitled Job")
-                # These fields will be automatically populated:
-                # id=None,
-                # created_at=None,
-            )
+            request_json = request.get_json() or {}
+            try:
+                job = UploadJob(
+                    status=JobStatus.UPLOADING,
+                    name=request_json.get("name", "Untitled Job"),
+                    source_type=request_json.get("source_type", "image_stack"),
+                    # These fields will be automatically populated:
+                    # id=None,
+                    # created_at=None,
+                )
+            except ValueError as exc:
+                return jsonify({"status": "error", "message": str(exc)}), 400
             job_id = job_manager.new_job(job)
             return jsonify({"job_id": job_id})
 
@@ -183,6 +195,12 @@ class ML4PaleoWebApplication:
                 )
 
             job = job_manager.get_job(job_id)
+            upload_dir = pathlib.Path(CONFIG.upload_directory) / job_id
+            if not upload_dir.exists() or not any(upload_dir.iterdir()):
+                return (
+                    jsonify({"status": "error", "message": "No uploaded files found"}),
+                    400,
+                )
             job.complete_upload()
             job_manager.update_job(job_id, job)
             return jsonify({"job_id": job_id, "status": str(job.status)})
@@ -197,20 +215,10 @@ class ML4PaleoWebApplication:
 
             job = job_manager.get_job(job_id)
             # Get the number of annotations for this job:
-            num_annotations = (
-                len(
-                    [
-                        f
-                        for f in (
-                            pathlib.Path(CONFIG.training_directory) / job.id
-                        ).glob("*")
-                        if f.is_file()
-                    ]
-                )
-                // 2
-            )
+            num_annotations = count_annotation_samples(job)
 
             voxel_count = (job.shape[0] * job.shape[1] * job.shape[2]) if job.shape else 0
+            voxel_count_localized = "Not available yet"
             # Replace voxels with KV, MV, GV, etc.
             if voxel_count:
                 voxel_count_localized = voxel_count
@@ -220,6 +228,8 @@ class ML4PaleoWebApplication:
                     voxel_count_localized /= 1024
                 voxel_count_localized = f"{voxel_count_localized:.2f} {unit}V"
 
+            latest_segmentation_id = get_latest_segmentation_id(job)
+            latest_mesh_seg_id = get_latest_mesh_id(job)
             return render_template(
                 "job_page.html",
                 job=job,
@@ -227,7 +237,8 @@ class ML4PaleoWebApplication:
                 voxel_count_localized=voxel_count_localized,
                 num_annotations=num_annotations,
                 neuroglancer_link=create_neuroglancer_link(job),
-                latest_segmentation_id=get_latest_segmentation_id(job),
+                latest_segmentation_id=latest_segmentation_id,
+                latest_mesh_seg_id=latest_mesh_seg_id,
                 # Status breakdown:
                 has_been_annotated=(
                     job.status
@@ -259,7 +270,7 @@ class ML4PaleoWebApplication:
                         JobStatus.MESHED,
                     ]
                 ),
-                meshes_ready=job.status in [JobStatus.MESHED],
+                meshes_ready=latest_mesh_seg_id is not None,
             )
 
         ############################
@@ -290,11 +301,14 @@ class ML4PaleoWebApplication:
                 )
             zarrvol = ZarrVolumeProvider(zarr_path)
             # Get a random slice from the dataset:
-            vol_zyx = get_random_zyx_subvolume(
-                zarrvol, CONFIG.annotation_shape_xyz[::-1]
+            vol_zyx, sample_metadata = get_random_zyx_subvolume(
+                zarrvol,
+                CONFIG.annotation_shape_xyz[::-1],
+                return_metadata=True,
             )
+            display_vol_zyx, display_stats = normalize_annotation_volume(vol_zyx)
             # Get the slice as a PIL image:
-            img = get_png_filmstrip(vol_zyx)
+            img = get_png_filmstrip(display_vol_zyx)
             img_bytes = io.BytesIO()
             img.save(img_bytes, format="PNG")
             img_bytes.seek(0)
@@ -304,9 +318,11 @@ class ML4PaleoWebApplication:
                 {
                     "zInfo": {
                         "min": 0,
-                        "max": 0,
-                        "current": 0,
+                        "max": int(display_vol_zyx.shape[0] - 1),
+                        "current": int(display_vol_zyx.shape[0] // 2),
                     },
+                    "intensityWindow": display_stats,
+                    "sampleMetadata": sample_metadata,
                 }
             )
             return resp
@@ -331,6 +347,7 @@ class ML4PaleoWebApplication:
                 )
             image_b64 = data.get("image", None)
             mask_b64 = data.get("mask", None)
+            sample_metadata = data.get("sample_metadata", None)
             if image_b64 is None or mask_b64 is None:
                 return (
                     jsonify(
@@ -350,7 +367,6 @@ class ML4PaleoWebApplication:
             img_slices = CONFIG.annotation_shape_xyz[2]
             middle_slice = img_slices // 2
 
-            print(img_slices, middle_slice, img_height)
             img = img.crop(
                 (
                     # Left Up Right Lower
@@ -365,6 +381,19 @@ class ML4PaleoWebApplication:
             Image.open(io.BytesIO(base64.b64decode(mask_b64.split(",")[1]))).resize(
                 CONFIG.annotation_shape_xyz[:-1]
             ).save(mfname)
+            if isinstance(sample_metadata, dict):
+                meta_fname = _prefix / (CONFIG.training_meta_prefix + tic + ".json")
+                metadata_to_save = dict(sample_metadata)
+                metadata_to_save.update(
+                    {
+                        "timestamp": tic,
+                        "job_id": job.id,
+                        "training_image_filename": fname.name,
+                        "training_mask_filename": mfname.name,
+                    }
+                )
+                with open(meta_fname, "w") as f:
+                    json.dump(metadata_to_save, f)
 
             # If the job is CONVERTING, don't change the status (we need the
             # daemon to continue to run the conversion process.)
@@ -403,24 +432,21 @@ class ML4PaleoWebApplication:
                     400,
                 )
             image_b64 = data.get("image", None)
-            img_np = np.array(
-                Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1])))
-            )
-            print(img_np.shape)
-            # img_np = img_np.reshape(*CONFIG.annotation_shape_xyz, 4)
-            # Crop the image to the center slice.
-            slice_count = CONFIG.annotation_shape_xyz[2]
-            # This is an odd number, so we want the middle slice:
-            middle_slice = slice_count // 2
-            start_x = int((img_np.shape[0] / slice_count) * middle_slice)
-
-            img_np = img_np[
-                start_x : start_x + CONFIG.annotation_shape_xyz[0],
-                :,
-                0,
-            ]
-
-            print(img_np.shape)
+            sample_metadata = data.get("sample_metadata", None)
+            if isinstance(sample_metadata, dict):
+                img_np = load_annotation_source_slice(job.id, sample_metadata)
+            else:
+                img_np = np.array(
+                    Image.open(io.BytesIO(base64.b64decode(image_b64.split(",")[1])))
+                )
+                slice_count = CONFIG.annotation_shape_xyz[2]
+                middle_slice = slice_count // 2
+                start_y = int((img_np.shape[0] / slice_count) * middle_slice)
+                img_np = img_np[
+                    start_y : start_y + CONFIG.annotation_shape_xyz[1],
+                    :,
+                    0,
+                ].T
             # Load the latest model if it exists:
             modelpath = get_latest_segmentation_model(job)
             if modelpath is None:
@@ -429,9 +455,8 @@ class ML4PaleoWebApplication:
             # Predict the mask:
             model = RandomForest3DSegmenter()
             model.load(str(modelpath))
-            print("Loaded model: ", modelpath)
-            print(img_np.shape)
             mask = model._segment_slice(img_np)
+            mask = mask.T
             annos = np.array(
                 Image.fromarray(mask).resize(CONFIG.annotation_shape_xyz[:-1])
             )
@@ -467,30 +492,14 @@ class ML4PaleoWebApplication:
 
             job = job_manager.get_job(job_id)
 
-            all_annotation_files = [
-                f
-                for f in (
-                    pathlib.Path(CONFIG.training_directory) / job.id
-                ).glob("*")
-                if f.is_file()
-            ]
-
             img_seg_pairs = []
-            for img_file in all_annotation_files:
-                if img_file.name.startswith(CONFIG.training_img_prefix):
-                    seg_file = img_file.with_name(
-                        img_file.name.replace(CONFIG.training_img_prefix, "seg")
-                    )
-                    if seg_file in all_annotation_files:
-                        img_seg_pairs.append((
-                            img_file.name,
-                            seg_file.name
-                        ))
+            for img_file, seg_file, _meta_file in get_annotation_pairs(job):
+                img_seg_pairs.append((img_file.name, seg_file.name))
 
             return render_template(
                 "annotation_gallery.html",
                 job=job,
-                num_annotations=len(all_annotation_files) // 2,
+                num_annotations=len(img_seg_pairs),
                 img_seg_pairs=img_seg_pairs,
             )
 
@@ -624,10 +633,12 @@ class ML4PaleoWebApplication:
                 )
 
             job = job_manager.get_job(job_id)
+            latest_mesh_seg_id = get_latest_mesh_id(job)
             return render_template(
                 "download_page.html",
                 job=job,
                 latest_seg_id=get_latest_segmentation_id(job),
+                latest_mesh_seg_id=latest_mesh_seg_id,
                 segmentation_done=job.status
                 in [
                     JobStatus.SEGMENTED,
@@ -721,25 +732,32 @@ class ML4PaleoWebApplication:
                 pathlib.Path(CONFIG.download_cache) / f"{job_id}_{seg_id}.meshes.zip"
             )
             zip_fname.parent.mkdir(parents=True, exist_ok=True)
-            if not zip_fname.exists():
-                # Meshes are stored in CONFIG.meshes_directory / job_id / seg_id:
-                mesh_path = pathlib.Path(CONFIG.meshed_directory) / job_id / seg_id
-                # Check if the directory exists:
-                if not mesh_path.exists():
-                    return (
-                        jsonify({"status": "error", "message": "meshes do not exist"}),
-                        400,
-                    )
+            mesh_path = get_mesh_directory(job, seg_id)
+            if not mesh_path.exists():
+                return (
+                    jsonify({"status": "error", "message": "meshes do not exist"}),
+                    400,
+                )
 
-                # Compress all .combined.stl files in the directory:
-                with zipfile.ZipFile(zip_fname, "w") as zf:
-                    for root, dirs, files in os.walk(mesh_path):
-                        for file in files:
-                            if file.endswith(".combined.stl"):
-                                zf.write(
-                                    os.path.join(root, file),
-                                    arcname=os.path.join(os.path.basename(root), file),
-                                )
+            stl_files = get_mesh_files(job, seg_id, "*.combined.stl")
+            if len(stl_files) == 0:
+                if zip_fname.exists():
+                    zip_fname.unlink()
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "No STL meshes were generated for this segmentation.",
+                        }
+                    ),
+                    400,
+                )
+
+            if zip_fname.exists():
+                zip_fname.unlink()
+            with zipfile.ZipFile(zip_fname, "w") as zf:
+                for stl_file in stl_files:
+                    zf.write(stl_file, arcname=stl_file.name)
 
             return send_file(zip_fname, as_attachment=True)
 

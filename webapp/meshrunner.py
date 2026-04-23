@@ -64,14 +64,22 @@ def mesh_job(job: UploadJob) -> None:
         pathlib.Path(CONFIG.segmented_directory) / job.id / latest_seg
     )
     # Get the mesher:
+    mesh_output_dir = pathlib.Path(CONFIG.meshed_directory) / job.id / latest_seg
     mesher = ChunkedMesher(
         volume_provider,
-        pathlib.Path(CONFIG.meshed_directory) / job.id / latest_seg,
+        mesh_output_dir,
         chunk_size=CONFIG.meshing_chunk_size,
-        mip=2,
+        downsample_factor=CONFIG.meshing_downsample_factor,
     )
     # Mesh everything:
     mesher.mesh_all()
+    stl_files = sorted(mesh_output_dir.glob("*.combined.stl"))
+    if len(stl_files) == 0:
+        raise ValueError(
+            "Meshing produced no STL files for "
+            f"job {job.id} and segmentation {latest_seg}. "
+            "The segmentation may contain no labeled objects."
+        )
 
 
 def main():

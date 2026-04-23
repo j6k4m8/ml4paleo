@@ -69,6 +69,7 @@ class CONFIG:
     training_directory = "volume/training"
     training_img_prefix = "img"
     training_seg_prefix = "seg"
+    training_meta_prefix = "meta"
     # The directory where trained models (i.e., parameters, or weights for DL)
     # are stored. The models are stored alongside a freeform JSON file that can
     # contain arbitrary metadata, per the `ml4paleo.segmentationSegmenter3D`
@@ -100,6 +101,10 @@ class CONFIG:
     # not need to be the same as the segmentation chunk size or the storage
     # chunk size.
     meshing_chunk_size = (512, 512, 512)
+    # Downsample the segmented labels before meshing to reduce memory and mesh
+    # complexity. A value of 1 disables downsampling; 2 means mesh at half
+    # resolution in each dimension. This was previously hard-coded to 4x.
+    meshing_downsample_factor = 1
 
     # Downloading
     #

@@ -66,6 +66,7 @@ def export_zarr_array(
     zarr_array = zarr.open(
         str(zarr_file),
         mode="w",
+        zarr_format=2,
         shape=shape,
         chunks=chunk_size,
         dtype=dtype,
@@ -149,16 +150,34 @@ def get_random_tile(
         np.ndarray: A random tile from the volume.
 
     """
-    x = np.random.randint(0, volume_provider.shape[0] - tile_size[0])
-    y = np.random.randint(0, volume_provider.shape[1] - tile_size[1])
+    tile_width = min(volume_provider.shape[0], tile_size[0])
+    tile_height = min(volume_provider.shape[1], tile_size[1])
+
+    x_high = volume_provider.shape[0] - tile_width
+    y_high = volume_provider.shape[1] - tile_height
+    x = np.random.randint(0, x_high + 1) if x_high > 0 else 0
+    y = np.random.randint(0, y_high + 1) if y_high > 0 else 0
     z = np.random.randint(0, volume_provider.shape[2])
-    return volume_provider[x : x + tile_size[0], y : y + tile_size[1], z]
+    tile = volume_provider[x : x + tile_width, y : y + tile_height, z]
+
+    if tile.shape == tile_size:
+        return tile
+
+    padded_tile = np.zeros(tile_size, dtype=tile.dtype)
+    x_pad = (tile_size[0] - tile.shape[0]) // 2
+    y_pad = (tile_size[1] - tile.shape[1]) // 2
+    padded_tile[
+        x_pad : x_pad + tile.shape[0],
+        y_pad : y_pad + tile.shape[1],
+    ] = tile
+    return padded_tile
 
 
 def get_random_zyx_subvolume(
     volume_provider,
     subvolume_size_zyx: Tuple[int, int, int],
-) -> np.ndarray:
+    return_metadata: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict]:
     """
     Get a random subvolume from the volume.
 
@@ -168,16 +187,69 @@ def get_random_zyx_subvolume(
 
     Returns:
         np.ndarray: A random subvolume from the volume.
+        tuple[np.ndarray, dict]: The subvolume and metadata if
+            `return_metadata` is True.
 
     """
-    z = np.random.randint(0, volume_provider.shape[2] - subvolume_size_zyx[0])
-    y = np.random.randint(0, volume_provider.shape[1] - subvolume_size_zyx[1])
-    x = np.random.randint(0, volume_provider.shape[0] - subvolume_size_zyx[2])
-    return volume_provider[
-        x : x + subvolume_size_zyx[2],
-        y : y + subvolume_size_zyx[1],
-        z : z + subvolume_size_zyx[0],
+    requested_z, requested_y, requested_x = subvolume_size_zyx
+    actual_x = min(volume_provider.shape[0], requested_x)
+    actual_y = min(volume_provider.shape[1], requested_y)
+    actual_z = min(volume_provider.shape[2], requested_z)
+
+    x_high = volume_provider.shape[0] - actual_x
+    y_high = volume_provider.shape[1] - actual_y
+    z_high = volume_provider.shape[2] - actual_z
+    x = np.random.randint(0, x_high + 1) if x_high > 0 else 0
+    y = np.random.randint(0, y_high + 1) if y_high > 0 else 0
+    z = np.random.randint(0, z_high + 1) if z_high > 0 else 0
+
+    subvolume = volume_provider[
+        x : x + actual_x,
+        y : y + actual_y,
+        z : z + actual_z,
     ].swapaxes(0, 2)
+
+    z_pad = requested_z - subvolume.shape[0]
+    y_pad = requested_y - subvolume.shape[1]
+    x_pad = requested_x - subvolume.shape[2]
+    z_pad_before = z_pad // 2
+    y_pad_before = y_pad // 2
+    x_pad_before = x_pad // 2
+    z_pad_after = z_pad - z_pad_before
+    y_pad_after = y_pad - y_pad_before
+    x_pad_after = x_pad - x_pad_before
+
+    if subvolume.shape != subvolume_size_zyx:
+        subvolume = np.pad(
+            subvolume,
+            (
+                (z_pad_before, z_pad_after),
+                (y_pad_before, y_pad_after),
+                (x_pad_before, x_pad_after),
+            ),
+            mode="constant",
+        )
+
+    if not return_metadata:
+        return subvolume
+
+    annotated_local_z_index = requested_z // 2
+    source_local_z_index = annotated_local_z_index - z_pad_before
+    if 0 <= source_local_z_index < actual_z:
+        annotated_global_z_index = int(z + source_local_z_index)
+    else:
+        annotated_global_z_index = None
+
+    sample_metadata = {
+        "cutout_origin_xyz": [int(x), int(y), int(z)],
+        "cutout_shape_xyz": [int(actual_x), int(actual_y), int(actual_z)],
+        "requested_shape_xyz": [int(requested_x), int(requested_y), int(requested_z)],
+        "padding_before_xyz": [int(x_pad_before), int(y_pad_before), int(z_pad_before)],
+        "padding_after_xyz": [int(x_pad_after), int(y_pad_after), int(z_pad_after)],
+        "annotated_local_z_index": int(annotated_local_z_index),
+        "annotated_global_z_index": annotated_global_z_index,
+    }
+    return subvolume, sample_metadata
 
 
 def export_to_img_stack(

@@ -18,7 +18,8 @@ _default_features_func = functools.partial(
     sigma_max=32,
 )
 
-# one in every X voxels will be used for training
+# one in every X negative voxels will be used for training; positives are kept
+# in full so sparse brush annotations still reach the classifier
 _DEFAULT_TRAINING_SPARSITY = 500
 
 
@@ -136,9 +137,28 @@ class RandomForest3DSegmenter(Segmenter3D):
         # Extract features:
         features = self.features_fn(imgslice)
 
-        # Train the classifier:
-        features = features.reshape(-1, features.shape[-1])[:: self._training_subsample]
-        mask = mask.reshape(-1)[:: self._training_subsample]
+        flat_features = features.reshape(-1, features.shape[-1])
+        flat_mask = mask.reshape(-1)
+
+        positive_mask = flat_mask != 0
+        negative_mask = ~positive_mask
+
+        positive_features = flat_features[positive_mask]
+        positive_labels = flat_mask[positive_mask]
+
+        negative_features = flat_features[negative_mask]
+        negative_labels = flat_mask[negative_mask]
+        if self._training_subsample > 1:
+            negative_features = negative_features[:: self._training_subsample]
+            negative_labels = negative_labels[:: self._training_subsample]
+
+        if positive_features.size == 0:
+            return negative_features, negative_labels
+        if negative_features.size == 0:
+            return positive_features, positive_labels
+
+        features = np.concatenate([positive_features, negative_features], axis=0)
+        mask = np.concatenate([positive_labels, negative_labels], axis=0)
 
         return features, mask
 

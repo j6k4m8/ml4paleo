@@ -22,6 +22,7 @@ A metadata blob looks like this:
         "status": "JobStatus.MESHED",
         "name": "Burrow",
         "id": "CC7651",
+        "source_type": "image_stack",
         "created_at": "2024-07-05T16:24:13.446237",
         "last_updated_at": "2024-07-05T16:35:11.017184",
         "current_job_progress": 0.9791666666666666,
@@ -77,7 +78,7 @@ Because `model_id`s are also timestamps, you can tell which images were used to 
 
 ## `uploads/`
 
-This directory contains the uploaded raw z-slice images for each job,
+This directory contains the uploaded raw source files for each job. These may be image slices or DICOM files:
 
 ```
 uploads/{job_id}/{original_filename1}
@@ -85,4 +86,4 @@ uploads/{job_id}/{original_filename2}
 uploads/{job_id}/{original_filename3}
 ```
 
-These must sort lexicographically to be in the correct order when converted.
+For image stacks, these must sort lexicographically to be in the correct order when converted. For DICOM uploads, slices are ordered from DICOM metadata when possible.

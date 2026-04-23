@@ -73,6 +73,24 @@
                                     </footer>
                                 </article>
                             </details>
+                            {% if latest_mesh_seg_id %}
+                            <details>
+                                <summary>
+                                    Mesh STL Bundle
+                                </summary>
+                                <article>
+                                    STL meshes are the best download option if you want the reconstructed
+                                    surfaces directly for inspection, sharing, or 3D printing workflows.
+                                    <footer>
+                                        <a class="download-button" onclick="disableDownloadButtons()" role="button"
+                                            style="width:100%" href="{{
+                                            url_for('download_meshes', job_id=job.id, seg_id=latest_mesh_seg_id)
+                                         }}">Download
+                                            <b>{{job.name}}</b> meshes as STL</a>
+                                    </footer>
+                                </article>
+                            </details>
+                            {% endif %}
                         </div>
                     </div>
                 </article>

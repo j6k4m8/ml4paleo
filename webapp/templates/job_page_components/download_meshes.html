@@ -4,7 +4,7 @@
     </header>
     <p>
         <a role="button" style="width:100%"
-            href="{{ url_for('download_meshes', job_id=job.id, seg_id=latest_segmentation_id) }}">
+            href="{{ url_for('download_meshes', job_id=job.id, seg_id=(latest_mesh_seg_id or latest_segmentation_id)) }}">
             Download (STL)
         </a>
     </p>
