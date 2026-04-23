@@ -5,136 +5,875 @@
     <meta charset="UTF-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Web Annotation | ml4paleo</title>
+    <title>Raster Annotation | ml4paleo</title>
     <style>
+        :root {
+            --app-bg: #eef3f6;
+            --panel-bg: rgba(255, 255, 255, 0.92);
+            --panel-strong: #ffffff;
+            --line: rgba(29, 47, 62, 0.12);
+            --line-strong: rgba(29, 47, 62, 0.22);
+            --text: #233443;
+            --muted: #677d90;
+            --primary: #1095c1;
+            --primary-strong: #0b7396;
+            --primary-soft: rgba(16, 149, 193, 0.12);
+            --danger: #bf4a58;
+            --danger-soft: rgba(191, 74, 88, 0.12);
+            --shadow: 0 1.2rem 3rem rgba(24, 39, 54, 0.08);
+            --radius: 1.05rem;
+        }
+
         * {
             box-sizing: border-box;
         }
 
-        body,
-        html {
-            height: 100%;
+        html,
+        body {
+            min-height: 100%;
             margin: 0;
             padding: 0;
-            overflow: hidden;
+            background:
+                radial-gradient(circle at top left, rgba(16, 149, 193, 0.09), transparent 22rem),
+                linear-gradient(180deg, #f5f9fb 0%, var(--app-bg) 100%);
+            color: var(--text);
+            font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif;
         }
 
-        .pill-button {
-            border-radius: 25px;
-            border: none;
-            margin: 1em;
-            padding: 0.5em 1em;
-            text-align: center;
-            font-size: 20px;
-            cursor: pointer;
+        body {
+            min-height: 100vh;
+        }
+
+        a,
+        button,
+        input {
+            font: inherit;
+        }
+
+        button,
+        input[type="range"],
+        input[type="checkbox"] {
+            accent-color: var(--primary);
+        }
+
+        .anno-shell {
+            min-height: 100vh;
+            display: grid;
+            grid-template-rows: auto 1fr;
+            gap: 1rem;
+            padding: 1rem;
+        }
+
+        .anno-topbar {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: 1.1rem 1.2rem;
+            border: 1px solid var(--line);
+            border-radius: calc(var(--radius) + 0.1rem);
+            background: var(--panel-bg);
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(12px);
+        }
+
+        .anno-kicker,
+        .sidebar-kicker {
+            margin: 0 0 0.35rem;
+            color: var(--muted);
+            font-size: 0.76rem;
+            font-weight: 700;
+            letter-spacing: 0.09em;
             text-transform: uppercase;
-            letter-spacing: 2pt;
-            font-weight: bold;
         }
 
-        .submit-button {
-            position: fixed;
-            bottom: 0;
-            right: 0;
-            background-color: #d1e7d1;
-        }
-
-        .top-right-controls {
-            position: fixed;
-            top: 0;
-            right: 0;
+        .anno-title-row {
             display: flex;
-            flex-direction: row;
-            justify-content: space-between;
-            align-items: center;
-            padding: 1em;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 0.75rem;
         }
 
-        .bottom-left-controls {
-            position: fixed;
-            bottom: 0;
-            left: 0;
+        .anno-title-row h1 {
+            margin: 0;
+            font-size: clamp(1.75rem, 4vw, 2.45rem);
+            line-height: 1.02;
+        }
+
+        .anno-job-id {
+            color: var(--muted);
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+
+        .anno-subtitle {
+            margin: 0.55rem 0 0;
+            max-width: 46rem;
+            color: var(--muted);
+            font-size: 1rem;
+            line-height: 1.45;
+        }
+
+        .anno-top-actions {
             display: flex;
-            flex-direction: row;
-            justify-content: space-between;
             align-items: center;
-            padding: 1em;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+            gap: 0.65rem;
+            max-width: 34rem;
         }
 
-        .skip-button {
-            background-color: #e8c7c7;
+        .ghost-button,
+        .secondary-button,
+        .primary-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.4rem;
+            min-height: 2.75rem;
+            padding: 0.72rem 0.95rem;
+            border-radius: 0.72rem;
+            border: 1px solid var(--line-strong);
+            background: var(--panel-strong);
+            color: var(--text);
+            text-decoration: none;
+            font-size: 0.94rem;
+            font-weight: 700;
+            line-height: 1.1;
+            cursor: pointer;
+            transition: border-color 120ms ease, background 120ms ease, color 120ms ease, transform 120ms ease;
         }
 
-        .clear-button {
-            background-color: #e8c7c7;
+        .ghost-button:hover,
+        .ghost-button:focus-visible,
+        .secondary-button:hover,
+        .secondary-button:focus-visible {
+            border-color: rgba(16, 149, 193, 0.36);
+            color: var(--primary-strong);
+            text-decoration: none;
+            transform: translateY(-1px);
         }
 
-        .return-button {
-            background-color: #c7e8e6;
+        .primary-button {
+            border-color: transparent;
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 0.7rem 1.4rem rgba(16, 149, 193, 0.18);
         }
 
-        #keymapOverlay {
-            position: fixed;
-            top: 0;
-            left: 0;
+        .primary-button:hover,
+        .primary-button:focus-visible {
+            background: var(--primary-strong);
+            transform: translateY(-1px);
+        }
+
+        .ghost-button.danger {
+            color: var(--danger);
+            border-color: rgba(191, 74, 88, 0.22);
+            background: white;
+        }
+
+        .ghost-button.danger:hover,
+        .ghost-button.danger:focus-visible {
+            border-color: rgba(191, 74, 88, 0.4);
+            background: var(--danger-soft);
+            color: #8d3240;
+        }
+
+        .ghost-button:disabled,
+        .secondary-button:disabled,
+        .primary-button:disabled {
+            opacity: 0.55;
+            transform: none;
+            cursor: not-allowed;
+        }
+
+        .anno-workspace {
+            min-height: 0;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 21rem;
+            gap: 1rem;
+            align-items: start;
+        }
+
+        .viewer-card,
+        .sidebar-card {
+            border: 1px solid var(--line);
+            border-radius: calc(var(--radius) + 0.1rem);
+            background: var(--panel-bg);
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(12px);
+        }
+
+        .viewer-card {
+            min-height: calc(100vh - 9rem);
+            display: grid;
+            grid-template-rows: auto auto minmax(28rem, 1fr) auto;
+            gap: 0.8rem;
+            padding: 1rem;
+        }
+
+        .viewer-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+        }
+
+        .viewer-toolbar-block {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+
+        .viewer-toolbar-block--end {
+            justify-content: flex-end;
+        }
+
+        .slice-controls {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.65rem;
+        }
+
+        .slice-controls button {
+            min-width: 5.1rem;
+        }
+
+        .slice-readout {
+            display: grid;
+            gap: 0.08rem;
+        }
+
+        .slice-readout strong,
+        .slice-readout span {
+            font-size: 0.96rem;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+
+        .slice-readout small {
+            color: var(--muted);
+            font-size: 0.84rem;
+            font-weight: 600;
+        }
+
+        .slice-rail {
+            display: grid;
+            gap: 0.55rem;
+        }
+
+        .slice-rail input[type="range"] {
             width: 100%;
-            height: 100%;
-            background-color: rgba(0, 0, 0, 0.5);
-            z-index: 100;
+            margin: 0;
         }
 
-        .hidden {
+        .slice-rail-copy {
+            color: var(--muted);
+            font-size: 0.86rem;
+            font-weight: 600;
+            line-height: 1.35;
+        }
+
+        .canvas-wrap {
+            position: relative;
+            min-height: 30rem;
+            height: 100%;
+            border-radius: 1rem;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            background:
+                linear-gradient(180deg, rgba(245, 250, 252, 0.94), rgba(232, 239, 243, 0.96)),
+                repeating-linear-gradient(45deg, rgba(35, 52, 67, 0.02), rgba(35, 52, 67, 0.02) 12px, transparent 12px, transparent 24px);
+        }
+
+        #p5-canvas-host {
+            position: absolute;
+            inset: 0;
+        }
+
+        #p5-canvas-host canvas {
+            display: block;
+        }
+
+        .canvas-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+            background: rgba(239, 245, 248, 0.76);
+            backdrop-filter: blur(2px);
+            transition: opacity 140ms ease;
+            z-index: 5;
+        }
+
+        .canvas-overlay[hidden] {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .canvas-overlay-card {
+            display: grid;
+            gap: 0.35rem;
+            padding: 1rem 1.15rem;
+            border: 1px solid var(--line);
+            border-radius: 1rem;
+            background: rgba(255, 255, 255, 0.95);
+            box-shadow: 0 0.85rem 1.85rem rgba(24, 39, 54, 0.1);
+            text-align: center;
+        }
+
+        .canvas-overlay-card strong {
+            font-size: 1rem;
+            line-height: 1.2;
+        }
+
+        .canvas-overlay-card span {
+            color: var(--muted);
+            font-size: 0.92rem;
+            line-height: 1.4;
+        }
+
+        .loading-dots {
+            display: inline-flex;
+            gap: 0.35rem;
+            justify-content: center;
+            color: var(--primary);
+            font-size: 1.2rem;
+            letter-spacing: 0.1em;
+        }
+
+        .viewer-footer {
+            display: grid;
+            gap: 0.32rem;
+        }
+
+        .viewer-footer-status,
+        .viewer-footer-help {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.7rem 1rem;
+        }
+
+        .viewer-footer-status span,
+        .viewer-footer-help span {
+            color: var(--muted);
+            font-size: 0.86rem;
+            font-weight: 600;
+            line-height: 1.35;
+        }
+
+        .viewer-footer-help span::before {
+            content: "•";
+            margin-right: 0.35rem;
+            color: rgba(16, 149, 193, 0.45);
+        }
+
+        .viewer-footer-help span:first-child::before {
+            content: "";
+            margin-right: 0;
+        }
+
+        .anno-sidebar {
+            display: grid;
+            gap: 0.85rem;
+        }
+
+        .sidebar-card {
+            display: grid;
+            gap: 0.75rem;
+            padding: 0.95rem 1rem;
+        }
+
+        .sidebar-metric-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.7rem;
+        }
+
+        .sidebar-metric-grid>div {
+            display: grid;
+            gap: 0.18rem;
+            padding: 0.65rem 0.7rem;
+            border: 1px solid var(--line);
+            border-radius: 0.82rem;
+            background: rgba(248, 251, 253, 0.94);
+        }
+
+        .metric-label {
+            color: var(--muted);
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .metric-value {
+            font-size: 0.98rem;
+            font-weight: 700;
+            line-height: 1.25;
+        }
+
+        .sidebar-button-stack {
+            display: grid;
+            gap: 0.55rem;
+        }
+
+        .toggle-row,
+        .range-row {
+            display: grid;
+            gap: 0.42rem;
+            color: var(--text);
+            font-size: 0.92rem;
+            font-weight: 600;
+        }
+
+        .toggle-row {
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+        }
+
+        .range-row input[type="range"] {
+            width: 100%;
+            margin: 0;
+        }
+
+        .range-row-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+        }
+
+        .range-row-header small {
+            color: var(--muted);
+            font-size: 0.82rem;
+            font-weight: 700;
+        }
+
+        .sidebar-list {
+            display: grid;
+            gap: 0.6rem;
+            margin: 0;
+        }
+
+        .sidebar-list div {
+            display: grid;
+            gap: 0.18rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid rgba(29, 47, 62, 0.08);
+        }
+
+        .sidebar-list div:last-child {
+            padding-bottom: 0;
+            border-bottom: 0;
+        }
+
+        .sidebar-list dt {
+            color: var(--muted);
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .sidebar-list dd {
+            margin: 0;
+            color: var(--text);
+            font-size: 0.9rem;
+            font-weight: 600;
+            line-height: 1.45;
+            overflow-wrap: anywhere;
+        }
+
+        .shortcut-list {
+            display: grid;
+            gap: 0.45rem;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .shortcut-list li {
+            color: var(--muted);
+            font-size: 0.88rem;
+            font-weight: 600;
+            line-height: 1.45;
+        }
+
+        .shortcut-list strong {
+            color: var(--text);
+            font-weight: 700;
+        }
+
+        .keymap-overlay {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1.2rem;
+            background: rgba(21, 34, 45, 0.46);
+            backdrop-filter: blur(3px);
+            z-index: 40;
+        }
+
+        .keymap-overlay.hidden {
             display: none;
         }
 
+        .keymap-card {
+            width: min(56rem, calc(100vw - 2rem));
+            max-height: min(80vh, 48rem);
+            overflow: auto;
+            padding: 1.15rem 1.2rem;
+            border: 1px solid var(--line);
+            border-radius: 1rem;
+            background: rgba(255, 255, 255, 0.97);
+            box-shadow: 0 1.2rem 3rem rgba(24, 39, 54, 0.18);
+        }
+
+        .keymap-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-bottom: 0.8rem;
+        }
+
+        .keymap-header h2 {
+            margin: 0;
+            font-size: 1.4rem;
+            line-height: 1.1;
+        }
+
+        .keymap-copy {
+            margin: 0 0 0.95rem;
+            color: var(--muted);
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        .keymap-table-wrap {
+            overflow: auto;
+        }
+
+        .keymap-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.92rem;
+        }
+
+        .keymap-table td {
+            padding: 0.5rem 0.45rem;
+            border-bottom: 1px solid rgba(29, 47, 62, 0.08);
+            vertical-align: top;
+        }
+
+        .keymap-table tr:last-child td {
+            border-bottom: 0;
+        }
+
         kbd {
-            font-family: 'Courier New', Courier, monospace;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
             display: inline-block;
-            padding: 0.2em 0.8em;
-            font-size: 90%;
-            color: #444;
+            padding: 0.2em 0.55em;
+            font-size: 0.85rem;
+            color: #395063;
             vertical-align: middle;
-            background-color: #f7f7f9;
-            border: 2px solid #cfcfcf;
-            border-bottom-color: #bbb;
-            border-radius: 3px;
-            box-shadow: inset 0 -1px 0 #bbb;
+            background-color: #f7fbfd;
+            border: 1px solid rgba(57, 80, 99, 0.18);
+            border-bottom-color: rgba(57, 80, 99, 0.28);
+            border-radius: 0.35rem;
+            box-shadow: inset 0 -1px 0 rgba(57, 80, 99, 0.1);
+        }
+
+        @media (max-width: 1180px) {
+            .anno-workspace {
+                grid-template-columns: 1fr;
+            }
+
+            .anno-sidebar {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                align-items: start;
+            }
+        }
+
+        @media (max-width: 860px) {
+            .anno-shell {
+                padding: 0.75rem;
+            }
+
+            .anno-topbar {
+                flex-direction: column;
+            }
+
+            .anno-top-actions {
+                max-width: none;
+                justify-content: flex-start;
+            }
+
+            .viewer-card {
+                min-height: 0;
+                grid-template-rows: auto auto minmax(24rem, 56vh) auto;
+            }
+
+            .anno-sidebar {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 640px) {
+
+            .viewer-toolbar,
+            .viewer-toolbar-block,
+            .viewer-toolbar-block--end {
+                align-items: stretch;
+            }
+
+            .viewer-toolbar-block,
+            .viewer-toolbar-block--end {
+                width: 100%;
+            }
+
+            .slice-controls,
+            .viewer-toolbar-block--end {
+                width: 100%;
+            }
+
+            .slice-controls button,
+            .viewer-toolbar-block--end .ghost-button {
+                flex: 1 1 auto;
+            }
+
+            .sidebar-metric-grid {
+                grid-template-columns: 1fr 1fr;
+            }
         }
     </style>
 </head>
 
 <body>
-    <div id="keymapOverlay" class="hidden" onclick="toggleKeyMapOverlay()">
-        <div style="background: #fefefecc; max-width: 40em; margin: auto; padding: 2em;">
-            <h2>Usage</h2>
-            Click and drag to paint. Hold <kbd>alt (⌥)</kbd> to erase. Hold <kbd>shift (⇧)</kbd> to pan. Scroll to zoom
-            in and
-            out.
-            <h2>Keys</h2>
-            <div id="keymap-list"></div>
+    <div class="anno-shell">
+        <header class="anno-topbar">
+            <div>
+                <p class="anno-kicker">Legacy Raster Annotator</p>
+                <div class="anno-title-row">
+                    <h1>{{ job.name }}</h1>
+                    <span class="anno-job-id">Project {{ job.id }}</span>
+                </div>
+                <p class="anno-subtitle">
+                    Paintbrush-based annotator
+                </p>
+            </div>
+            <div class="anno-top-actions">
+                <a class="ghost-button" href="{{ url_for('job_page', job_id=job.id) }}">Back to project</a>
+                <a class="ghost-button" href="{{ url_for('annotation_page_v2', job_id=job.id) }}" target="_blank"
+                    rel="noopener">Polygon annotator</a>
+                <button class="ghost-button" type="button" id="open-shortcuts-button">Shortcuts</button>
+                <button class="secondary-button" type="button" id="skip-button">Next sample</button>
+                <button class="primary-button" type="button" id="submit-button">Submit annotation</button>
+            </div>
+        </header>
+
+        <main class="anno-workspace">
+            <section class="viewer-card">
+                <div class="viewer-toolbar">
+                    <div class="viewer-toolbar-block">
+                        <button type="button" class="ghost-button" id="home-slice-button">Labeled slice</button>
+                        <div class="slice-controls">
+                            <button type="button" class="ghost-button" id="prev-slice-button">Previous</button>
+                            <div class="slice-readout">
+                                <span id="slice-readout">Slice 1 / 1</span>
+                                <small id="slice-detail-readout">Viewing the labeled slice</small>
+                            </div>
+                            <button type="button" class="ghost-button" id="next-slice-button">Next</button>
+                        </div>
+                    </div>
+                    <div class="viewer-toolbar-block viewer-toolbar-block--end">
+                        <button type="button" class="ghost-button" id="refresh-prediction-button">Refresh
+                            prediction</button>
+                        <button type="button" class="ghost-button" id="reset-view-button">Reset view</button>
+                        <button type="button" class="ghost-button danger" id="clear-button">Clear mask</button>
+                    </div>
+                </div>
+
+                <div class="slice-rail">
+                    <input id="slice-slider" type="range" min="0" max="0" value="0" />
+                    <div class="slice-rail-copy">
+                        Use <kbd>,</kbd> and <kbd>.</kbd> or the slider to inspect neighboring Z slices. Painting stays
+                        anchored to the labeled slice.
+                    </div>
+                </div>
+
+                <div id="canvas-wrap" class="canvas-wrap">
+                    <div id="p5-canvas-host"></div>
+                    <div id="p5_loading" class="canvas-overlay">
+                        <div class="canvas-overlay-card">
+                            <strong id="loading-title">Loading sample…</strong>
+                            <span id="loading-copy">Preparing the next cutout and prediction overlay.</span>
+                            <div class="loading-dots" aria-hidden="true">
+                                <span>•</span>
+                                <span>•</span>
+                                <span>•</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="viewer-footer">
+                    <div class="viewer-footer-status">
+                        <span id="cursor-readout">x -, y -, dz -</span>
+                        <span id="zoom-readout">100%</span>
+                        <span id="brush-readout">Brush 20 px</span>
+                        <span id="prediction-status">Prediction unavailable</span>
+                    </div>
+                    <div class="viewer-footer-help">
+                        <span>Drag to paint.</span>
+                        <span>Hold Alt to erase.</span>
+                        <span>Hold Shift to pan.</span>
+                        <span>Drag the left histogram to adjust contrast.</span>
+                    </div>
+                </div>
+            </section>
+
+            <aside class="anno-sidebar">
+                <section class="sidebar-card">
+                    <p class="sidebar-kicker">Current view</p>
+                    <div class="sidebar-metric-grid">
+                        <div>
+                            <span class="metric-label">Viewing</span>
+                            <span class="metric-value" id="viewing-slice-readout">Slice 1</span>
+                        </div>
+                        <div>
+                            <span class="metric-label">Labeled</span>
+                            <span class="metric-value" id="annotating-slice-readout">Slice 1</span>
+                        </div>
+                        <div>
+                            <span class="metric-label">Slice offset</span>
+                            <span class="metric-value" id="slice-offset-readout">0</span>
+                        </div>
+                        <div>
+                            <span class="metric-label">Overlay</span>
+                            <span class="metric-value" id="overlay-visibility-readout">Visible</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="sidebar-card">
+                    <p class="sidebar-kicker">Brush and overlay</p>
+                    <label class="range-row" for="brush-size-slider">
+                        <span class="range-row-header">
+                            <span>Brush size</span>
+                            <small id="brush-size-value">20 px</small>
+                        </span>
+                        <input id="brush-size-slider" type="range" min="1" max="200" step="0.5" value="20" />
+                    </label>
+                    <label class="range-row" for="mask-opacity-slider">
+                        <span class="range-row-header">
+                            <span>Overlay opacity</span>
+                            <small id="mask-opacity-value">20%</small>
+                        </span>
+                        <input id="mask-opacity-slider" type="range" min="0" max="100" step="1" value="20" />
+                    </label>
+                    <label class="toggle-row">
+                        <span>Show annotation overlay</span>
+                        <input id="annos-visible-toggle" type="checkbox" checked />
+                    </label>
+                </section>
+
+                <section class="sidebar-card">
+                    <p class="sidebar-kicker">Actions</p>
+                    <div class="sidebar-button-stack">
+                        <button type="button" class="secondary-button" id="refresh-prediction-sidebar-button">Refresh
+                            prediction</button>
+                        <button type="button" class="ghost-button" id="reset-view-sidebar-button">Reset view and
+                            pan</button>
+                        <button type="button" class="ghost-button" id="home-slice-sidebar-button">Return to labeled
+                            slice</button>
+                        <button type="button" class="ghost-button danger" id="clear-sidebar-button">Clear current
+                            mask</button>
+                    </div>
+                </section>
+
+                <section class="sidebar-card">
+                    <p class="sidebar-kicker">Sample metadata</p>
+                    <dl class="sidebar-list">
+                        <div>
+                            <dt>Intensity window</dt>
+                            <dd id="window-readout">-</dd>
+                        </div>
+                        <div>
+                            <dt>Cutout origin</dt>
+                            <dd id="origin-readout">-</dd>
+                        </div>
+                        <div>
+                            <dt>Cutout shape</dt>
+                            <dd id="shape-readout">-</dd>
+                        </div>
+                        <div>
+                            <dt>Padding</dt>
+                            <dd id="padding-readout">-</dd>
+                        </div>
+                        <div>
+                            <dt>Saved as</dt>
+                            <dd>Legacy raster training PNGs and metadata JSON.</dd>
+                        </div>
+                    </dl>
+                </section>
+
+                <section class="sidebar-card">
+                    <p class="sidebar-kicker">Shortcuts</p>
+                    <ul class="shortcut-list">
+                        <li><strong>Q / W</strong> decrease or increase brush size</li>
+                        <li><strong>A / S</strong> decrease or increase overlay opacity</li>
+                        <li><strong>, / .</strong> browse neighboring Z slices</li>
+                        <li><strong>Shift + drag</strong> pan</li>
+                        <li><strong>Alt + drag</strong> erase</li>
+                        <li><strong>V</strong> toggle the annotation overlay</li>
+                        <li><strong>Esc</strong> reset view, or return home with a modifier</li>
+                    </ul>
+                </section>
+            </aside>
+        </main>
+    </div>
+
+    <div id="keymapOverlay" class="keymap-overlay hidden">
+        <div class="keymap-card" role="dialog" aria-modal="true" aria-labelledby="keymap-title">
+            <div class="keymap-header">
+                <h2 id="keymap-title">Shortcut reference</h2>
+                <button class="ghost-button" type="button" id="close-shortcuts-button">Close</button>
+            </div>
+            <p class="keymap-copy">
+                Click and drag to paint. Hold <kbd>Alt</kbd> to erase. Hold <kbd>Shift</kbd> to pan. Scroll to zoom in
+                and out. Use the table below for the full keyboard map.
+            </p>
+            <div id="keymap-list" class="keymap-table-wrap"></div>
         </div>
     </div>
+
     <script src="https://cdn.jsdelivr.net/npm/p5@1.4.1/lib/p5.js"></script>
     <script>
-
         const KEY_MAP = {
             zScrollUp: {
                 keyCode: 188,
                 key: ',',
-
                 description: 'Scroll up in z', shift: false, ctrl: false, alt: false
             },
             zScrollDown: {
                 keyCode: 190,
                 key: '.',
-
                 description: 'Scroll down in z', shift: false, ctrl: false, alt: false
             },
 
             panUp: {
                 keyCode: 38,
                 key: 'ArrowUp',
-
                 description: 'Pan up', shift: false, ctrl: false, alt: false
             },
             panUpFast: {
@@ -218,33 +957,28 @@
             imageTransparencyUp: {
                 keyCode: 83,
                 key: "s",
-                description: 'Increase annotation transparency', shift: false, ctrl: false, alt:
-                    false
+                description: 'Increase annotation transparency', shift: false, ctrl: false, alt: false
             },
             imageTransparencyUpFast: {
                 keyCode: 83,
                 key: "s",
-                description: '(Fast) Increase annotation transparency', shift: true, ctrl:
-                    false, alt: false
+                description: '(Fast) Increase annotation transparency', shift: true, ctrl: false, alt: false
             },
             imageTransparencyDown: {
                 keyCode: 65,
                 key: "a",
-                description: 'Decrease annotation transparency', shift: false, ctrl: false, alt:
-                    false
+                description: 'Decrease annotation transparency', shift: false, ctrl: false, alt: false
             },
             imageTransparencyDownFast: {
                 keyCode: 65,
                 key: "a",
-                description: '(Fast) Decrease annotation transparency', shift: true, ctrl:
-                    false, alt: false
+                description: '(Fast) Decrease annotation transparency', shift: true, ctrl: false, alt: false
             },
 
             toggleAnnotationVisibility: {
                 keyCode: 86,
                 key: "v",
-                description: 'Toggle annotation visibility', shift: false, ctrl: false, alt:
-                    false
+                description: 'Toggle annotation visibility', shift: false, ctrl: false, alt: false
             },
 
             toggleKeyMapOverlay: {
@@ -256,52 +990,46 @@
             returnHome: {
                 keyCode: 27,
                 key: "esc",
-                description: 'Return to home slice', shift: false, ctrl: false, alt: false
+                description: 'Reset pan and zoom', shift: false, ctrl: false, alt: false
             },
 
             returnHomePan: {
                 keyCode: 27,
                 key: "esc",
                 description: 'Return to home slice and reset pan and zoom',
-                // Shift if not firefox, otherwise control:
                 shift: !navigator.userAgent.toLowerCase().includes('firefox'),
                 ctrl: navigator.userAgent.toLowerCase().includes('firefox'),
                 alt: false
             },
         };
 
-        let STATE = {
-            // Image Rendering:
+        const DEFAULT_STATE = {
             imageLoaded: false,
             imageFilter: "invert",
-
-            // Annotation Rendering:
             colorScheme: 1,
             annosVisible: true,
             imageTransparency: 0.2,
-
-            // Brush:
             brushSize: 20,
-
-            // Navigation:
             zoom: 1,
             panX: 0,
             panY: 0,
-
             histogram: {
                 vmin: 0,
                 vmax: 1.0,
                 pvmin: 0,
                 pvmax: 1.0,
             },
-
             z: {
                 current: 0,
-                annotating: undefined,
+                annotating: 0,
                 min: 0,
                 max: 0,
-            }
+            },
+            annotationDirty: false,
+            predictionStatus: "Prediction unavailable",
         };
+
+        let STATE = JSON.parse(JSON.stringify(DEFAULT_STATE));
 
         const CONFIG = {
             zoom: {
@@ -324,7 +1052,7 @@
                 bigIncrement: 100,
             },
 
-            backgroundColor: "#333333",
+            backgroundColor: "#12202c",
 
             histogram: {
                 width: 30,
@@ -332,69 +1060,285 @@
             }
         };
 
+        const refs = {
+            canvasWrap: document.getElementById("canvas-wrap"),
+            host: document.getElementById("p5-canvas-host"),
+            loading: document.getElementById("p5_loading"),
+            loadingTitle: document.getElementById("loading-title"),
+            loadingCopy: document.getElementById("loading-copy"),
+            openShortcutsButton: document.getElementById("open-shortcuts-button"),
+            closeShortcutsButton: document.getElementById("close-shortcuts-button"),
+            keymapOverlay: document.getElementById("keymapOverlay"),
+            sliceReadout: document.getElementById("slice-readout"),
+            sliceDetailReadout: document.getElementById("slice-detail-readout"),
+            sliceSlider: document.getElementById("slice-slider"),
+            prevSliceButton: document.getElementById("prev-slice-button"),
+            nextSliceButton: document.getElementById("next-slice-button"),
+            homeSliceButton: document.getElementById("home-slice-button"),
+            resetViewButton: document.getElementById("reset-view-button"),
+            clearButton: document.getElementById("clear-button"),
+            skipButton: document.getElementById("skip-button"),
+            submitButton: document.getElementById("submit-button"),
+            refreshPredictionButton: document.getElementById("refresh-prediction-button"),
+            brushSizeSlider: document.getElementById("brush-size-slider"),
+            brushSizeValue: document.getElementById("brush-size-value"),
+            maskOpacitySlider: document.getElementById("mask-opacity-slider"),
+            maskOpacityValue: document.getElementById("mask-opacity-value"),
+            annosVisibleToggle: document.getElementById("annos-visible-toggle"),
+            refreshPredictionSidebarButton: document.getElementById("refresh-prediction-sidebar-button"),
+            resetViewSidebarButton: document.getElementById("reset-view-sidebar-button"),
+            homeSliceSidebarButton: document.getElementById("home-slice-sidebar-button"),
+            clearSidebarButton: document.getElementById("clear-sidebar-button"),
+            cursorReadout: document.getElementById("cursor-readout"),
+            zoomReadout: document.getElementById("zoom-readout"),
+            brushReadout: document.getElementById("brush-readout"),
+            predictionStatus: document.getElementById("prediction-status"),
+            viewingSliceReadout: document.getElementById("viewing-slice-readout"),
+            annotatingSliceReadout: document.getElementById("annotating-slice-readout"),
+            sliceOffsetReadout: document.getElementById("slice-offset-readout"),
+            overlayVisibilityReadout: document.getElementById("overlay-visibility-readout"),
+            windowReadout: document.getElementById("window-readout"),
+            originReadout: document.getElementById("origin-readout"),
+            shapeReadout: document.getElementById("shape-readout"),
+            paddingReadout: document.getElementById("padding-readout"),
+        };
+
         let img;
         let paintPixels;
         let currentSampleMetadata = null;
+        let currentIntensityWindow = null;
+        let originalPixels;
+        let maxPixelValue = 255;
 
         const BASE_URL = ``;
 
-        function setLoadingVisible(visible) {
-            const loading = document.getElementById("p5_loading");
-            if (!loading) {
+        function setLoadingVisible(visible, title = "Loading sample…", copy = "Preparing the next cutout and prediction overlay.") {
+            refs.loading.hidden = !visible;
+            refs.loadingTitle.textContent = title;
+            refs.loadingCopy.textContent = copy;
+        }
+
+        function isCanvasEvent(event) {
+            return !!(event && refs.host && refs.host.contains(event.target));
+        }
+
+        function setPredictionStatus(text) {
+            STATE.predictionStatus = text;
+            refs.predictionStatus.textContent = text;
+        }
+
+        function formatTriplet(value) {
+            return Array.isArray(value) ? value.join(", ") : "-";
+        }
+
+        function formatWindow(windowInfo) {
+            if (!windowInfo || typeof windowInfo !== "object") {
+                return "-";
+            }
+            const minValue = windowInfo.window_min;
+            const maxValue = windowInfo.window_max;
+            if (minValue === undefined || maxValue === undefined) {
+                return "-";
+            }
+            return `${Math.round(minValue)} to ${Math.round(maxValue)}`;
+        }
+
+        function syncUi(cursorCoords = null) {
+            const totalSlices = Math.max(1, (STATE.z.max - STATE.z.min) + 1);
+            refs.sliceReadout.textContent = `Slice ${STATE.z.current + 1} / ${totalSlices}`;
+            if (STATE.z.current === STATE.z.annotating) {
+                refs.sliceDetailReadout.textContent = `Painting on the labeled slice (${STATE.z.annotating + 1})`;
+            } else {
+                const delta = STATE.z.current - STATE.z.annotating;
+                refs.sliceDetailReadout.textContent = `Inspecting neighboring slice (${delta > 0 ? "+" : ""}${delta} from labeled)`;
+            }
+
+            refs.sliceSlider.min = String(STATE.z.min);
+            refs.sliceSlider.max = String(STATE.z.max);
+            refs.sliceSlider.value = String(STATE.z.current);
+            refs.prevSliceButton.disabled = STATE.z.current <= STATE.z.min;
+            refs.nextSliceButton.disabled = STATE.z.current >= STATE.z.max;
+            refs.homeSliceButton.disabled = STATE.z.current === STATE.z.annotating;
+            refs.homeSliceSidebarButton.disabled = STATE.z.current === STATE.z.annotating;
+
+            refs.viewingSliceReadout.textContent = `Slice ${STATE.z.current + 1}`;
+            refs.annotatingSliceReadout.textContent = `Slice ${STATE.z.annotating + 1}`;
+            refs.sliceOffsetReadout.textContent = `${STATE.z.current - STATE.z.annotating}`;
+            refs.overlayVisibilityReadout.textContent = STATE.annosVisible ? "Visible" : "Hidden";
+
+            refs.zoomReadout.textContent = `${Math.round(STATE.zoom * 100)}%`;
+            refs.brushReadout.textContent = `Brush ${STATE.brushSize.toFixed(1)} px`;
+            refs.brushSizeValue.textContent = `${STATE.brushSize.toFixed(1)} px`;
+            refs.maskOpacityValue.textContent = `${Math.round(STATE.imageTransparency * 100)}%`;
+            refs.brushSizeSlider.value = String(STATE.brushSize);
+            refs.maskOpacitySlider.value = String(Math.round(STATE.imageTransparency * 100));
+            refs.annosVisibleToggle.checked = STATE.annosVisible;
+
+            if (cursorCoords && Array.isArray(cursorCoords) && cursorCoords.length === 2) {
+                refs.cursorReadout.textContent = `x ${Math.round(cursorCoords[0])}, y ${Math.round(cursorCoords[1])}, dz ${STATE.z.current - STATE.z.annotating}`;
+            } else {
+                refs.cursorReadout.textContent = `x -, y -, dz ${STATE.z.current - STATE.z.annotating}`;
+            }
+
+            refs.windowReadout.textContent = formatWindow(currentIntensityWindow);
+            refs.originReadout.textContent = currentSampleMetadata ? formatTriplet(currentSampleMetadata.cutout_origin_xyz) : "-";
+            refs.shapeReadout.textContent = currentSampleMetadata ? formatTriplet(currentSampleMetadata.cutout_shape_xyz) : "-";
+            if (currentSampleMetadata) {
+                const before = formatTriplet(currentSampleMetadata.padding_before_xyz);
+                const after = formatTriplet(currentSampleMetadata.padding_after_xyz);
+                refs.paddingReadout.textContent = `${before} before / ${after} after`;
+            } else {
+                refs.paddingReadout.textContent = "-";
+            }
+        }
+
+        function getJobId() {
+            return window.location.pathname.split("/")[window.location.pathname.split("/").length - 1];
+        }
+
+        function clearPaintPixels() {
+            if (!paintPixels) {
                 return;
             }
-            loading.style.display = visible ? "block" : "none";
+            paintPixels.clear();
+        }
+
+        function resetView() {
+            STATE.panX = 0;
+            STATE.panY = 0;
+            STATE.zoom = 1;
+            syncUi();
+        }
+
+        function goToAnnotatingSlice() {
+            STATE.z.current = STATE.z.annotating;
+            syncUi();
+        }
+
+        function hasUnsavedAnnotation() {
+            return !!STATE.annotationDirty;
         }
 
         function screenToImage(x, y) {
             if (!img) {
                 return [0, 0];
             }
-            // Return [x, y] in image coordinates;
-            const d = [
-                (x - width / 2 + (STATE.zoom * img.width) / 2) /
-                STATE.zoom -
-                STATE.panX / STATE.zoom,
-                (y - height / 2 + (STATE.zoom * img.width) / 2) /
-                STATE.zoom -
-                STATE.panY / STATE.zoom,
+            return [
+                (x - width / 2 + (STATE.zoom * img.width) / 2) / STATE.zoom - STATE.panX / STATE.zoom,
+                (y - height / 2 + (STATE.zoom * img.width) / 2) / STATE.zoom - STATE.panY / STATE.zoom,
             ];
-            return d;
         }
 
-        function imageToScreen(x, y) {
-            // Return [x, y] in screen coordinates;
-            // Accounting for zoom and the translate to the center of the image.
-            d = [STATE.zoom * x, STATE.zoom * y];
-            return d;
-        }
-
-        function clearAnnotations() {
-            if (confirm("Are you sure you want to clear this annotation?")) {
-                // Clear pixels by erasing:
-                paintPixels.erase()
-                paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
-                paintPixels.noErase();
+        function clearAnnotations(skipConfirm = false) {
+            if (!skipConfirm && hasUnsavedAnnotation() && !window.confirm("Clear the current raster mask?")) {
+                return;
             }
+            clearPaintPixels();
+            STATE.annotationDirty = false;
+            setPredictionStatus("Annotation cleared");
+            syncUi();
         }
 
         function quit() {
-            if (confirm("Are you sure you want to quit?")) {
-                let jobId = window.location.pathname.split("/")[
-                    window.location.pathname.split("/").length - 1
-                ];
-                window.location.href = `/job/${jobId}`;
+            if (hasUnsavedAnnotation() && !window.confirm("Discard the current annotation and return to the project page?")) {
+                return;
+            }
+            window.location.href = `/job/${getJobId()}`;
+        }
+
+        function skipSample() {
+            if (hasUnsavedAnnotation() && !window.confirm("Discard the current annotation and load a different sample?")) {
+                return;
+            }
+            loadNextImage(getJobId(), true);
+        }
+
+        function adjustHistogram(vmin, vmax, imageObject, sourcePixels, maxPixValue = 255) {
+            if (!imageObject || !sourcePixels) {
+                return;
+            }
+            for (let x = 0; x < imageObject.width; x++) {
+                for (let y = 0; y < imageObject.height; y++) {
+                    const i = (x + y * imageObject.width) * 4;
+                    let pixR = sourcePixels[i];
+                    pixR = maxPixValue * ((pixR / maxPixValue) - vmin) / (vmax - vmin);
+                    imageObject.pixels[i] = pixR;
+                    imageObject.pixels[i + 1] = pixR;
+                    imageObject.pixels[i + 2] = pixR;
+                }
             }
         }
 
+        function applyPrediction(predictionB64) {
+            if (!paintPixels) {
+                setLoadingVisible(false);
+                return;
+            }
+            if (!predictionB64) {
+                clearPaintPixels();
+                STATE.annotationDirty = false;
+                setPredictionStatus("Prediction unavailable");
+                setLoadingVisible(false);
+                syncUi();
+                return;
+            }
+
+            loadImage(`data:image/png;base64,${predictionB64}`, (predictionImage) => {
+                clearPaintPixels();
+                paintPixels.image(predictionImage, 0, 0, predictionImage.width / 2, predictionImage.height / 2);
+                STATE.annotationDirty = false;
+                setPredictionStatus("Prediction ready");
+                setLoadingVisible(false);
+                syncUi();
+            }, () => {
+                clearPaintPixels();
+                STATE.annotationDirty = false;
+                setPredictionStatus("Prediction error");
+                setLoadingVisible(false);
+                syncUi();
+            });
+        }
+
+        function loadPrediction(jobId, force = false) {
+            if (!currentSampleMetadata) {
+                clearPaintPixels();
+                STATE.annotationDirty = false;
+                setPredictionStatus("Prediction unavailable");
+                setLoadingVisible(false);
+                syncUi();
+                return;
+            }
+            if (!force && hasUnsavedAnnotation() && !window.confirm("Refresh prediction and discard your current edits?")) {
+                return;
+            }
+            setPredictionStatus("Prediction loading…");
+            setLoadingVisible(true, "Loading prediction…", "Refreshing the model overlay for the labeled slice.");
+            fetch(`${BASE_URL}/api/annotate/${jobId}/data/predict`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    sample_metadata: currentSampleMetadata,
+                    annotated_local_z_index: STATE.z.annotating,
+                    intensity_window: currentIntensityWindow,
+                }),
+            }).then((res) => {
+                return res.json();
+            }).then((data) => {
+                applyPrediction(data.prediction);
+            }).catch((err) => {
+                console.error("Error loading prediction.", err);
+                setPredictionStatus("Prediction error");
+                setLoadingVisible(false);
+                syncUi();
+            });
+        }
+
         function submitData() {
-            // Save STATE to localStorage.
             localStorage.setItem("state", JSON.stringify(STATE));
 
             paintPixels.loadPixels();
             const maskPixels = paintPixels.canvas.toDataURL();
 
-            // Set the image to the original image.
             for (let i = 0; i < img.pixels.length; i++) {
                 img.pixels[i] = originalPixels[i];
             }
@@ -402,9 +1346,10 @@
             img.loadPixels();
             const imagePixels = img.canvas.toDataURL();
 
-            let jobId = window.location.pathname.split("/")[
-                window.location.pathname.split("/").length - 1
-            ];
+            const jobId = getJobId();
+            refs.submitButton.disabled = true;
+            refs.skipButton.disabled = true;
+            setLoadingVisible(true, "Submitting annotation…", "Saving the legacy raster training files for this labeled slice.");
 
             fetch(`${BASE_URL}/api/annotate/${jobId}/data/submit`, {
                 method: "POST",
@@ -413,80 +1358,36 @@
                     mask: maskPixels,
                     image: imagePixels,
                     sample_metadata: currentSampleMetadata,
+                    annotated_local_z_index: STATE.z.annotating,
+                    intensity_window: currentIntensityWindow,
                 }),
             }).then((res) => {
-                return res.json();
-            }).then((data) => {
-                // There's a new image in data.prediction;
-                // b64 encoded png. Render it to paintPixels.
-                // img.src = `data:image/png;base64,${data.prediction}`;
-                // loadImage('data:image/png;base64,' + data.prediction, img => {
-                //     // Clear pixels by erasing:
-                //     paintPixels.erase();
-                //     paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
-                //     paintPixels.noErase();
-                //     // At half-size:
-                //     paintPixels.image(img, 0, 0, img.width / 2, img.height / 2);
-                // });
-                window.location.reload();
-            });
-        }
-
-        function adjustHistogram(vmin, vmax, imageObject, originalPixels, maxPixValue = 255) {
-
-            for (let x = 0; x < imageObject.width; x++) {
-                for (let y = 0; y < imageObject.height; y++) {
-                    let i = (x + y * imageObject.width) * 4;
-
-                    let pixR = originalPixels[i];
-                    pixR = maxPixelValue * ((pixR / maxPixelValue) - vmin) / (vmax - vmin);
-
-                    imageObject.pixels[i] = pixR;
-                    imageObject.pixels[i + 1] = pixR;
-                    imageObject.pixels[i + 2] = pixR;
-                    // imageObject.pixels[i + 3] = pixA;
+                if (!res.ok) {
+                    throw new Error(`Submit failed with ${res.status}`);
                 }
-            }
-        }
-
-        let originalPixels;
-        let maxPixelValue = 255;
-        function getJobId() {
-            return window.location.pathname.split("/")[
-                window.location.pathname.split("/").length - 1
-            ];
-        }
-
-        function loadPrediction(jobId) {
-            img.loadPixels();
-            const imagePixels = img.canvas.toDataURL();
-            fetch(`${BASE_URL}/api/annotate/${jobId}/data/predict`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    image: imagePixels,
-                    sample_metadata: currentSampleMetadata,
-                }),
-            }).then((res) => {
                 return res.json();
-            }).then((data) => {
-                window.prediction = data.prediction;
-                if (!window.prediction && paintPixels) {
-                    paintPixels.erase();
-                    paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
-                    paintPixels.noErase();
-                }
-                setLoadingVisible(false);
+            }).then(() => {
+                STATE.annotationDirty = false;
+                loadNextImage(jobId, true);
             }).catch((err) => {
-                console.error("Error loading prediction.", err);
+                console.error("Error submitting annotation.", err);
                 setLoadingVisible(false);
+                setPredictionStatus("Submit failed");
+            }).finally(() => {
+                refs.submitButton.disabled = false;
+                refs.skipButton.disabled = false;
+                syncUi();
             });
         }
 
-        function loadNextImage(jobId) {
-            setLoadingVisible(true);
-            let _cachebuster = `?cachebuster=${Math.random()}`;
-            fetch(`${BASE_URL}/api/annotate/${jobId}/images/next${_cachebuster}`)
+        function loadNextImage(jobId, force = false) {
+            if (!force && hasUnsavedAnnotation() && !window.confirm("Discard the current annotation and load another sample?")) {
+                return;
+            }
+            setLoadingVisible(true, "Loading sample…", "Preparing the next cutout and prediction overlay.");
+            setPredictionStatus("Prediction loading…");
+            const cachebuster = `?cachebuster=${Math.random()}`;
+            fetch(`${BASE_URL}/api/annotate/${jobId}/images/next${cachebuster}`)
                 .then((res) => {
                     const imageInfoHeader = res.headers.get("zInfo");
                     const imageInfo = imageInfoHeader ? JSON.parse(imageInfoHeader) : {};
@@ -500,112 +1401,133 @@
                         if (!paintPixels || paintPixels.width !== img.width / 2 || paintPixels.height !== img.width / 2) {
                             paintPixels = createGraphics(img.width / 2, img.width / 2);
                             paintPixels.frameRate(1);
+                        } else {
+                            clearPaintPixels();
                         }
 
                         const zInfo = imageInfo.zInfo || {};
+                        const annotatedSlice = zInfo.current ?? Math.round(((img.height / img.width) - 1) / 2);
                         STATE.z = {
                             min: zInfo.min ?? 0,
                             max: zInfo.max ?? ((img.height / img.width) - 1),
-                            current: zInfo.current ?? Math.round(((img.height / img.width) - 1) / 2),
-                            annotating: zInfo.current ?? Math.round(((img.height / img.width) - 1) / 2),
+                            current: annotatedSlice,
+                            annotating: annotatedSlice,
                         };
-                        currentSampleMetadata = imageInfo.sampleMetadata || null;
-                        img.loadPixels();
-                        originalPixels = img.pixels.map((x) => x);
-                        maxPixelValue = originalPixels.reduce((a, b) => Math.max(a, b), 0);
                         STATE.imageLoaded = true;
-                        loadPrediction(jobId);
+                        STATE.annotationDirty = false;
+                        STATE.panX = 0;
+                        STATE.panY = 0;
+                        STATE.zoom = 1;
+                        currentSampleMetadata = imageInfo.sampleMetadata || null;
+                        currentIntensityWindow = imageInfo.intensityWindow || null;
+                        img.loadPixels();
+                        originalPixels = img.pixels.slice();
+                        maxPixelValue = originalPixels.reduce((a, b) => Math.max(a, b), 0);
+                        syncUi();
+                        loadPrediction(jobId, true);
+                    }, (err) => {
+                        console.error("Error loading image blob.", err);
+                        setLoadingVisible(false);
+                        setPredictionStatus("Prediction error");
                     });
                 })
                 .catch((err) => {
                     console.error("Error loading next annotation image.", err);
                     setLoadingVisible(false);
+                    setPredictionStatus("Prediction error");
                 });
         }
 
-        function setup() {
-
-            // If there's state in localStorage, use it.
-            if (localStorage.getItem("state")) {
-                try {
-                    STATE = JSON.parse(localStorage.getItem("state"));
-                    // Bump the histogram:
-                    STATE.histogram.pvmin = -1;
-                }
-                catch { console.log("Error loading state from localStorage."); }
+        function restoreState() {
+            if (!localStorage.getItem("state")) {
+                return;
             }
-            createCanvas(windowWidth, windowHeight);
+            try {
+                const parsed = JSON.parse(localStorage.getItem("state"));
+                if (!parsed || typeof parsed !== "object") {
+                    return;
+                }
+                STATE = {
+                    ...DEFAULT_STATE,
+                    ...parsed,
+                    histogram: {
+                        ...DEFAULT_STATE.histogram,
+                        ...(parsed.histogram || {}),
+                    },
+                    z: {
+                        ...DEFAULT_STATE.z,
+                        ...(parsed.z || {}),
+                    },
+                };
+                STATE.annotationDirty = false;
+                STATE.predictionStatus = "Prediction unavailable";
+                STATE.histogram.pvmin = -1;
+            } catch (err) {
+                console.log("Error loading state from localStorage.", err);
+            }
+        }
+
+        function setup() {
+            restoreState();
+            createCanvas(refs.host.clientWidth || windowWidth, refs.host.clientHeight || windowHeight).parent("p5-canvas-host");
             frameRate(20);
-            loadNextImage(getJobId());
+            syncUi();
+            loadNextImage(getJobId(), true);
+        }
+
+        function setCurrentSlice(nextZ) {
+            STATE.z.current = Math.min(STATE.z.max, Math.max(STATE.z.min, nextZ));
+            syncUi();
         }
 
         function keyPressed() {
-            // Hitting escape resets pan and zoom:
             if (keyCode === ESCAPE) {
-                STATE.panX = 0;
-                STATE.panY = 0;
-                STATE.zoom = 1;
-
-                // If also holding shift, also go back to the home slice:
+                resetView();
                 if (keyIsDown(SHIFT) || keyIsDown(CONTROL) || keyIsDown(COMMAND) || keyIsDown(OPTION) || keyIsDown(ALT)) {
-                    STATE.z.current = STATE.z.annotating;
+                    goToAnnotatingSlice();
                 }
             }
 
-            // Pressing V toggles annotation visibility:
-            // if (keyCode === 86) {
             if (key === "v") {
                 STATE.annosVisible = !STATE.annosVisible;
+                syncUi();
             }
 
-            // Zoom in/out with + and -
             if (keyCode === 173) {
-                // If holding shift, move in increments of 50%
-                if (keyIsDown(SHIFT)) {
-                    STATE.zoom -= 0.5;
-                } else {
-                    STATE.zoom -= 0.1;
-                }
+                STATE.zoom -= keyIsDown(SHIFT) ? 0.5 : 0.1;
                 boundZoom();
+                syncUi();
             }
             if (keyCode === 61) {
-                if (keyIsDown(SHIFT)) {
-                    STATE.zoom += 0.5;
-                } else {
-                    STATE.zoom += 0.1;
-                }
+                STATE.zoom += keyIsDown(SHIFT) ? 0.5 : 0.1;
                 boundZoom();
+                syncUi();
             }
 
-            // Pan with arrows:
             if (key === 'ArrowUp') {
-                STATE.panY += keyIsDown(SHIFT)
-                    ? CONFIG.pan.bigIncrement
-                    : CONFIG.pan.smallIncrement;
+                STATE.panY += keyIsDown(SHIFT) ? CONFIG.pan.bigIncrement : CONFIG.pan.smallIncrement;
+                syncUi();
             }
             if (keyCode === DOWN_ARROW) {
-                STATE.panY -= keyIsDown(SHIFT)
-                    ? CONFIG.pan.bigIncrement
-                    : CONFIG.pan.smallIncrement;
+                STATE.panY -= keyIsDown(SHIFT) ? CONFIG.pan.bigIncrement : CONFIG.pan.smallIncrement;
+                syncUi();
             }
             if (keyCode === LEFT_ARROW) {
-                STATE.panX += keyIsDown(SHIFT)
-                    ? CONFIG.pan.bigIncrement
-                    : CONFIG.pan.smallIncrement;
+                STATE.panX += keyIsDown(SHIFT) ? CONFIG.pan.bigIncrement : CONFIG.pan.smallIncrement;
+                syncUi();
             }
             if (keyCode === RIGHT_ARROW) {
-                STATE.panX -= keyIsDown(SHIFT)
-                    ? CONFIG.pan.bigIncrement
-                    : CONFIG.pan.smallIncrement;
+                STATE.panX -= keyIsDown(SHIFT) ? CONFIG.pan.bigIncrement : CONFIG.pan.smallIncrement;
+                syncUi();
             }
 
-            // Q and W to change brush size:
             if (keyCode === 81) {
                 STATE.brushSize *= 0.9;
                 if (keyIsDown(SHIFT)) { STATE.brushSize *= 0.8; }
                 if (STATE.brushSize < CONFIG.brushSize.min) {
                     STATE.brushSize = CONFIG.brushSize.min;
                 }
+                syncUi();
             }
             if (keyCode === 87) {
                 STATE.brushSize *= 1.1;
@@ -613,80 +1535,72 @@
                 if (STATE.brushSize > CONFIG.brushSize.max) {
                     STATE.brushSize = CONFIG.brushSize.max;
                 }
+                syncUi();
             }
 
-            // A and S to change image opacity:
             if (keyCode === 65) {
-                STATE.imageTransparency -= .05;
-                if (keyIsDown(SHIFT)) { STATE.imageTransparency -= .05; }
-                if (STATE.imageTransparency > CONFIG.imageTransparency.max) {
-                    STATE.imageTransparency = CONFIG.imageTransparency.max;
-                }
-            }
-            if (keyCode === 83) {
-                STATE.imageTransparency += .05;
-                if (keyIsDown(SHIFT)) { STATE.imageTransparency += .05; }
+                STATE.imageTransparency -= 0.05;
+                if (keyIsDown(SHIFT)) { STATE.imageTransparency -= 0.05; }
                 if (STATE.imageTransparency < CONFIG.imageTransparency.min) {
                     STATE.imageTransparency = CONFIG.imageTransparency.min;
                 }
+                syncUi();
+            }
+            if (keyCode === 83) {
+                STATE.imageTransparency += 0.05;
+                if (keyIsDown(SHIFT)) { STATE.imageTransparency += 0.05; }
+                if (STATE.imageTransparency > CONFIG.imageTransparency.max) {
+                    STATE.imageTransparency = CONFIG.imageTransparency.max;
+                }
+                syncUi();
             }
 
-            // , and . to scroll in z:
             if (keyCode === 188) {
-                STATE.z.current -= 1;
-                if (STATE.z.current < 0) {
-                    STATE.z.current = 0;
-                }
+                setCurrentSlice(STATE.z.current - 1);
             }
             if (keyCode === 190) {
-                STATE.z.current += 1;
-                if (STATE.z.current > STATE.z.max) {
-                    STATE.z.current = STATE.z.max;
-                }
+                setCurrentSlice(STATE.z.current + 1);
             }
 
-            // ? toggles the key map:
             if (keyCode === 191) {
                 toggleKeyMapOverlay();
             }
         }
 
         function boundZoom() {
-            // Returns true if the zoom is still valid:
             if (STATE.zoom > CONFIG.zoom.max) {
                 STATE.zoom = CONFIG.zoom.max;
-            }
-            else if (STATE.zoom < CONFIG.zoom.min) {
+            } else if (STATE.zoom < CONFIG.zoom.min) {
                 STATE.zoom = CONFIG.zoom.min;
-            }
-            else {
+            } else {
                 return true;
             }
             return false;
         }
 
         function windowResized() {
-            resizeCanvas(windowWidth, windowHeight);
+            resizeCanvas(refs.host.clientWidth || windowWidth, refs.host.clientHeight || windowHeight);
         }
 
         function mouseWheel(event) {
-            // Zoom in/out with mouse wheel:
+            if (!isCanvasEvent(event)) {
+                return true;
+            }
             const zDelta = event.delta / 1000;
             STATE.zoom -= zDelta;
-            // If all we do is change zoom, then we are going to zoom in and
-            // out of the CANVAS center point, not the viewport centerpoint.
-            // This is because we zoom by rescaling the image, and the image
-            // is always centered in the canvas.
             if (boundZoom()) {
                 STATE.panX -= zDelta * (STATE.panX / STATE.zoom);
                 STATE.panY -= zDelta * (STATE.panY / STATE.zoom);
             }
+            syncUi();
+            return false;
         }
 
-        function doubleClicked() {
-            // Check for mouse pos in histogram:
+        function doubleClicked(event) {
+            if (!isCanvasEvent(event)) {
+                return;
+            }
             if (mouseX < CONFIG.histogram.width && mouseY < CONFIG.histogram.height) {
-                // reset histogram:
                 STATE.histogram.vmax = 1;
                 STATE.histogram.vmin = 0;
                 reloadHistogramSettings();
@@ -696,40 +1610,25 @@
         function draw() {
             if (!img) {
                 background(CONFIG.backgroundColor);
+                syncUi();
                 return;
             }
-            // If window.prediction is set, load it into paintPixels.
-            if (window.prediction) {
-                loadImage('data:image/png;base64,' + window.prediction, img => {
-                    // Clear pixels by erasing:
-                    paintPixels.erase();
-                    paintPixels.rect(0, 0, paintPixels.width, paintPixels.height);
-                    paintPixels.noErase();
-                    // At half-size:
-                    paintPixels.image(img, 0, 0, img.width / 2, img.width / 2);
-                });
-                window.prediction = undefined;
-                reloadHistogramSettings();
-            }
 
+            let imgcoords = null;
             push();
-            let imgcoords = [0, 0];
             translate(
                 STATE.panX + (width / 2 - (STATE.zoom * img.width) / 2),
                 STATE.panY + (height / 2 - (STATE.zoom * img.width) / 2)
             );
-            // If mouse is over the image, switch to cursor=CROSS.
-            // Otherwise, draw cursor=ARROW.
+
             if (inBounds(mouseX, mouseY)) {
                 cursor(CROSS);
             } else {
                 cursor(ARROW);
             }
-            background(0);
 
+            background(CONFIG.backgroundColor);
             if (STATE.imageLoaded) {
-                background(CONFIG.backgroundColor);
-                // image(img, dx, dy, dWidth, dHeight, sx, sy, [sWidth], [sHeight], [fit], [xAlign], [yAlign])
                 image(
                     img,
                     0, 0,
@@ -742,21 +1641,18 @@
             if (STATE.annosVisible) {
                 imgcoords = screenToImage(mouseX, mouseY);
                 if (paintPixels) {
-                    let homeSlice = STATE.z.current == STATE.z.annotating;
-                    tint(
-                        homeSlice ? 255 : 128,
-                        STATE.imageTransparency * 255);
+                    const homeSlice = STATE.z.current === STATE.z.annotating;
+                    tint(homeSlice ? 255 : 128, STATE.imageTransparency * 255);
                     image(paintPixels, 0, 0, paintPixels.width * 2 * STATE.zoom, paintPixels.height * 2 * STATE.zoom);
+                    noTint();
                 }
             }
-
             pop();
+
             if (inBounds(mouseX, mouseY)) {
-                cursor(CROSS);
-                // Draw the current brush size:
+                imgcoords = screenToImage(mouseX, mouseY);
                 noFill();
                 strokeWeight(1);
-                // Draw the brush size as a circle:
                 if (!keyIsDown(SHIFT)) {
                     stroke((keyIsDown(OPTION) || keyIsDown(ALT)) ? "white" : "red");
                     ellipse(mouseX, mouseY, STATE.brushSize * STATE.zoom, STATE.brushSize * STATE.zoom);
@@ -764,46 +1660,28 @@
                     ellipse(mouseX, mouseY, STATE.brushSize * 1.05 * STATE.zoom, STATE.brushSize * 1.05 * STATE.zoom);
                 }
             }
-            textSize(12);
-            fill("white");
-            noStroke();
-            text(
-                `Mouse: ${Math.round(imgcoords[0])}, ${Math.round(imgcoords[1])}, ${STATE.z.current - STATE.z.annotating}\n` +
-                `Zoom: ${Math.round(STATE.zoom * 100)}%\n` +
-                `Viewport: ${Math.round(STATE.panX)}, ${Math.round(STATE.panY)}\n`,
-                10 + CONFIG.histogram.width,
-                10
-            );
 
-            // Draw the histogram, which is a gradient from black to white.
-            // The histogram is drawn in the top-left corner of the screen.
             noStroke();
             for (let i = 0; i < CONFIG.histogram.height; i++) {
                 fill((255 * i) / CONFIG.histogram.height);
                 rect(0, i, CONFIG.histogram.width, 1);
             }
 
-            // Draw the histogram bounds:
             stroke("red");
             strokeWeight(1);
-            let vMinMapped = map(STATE.histogram.vmin, 0, 1, CONFIG.histogram.height, 0);
-            let vMaxMapped = map(STATE.histogram.vmax, 0, 1, CONFIG.histogram.height, 0
-            );
+            const vMinMapped = map(STATE.histogram.vmin, 0, 1, CONFIG.histogram.height, 0);
+            const vMaxMapped = map(STATE.histogram.vmax, 0, 1, CONFIG.histogram.height, 0);
             line(0, vMinMapped, CONFIG.histogram.width, vMinMapped);
             line(0, vMaxMapped, CONFIG.histogram.width, vMaxMapped);
+
+            syncUi(imgcoords);
         }
 
         function inBounds(x, y, radius = 0) {
-            // return true if x, y screenspace coordinates are inside the
-            // image, accounting for pan and zoom
             if (!img) {
                 return false;
             }
-
-            // Convert to image coordinates
-            let imgcoords = screenToImage(x, y);
-
-            // Check if in bounds
+            const imgcoords = screenToImage(x, y);
             return (
                 imgcoords[0] >= (0 - radius) &&
                 imgcoords[0] < (img.width + radius) &&
@@ -812,23 +1690,16 @@
             );
         }
 
-        function mousePressed() {
-            if (!inBounds(mouseX, mouseY)) {
-                // Check for submit button press:
-                return;
-            }
-
-            // If we're in the middle of a gesture, ignore clicks
-            if (keyIsDown(SHIFT)) {
+        function mousePressed(event) {
+            STATE.pointerDownInCanvas = isCanvasEvent(event);
+            if (!STATE.pointerDownInCanvas) {
                 return;
             }
         }
 
         function mouseReleased() {
-            if (
-                (STATE.histogram.pvmax != STATE.histogram.vmax)
-                || (STATE.histogram.pvmin != STATE.histogram.vmin)
-            ) {
+            STATE.pointerDownInCanvas = false;
+            if ((STATE.histogram.pvmax !== STATE.histogram.vmax) || (STATE.histogram.pvmin !== STATE.histogram.vmin)) {
                 reloadHistogramSettings();
             }
         }
@@ -836,7 +1707,6 @@
         function reloadHistogramSettings() {
             STATE.histogram.pvmax = STATE.histogram.vmax;
             STATE.histogram.pvmin = STATE.histogram.vmin;
-            // adjustHistogram to match the current histogram:
             adjustHistogram(
                 STATE.histogram.vmin,
                 STATE.histogram.vmax,
@@ -845,178 +1715,147 @@
                 maxPixelValue
             );
             img.updatePixels();
+            syncUi();
         }
 
-        function mouseDragged() {
-            // First check if you're within H vertically of the global top
-            // left corner, and within W horizontally of the global top
-            // left corner. If so, then you're in the histogram, and you should
-            // interact with the histogram instead of the image:
+        function mouseDragged(event) {
+            if (!STATE.pointerDownInCanvas || !isCanvasEvent(event)) {
+                return false;
+            }
             if (mouseX < CONFIG.histogram.width && mouseY < CONFIG.histogram.height) {
-
-                // Are you closer to vmin or vmax?
-                let vMinMapped = map(
-                    STATE.histogram.vmin,
-                    0,
-                    1,
-                    CONFIG.histogram.height,
-                    0
-                );
-                let vMaxMapped = map(
-                    STATE.histogram.vmax,
-                    0,
-                    1,
-                    CONFIG.histogram.height,
-                    0
-                );
-                let vminDist = Math.abs(mouseY - vMinMapped);
-                let vmaxDist = Math.abs(mouseY - vMaxMapped);
+                const vMinMapped = map(STATE.histogram.vmin, 0, 1, CONFIG.histogram.height, 0);
+                const vMaxMapped = map(STATE.histogram.vmax, 0, 1, CONFIG.histogram.height, 0);
+                const vminDist = Math.abs(mouseY - vMinMapped);
+                const vmaxDist = Math.abs(mouseY - vMaxMapped);
 
                 if (vminDist < vmaxDist) {
                     STATE.histogram.vmin = map(mouseY, CONFIG.histogram.height, 0, 0, 1);
                 } else {
                     STATE.histogram.vmax = map(mouseY, CONFIG.histogram.height, 0, 0, 1);
                 }
+                syncUi();
                 return;
             }
 
-            // Pan when holding shift:
-            if (keyIsDown(SHIFT) || !inBounds(mouseX, mouseY, radius = STATE.brushSize)) {
+            if (keyIsDown(SHIFT) || !inBounds(mouseX, mouseY, STATE.brushSize)) {
                 STATE.panX += movedX;
                 STATE.panY += movedY;
+                syncUi();
+                return;
+            }
+
+            if (STATE.z.current !== STATE.z.annotating) {
                 return;
             }
 
             paintPixels.fill(255, 0, 0);
             paintPixels.noStroke();
-            let mappedMouse = screenToImage(mouseX, mouseY);
-            let pMappedMouse = screenToImage(pmouseX, pmouseY);
+            const mappedMouse = screenToImage(mouseX, mouseY);
+            const previousMappedMouse = screenToImage(pmouseX, pmouseY);
 
-            if (STATE.z.current == STATE.z.annotating) {
-                // If holding alt, then erase:
-                if (keyIsDown(OPTION) || keyIsDown(ALT)) {
-                    paintPixels.erase();
-                    paintPixels.ellipse(
-                        mappedMouse[0] / 2,
-                        mappedMouse[1] / 2,
-                        STATE.brushSize / 2,
-                        STATE.brushSize / 2
-                    );
-                    paintPixels.noErase();
-                } else {
-                    paintPixels.ellipse(
-                        mappedMouse[0] / 2,
-                        mappedMouse[1] / 2,
-                        STATE.brushSize / 2,
-                        STATE.brushSize / 2
-                    );
-                    paintPixels.strokeWeight(STATE.brushSize / 2);
-                    paintPixels.stroke(255, 0, 0)
-                    paintPixels.line(pMappedMouse[0] / 2, pMappedMouse[1] / 2, mappedMouse[0] / 2, mappedMouse[1] / 2);
-                    paintPixels.noStroke();
-                }
-            }
-        }
-
-        // Toggle keymap with ?:
-        function toggleKeyMapOverlay() {
-            let overlay = document.getElementById("keymapOverlay");
-            if (overlay.classList.contains("hidden")) {
-                overlay.classList.remove("hidden");
+            if (keyIsDown(OPTION) || keyIsDown(ALT)) {
+                paintPixels.erase();
+                paintPixels.ellipse(
+                    mappedMouse[0] / 2,
+                    mappedMouse[1] / 2,
+                    STATE.brushSize / 2,
+                    STATE.brushSize / 2
+                );
+                paintPixels.noErase();
             } else {
-                overlay.classList.add("hidden");
+                paintPixels.ellipse(
+                    mappedMouse[0] / 2,
+                    mappedMouse[1] / 2,
+                    STATE.brushSize / 2,
+                    STATE.brushSize / 2
+                );
+                paintPixels.strokeWeight(STATE.brushSize / 2);
+                paintPixels.stroke(255, 0, 0);
+                paintPixels.line(
+                    previousMappedMouse[0] / 2,
+                    previousMappedMouse[1] / 2,
+                    mappedMouse[0] / 2,
+                    mappedMouse[1] / 2
+                );
+                paintPixels.noStroke();
             }
+            STATE.annotationDirty = true;
+            setPredictionStatus("Mask edited");
+            syncUi(mappedMouse);
         }
 
-        // Create the keymap list:
-        (() => {
-            let keymapList = document.getElementById("keymap-list");
-            // Create the table:
-            let table = document.createElement("table");
+        function toggleKeyMapOverlay() {
+            refs.keymapOverlay.classList.toggle("hidden");
+        }
+
+        (function buildKeymapTable() {
+            const keymapList = document.getElementById("keymap-list");
+            const table = document.createElement("table");
+            table.className = "keymap-table";
             keymapList.appendChild(table);
-            let keymap = KEY_MAP;
-            for (let key in keymap) {
-                // Convert from keyCode to character:
-                let k = keymap[key].key;
-                // Ascii to character:
-                let keymapItem = document.createElement("tr");
-                keymapItem.innerHTML = `<td>
-                ${keymap[key].shift ? "<kbd>⇧</kbd>" : ""}
-                ${keymap[key].alt ? "<kbd>⌥</kbd>" : ""}
-                ${keymap[key].opt ? "<kbd>⌥</kbd>" : ""}
-                ${keymap[key].ctrl ? "<kbd>⌃</kbd>" : ""}
-                ${keymap[key].cmd ? "<kbd>⌘</kbd>" : ""}</td><td>
-                <kbd>${k}</kbd></td><td>${keymap[key].description} <small>(${key})</small></td>
-                `;
-                table.appendChild(keymapItem);
+            Object.keys(KEY_MAP).forEach((key) => {
+                const item = KEY_MAP[key];
+                const row = document.createElement("tr");
+                row.innerHTML = `<td>
+                    ${item.shift ? "<kbd>Shift</kbd>" : ""}
+                    ${item.alt ? "<kbd>Alt</kbd>" : ""}
+                    ${item.opt ? "<kbd>Opt</kbd>" : ""}
+                    ${item.ctrl ? "<kbd>Ctrl</kbd>" : ""}
+                    ${item.cmd ? "<kbd>Cmd</kbd>" : ""}
+                </td>
+                <td><kbd>${item.key}</kbd></td>
+                <td>${item.description} <small>(${key})</small></td>`;
+                table.appendChild(row);
+            });
+        })();
+
+        refs.openShortcutsButton.addEventListener("click", toggleKeyMapOverlay);
+        refs.closeShortcutsButton.addEventListener("click", toggleKeyMapOverlay);
+        refs.keymapOverlay.addEventListener("click", (event) => {
+            if (event.target === refs.keymapOverlay) {
+                toggleKeyMapOverlay();
             }
-        })()
+        });
+
+        refs.prevSliceButton.addEventListener("click", () => setCurrentSlice(STATE.z.current - 1));
+        refs.nextSliceButton.addEventListener("click", () => setCurrentSlice(STATE.z.current + 1));
+        refs.sliceSlider.addEventListener("input", (event) => setCurrentSlice(Number(event.target.value)));
+        refs.homeSliceButton.addEventListener("click", goToAnnotatingSlice);
+        refs.homeSliceSidebarButton.addEventListener("click", goToAnnotatingSlice);
+
+        refs.resetViewButton.addEventListener("click", resetView);
+        refs.resetViewSidebarButton.addEventListener("click", resetView);
+
+        refs.clearButton.addEventListener("click", () => clearAnnotations(false));
+        refs.clearSidebarButton.addEventListener("click", () => clearAnnotations(false));
+
+        refs.refreshPredictionButton.addEventListener("click", () => loadPrediction(getJobId(), false));
+        refs.refreshPredictionSidebarButton.addEventListener("click", () => loadPrediction(getJobId(), false));
+
+        refs.skipButton.addEventListener("click", skipSample);
+        refs.submitButton.addEventListener("click", submitData);
+
+        refs.brushSizeSlider.addEventListener("input", (event) => {
+            STATE.brushSize = Number(event.target.value);
+            syncUi();
+        });
+        refs.maskOpacitySlider.addEventListener("input", (event) => {
+            STATE.imageTransparency = Number(event.target.value) / 100;
+            syncUi();
+        });
+        refs.annosVisibleToggle.addEventListener("change", (event) => {
+            STATE.annosVisible = event.target.checked;
+            syncUi();
+        });
+
+        window.addEventListener("beforeunload", (event) => {
+            if (!hasUnsavedAnnotation()) {
+                return;
+            }
+            event.preventDefault();
+            event.returnValue = "";
+        });
     </script>
-
-    <!-- UI to submit (floating bottom) -->
-    <div class="submit-container">
-        <div class="top-right-controls">
-            <button class="pill-button clear-button" onclick="clearAnnotations()">Clear</button>
-            <button class="pill-button skip-button" onclick="window.location.reload()">Skip</button>
-            <button class="pill-button return-button" onclick="quit()">Quit</button>
-        </div>
-        <div class="bottom-left-controls">
-            <button class="pill-button" onclick="toggleKeyMapOverlay()">?</button>
-        </div>
-        <button class="pill-button submit-button" onclick="submitData()">Submit</button>
-    </div>
-
-    <div id="p5_loading">
-        <!-- Loading screen for the annotation tool. -->
-        <div class="loading-container">
-            <div class="loading-dot">•</div>
-            <div class="loading-dot">•</div>
-            <div class="loading-dot">•</div>
-        </div>
-
-        <style>
-            .loading-container {
-                position: absolute;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                background-color: #000000;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-            }
-
-            /* Animated loading dots */
-            .loading-dot {
-                color: #ffffff;
-                font-size: 50px;
-                animation: loading-dot 1s infinite;
-                margin: 0 10px;
-            }
-
-            .loading-dot:nth-child(2) {
-                animation-delay: 0.2s;
-            }
-
-            .loading-dot:nth-child(3) {
-                animation-delay: 0.4s;
-            }
-
-            @keyframes loading-dot {
-                0% {
-                    opacity: 0;
-                }
-
-                50% {
-                    opacity: 1;
-                }
-
-                100% {
-                    opacity: 0;
-                }
-            }
-        </style>
 </body>
 
 </html>

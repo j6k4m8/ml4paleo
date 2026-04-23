@@ -8,28 +8,33 @@
     </div>
     <p class="job-card-copy">
         {% if job_status_str == "JobStatus.CONVERTING" %}
-        The annotator is already usable for finished tiles, even while conversion is still running.
+        The polygon annotator is already usable for finished tiles, even while conversion is still running.
         {% else %}
-        Add labeled slices, review what you already have, then retrain or rerun segmentation when you want a better result.
+        Add labeled slices with the new polygon annotator, review what you already have, then retrain or rerun
+        segmentation when you want a better result.
         {% endif %}
     </p>
     <div class="training-card-actions">
-        <a target="_blank" role="button" href="{{ url_for('annotation_page', job_id=job.id) }}">
-            {% if num_annotations > 0 %}Continue annotating{% else %}Open annotator{% endif %}
+        <a target="_blank" role="button" href="{{ url_for('annotation_page_v2', job_id=job.id) }}">
+            {% if num_annotations > 0 %}Continue in polygon annotator{% else %}Open polygon annotator{% endif %}
         </a>
         {% if has_been_annotated %}
-        {% if job_status_str in ["JobStatus.TRAINING_QUEUED", "JobStatus.TRAINING"] %}
+        {% if not can_trigger_segmentation %}
         <button type="button" class="secondary outline" disabled aria-busy="true">
-            {% if job_status_str == "JobStatus.TRAINING" %}Training{% else %}Queued{% endif %}
+            {% if job_status_str == "JobStatus.SEGMENTING" %}Segmenting{% elif job_status_str == "JobStatus.TRAINING" %}Training{% else %}Queued{% endif %}
         </button>
         {% else %}
-        <button id="segmentation-trigger-button" class="secondary outline" onclick="triggerSegmentation()">
+        <button id="segmentation-trigger-button" class="secondary outline"
+            onclick="triggerSegmentation('segmentation-trigger-button')">
             Run segmentation
         </button>
         {% endif %}
         {% endif %}
     </div>
     <div class="training-card-links">
+        <a class="training-card-link" target="_blank" href="{{ url_for('annotation_page', job_id=job.id) }}">
+            Open legacy annotator
+        </a>
         {% if num_annotations >= 2 %}
         <button type="button" class="training-card-link" id="train-only-trigger-button" onclick="triggerTrainOnly()">
             Retrain model only

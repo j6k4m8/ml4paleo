@@ -270,6 +270,11 @@
             background: linear-gradient(180deg, #fff7f8 0%, #fff 100%);
         }
 
+        .job-card--warning {
+            border-color: rgba(173, 118, 16, 0.28);
+            background: linear-gradient(180deg, #fffdf7 0%, #fff 100%);
+        }
+
         .job-card-header {
             display: flex;
             align-items: flex-start;
@@ -281,6 +286,13 @@
             margin: 0;
             font-size: var(--job-title-size);
             line-height: 1.28;
+        }
+
+        .job-card-token-group {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            gap: 0.45rem;
         }
 
         .job-card-copy {
@@ -453,10 +465,36 @@
             white-space: nowrap;
         }
 
+        .job-inline-token--warning {
+            background: #fff1d4;
+            color: #955f00;
+        }
+
+        .job-summary-note {
+            display: block;
+            margin-top: 0.18rem;
+            color: var(--job-muted);
+            font-size: var(--job-meta-size);
+            font-weight: 600;
+            line-height: 1.35;
+        }
+
+        .job-summary-note--warning {
+            color: #955f00;
+        }
+
         .job-error-list {
             margin: 0.85rem 0 0;
             padding-left: 1.1rem;
             color: var(--job-muted);
+        }
+
+        .job-stale-list {
+            margin: 0.8rem 0 0;
+            padding-left: 1.1rem;
+            color: var(--job-muted);
+            font-size: var(--job-meta-size);
+            line-height: 1.45;
         }
 
         #rename-job-dialog {
@@ -654,6 +692,11 @@
                     <span class="job-summary-value">
                         {% if latest_segmentation_id %}
                         <code>{{ latest_segmentation_id }}</code>
+                        {% if segmentation_stale and segmentation_stale_reasons %}
+                        <small class="job-summary-note job-summary-note--warning">
+                            {{ segmentation_stale_reasons[0] }}
+                        </small>
+                        {% endif %}
                         {% else %}
                         Not yet
                         {% endif %}
@@ -665,6 +708,12 @@
                 {% if job.shape %}
                 <a role="button" class="secondary outline" href="{{ neuroglancer_link }}" target="_blank">
                     View in 3D
+                </a>
+                {% endif %}
+                {% if show_annotation_cta %}
+                <a role="button" class="secondary outline" href="{{ url_for('annotation_page_v2', job_id=job.id) }}"
+                    target="_blank">
+                    Polygon annotator
                 </a>
                 {% endif %}
                 <a role="button" class="secondary outline" href="{{ url_for('models_page', job_id=job.id) }}">
@@ -871,11 +920,11 @@
             </section>
             {% endif %}
 
-            {% if segmentation_ready %}
+            {% if segmentation_output_available %}
             {% include "job_page_components/segmentation_results.html" %}
             {% endif %}
 
-            {% if meshes_ready %}
+            {% if mesh_output_available %}
             {% include "job_page_components/download_meshes.html" %}
             {% endif %}
 
@@ -898,9 +947,12 @@
             dismissible: true,
         });
 
-        triggerSegmentation = () => {
-            document.getElementById("segmentation-trigger-button").disabled = true;
-            document.getElementById("segmentation-trigger-button").setAttribute("aria-busy", "true");
+        triggerSegmentation = (buttonId = "segmentation-trigger-button") => {
+            const button = document.getElementById(buttonId);
+            if (button) {
+                button.disabled = true;
+                button.setAttribute("aria-busy", "true");
+            }
 
             fetch("/api/job/{{ job.id }}/start", {
                 method: "POST",
@@ -909,11 +961,49 @@
                     if (response.ok) {
                         notyf.success("Segmentation started. You will receive an email when it is complete.");
                     } else {
+                        if (button) {
+                            button.disabled = false;
+                            button.removeAttribute("aria-busy");
+                        }
                         notyf.error("There was an error starting segmentation. Please try again in a few minutes.");
                     }
                 })
                 .catch(() => {
+                    if (button) {
+                        button.disabled = false;
+                        button.removeAttribute("aria-busy");
+                    }
                     notyf.error("There was an error starting segmentation. Please try again in a few minutes.");
+                });
+        };
+
+        triggerMeshing = (buttonId = "mesh-trigger-button") => {
+            const button = document.getElementById(buttonId);
+            if (button) {
+                button.disabled = true;
+                button.setAttribute("aria-busy", "true");
+            }
+
+            fetch("/api/job/{{ job.id }}/mesh", {
+                method: "POST",
+            })
+                .then((response) => {
+                    if (response.ok) {
+                        notyf.success("Meshing started. You will receive an email when it is complete.");
+                    } else {
+                        if (button) {
+                            button.disabled = false;
+                            button.removeAttribute("aria-busy");
+                        }
+                        notyf.error("There was an error starting meshing. Please try again in a few minutes.");
+                    }
+                })
+                .catch(() => {
+                    if (button) {
+                        button.disabled = false;
+                        button.removeAttribute("aria-busy");
+                    }
+                    notyf.error("There was an error starting meshing. Please try again in a few minutes.");
                 });
         };
 
