@@ -16,9 +16,11 @@ import numpy as np
 import logging
 import os
 import pathlib
+import re
 import time
 from flask import (
     Flask,
+    abort,
     jsonify,
     render_template,
     request,
@@ -79,6 +81,11 @@ MODEL_PAGE_METRIC_OPTIONS = {
     "train_loss": "Training Loss (1 - Dice)",
     "train_foreground_iou": "Train IoU",
 }
+
+# Route values that get joined into filesystem paths. Each one must be a single
+# plain path segment, so it can never be "." or ".." or contain a separator.
+PATH_SEGMENT_ROUTE_ARGS = ("job_id", "seg_id", "model_id")
+SAFE_PATH_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 def _timeline_position_for_status(status: JobStatus) -> tuple[int | None, int | None]:
@@ -367,6 +374,14 @@ class ML4PaleoWebApplication:
     def __init__(self, app: Flask):
         job_manager = JSONFileUploadJobManager("volume/jobs.json")
         self.app = app
+
+        @self.app.before_request
+        def reject_unsafe_path_segments():
+            view_args = request.view_args or {}
+            for arg_name in PATH_SEGMENT_ROUTE_ARGS:
+                value = view_args.get(arg_name)
+                if value is not None and not SAFE_PATH_SEGMENT.fullmatch(value):
+                    abort(404)
 
         @self.app.route("/")
         def index():
