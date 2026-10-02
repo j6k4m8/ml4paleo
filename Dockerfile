@@ -8,10 +8,9 @@ FROM python:3.12-slim-bookworm
 LABEL maintainer="Jordan Matelsky <ml4paleo@matelsky.com>"
 LABEL description="ml4paleo: A web application for paleontological image segmentation."
 
-# Install uv from the official image and keep the system packages needed by
-# scientific Python wheels that may need local compilation.
-COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /uvx /bin/
-
+# Keep the system packages needed by scientific Python wheels that may need
+# local compilation. uv is mounted from the official image only for the
+# install steps below, so it never ships in the runtime image.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc g++ zlib1g-dev libjpeg-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -24,11 +23,13 @@ WORKDIR /ml4paleo
 # Install third-party dependencies before copying the whole repo to improve
 # Docker layer reuse when application code changes.
 COPY pyproject.toml uv.lock /ml4paleo/
-RUN uv sync --locked --group dicom --no-install-project
+RUN --mount=from=ghcr.io/astral-sh/uv:0.11.3,source=/uv,target=/bin/uv \
+    uv sync --locked --group dicom --no-install-project
 
 # Copy the application source and install the project itself.
 COPY . /ml4paleo
-RUN uv sync --locked --group dicom \
+RUN --mount=from=ghcr.io/astral-sh/uv:0.11.3,source=/uv,target=/bin/uv \
+    uv sync --locked --group dicom \
     && uv pip install --python .venv/bin/python gunicorn
 
 # Expose the synced environment to the runtime entrypoints used in compose.
