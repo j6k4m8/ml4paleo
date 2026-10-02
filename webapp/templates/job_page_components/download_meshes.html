@@ -17,6 +17,9 @@
         {% if mesh_stale and segmentation_stale %}
         The stored STL bundle predates the current annotations because the underlying segmentation is stale. Refresh
         segmentation first, then regenerate meshes.
+        {% elif mesh_stale and mesh_axis_order_legacy %}
+        The stored STL bundle was generated with its x and z axes swapped, so it is a mirror image of the scan.
+        Regenerate meshes to get the corrected orientation.
         {% elif mesh_stale %}
         A newer segmentation exists for this project, so the stored STL bundle is behind the latest model output.
         {% else %}

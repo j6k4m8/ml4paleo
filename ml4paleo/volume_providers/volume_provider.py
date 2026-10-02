@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Optional, Tuple
 import abc
 import numpy as np
 
@@ -134,6 +134,18 @@ class VolumeProvider(abc.ABC):
 
         """
         raise NotImplementedError
+
+    @property
+    def voxel_size_xyz_mm(self) -> Optional[Tuple[float, float, float]]:
+        """
+        Return the physical size of one voxel along X, Y, and Z, in mm.
+
+        Returns:
+            The voxel size, or None if the source does not record it (in which
+            case downstream outputs such as meshes are in voxel units).
+
+        """
+        return None
 
     @abc.abstractmethod
     def __getitem__(self, key) -> np.ndarray:

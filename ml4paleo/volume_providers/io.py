@@ -73,6 +73,14 @@ def export_zarr_array(
         compressor=compression,
         **kwargs,
     )
+    # Record the physical voxel size, when known, so that meshes made from
+    # this array (or from segmentations of it) can be written in millimeters.
+    voxel_size_xyz_mm = getattr(volume_provider, "voxel_size_xyz_mm", None)
+    if voxel_size_xyz_mm is not None:
+        zarr_array.attrs["voxel_size_xyz_mm"] = [
+            float(size) * factor
+            for size, factor in zip(voxel_size_xyz_mm, downsample_factor)
+        ]
 
     # Write the data
     if slice_count is None:
@@ -283,12 +291,16 @@ def export_to_img_stack(
     img_dir.mkdir(parents=True, exist_ok=True)
 
     def _export_slice(i):
-        img = volume_provider[:, :, i]
+        img = np.asarray(volume_provider[:, :, i])
+        if img.ndim == 3:
+            img = img[:, :, 0]
         img = img[
             :: downsample_factor[0],
             :: downsample_factor[1],
         ]
-        img = img.squeeze()
+        # Volumes are indexed (X, Y), but image rows run along Y. Transpose so
+        # each exported slice has the same orientation as the uploaded images.
+        img = img.T
 
         # Cast if file format requires it:
         if img_format in ["png", "jpg", "jpeg"]:

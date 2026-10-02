@@ -45,7 +45,7 @@ def segment_volume_to_zarr(
     seg_path.mkdir(parents=True, exist_ok=True)
 
     # Create the Zarr file for the segmentation.
-    zarr.open(
+    seg_zarr = zarr.open(
         str(seg_path),
         mode="w",
         zarr_format=2,
@@ -54,6 +54,10 @@ def segment_volume_to_zarr(
         chunks=chunk_size,
         write_empty_chunks=False,
     )
+    # Carry the source voxel size over so meshes can be written in mm.
+    voxel_size_xyz_mm = getattr(vol_provider, "voxel_size_xyz_mm", None)
+    if voxel_size_xyz_mm is not None:
+        seg_zarr.attrs["voxel_size_xyz_mm"] = [float(v) for v in voxel_size_xyz_mm]
 
     # Now segment the job.
     # We segment the job in chunks, and save the results in the
