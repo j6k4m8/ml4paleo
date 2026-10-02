@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 import pathlib
 import numpy as np
 import zarr
@@ -31,3 +31,10 @@ class ZarrVolumeProvider(VolumeProvider):
     @property
     def dtype(self) -> np.dtype:
         return self.zarr.dtype
+
+    @property
+    def voxel_size_xyz_mm(self) -> Optional[Tuple[float, float, float]]:
+        voxel_size = self.zarr.attrs.get("voxel_size_xyz_mm")
+        if voxel_size is None:
+            return None
+        return tuple(float(size) for size in voxel_size)

@@ -31,6 +31,7 @@ class DicomVolumeProvider(VolumeProvider):
         self._glob = dcm_glob
         self._files: list[pathlib.Path] = []
         self._volume_xyz: Optional[np.ndarray] = None
+        self._voxel_size_xyz_mm: Optional[tuple[float, float, float]] = None
 
         if isinstance(path_to_dcms, list):
             self._load_file_list(path_to_dcms)
@@ -65,6 +66,80 @@ class DicomVolumeProvider(VolumeProvider):
 
         return (2, path.name)
 
+    @staticmethod
+    def _pixel_measures(dataset):
+        """
+        Return the dataset that holds the pixel spacing: the dataset itself,
+        or the shared functional group of an enhanced multi-frame DICOM.
+        """
+        if getattr(dataset, "PixelSpacing", None) is not None:
+            return dataset
+        shared_groups = getattr(dataset, "SharedFunctionalGroupsSequence", None)
+        if shared_groups:
+            pixel_measures = getattr(shared_groups[0], "PixelMeasuresSequence", None)
+            if pixel_measures:
+                return pixel_measures[0]
+        return dataset
+
+    @classmethod
+    def _in_plane_spacing_xy(cls, dataset) -> Optional[tuple[float, float]]:
+        # PixelSpacing is (row spacing, column spacing). Rows are stacked
+        # along Y and columns along X, so X spacing is the second value.
+        pixel_spacing = getattr(cls._pixel_measures(dataset), "PixelSpacing", None)
+        try:
+            row_spacing, column_spacing = (float(v) for v in pixel_spacing)
+        except (TypeError, ValueError):
+            return None
+        if row_spacing <= 0 or column_spacing <= 0:
+            return None
+        return column_spacing, row_spacing
+
+    @classmethod
+    def _nominal_slice_spacing(cls, dataset) -> Optional[float]:
+        for source in (dataset, cls._pixel_measures(dataset)):
+            for attribute in ("SpacingBetweenSlices", "SliceThickness"):
+                try:
+                    spacing = float(getattr(source, attribute, None))
+                except (TypeError, ValueError):
+                    continue
+                if spacing > 0:
+                    return spacing
+        return None
+
+    @staticmethod
+    def _slice_spacing_from_positions(headers) -> Optional[float]:
+        """
+        Return the median distance between sorted slices along the slice
+        normal, or None if any slice lacks a position.
+        """
+        try:
+            positions = np.array(
+                [
+                    [float(v) for v in header.ImagePositionPatient[:3]]
+                    for _, header in headers
+                ]
+            )
+            orientation = [float(v) for v in headers[0][1].ImageOrientationPatient]
+            normal = np.cross(orientation[:3], orientation[3:6])
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if len(positions) < 2:
+            return None
+        gaps = np.abs(np.diff(positions @ normal))
+        gaps = gaps[gaps > 0]
+        return float(np.median(gaps)) if gaps.size else None
+
+    @classmethod
+    def _voxel_size(
+        cls, dataset, slice_spacing: Optional[float] = None
+    ) -> Optional[tuple[float, float, float]]:
+        in_plane_spacing = cls._in_plane_spacing_xy(dataset)
+        if slice_spacing is None:
+            slice_spacing = cls._nominal_slice_spacing(dataset)
+        if in_plane_spacing is None or slice_spacing is None:
+            return None
+        return (*in_plane_spacing, slice_spacing)
+
     def _load_single_file(self, dicom_path: pathlib.Path) -> None:
         dataset = pydicom.dcmread(str(dicom_path))
         pixel_array = dataset.pixel_array
@@ -84,6 +159,7 @@ class DicomVolumeProvider(VolumeProvider):
         self._shape_xyz = volume_xyz.shape
         self._files = [dicom_path]
         self._volume_xyz = volume_xyz
+        self._voxel_size_xyz_mm = self._voxel_size(dataset)
 
     def _load_file_list(self, dicom_files: list[pathlib.Path]) -> None:
         if len(dicom_files) == 0:
@@ -187,6 +263,9 @@ class DicomVolumeProvider(VolumeProvider):
         self._ds = dataset
         self._dtype = np.dtype(dataset.pixel_array.dtype)
         self._shape_xyz = (cols, rows, len(self._files))
+        self._voxel_size_xyz_mm = self._voxel_size(
+            dataset, self._slice_spacing_from_positions(headers)
+        )
 
     def __getitem__(self, key):
         zs, ys, xs = normalize_key(key, self.shape[::-1])
@@ -213,3 +292,7 @@ class DicomVolumeProvider(VolumeProvider):
     @property
     def dtype(self):
         return self._dtype
+
+    @property
+    def voxel_size_xyz_mm(self) -> Optional[tuple[float, float, float]]:
+        return self._voxel_size_xyz_mm
