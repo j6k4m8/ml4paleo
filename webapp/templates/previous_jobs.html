@@ -6,31 +6,33 @@
     </table>
 
     <script>
-        // Check localStorage for `jobs` key.
-        const template = `
-            <tr>
-                <td>
-                    <a href="/job/$ID">
-                        $NAME
-                    </a>
-                    <span data-tooltip="Remove from the list (will not delete)" style="float:right;cursor:pointer" class="link" onClick="deleteJobFromPrevList('$ID')">❌</span>
-                </td>
-            </tr>
-        `;
+        // Check localStorage for `jobs` key. Job names come from the server and
+        // can contain anything, so build the rows with text nodes, not HTML.
         const jobs = JSON.parse(localStorage.getItem('jobs'));
         const jobList = document.getElementById('job-list');
         if (jobs) {
-            jobList.innerHTML = " ";
+            jobList.replaceChildren();
             jobs.forEach(job => {
-                const html = template
-                    .replace('$ID', job.id)
-                    .replace('$ID', job.id)
-                    .replace('$NAME', job.name);
-                console.log(html)
-                jobList.innerHTML += html;
+                const link = document.createElement('a');
+                link.href = `/job/${encodeURIComponent(job.id)}`;
+                link.textContent = job.name;
+
+                const removeButton = document.createElement('span');
+                removeButton.dataset.tooltip = 'Remove from the list (will not delete)';
+                removeButton.style.float = 'right';
+                removeButton.style.cursor = 'pointer';
+                removeButton.className = 'link';
+                removeButton.textContent = '❌';
+                removeButton.addEventListener('click', () => deleteJobFromPrevList(job.id));
+
+                const cell = document.createElement('td');
+                cell.append(link, removeButton);
+                const row = document.createElement('tr');
+                row.append(cell);
+                jobList.append(row);
             });
         } else {
-            jobList.innerHTML = "Once you have submitted a job, it will appear here."
+            jobList.textContent = "Once you have submitted a job, it will appear here."
         }
 
         function deleteJobFromPrevList(id) {
