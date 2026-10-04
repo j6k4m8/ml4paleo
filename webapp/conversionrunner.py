@@ -216,8 +216,9 @@ def convert_next():
         logging.info("No datasets to convert")
         return
     logging.info("Converting dataset %s", next_job.id)
-    next_job.start_convert()
-    job_manager.update_job(next_job.id, next_job)
+    # Only write the fields this runner changes. Writing back the whole job
+    # would undo anything the web app changed during conversion, like a rename.
+    job_manager.update_job(next_job.id, update={"status": JobStatus.CONVERTING})
     try:
         with _prepare_upload_source_files(next_job.id) as source_files:
             volume_provider, resolved_source_type = _get_volume_provider(
@@ -261,11 +262,15 @@ def convert_next():
         return
 
     logging.info("Finished converting dataset %s", next_job.id)
-    next_job.complete_convert()
     # Take only the last three dimensions of the shape, since the first
     # dimension is the channel dimension, which we don't want to include
-    next_job.shape = volume_provider.shape[-3:]
-    job_manager.update_job(next_job.id, next_job)
+    job_manager.update_job(
+        next_job.id,
+        update={
+            "status": JobStatus.CONVERTED,
+            "shape": list(volume_provider.shape[-3:]),
+        },
+    )
     logging.info("Updating job %s", next_job.id)
 
 

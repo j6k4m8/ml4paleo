@@ -12,20 +12,23 @@ indicate which parts of the job are ready, and which parts are not.
 
 """
 
+import contextlib
 import datetime
 import abc
 import logging
 import os
-import time
-from typing import Dict, List, Optional
+import tempfile
+from typing import Dict, Iterator, List, Optional
 import json
 import uuid
 from enum import Enum
 from marshmallow import Schema, fields
 from jque import jque
 
-from enum import Enum
-import uuid
+try:
+    import fcntl
+except ImportError:  # Windows has no flock; writes are still atomic there.
+    fcntl = None
 
 log = logging.getLogger(__name__)
 
@@ -261,15 +264,18 @@ class JSONFileUploadJobManager(UploadJobManager):
     """
     This class manages the upload jobs by storing them in a JSON file.
 
-    This is mostly production-ready, but is not thread safe, so updating the
-    file COULD be a problem if multiple processes are accessing it at the same
-    time. Practically this is rarely a problem, but it's something to be aware
-    of when scaling up.
+    The web app and all three job runners read and write the same file from
+    separate processes, so two rules keep it consistent:
 
-    To be consistent, this reads from the file every time a job is requested,
-    and writes to the file every time a job is updated. This is not the most
-    efficient way to do it, but it's the simplest, and it's not a problem for
-    the small number of jobs we expect to have.
+    1. Every write goes to a temporary file that then atomically replaces the
+       jobs file, so readers always see a complete file.
+    2. Every read-modify-write holds an exclusive `flock` on a sidecar lock
+       file, so concurrent updates cannot overwrite each other.
+
+    Reads do not take the lock. This reads from the file every time a job is
+    requested, and writes the whole file every time a job is updated. This is
+    not the most efficient way to do it, but it's the simplest, and it's not a
+    problem for the small number of jobs we expect to have.
 
     """
 
@@ -283,50 +289,83 @@ class JSONFileUploadJobManager(UploadJobManager):
 
         """
         self.file_path = file_path
-        if not os.path.exists(self.file_path):
-            with open(self.file_path, "w") as f:
-                json.dump({}, f)
+        self._lock_path = f"{file_path}.lock"
+        with self._locked():
+            if not os.path.exists(self.file_path):
+                self._save_jobs({})
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """
+        Hold the exclusive lock that guards every read-modify-write.
+
+        `flock` locks belong to each open file, so this also serializes threads
+        within one process (for example, parallel progress callbacks).
+        """
+        if fcntl is None:
+            yield
+            return
+        with open(self._lock_path, "a") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _load_jobs(self) -> Dict[UploadJobID, UploadJob]:
         """
         Get all jobs from the file.
-        """
-        retries = 3
-        for i in range(retries):
-            try:
-                with open(self.file_path, "r") as f:
-                    results = {
-                        k: (UploadJob.from_dict(v) if isinstance(v, dict) else v)
-                        for k, v in json.load(f).items()
-                    }
-                    return results
-            except json.JSONDecodeError as e:
-                time.sleep(0.5)
-            except Exception as e:
-                log.exception(f"Error loading jobs file: {self.file_path}")
-                raise e
 
-        # If we get here, we failed to load the file.
-        # Move the corrupted file out of the way:
-        log.exception(
-            f"Corrupted jobs file: {self.file_path}, moving to {self.file_path}.{time.time()}"
-        )
-        os.rename(self.file_path, f"{self.file_path}.{time.time()}")
-        return {}
+        Writes are atomic, so a file that fails to parse is really corrupted.
+        In that case this raises rather than silently starting over with no
+        jobs, which would let the next save wipe every job.
+        """
+        try:
+            with open(self.file_path, "r") as f:
+                raw_jobs = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except json.JSONDecodeError:
+            log.exception(f"Corrupted jobs file: {self.file_path}")
+            raise
+        return {
+            k: (UploadJob.from_dict(v) if isinstance(v, dict) else v)
+            for k, v in raw_jobs.items()
+        }
 
     def _save_jobs(self, jobs: Dict[UploadJobID, UploadJob]):
         """
-        Save all jobs to the file.
+        Atomically replace the jobs file with `jobs`.
         """
-        with open(self.file_path, "w") as f:
-            jobs_jsonable = {
-                k: (v if isinstance(v, dict) else v.to_dict()) for k, v in jobs.items()
-            }
-            json.dump(jobs_jsonable, f, indent=4)
+        jobs_jsonable = {
+            k: (v if isinstance(v, dict) else v.to_dict()) for k, v in jobs.items()
+        }
+        directory = os.path.dirname(os.path.abspath(self.file_path))
+        fd, tmp_path = tempfile.mkstemp(
+            dir=directory, prefix=".jobs-", suffix=".json.tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(jobs_jsonable, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            # mkstemp creates the file as 0600; keep the existing permissions.
+            try:
+                os.chmod(tmp_path, os.stat(self.file_path).st_mode & 0o777)
+            except FileNotFoundError:
+                os.chmod(tmp_path, 0o644)
+            os.replace(tmp_path, self.file_path)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(tmp_path)
+            raise
 
     def new_job(self, job: UploadJob) -> UploadJobID:
         """
         Create a new job and return its ID.
+
+        If the job's ID is already taken, the job gets a fresh ID instead of
+        overwriting the existing job, so always use the returned ID.
 
         Arguments:
             job (UploadJob): The job to create.
@@ -335,9 +374,12 @@ class JSONFileUploadJobManager(UploadJobManager):
             UploadJobID: The ID of the new job.
 
         """
-        jobs = self._load_jobs()
-        jobs[job.id] = job
-        self._save_jobs(jobs)
+        with self._locked():
+            jobs = self._load_jobs()
+            while job.id in jobs:
+                job.id = _new_job_id()
+            jobs[job.id] = job
+            self._save_jobs(jobs)
         return job.id
 
     def get_job(self, job_id: UploadJobID) -> UploadJob:
@@ -370,11 +412,14 @@ class JSONFileUploadJobManager(UploadJobManager):
         In all uses, you must pass the `job_id` argument with the job's unique
         identifier in the database. (It is not supported behavior to create a
         new job by passing a new job ID, but it works in this implementation.)
-        There are two ways to use this function. The first is to pass in a Job
-        object with updated fields. The second is to pass in a dictionary of
-        ONLY the fields you want to update (not the whole job) under the
-        `update` argument. If you pass both, the `update` operation will be run
-        on the passed `job` object, which may or may not be what you want.
+        There are two ways to use this function. The preferred way is to pass
+        a dictionary of ONLY the fields you want to update (not the whole job)
+        under the `update` argument; those fields are applied to the latest
+        stored copy of the job under the lock. The second is to pass in a Job
+        object, which replaces the stored job entirely, including any fields
+        another process changed since that object was read. If you pass both,
+        the `update` operation will be run on the passed `job` object, which
+        may or may not be what you want.
 
         Arguments:
             job_id (UploadJobID): The ID of the job to update.
@@ -386,16 +431,17 @@ class JSONFileUploadJobManager(UploadJobManager):
             UploadJobID: The ID of the updated job.
 
         """
-        jobs = self._load_jobs()
-        if job is None:
-            job = jobs[job_id]
-        if update is not None:
-            for k, v in update.items():
-                setattr(job, k, v)
-        # Update the last_updated_at field:
-        job.last_updated_at = datetime.datetime.now().isoformat()
-        jobs[job_id] = job
-        self._save_jobs(jobs)
+        with self._locked():
+            jobs = self._load_jobs()
+            if job is None:
+                job = jobs[job_id]
+            if update is not None:
+                for k, v in update.items():
+                    setattr(job, k, v)
+            # Update the last_updated_at field:
+            job.last_updated_at = datetime.datetime.now().isoformat()
+            jobs[job_id] = job
+            self._save_jobs(jobs)
         return job.id
 
     def has_job(self, job_id: UploadJobID) -> bool:

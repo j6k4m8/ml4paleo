@@ -535,16 +535,16 @@ class ML4PaleoWebApplication:
                     400,
                 )
 
-            job = job_manager.get_job(job_id)
+            # Raises if the job does not exist:
+            job_manager.get_job(job_id)
             upload_dir = pathlib.Path(CONFIG.upload_directory) / job_id
             if not upload_dir.exists() or not any(upload_dir.iterdir()):
                 return (
                     jsonify({"status": "error", "message": "No uploaded files found"}),
                     400,
                 )
-            job.complete_upload()
-            job_manager.update_job(job_id, job)
-            return jsonify({"job_id": job_id, "status": str(job.status)})
+            job_manager.update_job(job_id, update={"status": JobStatus.UPLOADED})
+            return jsonify({"job_id": job_id, "status": str(JobStatus.UPLOADED)})
 
         @self.app.route("/job/<job_id>", methods=["GET"])
         def job_page(job_id):
