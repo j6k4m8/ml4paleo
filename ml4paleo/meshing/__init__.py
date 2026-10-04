@@ -1,5 +1,5 @@
-import logging
-from typing import Tuple
+import json
+from typing import Optional, Tuple
 import tqdm
 from intern.utils.parallel import block_compute
 from ..volume_providers import VolumeProvider
@@ -10,7 +10,9 @@ import stl
 import numpy as np
 import skimage.measure
 
-logging.basicConfig(level=logging.DEBUG)
+# Written next to the meshes to record their coordinate system. Meshes without
+# this file predate x, y, z vertex order and are stored in (z, y, x) order.
+MESH_INFO_FILENAME = "mesh_info.json"
 
 
 class ChunkedMesher:
@@ -20,7 +22,15 @@ class ChunkedMesher:
         mesh_path: pathlib.Path,
         chunk_size: Tuple[int, int, int],
         downsample_factor: int = 1,
+        voxel_size_xyz_mm: Optional[Tuple[float, float, float]] = None,
     ):
+        """
+        Arguments:
+            voxel_size_xyz_mm: The physical voxel size. If given (or recorded
+                by the volume provider), mesh vertices are written in mm;
+                otherwise they are in voxel units.
+
+        """
         self.volume_provider = volume_provider
         self.mesh_path = mesh_path
         self.mesh_path.mkdir(parents=True, exist_ok=True)
@@ -29,6 +39,13 @@ class ChunkedMesher:
         if downsample_factor < 1:
             raise ValueError("downsample_factor must be at least 1")
         self.downsample_factor = int(downsample_factor)
+        if voxel_size_xyz_mm is None:
+            voxel_size_xyz_mm = getattr(volume_provider, "voxel_size_xyz_mm", None)
+        self.voxel_size_xyz_mm = voxel_size_xyz_mm
+        self._vertex_scale = np.array(
+            voxel_size_xyz_mm if voxel_size_xyz_mm is not None else (1, 1, 1),
+            dtype=np.float64,
+        )
 
     def _add_id(self, obj_id: int):
         if self._ids is None:
@@ -46,16 +63,32 @@ class ChunkedMesher:
             block_size=self.chunk_size,
         )
 
+        # Remove per-chunk meshes from any earlier run so they are not combined
+        # with this one.
+        for old_chunk_mesh in self.mesh_path.glob("_*.stl"):
+            old_chunk_mesh.unlink()
+
         # Now mesh each chunk.
         _prog = tqdm.tqdm if progress else lambda x: x
         for xs, ys, zs in _prog(chunks_to_mesh):
             self.mesh_chunk(xs, ys, zs)
 
         # Combine meshes
-        if self._ids is None:
-            return
-        for obj_id in self._ids:
+        for obj_id in self._ids or []:
             self.combine_meshes(obj_id)
+        self.write_mesh_info()
+
+    def write_mesh_info(self):
+        """
+        Record the axis order and units of the mesh files next to them.
+        """
+        mesh_info = {
+            "axis_order": "xyz",
+            "units": "mm" if self.voxel_size_xyz_mm is not None else "voxels",
+            "voxel_size_xyz": [float(v) for v in self._vertex_scale],
+        }
+        with open(self.mesh_path / MESH_INFO_FILENAME, "w") as f:
+            json.dump(mesh_info, f, indent=2)
 
     def mesh_chunk(self, xs, ys, zs):
         labels = self.volume_provider[xs[0] : xs[1], ys[0] : ys[1], zs[0] : zs[1]]
@@ -91,20 +124,20 @@ class ChunkedMesher:
             mesher.erase(obj_id)
         mesher.clear()
         for obj_id, mesh in meshes.items():
-            # with open(
-            #     str(self.mesh_path / f"_{obj_id}_{xs[0]}_{ys[0]}_{zs[0]}.obj"), "wb"
-            # ) as f:
-            #     f.write(mesh.to_obj())
+            # zmesh reads the (X, Y, Z) array as (Z, Y, X), so its vertices come
+            # out in (z, y, x) order. Reverse them to (x, y, z). Swapping axes
+            # mirrors the mesh, so also reverse the triangle winding to keep the
+            # normals pointing outward. Then offset the chunk into place and
+            # scale to physical units.
+            vertices = mesh.vertices[:, ::-1] + np.array([xs[0], ys[0], zs[0]])
+            vertices = vertices * self._vertex_scale
+            faces = mesh.faces[:, ::-1]
 
-            m = stl_mesh.Mesh(np.zeros(mesh.faces.shape[0], dtype=stl_mesh.Mesh.dtype))
-            for i, f in enumerate(mesh.faces):
-                for j in range(3):
-                    m.vectors[i][j] = mesh.vertices[f[j], :]
-            # Offset the mesh to the correct position.
-            m.x += zs[0]
-            m.y += ys[0]
-            m.z += xs[0]
-            m.save(
+            chunk_mesh = stl_mesh.Mesh(
+                np.zeros(faces.shape[0], dtype=stl_mesh.Mesh.dtype)
+            )
+            chunk_mesh.vectors[:] = vertices[faces]
+            chunk_mesh.save(
                 str(self.mesh_path / f"_{obj_id}_{xs[0]}_{ys[0]}_{zs[0]}.stl"),
                 mode=stl.Mode.ASCII,
             )

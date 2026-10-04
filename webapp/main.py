@@ -44,6 +44,7 @@ from ml4paleo.volume_providers.io import (
 
 from config import CONFIG
 from apputils import (
+    MESH_INFO_FILENAME,
     annotation_canvas_size_xy,
     annotation_display_image,
     annotation_mask_to_rgba,
@@ -427,24 +428,44 @@ class ML4PaleoWebApplication:
             if not job_manager.has_job(job_id):
                 return make_response(("Invalid job", 400))
 
-            # Create the directory for the job if it doesn't exist:
-            job_dir = os.path.join(str(CONFIG.upload_directory), job_id)
-            if not os.path.exists(job_dir):
-                os.makedirs(job_dir, exist_ok=True)
+            filename = secure_filename(file.filename)
+            try:
+                upload_uuid = request.form["dzuuid"]
+                current_chunk = int(request.form["dzchunkindex"])
+                total_chunks = int(request.form["dztotalchunkcount"])
+                chunk_offset = int(request.form["dzchunkbyteoffset"])
+                total_size = int(request.form["dztotalfilesize"])
+            except (KeyError, ValueError):
+                return make_response(("Missing or invalid chunk fields", 400))
+            if not filename or not (
+                0 < len(upload_uuid) <= 64
+                and all(c in "0123456789abcdefABCDEF-" for c in upload_uuid)
+            ):
+                return make_response(("Invalid file name or upload ID", 400))
 
-            save_path = os.path.join(
-                str(CONFIG.upload_directory), job_id, secure_filename(file.filename)
-            )
+            # Chunks go into a partial file named after Dropzone's per-file
+            # UUID, written at their byte offset, and the file is moved into
+            # place only once it is complete. A retried chunk then overwrites
+            # itself instead of being appended a second time, and conversion
+            # never sees a half-uploaded file.
+            job_dir = pathlib.Path(CONFIG.upload_directory) / job_id
+            job_dir.mkdir(parents=True, exist_ok=True)
+            partial_dir = pathlib.Path(CONFIG.upload_directory) / ".partial" / job_id
+            partial_dir.mkdir(parents=True, exist_ok=True)
+            save_path = job_dir / filename
+            partial_path = partial_dir / f"{upload_uuid}.part"
+            done_marker_path = partial_dir / f"{upload_uuid}.done"
 
-            current_chunk = int(request.form["dzchunkindex"])
-            # If the file already exists it's ok if we are appending to it,
-            # but not if it's new file that would overwrite the existing one
-            if os.path.exists(save_path) and current_chunk == 0:
+            if done_marker_path.exists():
+                # A retry of a chunk from a file that was already completed.
+                return make_response(("Chunk upload successful", 200))
+            if save_path.exists():
                 # 400 and 500s will tell dropzone that an error occurred and show an error
                 return make_response(("File already exists", 400))
             try:
-                with open(save_path, "ab") as f:
-                    f.seek(int(request.form["dzchunkbyteoffset"]))
+                fd = os.open(partial_path, os.O_WRONLY | os.O_CREAT, 0o644)
+                with os.fdopen(fd, "wb") as f:
+                    f.seek(chunk_offset)
                     f.write(file.stream.read())
             except OSError:
                 # log.exception will include the traceback so we can see what's wrong
@@ -452,16 +473,19 @@ class ML4PaleoWebApplication:
                 return make_response(
                     ("Not sure why, but we couldn't write the file to disk", 500)
                 )
-            total_chunks = int(request.form["dztotalchunkcount"])
             if current_chunk + 1 == total_chunks:
                 # This was the last chunk, the file should be complete and the size we expect
-                if os.path.getsize(save_path) != int(request.form["dztotalfilesize"]):
+                partial_size = partial_path.stat().st_size
+                if partial_size != total_size:
                     log.error(
                         f"File {file.filename} was completed, but has a size mismatch."
-                        f"Was {os.path.getsize(save_path)} but we expected {request.form['dztotalfilesize']} "
+                        f"Was {partial_size} but we expected {total_size} "
                     )
+                    partial_path.unlink(missing_ok=True)
                     return make_response(("Size mismatch", 500))
                 else:
+                    os.replace(partial_path, save_path)
+                    done_marker_path.touch()
                     log.info(f"File {file.filename} has been uploaded successfully")
             else:
                 log.debug(
@@ -651,6 +675,7 @@ class ML4PaleoWebApplication:
                 segmentation_stale_reasons=artifact_freshness["segmentation_stale_reasons"],
                 mesh_stale=mesh_stale,
                 mesh_stale_reasons=artifact_freshness["mesh_stale_reasons"],
+                mesh_axis_order_legacy=artifact_freshness["mesh_axis_order_legacy"],
                 latest_model_annotation_count=artifact_freshness["latest_model_annotation_count"],
                 latest_segmentation_annotation_count=artifact_freshness["latest_segmentation_annotation_count"],
                 latest_mesh_annotation_count=artifact_freshness["latest_mesh_annotation_count"],
@@ -1320,9 +1345,11 @@ class ML4PaleoWebApplication:
                     400,
                 )
 
-            # Create a zip file in CONFIG.download_cache:
+            # Create a zip file in CONFIG.download_cache. The "-xy" names mark
+            # exports in the same orientation as the uploaded slices; older
+            # cached exports were transposed and must not be served again.
             zip_fname = (
-                pathlib.Path(CONFIG.download_cache) / f"{job_id}_{seg_id}.png.zip"
+                pathlib.Path(CONFIG.download_cache) / f"{job_id}_{seg_id}-xy.png.zip"
             )
             zip_fname.parent.mkdir(parents=True, exist_ok=True)
             if not zip_fname.exists():
@@ -1331,7 +1358,7 @@ class ML4PaleoWebApplication:
                     pathlib.Path(CONFIG.segmented_directory) / job_id / seg_id
                 )
                 png_path = (
-                    pathlib.Path(CONFIG.download_cache) / f"{job_id}_{seg_id}" / "png"
+                    pathlib.Path(CONFIG.download_cache) / f"{job_id}_{seg_id}-xy" / "png"
                 )
                 png_path.mkdir(parents=True, exist_ok=True)
                 # Export to cache directory:
@@ -1388,6 +1415,10 @@ class ML4PaleoWebApplication:
             with zipfile.ZipFile(zip_fname, "w") as zf:
                 for stl_file in stl_files:
                     zf.write(stl_file, arcname=stl_file.name)
+                # Describes the axis order and units of the STL coordinates.
+                mesh_info_path = mesh_path / MESH_INFO_FILENAME
+                if mesh_info_path.exists():
+                    zf.write(mesh_info_path, arcname=mesh_info_path.name)
 
             return send_file(zip_fname, as_attachment=True)
 

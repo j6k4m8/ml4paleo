@@ -63,6 +63,12 @@ def mesh_job(job: UploadJob) -> None:
     volume_provider = ZarrVolumeProvider(
         pathlib.Path(CONFIG.segmented_directory) / job.id / latest_seg
     )
+    # Segmentations made before voxel sizes were recorded don't carry one, so
+    # fall back to the source volume's voxel size if it has one.
+    voxel_size_xyz_mm = volume_provider.voxel_size_xyz_mm
+    source_path = pathlib.Path(CONFIG.chunked_directory) / job.id
+    if voxel_size_xyz_mm is None and source_path.exists():
+        voxel_size_xyz_mm = ZarrVolumeProvider(source_path).voxel_size_xyz_mm
     # Get the mesher:
     mesh_output_dir = pathlib.Path(CONFIG.meshed_directory) / job.id / latest_seg
     mesher = ChunkedMesher(
@@ -70,6 +76,7 @@ def mesh_job(job: UploadJob) -> None:
         mesh_output_dir,
         chunk_size=CONFIG.meshing_chunk_size,
         downsample_factor=CONFIG.meshing_downsample_factor,
+        voxel_size_xyz_mm=voxel_size_xyz_mm,
     )
     # Mesh everything:
     mesher.mesh_all()

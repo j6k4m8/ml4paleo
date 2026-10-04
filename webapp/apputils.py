@@ -20,6 +20,7 @@ from flask import request
 from config import CONFIG
 from job import UploadJob
 from PIL import Image, ImageDraw
+from ml4paleo.meshing import MESH_INFO_FILENAME
 from ml4paleo.volume_providers import ZarrVolumeProvider
 
 MODEL_METRIC_SECTION_KEYS = (
@@ -1034,6 +1035,16 @@ def get_job_artifact_freshness(
                 "The latest mesh was generated from a stale segmentation."
             )
 
+    mesh_axis_order_legacy = bool(
+        latest_mesh_seg_id
+        and load_mesh_info(_mesh_directory(job_or_id) / latest_mesh_seg_id) is None
+    )
+    if mesh_axis_order_legacy:
+        mesh_stale_reasons.append(
+            "This mesh was generated with its x and z axes swapped, so it is a "
+            "mirror image of the volume. Regenerate it to fix the orientation."
+        )
+
     return {
         "current_annotation_count": current_annotation_count,
         "current_sample_ids": current_sample_ids,
@@ -1052,6 +1063,7 @@ def get_job_artifact_freshness(
         "mesh_matches_latest_segmentation": mesh_matches_latest_segmentation,
         "mesh_stale": len(mesh_stale_reasons) > 0,
         "mesh_stale_reasons": mesh_stale_reasons,
+        "mesh_axis_order_legacy": mesh_axis_order_legacy,
     }
 
 
@@ -1327,6 +1339,45 @@ def get_latest_mesh_id(job_or_id: Union[UploadJob, str]) -> Optional[str]:
     return None
 
 
+def load_mesh_info(mesh_dir: pathlib.Path) -> Optional[dict[str, Any]]:
+    """
+    Load the axis order and units written next to a mesh run, if present.
+
+    Meshes without this file predate x, y, z vertex order: their vertices are
+    in (z, y, x) voxel order, which mirrors them relative to the volume.
+    """
+    mesh_info_path = mesh_dir / MESH_INFO_FILENAME
+    if not mesh_info_path.exists():
+        return None
+    try:
+        with mesh_info_path.open("r") as f:
+            mesh_info = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return mesh_info if isinstance(mesh_info, dict) else None
+
+
+def mesh_to_voxel_transform(
+    mesh_info: Optional[dict[str, Any]],
+) -> list[list[float]]:
+    """
+    Return the Neuroglancer matrix that maps mesh coordinates onto the voxel
+    coordinates of the image layer.
+    """
+    if mesh_info is None or mesh_info.get("axis_order") != "xyz":
+        # Legacy meshes are in (z, y, x) voxel order, so swap x and z.
+        return [[0, 0, 1, 0], [0, 1, 0, 0], [1, 0, 0, 0]]
+
+    voxel_size = mesh_info.get("voxel_size_xyz")
+    try:
+        sx, sy, sz = (float(v) for v in voxel_size)
+    except (TypeError, ValueError):
+        sx = sy = sz = 1.0
+    if min(sx, sy, sz) <= 0:
+        sx = sy = sz = 1.0
+    return [[1 / sx, 0, 0, 0], [0, 1 / sy, 0, 0], [0, 0, 1 / sz, 0]]
+
+
 def get_latest_mesh_obj_path(
     job_or_id: Union[UploadJob, str],
 ) -> Optional[pathlib.Path]:
@@ -1395,7 +1446,9 @@ def create_neuroglancer_link(job: UploadJob, return_state: bool = False):
             "source": {
                 "url": f"obj://{protocol}://{request.host}/api/job/{job.id}/segmentation/{mesh_seg_id}/obj/{mesh_obj_path.name}",
                 "transform": {
-                    "matrix": [[0, 0, 1, 0], [0, 1, 0, 0], [1, 0, 0, 0]],
+                    "matrix": mesh_to_voxel_transform(
+                        load_mesh_info(mesh_obj_path.parent)
+                    ),
                     "outputDimensions": {
                         "d0": [1, "m"],
                         "d1": [1, "m"],
