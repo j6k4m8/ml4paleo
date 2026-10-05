@@ -7,6 +7,7 @@ numpy slicing protocol. This allows the user to slice the volume provider
 object as if it were a numpy array.
 
 """
+
 from .imagevp import ImageStackVolumeProvider
 from .numpyvp import NumpyVolumeProvider
 from .volume_provider import VolumeProvider

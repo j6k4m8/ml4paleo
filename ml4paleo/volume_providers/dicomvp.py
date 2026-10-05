@@ -181,7 +181,9 @@ class DicomVolumeProvider(VolumeProvider):
             except InvalidDicomError:
                 continue
             except Exception:
-                log.debug("Skipping unreadable file while scanning DICOM input: %s", path)
+                log.debug(
+                    "Skipping unreadable file while scanning DICOM input: %s", path
+                )
                 continue
             headers.append((path, dataset))
 
@@ -204,7 +206,9 @@ class DicomVolumeProvider(VolumeProvider):
             try:
                 dataset = self._read_header(path)
             except InvalidDicomError as exc:
-                raise ValueError(f"File {path.name} is not a valid DICOM file.") from exc
+                raise ValueError(
+                    f"File {path.name} is not a valid DICOM file."
+                ) from exc
             headers.append((path, dataset))
 
         if len(headers) == 1 and int(getattr(headers[0][1], "NumberOfFrames", 1)) > 1:
@@ -248,9 +252,10 @@ class DicomVolumeProvider(VolumeProvider):
         cols = int(dataset.Columns)
 
         for _, header in headers[1:]:
-            if int(getattr(header, "Rows", rows)) != rows or int(
-                getattr(header, "Columns", cols)
-            ) != cols:
+            if (
+                int(getattr(header, "Rows", rows)) != rows
+                or int(getattr(header, "Columns", cols)) != cols
+            ):
                 raise ValueError(
                     f"DICOM series in {source_label} has inconsistent slice dimensions."
                 )
