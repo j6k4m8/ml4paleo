@@ -4,9 +4,9 @@ from typing import Any
 
 import tqdm
 import zarr
-from intern.utils.parallel import block_compute
 from joblib import Parallel, delayed
 
+from ml4paleo.blocks import block_ranges
 from ml4paleo.volume_providers import VolumeProvider
 
 from .rf import RandomForest3DSegmenter
@@ -64,15 +64,7 @@ def segment_volume_to_zarr(
     # Now segment the job.
     # We segment the job in chunks, and save the results in the
     # CONFIG.segmentation_directory as another Zarr file.
-    chunks_to_segment = block_compute(
-        0,
-        vol_provider.shape[0],
-        0,
-        vol_provider.shape[1],
-        0,
-        vol_provider.shape[2],
-        block_size=chunk_size,
-    )
+    chunks_to_segment = block_ranges(vol_provider.shape, chunk_size)
 
     _progfn = tqdm.tqdm if progress else lambda x: x
     if progress_callback is not None:
