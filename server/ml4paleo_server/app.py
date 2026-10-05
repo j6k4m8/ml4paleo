@@ -9,19 +9,36 @@ single-page app): existing files are served as-is and any other path gets
 import contextlib
 import pathlib
 from collections.abc import AsyncIterator
+from urllib.parse import urlsplit
 
 import obstore
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from sqlalchemy import text
 from starlette.concurrency import run_in_threadpool
 
 from ml4paleo.storage import object_store
 
 from . import __version__
+from .api import ROUTERS
+from .auth.sessions import cookie_name
+from .auth.tokens import csrf_token, tokens_match
 from .db import create_engine, create_sessionmaker
 from .settings import Settings
 from .storage import project_storage
+
+MIN_SECRET_KEY_LENGTH = 32
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+# Requests that may carry a stale session cookie, so they are only checked
+# by origin. Logging in with a forged request is still blocked by the
+# Origin check.
+SESSION_CSRF_EXEMPT = {
+    "/api/auth/login",
+    "/api/auth/signup",
+    "/api/auth/verify-email",
+    "/api/auth/password-reset/request",
+    "/api/auth/password-reset/confirm",
+}
 
 CONTENT_SECURITY_POLICY = "; ".join(
     [
@@ -51,6 +68,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "public address. Serve the app over HTTPS, or set "
             "M4P_ALLOW_INSECURE_HTTP=true if you really mean it."
         )
+    secret_key = settings.secret_key.get_secret_value()
+    if len(secret_key) < MIN_SECRET_KEY_LENGTH:
+        raise RuntimeError(
+            f"M4P_SECRET_KEY must be at least {MIN_SECRET_KEY_LENGTH} random characters."
+        )
+    parts = urlsplit(settings.public_url)
+    public_origin = f"{parts.scheme}://{parts.netloc}"
+    session_cookie = cookie_name(settings)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -67,10 +92,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version=__version__,
         lifespan=lifespan,
         docs_url="/api/docs",
+        swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect",
         redoc_url=None,
         openapi_url="/api/openapi.json",
     )
     app.state.settings = settings
+
+    @app.middleware("http")
+    async def csrf_protection(request: Request, call_next) -> Response:
+        """
+        Refuse state-changing API requests from other sites. Browsers send
+        `Origin` (and `Sec-Fetch-Site`) on cross-site requests, and a signed-in
+        browser must also echo its CSRF token, which other sites can't read.
+        """
+        path = request.url.path
+        if request.method not in SAFE_METHODS and path.startswith("/api/"):
+            origin = request.headers.get("origin")
+            if (origin is not None and origin != public_origin) or request.headers.get(
+                "sec-fetch-site"
+            ) == "cross-site":
+                return JSONResponse({"detail": "Cross-site request refused."}, 403)
+            session_token = request.cookies.get(session_cookie)
+            if (
+                session_token
+                and path not in SESSION_CSRF_EXEMPT
+                and not tokens_match(
+                    csrf_token(secret_key, session_token),
+                    request.headers.get("x-csrf-token"),
+                )
+            ):
+                return JSONResponse({"detail": "Missing or wrong CSRF token."}, 403)
+        return await call_next(request)
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next) -> Response:
@@ -94,6 +146,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await connection.execute(text("SELECT 1"))
         await run_in_threadpool(_check_storage, settings)
         return {"status": "ok", "version": __version__}
+
+    for router in ROUTERS:
+        app.include_router(router)
 
     @app.get("/{path:path}", include_in_schema=False)
     async def web_app(path: str) -> Response:

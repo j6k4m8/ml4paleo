@@ -16,6 +16,7 @@ import uuid
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from helpers import SECRET_KEY
 from ml4paleo_server import migrations
 from ml4paleo_server.app import create_app
 from ml4paleo_server.settings import Settings
@@ -102,7 +103,7 @@ def migrated_database_url(database_url):
 def settings(migrated_database_url, tmp_path):
     return Settings(
         database_url=migrated_database_url,
-        secret_key="test-secret-key-that-is-long-enough-0123456789",
+        secret_key=SECRET_KEY,
         storage={"url": f"file://{tmp_path}/data"},
     )
 
@@ -111,3 +112,74 @@ def settings(migrated_database_url, tmp_path):
 def client(settings):
     with TestClient(create_app(settings)) as test_client:
         yield test_client
+
+
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+class Browser:
+    """
+    A test client that behaves like the web app: it keeps cookies and sends
+    the CSRF token it got from the last session response.
+    """
+
+    def __init__(self, client: TestClient):
+        self.client = client
+        self.csrf_token: str | None = None
+
+    def request(self, method: str, url: str, **kwargs):
+        headers = dict(kwargs.pop("headers", None) or {})
+        if self.csrf_token and method.upper() not in SAFE_METHODS:
+            headers.setdefault("X-CSRF-Token", self.csrf_token)
+        response = self.client.request(method, url, headers=headers, **kwargs)
+        if response.content and response.headers.get("content-type", "").startswith(
+            "application/json"
+        ):
+            body = response.json()
+            if isinstance(body, dict) and "csrf_token" in body:
+                self.csrf_token = body["csrf_token"]
+        return response
+
+    def get(self, url, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+    def put(self, url, **kwargs):
+        return self.request("PUT", url, **kwargs)
+
+
+@pytest.fixture
+def app(settings):
+    return create_app(settings)
+
+
+@pytest.fixture
+def new_browser(settings):
+    """
+    Return a function that opens a new browser (its own cookies).
+
+    Each browser gets its own app instance: a TestClient runs the app on its
+    own event loop thread, and app state (like the database engine) must not
+    be shared across loops.
+    """
+    clients = []
+
+    def open_browser(
+        custom_settings: Settings | None = None, address: str = "testclient"
+    ) -> Browser:
+        """
+        Open a browser on an app built from `custom_settings` (default: the
+        test settings), connecting from `address`.
+        """
+        client = TestClient(
+            create_app(custom_settings or settings), client=(address, 50000)
+        )
+        client.__enter__()
+        clients.append(client)
+        return Browser(client)
+
+    yield open_browser
+    for client in clients:
+        client.__exit__(None, None, None)

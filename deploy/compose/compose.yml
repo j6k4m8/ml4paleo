@@ -2,7 +2,9 @@
 #
 # First run `./setup.sh your.domain.org` (or `./setup.sh localhost` to try it
 # locally) in this directory to generate secrets and `.env`, then
-# `docker compose up -d --build`.
+# `docker compose up -d --build`. Sign in as `admin` with the password in
+# secrets/initial_admin_password; you'll be asked to change it and to set up
+# two-factor sign-in.
 
 name: ml4paleo
 
@@ -131,12 +133,32 @@ services:
     image: ml4paleo-server:local
     init: true
     command: ["ml4paleo-server", "migrate"]
-    environment: *server-environment
-    secrets: *server-secrets
+    environment:
+      <<: *server-environment
+      # The first admin account gets this password (see secrets/).
+      M4P_INITIAL_ADMIN_PASSWORD_FILE: /run/secrets/initial_admin_password
+    secrets:
+      - database_url
+      - secret_key
+      - s3_access_key_id
+      - s3_secret_access_key
+      - smtp_password
+      - initial_admin_password
     depends_on:
       postgres:
         condition: service_healthy
     restart: "no"
+
+  housekeeper:
+    image: ml4paleo-server:local
+    restart: unless-stopped
+    init: true
+    command: ["ml4paleo-server", "housekeeper"]
+    environment: *server-environment
+    secrets: *server-secrets
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   api:
     image: ml4paleo-server:local
@@ -179,6 +201,8 @@ secrets:
     file: ./secrets/seaweedfs_s3.json
   smtp_password:
     file: ./secrets/smtp_password
+  initial_admin_password:
+    file: ./secrets/initial_admin_password
 
 volumes:
   caddy-data:

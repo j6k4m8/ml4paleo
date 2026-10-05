@@ -54,6 +54,8 @@ JSON
 
 # Fill in to send email with a password (leave empty otherwise).
 write_secret smtp_password ""
+# The first admin account's password. It must be changed at first sign-in.
+write_secret initial_admin_password "$(random 24)"
 
 # Containers run as their own users, and compose mounts these files as-is, so
 # they must be readable. The secrets directory itself stays private (0700).
@@ -74,3 +76,5 @@ M4P_SMTP__FROM_ADDRESS=ml4paleo <no-reply@$domain>
 ENV
     echo "Created .env for https://$domain"
 fi
+
+echo "Sign in at https://$domain as 'admin' with the password in $(pwd)/secrets/initial_admin_password"
