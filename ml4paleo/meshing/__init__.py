@@ -160,4 +160,4 @@ def write_obj(mesh, filename):
             for p in v:
                 f.write(f"v {p[0]} {p[1]} {p[2]}\n")
         for i in range(len(mesh.vectors)):
-            f.write(f"f {3*i+1} {3*i+2} {3*i+3}\n")
+            f.write(f"f {3 * i + 1} {3 * i + 2} {3 * i + 3}\n")

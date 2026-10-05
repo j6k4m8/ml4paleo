@@ -45,7 +45,9 @@ class Block:
         """
         Return the slices that select this block from the full array.
         """
-        return tuple(slice(lo, hi) for lo, hi in zip(self.start, self.stop, strict=True))
+        return tuple(
+            slice(lo, hi) for lo, hi in zip(self.start, self.stop, strict=True)
+        )
 
     def expand(self, halo: Sequence[int], bounds: Sequence[int]) -> "Block":
         """
