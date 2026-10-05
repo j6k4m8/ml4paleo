@@ -2,13 +2,20 @@
 Projects, collaborators, the audit log, and quotas.
 """
 
+import asyncio
 import uuid
 
 import pytest
 from fastapi import HTTPException
 from helpers import make_admin, run_db, signup
 from ml4paleo_server import quotas
-from ml4paleo_server.db import AuditEvent, User, UserUsage
+from ml4paleo_server.db import (
+    AuditEvent,
+    User,
+    UserUsage,
+    create_engine,
+    create_sessionmaker,
+)
 from sqlalchemy import select, update
 
 
@@ -172,24 +179,80 @@ def test_quota_requests_are_rate_limited(new_browser):
     assert statuses == [202, 202, 202, 429]
 
 
-def test_quota_checks(settings, migrated_database_url):
+def test_quota_reservations(settings, migrated_database_url):
     async def scenario(db):
         user = User(username="ada", quota_override={"trained_models": 2})
         db.add(user)
         await db.flush()
-        db.add(UserUsage(user_id=user.id, storage_bytes=9 * 1024**3, trained_models=2))
-        await db.flush()
-        await quotas.check_storage(db, settings, user, 1024**3)  # exactly at 10 GB
+        await quotas.reserve_storage(db, settings, user, 9 * 1024**3)
+        await quotas.reserve_storage(db, settings, user, 1024**3)  # exactly 10 GB
         with pytest.raises(HTTPException) as too_big:
-            await quotas.check_storage(db, settings, user, 1024**3 + 1)
+            await quotas.reserve_storage(db, settings, user, 1)
+        await quotas.release_storage(db, user.id, 1024**3)
+        await quotas.reserve_storage(db, settings, user, 1024**3)
+        for _ in range(2):
+            await quotas.reserve_trained_model(db, settings, user)
         with pytest.raises(HTTPException) as too_many:
-            await quotas.check_trained_models(db, settings, user)
+            await quotas.reserve_trained_model(db, settings, user)
         user.quota_override = {"storage_gb": None, "trained_models": 3}
-        await quotas.check_storage(db, settings, user, 10**15)
-        await quotas.check_trained_models(db, settings, user)
-        return too_big.value.detail, too_many.value.detail
+        await quotas.reserve_storage(db, settings, user, 10**15)
+        await quotas.reserve_trained_model(db, settings, user)
+        usage = await quotas.usage_for(db, user.id)
+        return (
+            too_big.value.detail,
+            too_many.value.detail,
+            usage.storage_bytes,
+            usage.trained_models,
+        )
 
     assert run_db(migrated_database_url, scenario) == (
         "storage_quota_exceeded",
         "trained_model_quota_exceeded",
+        10 * 1024**3 + 10**15,
+        3,
     )
+
+
+@pytest.mark.parametrize("has_usage_row", [True, False])
+def test_concurrent_reservations_cannot_overshoot_the_limit(
+    settings, migrated_database_url, has_usage_row
+):
+    async def race():
+        engine = create_engine(migrated_database_url)
+        sessionmaker = create_sessionmaker(engine)
+        try:
+            async with sessionmaker() as db:
+                user = User(username="ada")
+                db.add(user)
+                await db.flush()
+                if has_usage_row:
+                    db.add(UserUsage(user_id=user.id))
+                await db.commit()
+                user_id = user.id
+
+            # Each attempt connects and loads the user first, then all reserve
+            # at once.
+            barrier = asyncio.Barrier(3)
+
+            async def attempt():
+                async with sessionmaker() as db:
+                    owner = await db.get(User, user_id)
+                    assert owner is not None
+                    await barrier.wait()
+                    try:
+                        await quotas.reserve_storage(db, settings, owner, 6 * 1024**3)
+                    except HTTPException:
+                        return False
+                    # Hold the transaction open so the attempts overlap.
+                    await asyncio.sleep(0.3)
+                    await db.commit()
+                    return True
+
+            results = await asyncio.gather(attempt(), attempt(), attempt())
+            async with sessionmaker() as db:
+                usage = await quotas.usage_for(db, user_id)
+                return sorted(results), usage.storage_bytes
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(race()) == ([False, False, True], 6 * 1024**3)

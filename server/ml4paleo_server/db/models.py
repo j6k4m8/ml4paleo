@@ -240,9 +240,9 @@ class AuditEvent(Base):
 
 class UserUsage(Base):
     """
-    What each user currently uses against their quota. Storage is updated as
-    project artifacts are committed or deleted; trained models as models are
-    saved or deleted.
+    What each user currently uses against their quota. Change it only through
+    `ml4paleo_server.quotas`, which reserves usage before work starts and
+    releases it when the work fails or its output is deleted.
     """
 
     __tablename__ = "user_usage"
