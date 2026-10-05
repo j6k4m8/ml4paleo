@@ -48,13 +48,35 @@ class DicomVolumeProvider(VolumeProvider):
         return pydicom.dcmread(str(path), stop_before_pixels=True)
 
     @staticmethod
-    def _sort_key(path: pathlib.Path, dataset) -> tuple:
+    def _slice_normal(dataset) -> np.ndarray | None:
+        """
+        Return the unit normal of a slice's plane, from ImageOrientationPatient.
+        """
+        try:
+            orientation = [float(v) for v in dataset.ImageOrientationPatient]
+            normal = np.cross(orientation[:3], orientation[3:6])
+        except (AttributeError, TypeError, ValueError):
+            return None
+        length = float(np.linalg.norm(normal))
+        return normal / length if length > 0 else None
+
+    @staticmethod
+    def _sort_key(
+        path: pathlib.Path, dataset, normal: np.ndarray | None = None
+    ) -> tuple:
         image_position = getattr(dataset, "ImagePositionPatient", None)
         if image_position is not None and len(image_position) >= 3:
             try:
-                return (0, float(image_position[2]), path.name)
+                position = [float(v) for v in image_position[:3]]
             except (TypeError, ValueError):
-                pass
+                position = None
+            if position is not None:
+                # Sort by distance along the slice normal, so coronal,
+                # sagittal, and oblique series stack in order too. Without an
+                # orientation, fall back to the patient z coordinate.
+                if normal is None:
+                    return (0, position[2], path.name)
+                return (0, float(np.dot(position, normal)), path.name)
 
         instance_number = getattr(dataset, "InstanceNumber", None)
         if instance_number is not None:
@@ -240,7 +262,10 @@ class DicomVolumeProvider(VolumeProvider):
         else:
             headers = next(iter(grouped_headers.values()))
 
-        headers = sorted(headers, key=lambda item: self._sort_key(item[0], item[1]))
+        normal = self._slice_normal(headers[0][1])
+        headers = sorted(
+            headers, key=lambda item: self._sort_key(item[0], item[1], normal)
+        )
         self._files = [path for path, _ in headers]
 
         dataset = pydicom.dcmread(str(self._files[0]))

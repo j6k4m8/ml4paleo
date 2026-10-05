@@ -6,35 +6,11 @@ S3-compatible object stores, and grants can never reach outside their prefix.
 import numpy as np
 import pytest
 import zarr
+from conftest import S3_TEST_BUCKET
 
 from ml4paleo.storage import StorageGrant, object_store, zarr_store
 from ml4paleo.volume_providers import NumpyVolumeProvider, ZarrVolumeProvider
 from ml4paleo.volume_providers.io import export_zarr_array
-
-BUCKET = "ml4paleo-test"
-
-
-@pytest.fixture(scope="module")
-def s3_endpoint():
-    """
-    Run moto's S3 server in-process, so the S3 path is tested without Docker.
-    """
-    import boto3
-    from moto.server import ThreadedMotoServer
-
-    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
-    server.start()
-    host, port = server.get_host_and_port()
-    endpoint = f"http://{host}:{port}"
-    boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-        region_name="us-east-1",
-    ).create_bucket(Bucket=BUCKET)
-    yield endpoint
-    server.stop()
 
 
 @pytest.fixture(params=["file", "s3"])
@@ -43,7 +19,7 @@ def grant(request, tmp_path):
         return StorageGrant(url=f"file://{tmp_path}/project", access="rw")
     endpoint = request.getfixturevalue("s3_endpoint")
     return StorageGrant(
-        url=f"s3://{BUCKET}/projects/{tmp_path.name}",
+        url=f"s3://{S3_TEST_BUCKET}/projects/{tmp_path.name}",
         access="rw",
         endpoint=endpoint,
         credentials={"access_key_id": "test", "secret_access_key": "test"},
