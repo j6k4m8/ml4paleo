@@ -24,6 +24,7 @@ from .api import ROUTERS
 from .auth.sessions import cookie_name
 from .auth.tokens import csrf_token, tokens_match
 from .db import create_engine, create_sessionmaker
+from .jobs import JobSignal
 from .settings import Settings
 from .storage import project_storage
 
@@ -82,9 +83,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         engine = create_engine(settings.database_url.get_secret_value())
         app.state.engine = engine
         app.state.sessionmaker = create_sessionmaker(engine)
+        job_signal = JobSignal(settings.database_url.get_secret_value())
+        job_signal.start()
+        app.state.job_signal = job_signal
         try:
             yield
         finally:
+            await job_signal.stop()
             await engine.dispose()
 
     app = FastAPI(

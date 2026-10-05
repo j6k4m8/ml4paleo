@@ -45,6 +45,13 @@ def main(argv: list[str] | None = None) -> int:
         "check-migrations",
         help="Fail if the models have changes that no migration covers.",
     )
+    check_workers = commands.add_parser(
+        "check-workers",
+        help="Queue a diagnostic job and wait for a worker to run it.",
+    )
+    check_workers.add_argument(
+        "--timeout", type=float, default=60, help="Seconds to wait (default: 60)."
+    )
 
     args = parser.parse_args(argv)
     if args.command == "serve":
@@ -67,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         from ml4paleo_server.settings import Settings
 
         migrations.upgrade(Settings().database_url.get_secret_value())
+        asyncio.run(_ensure_local_worker())
         password = asyncio.run(_ensure_admin())
         if password is not None:
             print(
@@ -88,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "reset-password":
         password = asyncio.run(_reset_password(args.username))
         print(f"New password for {args.username}: {password}", flush=True)
+    elif args.command == "check-workers":
+        return asyncio.run(_check_workers(args.timeout))
     elif args.command == "housekeeper":
         from ml4paleo_server.housekeeper import run_forever
 
@@ -110,6 +120,76 @@ async def _ensure_admin() -> str | None:
             return await ensure_admin(
                 db, initial.get_secret_value() if initial else None
             )
+    finally:
+        await engine.dispose()
+
+
+async def _ensure_local_worker() -> None:
+    from ml4paleo_server.db import create_engine, create_sessionmaker
+    from ml4paleo_server.jobs.workers import ensure_local_worker
+    from ml4paleo_server.settings import Settings
+
+    settings = Settings()
+    if settings.local_worker_token is None:
+        return
+    engine = create_engine(settings.database_url.get_secret_value())
+    try:
+        async with create_sessionmaker(engine)() as db:
+            await ensure_local_worker(
+                db, settings.local_worker_token.get_secret_value()
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _check_workers(timeout: float) -> int:
+    import time
+
+    from ml4paleo.protocol import Tier
+    from ml4paleo_server import jobs
+    from ml4paleo_server.db import Job, Worker, create_engine, create_sessionmaker
+    from ml4paleo_server.settings import Settings
+
+    engine = create_engine(Settings().database_url.get_secret_value())
+    sessionmaker = create_sessionmaker(engine)
+    try:
+        async with sessionmaker() as db:
+            job = await jobs.enqueue(
+                db, "noop", {"seconds": 0}, tier=Tier.INTERACTIVE, max_attempts=1
+            )
+            await db.commit()
+        started = time.monotonic()
+        while True:
+            async with sessionmaker() as db:
+                current = await db.get(Job, job.id)
+                assert current is not None
+                worker = (
+                    await db.get(Worker, current.lease_worker_id)
+                    if current.lease_worker_id
+                    else None
+                )
+                if current.status in jobs.queue.FINISHED or (
+                    time.monotonic() - started > timeout
+                ):
+                    break
+            await asyncio.sleep(1)
+        elapsed = time.monotonic() - started
+        if current.status == "succeeded":
+            name = worker.name if worker else "a worker"
+            print(f"Worker {name!r} ran the check job in {elapsed:.1f} s.", flush=True)
+            return 0
+        if current.status not in jobs.queue.FINISHED:
+            async with sessionmaker() as db:
+                await jobs.cancel_pipeline(db, job.id)
+                await db.commit()
+            print(
+                f"No worker ran the check job within {timeout:.0f} s "
+                f"(it was {current.status}).",
+                flush=True,
+            )
+            return 1
+        print(f"The check job {current.status}: {current.error}", flush=True)
+        return 1
     finally:
         await engine.dispose()
 

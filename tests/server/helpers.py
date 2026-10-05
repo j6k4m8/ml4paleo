@@ -10,8 +10,12 @@ from types import SimpleNamespace
 import pyotp
 from ml4paleo_server import email, sealing
 from ml4paleo_server.auth import ensure_admin
-from ml4paleo_server.db import EmailOutbox, create_engine, create_sessionmaker
+from ml4paleo_server.auth.tokens import token_hash
+from ml4paleo_server.db import EmailOutbox, Worker, create_engine, create_sessionmaker
+from ml4paleo_server.jobs.workers import new_worker_token
 from sqlalchemy import select
+
+from ml4paleo.protocol import WorkerCaps
 
 PASSWORD = "correct horse battery staple"
 ADMIN_PASSWORD = "fossil dig site 1923"
@@ -94,3 +98,23 @@ def next_code(secret: str) -> str:
     that sign in right after confirming setup need the next one.
     """
     return pyotp.TOTP(secret).at(int(time.time()) + 30)
+
+
+CAPS = WorkerCaps(version="test", kinds=["noop"])
+
+
+def add_worker(database_url, name="worker-1", pool="remote") -> str:
+    """
+    Register a worker and return its token.
+    """
+    token = new_worker_token()
+
+    async def add(db):
+        db.add(Worker(name=name, pool=pool, token_hash=token_hash(token), caps={}))
+
+    run_db(database_url, add)
+    return token
+
+
+def bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}

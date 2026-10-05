@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     # The first admin account's password (usually M4P_INITIAL_ADMIN_PASSWORD_FILE).
     # Without it, `migrate` generates one and prints it once.
     initial_admin_password: SecretStr | None = None
+    # The token that workers on this machine share (usually
+    # M4P_LOCAL_WORKER_TOKEN_FILE). `migrate` registers it as the "local" worker.
+    local_worker_token: SecretStr | None = None
     # The built web app (`web/build`). When missing, the API still runs and
     # serves a placeholder page.
     web_dir: pathlib.Path | None = None

@@ -11,15 +11,17 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
+    SmallInteger,
     String,
     Text,
     false,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, TimestampMixin, uuid7
@@ -283,3 +285,174 @@ class QuotaRequest(Base):
     __table_args__ = (
         CheckConstraint("status IN ('open', 'granted', 'declined')", name="status"),
     )
+
+
+class Worker(TimestampMixin, Base):
+    """
+    A credential that job workers use to pull work. Several worker processes
+    may share one (for example replicas of one container); each process sends
+    its capabilities with every claim, and `caps` keeps the last ones seen.
+    Whether a worker is online is derived from `last_seen_at`.
+    """
+
+    __tablename__ = "workers"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    # "local" (on this machine), "remote" (another machine), or "burst"
+    # (a cloud machine started for a backlog).
+    pool: Mapped[str] = mapped_column(String(16))
+    # SHA-256 of the bearer token; the token itself is shown once.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # "active" or "revoked".
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    caps: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+    last_seen_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    expires_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (
+        CheckConstraint("pool IN ('local', 'remote', 'burst')", name="pool"),
+        CheckConstraint("status IN ('active', 'revoked')", name="status"),
+    )
+
+
+JOB_STATUSES = ("blocked", "queued", "leased", "succeeded", "failed", "cancelled")
+
+
+class Job(TimestampMixin, Base):
+    """
+    One unit of work for a worker. Jobs form pipelines: every job has a
+    `root_id` (the first job of its pipeline, or itself), and `job_deps` says
+    which jobs must succeed before a job can run (until then it is
+    "blocked"). See `ml4paleo_server.jobs`.
+    """
+
+    __tablename__ = "jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    root_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), index=True
+    )
+    # The job that created this one, for jobs that fan out more jobs.
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), index=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    kind: Mapped[str] = mapped_column(String(64))
+    tier: Mapped[int] = mapped_column(SmallInteger)
+    status: Mapped[str] = mapped_column(String(16))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)
+    # Labels a worker must have (for example "gpu"), and the GPU memory it needs.
+    required_labels: Mapped[list[str]] = mapped_column(
+        ARRAY(String(64)), default=list, server_default=text("'{}'")
+    )
+    min_vram_gb: Mapped[float] = mapped_column(
+        Float, default=0, server_default=text("0")
+    )
+    # Pipeline progress is the weighted mean of its jobs' progress.
+    weight: Mapped[float] = mapped_column(Float, default=1, server_default=text("1"))
+    progress: Mapped[float] = mapped_column(Float, default=0, server_default=text("0"))
+    message: Mapped[str | None] = mapped_column(String(200))
+    attempts: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    max_attempts: Mapped[int] = mapped_column(default=3, server_default=text("3"))
+    # Retries wait until this time.
+    not_before: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # When the pipeline was submitted; jobs in a tier run in this order.
+    submitted_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True))
+    # Whether a backlog of this job may start new (burst) machines.
+    scale_trigger: Mapped[bool] = mapped_column(default=True)
+    lease_worker_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workers.id", ondelete="SET NULL")
+    )
+    lease_token_hash: Mapped[str | None] = mapped_column(String(64))
+    lease_expires_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    cancel_requested: Mapped[bool] = mapped_column(default=False)
+    # Enqueuing again with the same key returns the existing job.
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), unique=True)
+    started_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    finished_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ({})".format(", ".join(f"'{s}'" for s in JOB_STATUSES)),
+            name="status",
+        ),
+        CheckConstraint("progress >= 0 AND progress <= 1", name="progress"),
+        # The claim query walks this index in priority order.
+        Index(
+            "ix_jobs_claim_order",
+            "tier",
+            "submitted_at",
+            "id",
+            postgresql_where=text("status = 'queued'"),
+        ),
+        Index(
+            "ix_jobs_lease_expiry",
+            "lease_expires_at",
+            postgresql_where=text("status = 'leased'"),
+        ),
+    )
+
+
+class JobDep(Base):
+    """
+    `job_id` runs only after `depends_on` succeeds.
+    """
+
+    __tablename__ = "job_deps"
+
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True
+    )
+    depends_on: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
+class JobAttempt(Base):
+    """
+    One lease of a job by a worker, and how it ended.
+    """
+
+    __tablename__ = "job_attempts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), index=True
+    )
+    attempt: Mapped[int]
+    worker_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workers.id", ondelete="SET NULL")
+    )
+    started_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    ended_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # "succeeded", "failed", "expired" (the worker went silent), "cancelled",
+    # or "released" (given back, not counted); None while running.
+    outcome: Mapped[str | None] = mapped_column(String(16))
+    error: Mapped[str | None] = mapped_column(Text)

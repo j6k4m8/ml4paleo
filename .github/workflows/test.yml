@@ -75,7 +75,8 @@ jobs:
       - name: Start the stack
         run: >-
           docker compose -f deploy/compose/compose.yml
-          up --detach --build --wait --wait-timeout 300 api caddy housekeeper
+          up --detach --build --wait --wait-timeout 300
+          api caddy housekeeper worker-cpu
 
       - name: Check the API (with database and storage) through Caddy
         # Caddy serves "localhost" with its own local certificate authority.
@@ -98,6 +99,21 @@ jobs:
           --no-reach postgres:5432 --no-reach seaweedfs:8333
           --no-reach seaweedfs:9333 --no-reach seaweedfs:8888
           --no-reach seaweedfs:8080
+
+      - name: Check that the jobs network reaches only the worker API
+        run: >-
+          docker run --rm --network ml4paleo_jobs
+          --volume "$PWD/.github/scripts:/scripts:ro" ml4paleo-worker:local
+          python /scripts/check_network.py --reach caddy:8080
+          --no-reach api:8000 --no-reach postgres:5432
+          --no-reach seaweedfs:8333 --no-reach seaweedfs:9333
+          --status http://caddy:8080/api/worker/v1/hello=401
+          --status http://caddy:8080/api/auth/login=404
+
+      - name: Run a job on the local worker
+        run: >-
+          docker compose -f deploy/compose/compose.yml
+          exec -T api ml4paleo-server check-workers --timeout 120
 
       - name: Show logs
         if: failure()

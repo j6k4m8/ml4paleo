@@ -13,3 +13,16 @@
 
 	reverse_proxy api:8000
 }
+
+# Workers on this machine reach the worker API here, over the jobs network.
+# This port is not published, and it serves nothing but the worker API.
+http://:8080 {
+	@worker path /api/worker/*
+	handle @worker {
+		request_body {
+			max_size 8MB
+		}
+		reverse_proxy api:8000
+	}
+	respond 404
+}
