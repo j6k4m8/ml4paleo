@@ -2,8 +2,9 @@
 Upload a file the way a browser does, against the compose stack: sign up,
 create a project, start an upload, PUT its part straight to SeaweedFS through
 Caddy with the presigned URL, and complete it. Also check that storage
-refuses a part of the wrong length (the URL signs it), and that requests
-other than signed part uploads never reach SeaweedFS.
+refuses a part of the wrong length (the URL signs it), that a part URL can't
+be turned into a copy of another object, and that requests other than signed
+part uploads never reach SeaweedFS.
 
     python check_upload.py https://localhost
 """
@@ -45,8 +46,10 @@ def main(origin: str) -> int:
         csrf = answer.get("csrf_token", csrf)
         return answer
 
-    def put(url: str, data: bytes) -> tuple[int, bytes]:
-        request = urllib.request.Request(url, data=data, method="PUT")
+    def put(url: str, data: bytes, headers=None) -> tuple[int, bytes]:
+        request = urllib.request.Request(
+            url, data=data, method="PUT", headers=headers or {}
+        )
         try:
             with urllib.request.urlopen(request, context=CONTEXT) as response:
                 return response.status, response.read()
@@ -80,6 +83,28 @@ def main(origin: str) -> int:
         problems.append("storage doesn't list the uploaded part")
     if api("POST", f"{base}/complete")["state"] != "complete":
         problems.append("the upload didn't complete")
+    # A second upload's part URL, with a header that would make storage copy
+    # the first file into it instead (the signature doesn't cover it). The
+    # body has the signed length, so storage would accept the request: only
+    # Caddy refusing it keeps the part empty.
+    second = api(
+        "POST",
+        f"/api/projects/{project}/uploads",
+        {"filename": "copy.zip", "size": len(data)},
+    )
+    second_base = f"/api/projects/{project}/uploads/{second['id']}"
+    second_url = api("POST", f"{second_base}/part-urls", {"parts": [1]})["urls"]["1"]
+    source = url.split("?")[0].removeprefix(origin + "/")
+    status, body = put(
+        second_url,
+        bytes(len(data)),
+        {
+            "X-Amz-Copy-Source": source,
+            "X-Amz-Copy-Source-Range": f"bytes=0-{len(data) - 1}",
+        },
+    )
+    if status == 200 or api("GET", second_base)["stored_parts"]:
+        problems.append(f"a part URL copied another object (HTTP {status})")
     # Unsigned requests to the bucket path go to the API, not to storage.
     unsigned = url.split("?")[0]
     status, body = put(unsigned, b"x")
