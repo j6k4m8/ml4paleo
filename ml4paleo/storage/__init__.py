@@ -80,6 +80,8 @@ class StorageGrant(BaseModel):
             )
         if parts.query or parts.fragment:
             raise ValueError("Storage URLs cannot have a query or fragment")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("Put credentials in the grant, not in the URL")
         if parts.scheme == "file":
             if parts.netloc not in ("", "localhost"):
                 raise ValueError("file:// URLs must not name a host")
@@ -276,6 +278,8 @@ def _check_path_segments(path: str) -> None:
         return
     if forbidden := FORBIDDEN_PATH_CHARACTERS.intersection(path):
         raise ValueError(f"Storage paths cannot contain {sorted(forbidden)}: {path!r}")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
+        raise ValueError(f"Storage paths cannot contain control characters: {path!r}")
     # Split by hand: PurePosixPath would silently drop "." and empty segments.
     for segment in path.split("/"):
         if segment in ("", ".", ".."):
