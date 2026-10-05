@@ -204,16 +204,12 @@ async def write(job_id: uuid.UUID, index: int, key: str, request: Request) -> Re
                     yield chunk
             # The object becomes visible when this generator ends, so check
             # the lease now and keep it locked until the store finishes.
-            job = await db.scalar(
-                select(Job)
-                .where(Job.id == job_id)
-                .with_for_update(read=True)
-                .execution_options(populate_existing=True)
-            )
-            if not _holds_lease(job, token):
+            try:
+                await _hold_lease(db, job_id, token)
+            except LeaseEnded:
                 lease_ended = True
                 # Raising aborts the upload, so nothing becomes visible.
-                raise LeaseEnded
+                raise
 
         try:
             await obstore.put_async(store, key, body())
@@ -237,10 +233,39 @@ async def write(job_id: uuid.UUID, index: int, key: str, request: Request) -> Re
 @router.delete("/{key:path}", status_code=204)
 async def remove(job_id: uuid.UUID, index: int, key: str, request: Request) -> None:
     store = await _store(request, job_id, index, write=True)
-    try:
-        await obstore.delete_async(store, _checked(key))
-    except FileNotFoundError:
-        pass
+    key = _checked(key)
+    async with request.app.state.sessionmaker() as db:
+        # Like a finished upload: hold the lease while the object goes, so a
+        # delete can't take effect after the job's artifacts are committed.
+        try:
+            await _hold_lease(db, job_id, _token(request))
+        except LeaseEnded:
+            raise HTTPException(
+                status_code=401,
+                detail="This job's lease is not held with that token.",
+                headers={"WWW-Authenticate": "Bearer"},
+            ) from None
+        try:
+            await obstore.delete_async(store, key)
+        except FileNotFoundError:
+            pass
+        await db.commit()
+
+
+async def _hold_lease(db, job_id: uuid.UUID, token: str) -> None:
+    """
+    Share-lock the job until `db` commits, and check that `token` still
+    holds its lease. Completing (or taking over) the job needs a stronger
+    lock, so it waits until the caller is done.
+    """
+    job = await db.scalar(
+        select(Job)
+        .where(Job.id == job_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
+    if not _holds_lease(job, token):
+        raise LeaseEnded
 
 
 @router.api_route("", methods=["PROPFIND"])

@@ -43,6 +43,30 @@ PAST = datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
 SMALL_CHUNKS = {"chunk_zyx": (2, 2, 2), "shard_zyx": (2, 4, 4)}
 
 
+@pytest.fixture(params=["file", "s3"])
+def settings(request, migrated_database_url, tmp_path):
+    """
+    Every test here runs with project storage on local disk and on S3 (an
+    in-process S3 server), since uploads, listings, and aborted uploads
+    behave differently on each.
+    """
+    from helpers import SECRET_KEY
+    from ml4paleo_server.settings import Settings
+
+    storage = {"url": f"file://{tmp_path}/data"}
+    if request.param == "s3":
+        storage = {
+            "url": f"s3://{request.getfixturevalue('s3_bucket')}/{tmp_path.name}",
+            "endpoint": request.getfixturevalue("s3_endpoint"),
+            "access_key_id": "test",
+            "secret_access_key": "test",
+            "region": "us-east-1",
+        }
+    return Settings(
+        database_url=migrated_database_url, secret_key=SECRET_KEY, storage=storage
+    )
+
+
 def make_project(database_url, quota_override=None):
     async def add(db):
         user = User(username="ada", quota_override=quota_override)
@@ -399,7 +423,12 @@ def test_direct_access_is_only_for_local_workers(settings, migrated_database_url
         )
 
     local, remote, default = run_db(migrated_database_url, grants)
-    assert local.scheme == "file" and local.access == "rw"
+    # Direct grants are the server's own location and credentials.
+    expected = project_storage(settings).child(
+        f"projects/{project_id}/artifacts/{artifact_id}"
+    )
+    assert (local.url, local.access) == (expected.url, "rw")
+    assert local.credentials == expected.credentials
     assert remote.url == f"https://x.org/api/worker/v1/jobs/{job_id}/storage/0"
     assert default.scheme == "https" and default.secret("token") == "token"
 
@@ -453,16 +482,29 @@ def test_an_upload_cannot_land_after_its_job_finished(
                 headers=bearer(lease.lease_token),
             ).status_code
 
+    put_bytes(lease.grants[0], "kept", b"committed data")
     thread = threading.Thread(target=upload)
     thread.start()
     assert halfway.wait(10)
     client.complete(job_id, lease.lease_token, {})
     go_on.set()
     thread.join(timeout=20)
+    # The finished job's files can't be deleted any more, either.
+    with httpx2.Client(base_url=live_server) as raw:
+        deleting = raw.delete(
+            f"/api/worker/v1/jobs/{job_id}/storage/0/kept",
+            headers=bearer(lease.lease_token),
+        )
     client.close()
-    assert outcome["status"] == 401
-    artifact = artifact_row(migrated_database_url, artifact_id)
-    assert get_bytes(files_of(settings, artifact), "late") is None
+    assert (outcome["status"], deleting.status_code) == (401, 401)
+    # The aborted upload never became visible, on disk or in S3.
+    files = files_of(settings, artifact_row(migrated_database_url, artifact_id))
+    assert get_bytes(files, "late") is None
+    assert get_bytes(files, "kept") == b"committed data"
+    listed = [
+        meta["path"] for batch in obstore.list(object_store(files)) for meta in batch
+    ]
+    assert listed == ["kept"]
 
 
 def test_the_grant_root_is_not_an_object(settings, migrated_database_url, live_server):
