@@ -317,3 +317,34 @@ def test_golden_fixtures_match_the_implementation():
         "Label semantics changed: regenerate tests/fixtures/labels/cases.json "
         "and update the TypeScript implementation to match."
     )
+
+
+def test_declared_huge_frames_never_expand():
+    import resource
+
+    import zstandard
+
+    from ml4paleo.labels.codec import decompress_exact
+
+    bomb = zstandard.ZstdCompressor(level=19).compress(b"\0" * (512 << 20))
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    for size in (32768, len(bomb) - 100):
+        with pytest.raises(ValueError):
+            decompress_exact(bomb, size)
+    with pytest.raises(ValueError):
+        decode_chunk(bomb)
+    growth = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before
+    # ru_maxrss is bytes on macOS and kilobytes on Linux; either way, far
+    # below the 512 MB the frame declares.
+    assert growth < 64 << 20
+
+
+def test_trailing_frames_cannot_hide_extra_data():
+    import zstandard
+
+    from ml4paleo.labels.codec import decompress_exact
+
+    frame = zstandard.ZstdCompressor(write_content_size=False).compress(b"ab")
+    assert decompress_exact(frame, 2) == b"ab"
+    with pytest.raises(ValueError):
+        decompress_exact(frame + frame, 2)
