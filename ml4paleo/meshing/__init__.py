@@ -5,10 +5,10 @@ import numpy as np
 import skimage.measure
 import stl
 import tqdm
-from intern.utils.parallel import block_compute
 from stl import mesh as stl_mesh
 from zmesh import Mesher
 
+from ..blocks import block_ranges
 from ..volume_providers import VolumeProvider
 
 # Written next to the meshes to record their coordinate system. Meshes without
@@ -54,15 +54,7 @@ class ChunkedMesher:
         self._ids.add(obj_id)
 
     def mesh_all(self, progress: bool = True):
-        chunks_to_mesh = block_compute(
-            0,
-            self.volume_provider.shape[0],
-            0,
-            self.volume_provider.shape[1],
-            0,
-            self.volume_provider.shape[2],
-            block_size=self.chunk_size,
-        )
+        chunks_to_mesh = block_ranges(self.volume_provider.shape, self.chunk_size)
 
         # Remove per-chunk meshes from any earlier run so they are not combined
         # with this one.

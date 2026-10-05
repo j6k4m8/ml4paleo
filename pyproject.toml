@@ -7,19 +7,20 @@ requires-python = ">=3.12"
 dependencies = [
     "flask>=2.3.2",
     "flask-cors>=3.0.10",
-    "intern>=1.4.1",
     "jque>=0.1.3",
     "marshmallow>=3.19.0",
     "matplotlib>=3.9.2",
-    "numcodecs>=0.10.0,<0.16",
+    "numcodecs>=0.15",
     "numpy>=1.25.0",
     "numpy-stl>=3.0.1",
+    "obstore>=0.11",
     "pillow>=11.3.0",
     "psutil>=5.9.5",
+    "pydantic>=2.11",
     "scikit-image>=0.24.0",
     "scikit-learn>=1.6.1",
     "tqdm>=4.65.0",
-    "zarr>=2.15.0,<3",
+    "zarr>=3.4",
     "zmesh>=1.11.0",
 ]
 
@@ -33,6 +34,8 @@ bossdb = [
     "intern>=1.4.2",
 ]
 dev = [
+    "hypothesis>=6.140",
+    "moto[server]>=5.1",
     "pyright>=1.1.400",
     "pytest>=8.4",
     "ruff>=0.16",
@@ -56,5 +59,5 @@ select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
 testpaths = ["tests"]
 
 [tool.pyright]
-include = ["server", "worker"]
+include = ["server", "worker", "ml4paleo/storage", "ml4paleo/blocks.py"]
 pythonVersion = "3.12"
