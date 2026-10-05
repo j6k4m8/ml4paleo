@@ -14,7 +14,10 @@ from sqlalchemy.ext.asyncio import (
 
 from .base import Base, uuid7
 from .models import (
+    ARTIFACT_STATES,
     JOB_STATUSES,
+    Artifact,
+    ArtifactHead,
     AuditEvent,
     AuthToken,
     EmailOutbox,
@@ -50,7 +53,10 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 __all__ = [
+    "ARTIFACT_STATES",
     "JOB_STATUSES",
+    "Artifact",
+    "ArtifactHead",
     "AuditEvent",
     "AuthToken",
     "Base",

@@ -22,8 +22,8 @@ from ml4paleo.protocol import (
     ReleaseIn,
 )
 
-from .. import jobs
-from ..auth.deps import DbSession
+from .. import artifacts, broker, jobs
+from ..auth.deps import DbSession, SettingsDep
 from ..jobs.workers import CurrentWorker
 
 router = APIRouter(prefix="/api/worker/v1", tags=["worker"])
@@ -53,7 +53,11 @@ async def hello(body: HelloIn, worker: CurrentWorker, db: DbSession) -> HelloOut
 
 @router.post("/claim")
 async def claim(
-    body: ClaimIn, worker: CurrentWorker, db: DbSession, request: Request
+    body: ClaimIn,
+    worker: CurrentWorker,
+    db: DbSession,
+    settings: SettingsDep,
+    request: Request,
 ) -> ClaimOut:
     """
     Lease the next job this worker can run, waiting up to `wait_seconds`
@@ -89,6 +93,14 @@ async def claim(
                     lease_token=claimed.lease_token,
                     lease_expires_at=job.lease_expires_at,
                     attempt=job.attempts,
+                    # The server's address as this worker reached it.
+                    grants=broker.grants_for(
+                        settings,
+                        worker,
+                        job,
+                        claimed.lease_token,
+                        str(request.base_url),
+                    ),
                 )
             )
         remaining = deadline - loop.time()
@@ -116,10 +128,24 @@ async def heartbeat(
 
 @router.post("/jobs/{job_id}/complete", status_code=204)
 async def complete(
-    job_id: uuid.UUID, body: CompleteIn, worker: CurrentWorker, db: DbSession
+    job_id: uuid.UUID,
+    body: CompleteIn,
+    worker: CurrentWorker,
+    db: DbSession,
+    settings: SettingsDep,
 ) -> None:
+    """
+    Mark the job succeeded, committing the artifacts it produced in the same
+    transaction.
+    """
+
+    async def commit_artifacts(job):
+        await artifacts.commit_outputs(db, settings, job)
+
     try:
-        await jobs.complete(db, job_id, worker, body.lease_token, body.result)
+        await jobs.complete(
+            db, job_id, worker, body.lease_token, body.result, check=commit_artifacts
+        )
     except jobs.LeaseLost:
         raise _lease_lost() from None
     except jobs.JobCancelled:
@@ -127,6 +153,9 @@ async def complete(
         raise HTTPException(
             status_code=409, detail="job_cancelled: discard this job's output."
         ) from None
+    except jobs.Rejected as exc:
+        await db.commit()
+        raise HTTPException(status_code=409, detail=f"job_rejected: {exc}") from None
     await db.commit()
 
 

@@ -5,10 +5,18 @@
 	encode zstd gzip
 
 	# Large files go straight to object storage with presigned URLs, so API
-	# requests never need big bodies.
-	@api path /api/*
+	# requests never need big bodies, except workers writing through the
+	# storage proxy (one object, such as an image shard, per request).
+	@storage path_regexp ^/api/worker/v1/jobs/[^/]+/storage/
+	@api {
+		path /api/*
+		not path_regexp ^/api/worker/v1/jobs/[^/]+/storage/
+	}
 	request_body @api {
 		max_size 8MB
+	}
+	request_body @storage {
+		max_size 4GB
 	}
 
 	reverse_proxy api:8000
@@ -20,7 +28,7 @@ http://:8080 {
 	@worker path /api/worker/*
 	handle @worker {
 		request_body {
-			max_size 8MB
+			max_size 4GB
 		}
 		reverse_proxy api:8000
 	}

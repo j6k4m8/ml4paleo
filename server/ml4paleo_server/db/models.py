@@ -389,6 +389,12 @@ class Job(TimestampMixin, Base):
     cancel_requested: Mapped[bool] = mapped_column(default=False)
     # Enqueuing again with the same key returns the existing job.
     idempotency_key: Mapped[str | None] = mapped_column(String(200), unique=True)
+    # Storage the job may use: [{"path": "projects/<id>/...", "access": "r"}].
+    # Paths are relative to project storage; the claim turns each one into a
+    # StorageGrant for the worker (see ml4paleo_server.broker).
+    grants: Mapped[list[dict[str, str]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb")
+    )
     started_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
@@ -456,3 +462,91 @@ class JobAttempt(Base):
     # or "released" (given back, not counted); None while running.
     outcome: Mapped[str | None] = mapped_column(String(16))
     error: Mapped[str | None] = mapped_column(Text)
+
+
+ARTIFACT_STATES = ("staging", "committed", "superseded", "failed", "deleted")
+
+
+class Artifact(Base):
+    """
+    Something a job made and stored: an image pyramid, predictions, a model,
+    meshes, an export. Its files live under `projects/<project>/artifacts/<id>/`
+    and never change once committed.
+
+    - `staging`: jobs are writing it.
+    - `committed`: complete. The job that produces it commits it when it
+      succeeds, after finding `_MANIFEST.json` (written last); its size then
+      counts against the project owner's storage quota.
+    - `superseded`: a newer artifact took its place as a head.
+    - `failed`: its job failed or it was abandoned.
+    - `deleted`: garbage collection removed its files.
+    """
+
+    __tablename__ = "artifacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))
+    state: Mapped[str] = mapped_column(String(16), default="staging")
+    # The bytes it counts against the quota, measured at commit.
+    bytes: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
+    # What it was made from (artifact ids and parameters).
+    inputs: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+    manifest: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # The job whose success commits it.
+    produced_by_job: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL"), index=True
+    )
+    # The head slot it takes when committed (for example "image").
+    head_slot: Mapped[str | None] = mapped_column(String(32))
+    # For caches such as exports: the same key gives the same artifact.
+    cache_key: Mapped[str | None] = mapped_column(String(200))
+    expires_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # When it entered its current state.
+    state_changed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ({})".format(", ".join(f"'{s}'" for s in ARTIFACT_STATES)),
+            name="state",
+        ),
+        Index("ix_artifacts_state", "state", "state_changed_at"),
+        Index(
+            "ix_artifacts_cache_key",
+            "project_id",
+            "cache_key",
+            unique=True,
+            postgresql_where=text("cache_key IS NOT NULL AND state = 'committed'"),
+        ),
+    )
+
+
+class ArtifactHead(Base):
+    """
+    The current artifact for each slot of a project ("image", "prediction",
+    and so on). Moving a head is how a new result replaces the old one.
+    """
+
+    __tablename__ = "artifact_heads"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    slot: Mapped[str] = mapped_column(String(32), primary_key=True)
+    artifact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="RESTRICT"), index=True
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

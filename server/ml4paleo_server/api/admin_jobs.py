@@ -22,6 +22,14 @@ from ..jobs.workers import LOCAL_WORKER_NAME, new_worker_token
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
+
+def check_grant() -> dict[str, str]:
+    """
+    A scratch storage location for a diagnostic job.
+    """
+    return {"path": f"projects/_checks/{uuid.uuid4()}", "access": "rw"}
+
+
 JobStatus = Literal["blocked", "queued", "leased", "succeeded", "failed", "cancelled"]
 
 # A worker counts as online if it was seen within this long (a waiting claim
@@ -246,6 +254,9 @@ class NoopIn(BaseModel):
     # How long the job runs, and whether it fails at the end (to try retries).
     seconds: float = Field(default=1, ge=0, le=600)
     fail: bool = False
+    # Also write, read, and delete a scratch object through the worker's
+    # storage access.
+    check_storage: bool = False
 
 
 @router.post("/jobs/noop", status_code=201)
@@ -261,6 +272,7 @@ async def enqueue_noop(body: NoopIn, auth: AdminAuth, db: DbSession) -> JobOut:
         created_by=auth.user.id,
         tier=Tier.INTERACTIVE,
         max_attempts=1 if body.fail else 3,
+        grants=[check_grant()] if body.check_storage else [],
     )
     await db.commit()
     await db.refresh(job)

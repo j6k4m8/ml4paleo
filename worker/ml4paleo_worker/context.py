@@ -8,6 +8,7 @@ import uuid
 from typing import Any
 
 from ml4paleo.protocol import JobLease
+from ml4paleo.storage import StorageGrant
 
 
 class Cancelled(Exception):
@@ -44,6 +45,13 @@ class JobContext:
     @property
     def payload(self) -> dict[str, Any]:
         return self.lease.payload
+
+    @property
+    def grants(self) -> list[StorageGrant]:
+        """
+        The storage this job may use, in the order the job was given it.
+        """
+        return self.lease.grants
 
     def progress(self, fraction: float, message: str | None = None) -> None:
         with self._lock:

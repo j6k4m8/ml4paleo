@@ -1,0 +1,421 @@
+"""
+Artifacts and worker storage: the storage proxy, the credential broker,
+committing artifacts when their job succeeds, head slots, and garbage
+collection.
+"""
+
+import datetime
+import threading
+
+import httpx2
+import numpy as np
+import obstore
+import pytest
+from helpers import CAPS, add_worker, bearer, run_db
+from ml4paleo_server import artifacts, broker, jobs
+from ml4paleo_server.db import (
+    Artifact,
+    ArtifactHead,
+    Job,
+    Project,
+    ProjectMember,
+    User,
+    UserUsage,
+    Worker,
+    create_sessionmaker,
+)
+from ml4paleo_server.storage import project_storage
+from ml4paleo_worker.client import ServerClient
+from ml4paleo_worker.main import Worker as WorkerLoop
+from sqlalchemy import select, update
+
+from ml4paleo.ome import OmeImage, build_pyramid, write_from_provider
+from ml4paleo.storage import (
+    StorageGrant,
+    get_bytes,
+    object_store,
+    put_bytes,
+    write_manifest,
+)
+from ml4paleo.volume_providers import NumpyVolumeProvider
+
+PAST = datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
+SMALL_CHUNKS = {"chunk_zyx": (2, 2, 2), "shard_zyx": (2, 4, 4)}
+
+
+def make_project(database_url, quota_override=None):
+    async def add(db):
+        user = User(username="ada", quota_override=quota_override)
+        db.add(user)
+        await db.flush()
+        project = Project(name="Skull", owner_id=user.id)
+        db.add(project)
+        await db.flush()
+        db.add(ProjectMember(project_id=project.id, user_id=user.id))
+        return project.id
+
+    return run_db(database_url, add)
+
+
+def stage(database_url, project_id, *, head_slot="image", extra_grants=()):
+    """
+    Create a staging artifact and the job that produces it; return their ids.
+    """
+
+    async def add(db):
+        artifact = await artifacts.create_staging(
+            db, project_id=project_id, kind="image", head_slot=head_slot
+        )
+        job = await jobs.enqueue(
+            db,
+            "noop",
+            {},
+            project_id=project_id,
+            grants=[artifacts.grant_for(artifact), *extra_grants],
+        )
+        artifact.produced_by_job = job.id
+        return artifact.id, job.id
+
+    return run_db(database_url, add)
+
+
+def artifact_row(database_url, artifact_id) -> Artifact:
+    async def get(db):
+        return await db.get(Artifact, artifact_id)
+
+    return run_db(database_url, get)
+
+
+def storage_used(database_url) -> int:
+    async def get(db):
+        return await db.scalar(select(UserUsage.storage_bytes)) or 0
+
+    return run_db(database_url, get)
+
+
+def files_of(settings, artifact) -> StorageGrant:
+    return project_storage(settings).child(artifacts.artifact_path(artifact))
+
+
+def finish(settings, database_url, job_id, *, write=True):
+    """
+    Claim a job as a local worker, optionally write an artifact's files and
+    manifest straight to storage, and report success with the commit check.
+    """
+
+    async def run(db):
+        worker = await db.scalar(select(Worker).where(Worker.name == "w"))
+        if worker is None:
+            worker = Worker(name="w", pool="local", token_hash="0" * 64, caps={})
+            db.add(worker)
+            await db.flush()
+        await db.execute(update(Job).where(Job.id == job_id).values(not_before=PAST))
+        claimed = await jobs.claim(db, worker, CAPS)
+        assert claimed is not None and claimed.job.id == job_id
+        produced = (
+            await db.scalars(select(Artifact).where(Artifact.produced_by_job == job_id))
+        ).all()
+        for artifact in produced if write else []:
+            grant = files_of(settings, artifact)
+            put_bytes(grant, "data/0", b"x" * 1000)
+            write_manifest(grant, {"kind": "test"})
+
+        async def check(job):
+            await artifacts.commit_outputs(db, settings, job)
+
+        try:
+            await jobs.complete(db, job_id, worker, claimed.lease_token, {}, check)
+        except jobs.Rejected as exc:
+            return str(exc)
+        return None
+
+    return run_db(database_url, run)
+
+
+def test_a_worker_writes_an_image_through_the_proxy(
+    settings, migrated_database_url, live_server
+):
+    project_id = make_project(migrated_database_url)
+    artifact_id, job_id = stage(migrated_database_url, project_id)
+    rng = np.random.default_rng(0)
+    data = rng.integers(0, 60000, size=(10, 6, 5), dtype=np.uint16)  # (x, y, z)
+
+    def ingest(ctx):
+        grant = ctx.grants[0]
+        assert grant.scheme == "http" and grant.access == "rw"
+        provider = NumpyVolumeProvider(data)
+        image = OmeImage.create(
+            grant, shape_czyx=(1, 5, 6, 10), dtype=np.uint16, **SMALL_CHUNKS
+        )
+        write_from_provider(provider, image)
+        build_pyramid(image, "mean")
+        write_manifest(grant, {"levels": image.num_levels})
+        return {"levels": image.num_levels}
+
+    client = ServerClient(add_worker(migrated_database_url), base_url=live_server)
+    loop = WorkerLoop(client, CAPS, handlers={"noop": ingest}, claim_wait_seconds=1)
+    thread = threading.Thread(target=loop.run, kwargs={"max_jobs": 1})
+    thread.start()
+    thread.join(timeout=60)
+    client.close()
+
+    artifact = artifact_row(migrated_database_url, artifact_id)
+    assert artifact.state == "committed"
+    assert artifact.manifest["levels"] >= 2
+    on_disk = sum(
+        meta["size"]
+        for batch in obstore.list(object_store(files_of(settings, artifact)))
+        for meta in batch
+    )
+    assert artifact.bytes == on_disk == storage_used(migrated_database_url)
+    stored = OmeImage.open(
+        files_of(settings, artifact).model_copy(update={"access": "r"})
+    )
+    np.testing.assert_array_equal(
+        np.asarray(stored.array(0)[0]), data.transpose(2, 1, 0)
+    )
+
+    async def current(db):
+        return (await artifacts.head(db, project_id, "image")).id
+
+    assert run_db(migrated_database_url, current) == artifact_id
+
+
+def test_the_proxy_serves_only_the_jobs_grants(
+    settings, migrated_database_url, live_server
+):
+    project_id = make_project(migrated_database_url)
+    upload = f"projects/{project_id}/uploads/u1"
+    put_bytes(project_storage(settings).child(upload), "scan.tif", b"tiff")
+    artifact_id, job_id = stage(
+        migrated_database_url,
+        project_id,
+        extra_grants=[{"path": upload, "access": "r"}],
+    )
+    client = ServerClient(add_worker(migrated_database_url), base_url=live_server)
+    lease = client.claim(CAPS, wait_seconds=0)
+    assert lease is not None and lease.job_id == job_id
+    output, source = lease.grants
+    assert output.url.startswith(f"{live_server}/api/worker/v1/jobs/{job_id}/")
+    assert source.access == "r" and get_bytes(source, "scan.tif") == b"tiff"
+
+    big = bytes(range(256)) * 40_000  # 10 MB, one request
+    for key, value in [("a/b.txt", b"hello"), ("a/c/d.txt", b"deep"), ("big", big)]:
+        put_bytes(output, key, value)
+    store = object_store(output)
+    listed = sorted(meta["path"] for batch in obstore.list(store) for meta in batch)
+    assert listed == ["a/b.txt", "a/c/d.txt", "big"]
+    tree = obstore.list_with_delimiter(store, prefix="a")
+    assert tree["common_prefixes"] == ["a/c"]
+    assert [meta["path"] for meta in tree["objects"]] == ["a/b.txt"]
+    assert bytes(obstore.get_range(store, "big", start=5, end=9)) == big[5:9]
+    tail = obstore.get(store, "big", options={"range": {"suffix": 7}})
+    assert bytes(tail.bytes()) == big[-7:]
+    assert obstore.head(store, "big")["size"] == len(big)
+    obstore.delete(store, "a/b.txt")
+    assert get_bytes(output, "a/b.txt") is None
+
+    raw = httpx2.Client(base_url=live_server)
+    base = f"/api/worker/v1/jobs/{job_id}/storage"
+    token = bearer(lease.lease_token)
+    # A read-only grant refuses writes, and keys can't climb out of a grant.
+    assert raw.put(f"{base}/1/scan.tif", content=b"x", headers=token).status_code == 403
+    assert (
+        raw.put(f"{base}/0/%2E%2E%2Fescape", content=b"x", headers=token).status_code
+        == 400
+    )
+    assert raw.get(f"{base}/2/anything", headers=token).status_code == 404
+    assert raw.get(f"{base}/0/big", headers=bearer("wrong")).status_code == 401
+
+    # Once the lease is gone, so is access.
+    async def expire(db):
+        await db.execute(update(Job).values(lease_expires_at=PAST))
+
+    run_db(migrated_database_url, expire)
+    assert raw.get(f"{base}/0/big", headers=token).status_code == 401
+    raw.close()
+    client.close()
+
+
+def test_a_completion_without_a_manifest_is_retried(settings, migrated_database_url):
+    project_id = make_project(migrated_database_url)
+    artifact_id, job_id = stage(migrated_database_url, project_id)
+    error = finish(settings, migrated_database_url, job_id, write=False)
+    assert "_MANIFEST.json" in error
+
+    async def status(db):
+        return await db.scalar(select(Job.status).where(Job.id == job_id))
+
+    assert run_db(migrated_database_url, status) == "queued"
+    assert artifact_row(migrated_database_url, artifact_id).state == "staging"
+    assert finish(settings, migrated_database_url, job_id) is None
+    assert artifact_row(migrated_database_url, artifact_id).state == "committed"
+
+
+def test_results_over_quota_fail_the_job(settings, migrated_database_url):
+    project_id = make_project(migrated_database_url, {"storage_gb": 1e-9})
+    artifact_id, job_id = stage(migrated_database_url, project_id)
+    error = finish(settings, migrated_database_url, job_id)
+    assert "storage_quota_exceeded" in error
+
+    async def status(db):
+        return await db.scalar(select(Job.status).where(Job.id == job_id))
+
+    assert run_db(migrated_database_url, status) == "failed"
+    assert storage_used(migrated_database_url) == 0
+
+    # The abandoned files are cleaned up once failed artifacts expire.
+    no_wait = settings.model_copy(
+        update={"storage": settings.storage.model_copy(update={"keep_failed_hours": 0})}
+    )
+
+    async def collect(db):
+        return await artifacts.collect_garbage(create_sessionmaker(db.bind), no_wait)
+
+    assert run_db(migrated_database_url, collect) == 1
+    artifact = artifact_row(migrated_database_url, artifact_id)
+    assert artifact.state == "deleted"
+    assert get_bytes(files_of(settings, artifact), "data/0") is None
+
+
+def test_a_rejected_commit_reserves_nothing(settings, migrated_database_url):
+    # Room for one artifact's files but not two.
+    project_id = make_project(migrated_database_url, {"storage_gb": 1500 / 1024**3})
+    first, job_id = stage(migrated_database_url, project_id)
+
+    async def second_output(db):
+        artifact = await artifacts.create_staging(
+            db, project_id=project_id, kind="mesh"
+        )
+        artifact.produced_by_job = job_id
+        return artifact.id
+
+    second = run_db(migrated_database_url, second_output)
+    assert "storage_quota_exceeded" in finish(settings, migrated_database_url, job_id)
+    assert storage_used(migrated_database_url) == 0
+    for artifact_id in (first, second):
+        assert artifact_row(migrated_database_url, artifact_id).state == "staging"
+
+
+def test_new_heads_supersede_old_ones_and_gc_frees_them(
+    settings, migrated_database_url
+):
+    project_id = make_project(migrated_database_url)
+    first, first_job = stage(migrated_database_url, project_id)
+    finish(settings, migrated_database_url, first_job)
+    second, second_job = stage(migrated_database_url, project_id)
+    finish(settings, migrated_database_url, second_job)
+    assert artifact_row(migrated_database_url, first).state == "superseded"
+    first_bytes = artifact_row(migrated_database_url, first).bytes
+    assert storage_used(migrated_database_url) == 2 * first_bytes
+
+    # Kept for a week by default...
+    async def collect(db, current_settings):
+        return await artifacts.collect_garbage(
+            create_sessionmaker(db.bind), current_settings
+        )
+
+    assert run_db(migrated_database_url, lambda db: collect(db, settings)) == 0
+    # ...but a job that still reads the old one keeps it, whatever the setting.
+    no_wait = settings.model_copy(
+        update={
+            "storage": settings.storage.model_copy(update={"keep_superseded_days": 0})
+        }
+    )
+    old = artifact_row(migrated_database_url, first)
+
+    async def reader(db):
+        job = await jobs.enqueue(db, "noop", {}, grants=[artifacts.grant_for(old, "r")])
+        return job.id
+
+    reader_id = run_db(migrated_database_url, reader)
+    assert run_db(migrated_database_url, lambda db: collect(db, no_wait)) == 0
+
+    async def finish_reader(db):
+        await db.execute(
+            update(Job).where(Job.id == reader_id).values(status="succeeded")
+        )
+
+    run_db(migrated_database_url, finish_reader)
+    assert run_db(migrated_database_url, lambda db: collect(db, no_wait)) == 1
+    assert artifact_row(migrated_database_url, first).state == "deleted"
+    assert storage_used(migrated_database_url) == first_bytes
+    assert artifact_row(migrated_database_url, second).state == "committed"
+
+
+def test_deleting_a_project_deletes_its_artifacts(settings, migrated_database_url):
+    project_id = make_project(migrated_database_url)
+    artifact_id, job_id = stage(migrated_database_url, project_id)
+    finish(settings, migrated_database_url, job_id)
+    assert storage_used(migrated_database_url) > 0
+
+    async def delete_project_and_collect(db):
+        await db.execute(
+            update(Project).values(deleted_at=datetime.datetime.now(datetime.UTC))
+        )
+        await db.commit()
+        collected = await artifacts.collect_garbage(
+            create_sessionmaker(db.bind), settings
+        )
+        heads = (await db.scalars(select(ArtifactHead))).all()
+        return collected, heads
+
+    assert run_db(migrated_database_url, delete_project_and_collect) == (1, [])
+    assert artifact_row(migrated_database_url, artifact_id).state == "deleted"
+    assert storage_used(migrated_database_url) == 0
+
+
+def test_expired_caches_are_collected(settings, migrated_database_url):
+    project_id = make_project(migrated_database_url)
+    artifact_id, job_id = stage(migrated_database_url, project_id, head_slot=None)
+    finish(settings, migrated_database_url, job_id)
+
+    async def expire_and_collect(db):
+        await db.execute(update(Artifact).values(expires_at=PAST))
+        await db.commit()
+        return await artifacts.collect_garbage(create_sessionmaker(db.bind), settings)
+
+    assert run_db(migrated_database_url, expire_and_collect) == 1
+    assert storage_used(migrated_database_url) == 0
+
+
+def test_direct_access_is_only_for_local_workers(settings, migrated_database_url):
+    project_id = make_project(migrated_database_url)
+    artifact_id, job_id = stage(migrated_database_url, project_id)
+    direct = settings.model_copy(
+        update={
+            "storage": settings.storage.model_copy(update={"worker_access": "direct"})
+        }
+    )
+
+    async def grants(db):
+        job = await db.get(Job, job_id)
+        local = Worker(name="l", pool="local", token_hash="1" * 64)
+        remote = Worker(name="r", pool="remote", token_hash="2" * 64)
+        return (
+            broker.grants_for(direct, local, job, "token", "https://x.org")[0],
+            broker.grants_for(direct, remote, job, "token", "https://x.org")[0],
+            broker.grants_for(settings, local, job, "token", "https://x.org")[0],
+        )
+
+    local, remote, default = run_db(migrated_database_url, grants)
+    assert local.scheme == "file" and local.access == "rw"
+    assert remote.url == f"https://x.org/api/worker/v1/jobs/{job_id}/storage/0"
+    assert default.scheme == "https" and default.secret("token") == "token"
+
+
+@pytest.mark.parametrize(
+    "grant",
+    [
+        {"path": "projects/x/../../etc", "access": "r"},
+        {"path": "other/place", "access": "r"},
+        {"path": "projects/x", "access": "admin"},
+        {"path": "projects/x", "access": "r", "extra": "1"},
+    ],
+)
+def test_job_grants_are_checked(migrated_database_url, grant):
+    async def add(db):
+        with pytest.raises(ValueError):
+            await jobs.enqueue(db, "noop", {}, grants=[grant])
+
+    run_db(migrated_database_url, add)

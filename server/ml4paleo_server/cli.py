@@ -47,7 +47,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     check_workers = commands.add_parser(
         "check-workers",
-        help="Queue a diagnostic job and wait for a worker to run it.",
+        help="Queue a diagnostic job (which also writes and reads a scratch "
+        "object through the worker's storage access) and wait for a worker to "
+        "run it.",
     )
     check_workers.add_argument(
         "--timeout", type=float, default=60, help="Seconds to wait (default: 60)."
@@ -147,6 +149,7 @@ async def _check_workers(timeout: float) -> int:
 
     from ml4paleo.protocol import Tier
     from ml4paleo_server import jobs
+    from ml4paleo_server.api.admin_jobs import check_grant
     from ml4paleo_server.db import Job, Worker, create_engine, create_sessionmaker
     from ml4paleo_server.settings import Settings
 
@@ -155,7 +158,12 @@ async def _check_workers(timeout: float) -> int:
     try:
         async with sessionmaker() as db:
             job = await jobs.enqueue(
-                db, "noop", {"seconds": 0}, tier=Tier.INTERACTIVE, max_attempts=1
+                db,
+                "noop",
+                {"seconds": 0, "check_storage": True},
+                tier=Tier.INTERACTIVE,
+                max_attempts=1,
+                grants=[check_grant()],
             )
             await db.commit()
         started = time.monotonic()
@@ -176,7 +184,11 @@ async def _check_workers(timeout: float) -> int:
         elapsed = time.monotonic() - started
         if current.status == "succeeded":
             name = worker.name if worker else "a worker"
-            print(f"Worker {name!r} ran the check job in {elapsed:.1f} s.", flush=True)
+            print(
+                f"Worker {name!r} ran the check job, including a storage round "
+                f"trip, in {elapsed:.1f} s.",
+                flush=True,
+            )
             return 0
         if current.status not in jobs.queue.FINISHED:
             async with sessionmaker() as db:

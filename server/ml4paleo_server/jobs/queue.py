@@ -45,7 +45,7 @@ import datetime
 import hashlib
 import secrets
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,6 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from ml4paleo.protocol import Tier, WorkerCaps
+from ml4paleo.storage import StorageGrant
 
 from ..db import Job, JobAttempt, JobDep, Worker, uuid7
 
@@ -89,6 +90,18 @@ class JobCancelled(Exception):
     """
     The job was cancelled while the worker ran it; its output is not wanted.
     """
+
+
+class Rejected(Exception):
+    """
+    A job's output can't be accepted (for example it is missing its manifest,
+    or it doesn't fit the owner's storage quota). The attempt fails, and is
+    retried if `retryable`.
+    """
+
+    def __init__(self, message: str, *, retryable: bool):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -128,6 +141,7 @@ async def enqueue(
     weight: float = 1,
     max_attempts: int = 3,
     idempotency_key: str | None = None,
+    grants: Sequence[dict[str, str]] = (),
 ) -> Job:
     """
     Add a job and return it.
@@ -196,6 +210,7 @@ async def enqueue(
         scale_trigger=tier != Tier.BACKGROUND,
         cancel_requested=False,
         parent_id=parent.id if parent is not None else None,
+        grants=[_check_grant(g) for g in grants],
     )
     if pipeline is None:
         job.root_id = job.id
@@ -223,6 +238,17 @@ async def enqueue(
     if job.status == "queued":
         await notify(db)
     return job
+
+
+def _check_grant(grant: dict[str, str]) -> dict[str, str]:
+    path, access = grant.get("path", ""), grant.get("access")
+    if access not in ("r", "rw") or set(grant) != {"path", "access"}:
+        raise ValueError(f"Bad job grant {grant!r}")
+    # Raises for empty, ".", "..", and other unsafe path segments.
+    StorageGrant(url="s3://check").child(path)
+    if not path.startswith("projects/"):
+        raise ValueError(f"Job grants must be under projects/: {path!r}")
+    return {"path": path, "access": access}
 
 
 async def claim(db: AsyncSession, worker: Worker, caps: WorkerCaps) -> Claimed | None:
@@ -349,9 +375,14 @@ async def complete(
     worker: Worker,
     lease_token: str,
     result: dict[str, Any],
+    check: Callable[[Job], Awaitable[None]] | None = None,
 ) -> Job:
     """
     Mark a job succeeded and queue the jobs that were waiting only for it.
+
+    `check` runs first, in the same transaction (the server commits the job's
+    artifacts there); if it raises `Rejected`, the attempt fails instead and
+    the exception propagates.
 
     Reporting the same success twice is harmless. Raises `JobCancelled` if the
     job was cancelled while it ran.
@@ -367,6 +398,16 @@ async def complete(
     if job.cancel_requested:
         await _finish(db, job, "cancelled", outcome="cancelled")
         raise JobCancelled
+    if check is not None:
+        try:
+            # A savepoint, so a rejection undoes everything the check did
+            # (for example quota reserved for an earlier artifact).
+            async with db.begin_nested():
+                await check(job)
+        except Rejected as exc:
+            await db.refresh(job)
+            await _end_attempt(db, job, error=str(exc), retryable=exc.retryable)
+            raise
     job.result = result
     job.progress = 1
     await _finish(db, job, "succeeded", outcome="succeeded")
@@ -713,6 +754,7 @@ __all__ = [
     "JobCancelled",
     "LeaseLost",
     "PipelineStatus",
+    "Rejected",
     "cancel_pipeline",
     "claim",
     "complete",

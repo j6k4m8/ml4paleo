@@ -10,16 +10,24 @@ the backend:
 - `s3://bucket/prefix`: AWS S3, or any S3-compatible service (SeaweedFS, R2)
   when `endpoint` is set.
 - `gs://bucket/prefix`: Google Cloud Storage.
+- `https://server/api/worker/v1/jobs/<job>/storage/<n>` (or `http://` on a
+  private network): the API server's storage proxy, for workers that have no
+  storage credentials of their own. The only credential is `token`, the job's
+  lease token, so access ends when the lease does.
 
 `zarr_store` gives zarr-python a store rooted at the grant's location, and
 `get_bytes`, `put_bytes`, and `delete_object` cover plain objects. Code that
 reads or writes data therefore has one path for every backend.
+
+A job that produces an artifact writes `MANIFEST_KEY` last (`write_manifest`);
+the server commits the artifact only if it finds one.
 
 Read-only grants are enforced by these helpers and by the zarr store. The raw
 obstore handle from `object_store` cannot refuse writes, so read-only grants
 should also carry read-only credentials (the credential broker issues those).
 """
 
+import json
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal
@@ -27,7 +35,7 @@ from urllib.parse import urlsplit
 
 import obstore
 import zarr.storage
-from obstore.store import GCSStore, LocalStore, S3Store
+from obstore.store import GCSStore, HTTPStore, LocalStore, S3Store
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -36,12 +44,15 @@ from pydantic import (
     field_validator,
 )
 
-Scheme = Literal["file", "s3", "gs"]
-SUPPORTED_SCHEMES: tuple[Scheme, ...] = ("file", "s3", "gs")
+Scheme = Literal["file", "s3", "gs", "http", "https"]
+SUPPORTED_SCHEMES: tuple[Scheme, ...] = ("file", "s3", "gs", "http", "https")
+PROXY_SCHEMES = ("http", "https")
+MANIFEST_KEY = "_MANIFEST.json"
 
 # Credential keys a grant may carry, per backend.
 S3_CREDENTIAL_KEYS = ("access_key_id", "secret_access_key", "session_token")
 GCS_CREDENTIAL_KEYS = ("service_account_key", "token")
+PROXY_CREDENTIAL_KEYS = ("token",)
 
 # Characters never allowed in storage paths. Rejecting "%" means a path can't
 # smuggle an encoded "..", and "?" and "#" would end the path part of a URL.
@@ -91,7 +102,7 @@ class StorageGrant(BaseModel):
             if not parts.path.startswith("/"):
                 raise ValueError("file:// URLs must use an absolute path")
         elif not parts.netloc:
-            raise ValueError(f"{parts.scheme}:// URLs must name a bucket")
+            raise ValueError(f"{parts.scheme}:// URLs must name a bucket or host")
         _check_path_segments(parts.path.strip("/"))
         return url.rstrip("/") if parts.path not in ("", "/") else url
 
@@ -110,9 +121,11 @@ class StorageGrant(BaseModel):
     @property
     def bucket(self) -> str | None:
         """
-        The bucket name, or None for local disk.
+        The bucket name, or None for local disk and the storage proxy.
         """
-        return None if self.scheme == "file" else urlsplit(self.url).netloc
+        if self.scheme == "file" or self.scheme in PROXY_SCHEMES:
+            return None
+        return urlsplit(self.url).netloc
 
     @property
     def path(self) -> str:
@@ -145,18 +158,23 @@ Refresh = Callable[[], StorageGrant]
 
 def object_store(
     grant: StorageGrant, refresh: Refresh | None = None
-) -> LocalStore | S3Store | GCSStore:
+) -> LocalStore | S3Store | GCSStore | HTTPStore:
     """
     Return an obstore store rooted at the grant's location.
 
     For long jobs whose temporary credentials expire, pass `refresh`: a
     function that returns a fresh grant for the same location. The store calls
     it whenever its credentials are about to expire.
+
+    The storage proxy's store can't do multipart uploads: write through
+    `put_bytes` or `zarr_store`, which send each object in one request.
     """
     if grant.scheme == "file":
         return LocalStore(grant.path, mkdir=grant.access == "rw")
     if grant.scheme == "s3":
         return _s3_store(grant, refresh)
+    if grant.scheme in PROXY_SCHEMES:
+        return _proxy_store(grant)
     return _gcs_store(grant, refresh)
 
 
@@ -167,9 +185,30 @@ def zarr_store(
     Return a zarr store for the grant's location. Read-only grants give a
     read-only store.
     """
-    return zarr.storage.ObjectStore(
-        object_store(grant, refresh), read_only=grant.access == "r"
+    store_class = (
+        _SinglePutZarrStore
+        if grant.scheme in PROXY_SCHEMES
+        else zarr.storage.ObjectStore
     )
+    return store_class(object_store(grant, refresh), read_only=grant.access == "r")
+
+
+class _SinglePutZarrStore(zarr.storage.ObjectStore):
+    """
+    A zarr store that sends every object in one request, for the storage
+    proxy (obstore's HTTP store has no multipart uploads).
+    """
+
+    async def set(self, key: str, value) -> None:
+        self._check_writable()
+        await obstore.put_async(
+            self.store, key, value.as_buffer_like(), use_multipart=False
+        )
+
+    async def set_if_not_exists(self, key: str, value) -> None:
+        self._check_writable()
+        if not await self.exists(key):
+            await self.set(key, value)
 
 
 def get_bytes(grant: StorageGrant, key: str) -> bytes | None:
@@ -189,7 +228,20 @@ def put_bytes(grant: StorageGrant, key: str, data: bytes) -> None:
     """
     _check_writable(grant)
     _check_path_segments(key)
-    obstore.put(object_store(grant), key, data)
+    obstore.put(
+        object_store(grant),
+        key,
+        data,
+        use_multipart=False if grant.scheme in PROXY_SCHEMES else None,
+    )
+
+
+def write_manifest(grant: StorageGrant, manifest: dict[str, Any]) -> None:
+    """
+    Write an artifact's manifest. Write it last: its presence tells the
+    server that everything else is in place.
+    """
+    put_bytes(grant, MANIFEST_KEY, json.dumps(manifest, sort_keys=True).encode())
 
 
 def delete_object(grant: StorageGrant, key: str) -> None:
@@ -249,6 +301,16 @@ def _s3_store(grant: StorageGrant, refresh: Refresh | None) -> S3Store:
     )
 
 
+def _proxy_store(grant: StorageGrant) -> HTTPStore:
+    _check_credential_keys(grant, PROXY_CREDENTIAL_KEYS)
+    client_options: dict[str, Any] = {"timeout": "600s"}
+    if token := grant.secret("token"):
+        client_options["default_headers"] = {"Authorization": f"Bearer {token}"}
+    if grant.scheme == "http":
+        client_options["allow_http"] = True
+    return HTTPStore(grant.url, client_options=client_options)  # type: ignore[arg-type]
+
+
 def _gcs_store(grant: StorageGrant, refresh: Refresh | None) -> GCSStore:
     _check_credential_keys(grant, GCS_CREDENTIAL_KEYS)
     kwargs: dict[str, Any] = {}
@@ -292,11 +354,13 @@ def _check_path_segments(path: str) -> None:
 
 
 __all__ = [
+    "MANIFEST_KEY",
     "SUPPORTED_SCHEMES",
     "StorageGrant",
     "delete_object",
     "get_bytes",
     "object_store",
     "put_bytes",
+    "write_manifest",
     "zarr_store",
 ]
