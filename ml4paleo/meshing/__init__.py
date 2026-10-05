@@ -1,14 +1,15 @@
 import json
-from typing import Optional, Tuple
-import tqdm
-from intern.utils.parallel import block_compute
-from ..volume_providers import VolumeProvider
 import pathlib
-from zmesh import Mesher
-from stl import mesh as stl_mesh
-import stl
+
 import numpy as np
 import skimage.measure
+import stl
+import tqdm
+from intern.utils.parallel import block_compute
+from stl import mesh as stl_mesh
+from zmesh import Mesher
+
+from ..volume_providers import VolumeProvider
 
 # Written next to the meshes to record their coordinate system. Meshes without
 # this file predate x, y, z vertex order and are stored in (z, y, x) order.
@@ -20,9 +21,9 @@ class ChunkedMesher:
         self,
         volume_provider: VolumeProvider,
         mesh_path: pathlib.Path,
-        chunk_size: Tuple[int, int, int],
+        chunk_size: tuple[int, int, int],
         downsample_factor: int = 1,
-        voxel_size_xyz_mm: Optional[Tuple[float, float, float]] = None,
+        voxel_size_xyz_mm: tuple[float, float, float] | None = None,
     ):
         """
         Arguments:
@@ -167,4 +168,4 @@ def write_obj(mesh, filename):
             for p in v:
                 f.write(f"v {p[0]} {p[1]} {p[2]}\n")
         for i in range(len(mesh.vectors)):
-            f.write(f"f {3*i+1} {3*i+2} {3*i+3}\n")
+            f.write(f"f {3 * i + 1} {3 * i + 2} {3 * i + 3}\n")

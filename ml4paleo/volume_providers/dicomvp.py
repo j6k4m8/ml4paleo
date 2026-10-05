@@ -1,6 +1,5 @@
 import logging
 import pathlib
-from typing import Optional, Union
 
 import numpy as np
 
@@ -24,14 +23,14 @@ class DicomVolumeProvider(VolumeProvider):
 
     def __init__(
         self,
-        path_to_dcms: Union[pathlib.Path, str, list[pathlib.Path]],
+        path_to_dcms: pathlib.Path | str | list[pathlib.Path],
         dcm_glob: str = "*",
     ):
-        self._path: Optional[pathlib.Path] = None
+        self._path: pathlib.Path | None = None
         self._glob = dcm_glob
         self._files: list[pathlib.Path] = []
-        self._volume_xyz: Optional[np.ndarray] = None
-        self._voxel_size_xyz_mm: Optional[tuple[float, float, float]] = None
+        self._volume_xyz: np.ndarray | None = None
+        self._voxel_size_xyz_mm: tuple[float, float, float] | None = None
 
         if isinstance(path_to_dcms, list):
             self._load_file_list(path_to_dcms)
@@ -82,7 +81,7 @@ class DicomVolumeProvider(VolumeProvider):
         return dataset
 
     @classmethod
-    def _in_plane_spacing_xy(cls, dataset) -> Optional[tuple[float, float]]:
+    def _in_plane_spacing_xy(cls, dataset) -> tuple[float, float] | None:
         # PixelSpacing is (row spacing, column spacing). Rows are stacked
         # along Y and columns along X, so X spacing is the second value.
         pixel_spacing = getattr(cls._pixel_measures(dataset), "PixelSpacing", None)
@@ -95,7 +94,7 @@ class DicomVolumeProvider(VolumeProvider):
         return column_spacing, row_spacing
 
     @classmethod
-    def _nominal_slice_spacing(cls, dataset) -> Optional[float]:
+    def _nominal_slice_spacing(cls, dataset) -> float | None:
         for source in (dataset, cls._pixel_measures(dataset)):
             for attribute in ("SpacingBetweenSlices", "SliceThickness"):
                 try:
@@ -107,7 +106,7 @@ class DicomVolumeProvider(VolumeProvider):
         return None
 
     @staticmethod
-    def _slice_spacing_from_positions(headers) -> Optional[float]:
+    def _slice_spacing_from_positions(headers) -> float | None:
         """
         Return the median distance between sorted slices along the slice
         normal, or None if any slice lacks a position.
@@ -131,8 +130,8 @@ class DicomVolumeProvider(VolumeProvider):
 
     @classmethod
     def _voxel_size(
-        cls, dataset, slice_spacing: Optional[float] = None
-    ) -> Optional[tuple[float, float, float]]:
+        cls, dataset, slice_spacing: float | None = None
+    ) -> tuple[float, float, float] | None:
         in_plane_spacing = cls._in_plane_spacing_xy(dataset)
         if slice_spacing is None:
             slice_spacing = cls._nominal_slice_spacing(dataset)
@@ -182,7 +181,9 @@ class DicomVolumeProvider(VolumeProvider):
             except InvalidDicomError:
                 continue
             except Exception:
-                log.debug("Skipping unreadable file while scanning DICOM input: %s", path)
+                log.debug(
+                    "Skipping unreadable file while scanning DICOM input: %s", path
+                )
                 continue
             headers.append((path, dataset))
 
@@ -205,7 +206,9 @@ class DicomVolumeProvider(VolumeProvider):
             try:
                 dataset = self._read_header(path)
             except InvalidDicomError as exc:
-                raise ValueError(f"File {path.name} is not a valid DICOM file.") from exc
+                raise ValueError(
+                    f"File {path.name} is not a valid DICOM file."
+                ) from exc
             headers.append((path, dataset))
 
         if len(headers) == 1 and int(getattr(headers[0][1], "NumberOfFrames", 1)) > 1:
@@ -249,9 +252,10 @@ class DicomVolumeProvider(VolumeProvider):
         cols = int(dataset.Columns)
 
         for _, header in headers[1:]:
-            if int(getattr(header, "Rows", rows)) != rows or int(
-                getattr(header, "Columns", cols)
-            ) != cols:
+            if (
+                int(getattr(header, "Rows", rows)) != rows
+                or int(getattr(header, "Columns", cols)) != cols
+            ):
                 raise ValueError(
                     f"DICOM series in {source_label} has inconsistent slice dimensions."
                 )
@@ -294,5 +298,5 @@ class DicomVolumeProvider(VolumeProvider):
         return self._dtype
 
     @property
-    def voxel_size_xyz_mm(self) -> Optional[tuple[float, float, float]]:
+    def voxel_size_xyz_mm(self) -> tuple[float, float, float] | None:
         return self._voxel_size_xyz_mm

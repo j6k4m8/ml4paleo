@@ -1,13 +1,13 @@
 import functools
-from typing import Callable, Optional
+from collections.abc import Callable
+
+import joblib
 import numpy as np
 import skimage
 import skimage.feature
-import joblib
 from sklearn.ensemble import RandomForestClassifier
 
 from .segmenter import Segmenter3D
-
 
 _default_features_func = functools.partial(
     skimage.feature.multiscale_basic_features,
@@ -26,7 +26,7 @@ _DEFAULT_TRAINING_SPARSITY = 500
 class RandomForest3DSegmenter(Segmenter3D):
     def __init__(
         self,
-        rf_kwargs: Optional[dict] = None,
+        rf_kwargs: dict | None = None,
         features_fn: Callable = _default_features_func,
     ):
         """
@@ -51,7 +51,7 @@ class RandomForest3DSegmenter(Segmenter3D):
             n_estimators=estimators,
             max_depth=max_depth,
             n_jobs=n_jobs,
-            **self.rf_kwargs
+            **self.rf_kwargs,
         )
 
     def segment(self, volume: np.ndarray) -> np.ndarray:
@@ -112,9 +112,11 @@ class RandomForest3DSegmenter(Segmenter3D):
         labels = []
 
         for z in range(volume.shape[2]):
-            f, l = self._fit_slice(volume[:, :, z], mask[:, :, z])
-            features.append(f)
-            labels.append(l)
+            slice_features, slice_labels = self._fit_slice(
+                volume[:, :, z], mask[:, :, z]
+            )
+            features.append(slice_features)
+            labels.append(slice_labels)
 
         features = np.concatenate(features, axis=0)
         labels = np.concatenate(labels, axis=0)

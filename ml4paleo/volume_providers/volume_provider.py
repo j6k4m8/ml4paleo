@@ -1,13 +1,13 @@
-from typing import Optional, Tuple
 import abc
+
 import numpy as np
 
 
 def normalize_key(
-    key: Tuple,
-    self_shape: Tuple,
+    key: tuple,
+    self_shape: tuple,
     permit_single_int: bool = True,
-) -> Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]]:
+) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
     """
     NOTE: This function is copied from the BossDB "intern" package.
     https://github.com/jhuapl-boss/intern/blob/master/intern/convenience/array.py#L1293
@@ -114,7 +114,7 @@ class VolumeProvider(abc.ABC):
     """
 
     @abc.abstractproperty
-    def shape(self) -> Tuple[int, int, int]:
+    def shape(self) -> tuple[int, int, int]:
         """
         Return the shape of the volume.
 
@@ -136,7 +136,7 @@ class VolumeProvider(abc.ABC):
         raise NotImplementedError
 
     @property
-    def voxel_size_xyz_mm(self) -> Optional[Tuple[float, float, float]]:
+    def voxel_size_xyz_mm(self) -> tuple[float, float, float] | None:
         """
         Return the physical size of one voxel along X, Y, and Z, in mm.
 

@@ -1,5 +1,5 @@
-from typing import Optional, Tuple, Union
 import pathlib
+
 import numpy as np
 import zarr
 
@@ -11,7 +11,7 @@ class ZarrVolumeProvider(VolumeProvider):
     A volume provider that provides a 3D volume of data from a zarr array.
     """
 
-    def __init__(self, file_path: Union[str, pathlib.Path]):
+    def __init__(self, file_path: str | pathlib.Path):
         """
         Create a new ZarrVolumeProvider.
 
@@ -25,7 +25,7 @@ class ZarrVolumeProvider(VolumeProvider):
         return self.zarr[key]
 
     @property
-    def shape(self) -> Tuple[int, int, int]:
+    def shape(self) -> tuple[int, int, int]:
         return self.zarr.shape
 
     @property
@@ -33,7 +33,7 @@ class ZarrVolumeProvider(VolumeProvider):
         return self.zarr.dtype
 
     @property
-    def voxel_size_xyz_mm(self) -> Optional[Tuple[float, float, float]]:
+    def voxel_size_xyz_mm(self) -> tuple[float, float, float] | None:
         voxel_size = self.zarr.attrs.get("voxel_size_xyz_mm")
         if voxel_size is None:
             return None

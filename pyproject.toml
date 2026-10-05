@@ -3,7 +3,7 @@ name = "ml4paleo"
 version = "0.1.0"
 description = "Deep learning computer vision pipelines for paleontological 3D reconstruction"
 authors = [{ name = "Jordan Matelsky", email = "j6k4m8@gmail.com" }]
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
     "flask>=2.3.2",
     "flask-cors>=3.0.10",
@@ -32,6 +32,29 @@ bossdb = [
     "cloud-volume>=12.12.1",
     "intern>=1.4.2",
 ]
+dev = [
+    "pyright>=1.1.400",
+    "pytest>=8.4",
+    "ruff>=0.16",
+]
 dicom = [
     "pydicom>=2.4.4",
 ]
+
+[tool.uv.workspace]
+members = ["server", "worker"]
+
+[tool.ruff]
+target-version = "py312"
+# The v1 web app is frozen until the v2 importer replaces it.
+extend-exclude = ["webapp", "notebooks", "eda", "*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.pyright]
+include = ["server", "worker"]
+pythonVersion = "3.12"
