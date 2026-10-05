@@ -5,6 +5,23 @@
 
 FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
 
+# Neuroglancer, built from a pinned release (v2.41.2), served at /neuroglancer/.
+# Only the built static files reach the final image.
+FROM node:22-bookworm-slim AS neuroglancer
+ARG NEUROGLANCER_COMMIT=e13f1f4c62918f2ea07b12f2116bdcb6767b1499
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git init -q \
+    && git remote add origin https://github.com/google/neuroglancer.git \
+    && git fetch -q --depth 1 origin "$NEUROGLANCER_COMMIT" \
+    && git checkout -q FETCH_HEAD
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund \
+    && npm run build -- --no-typecheck --no-lint \
+    && test -f dist/client/index.html
+
 FROM python:3.12-slim-bookworm
 
 # Upgrade first so the image picks up Debian security fixes released after the
@@ -36,9 +53,12 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --package ml4paleo-server --no-editable
 
+COPY --from=neuroglancer /src/dist/client /app/neuroglancer
+
 RUN useradd --system --uid 10001 --no-create-home ml4paleo
 USER ml4paleo
-ENV PATH="/app/.venv/bin:$PATH"
+ENV PATH="/app/.venv/bin:$PATH" \
+    M4P_NEUROGLANCER_DIR=/app/neuroglancer
 
 EXPOSE 8000
 CMD ["ml4paleo-server", "serve", "--host", "0.0.0.0", "--port", "8000"]

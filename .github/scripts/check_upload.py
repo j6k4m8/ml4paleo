@@ -174,9 +174,21 @@ def main(origin: str) -> int:
     if pipeline["status"] != "succeeded":
         problems.append(f"ingest ended {pipeline['status']}: {pipeline.get('error')}")
     else:
-        manifest = api("GET", f"/api/projects/{project}/image")["manifest"]
-        if manifest["shape_czyx"] != [1, 20, 12, 16]:
-            problems.append(f"the image has shape {manifest['shape_czyx']}")
+        image = api("GET", f"/api/projects/{project}/image")
+        if image["manifest"]["shape_czyx"] != [1, 20, 12, 16]:
+            problems.append(f"the image has shape {image['manifest']['shape_czyx']}")
+        # Viewers read the image through the data gateway.
+        metadata = api("GET", image["zarr_url"] + "zarr.json")
+        if "ome" not in metadata.get("attributes", {}):
+            problems.append("the gateway didn't serve the image's OME-Zarr metadata")
+        if not (image.get("neuroglancer_url") or "").startswith("/neuroglancer/#!"):
+            problems.append("there is no Neuroglancer link for the image")
+    # Neuroglancer itself, with its own content security policy.
+    with opener.open(origin + "/neuroglancer/") as response:
+        page = response.read()
+        policy = response.headers.get("Content-Security-Policy", "")
+    if b"neuroglancer" not in page.lower() or "wasm-unsafe-eval" not in policy:
+        problems.append("Neuroglancer isn't served at /neuroglancer/")
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems else 0

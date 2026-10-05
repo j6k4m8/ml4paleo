@@ -6,6 +6,7 @@ from . import (
     admin,
     admin_jobs,
     auth,
+    gateway,
     me,
     pipelines,
     projects,
@@ -22,6 +23,7 @@ ROUTERS = [
     projects.router,
     uploads.router,
     pipelines.router,
+    gateway.router,
     worker.router,
     storage_proxy.router,
 ]

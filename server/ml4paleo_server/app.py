@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import obstore
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from starlette.concurrency import run_in_threadpool
 
@@ -27,6 +28,11 @@ from .db import create_engine, create_sessionmaker
 from .jobs import JobSignal
 from .settings import Settings
 from .storage import project_storage
+from .viewer import (
+    NEUROGLANCER_CONTENT_SECURITY_POLICY,
+    NEUROGLANCER_PATH,
+    neuroglancer_available,
+)
 
 MIN_SECRET_KEY_LENGTH = 32
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -132,7 +138,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def security_headers(request: Request, call_next) -> Response:
         response = await call_next(request)
-        response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        policy = (
+            NEUROGLANCER_CONTENT_SECURITY_POLICY
+            if request.url.path.startswith(NEUROGLANCER_PATH + "/")
+            else CONTENT_SECURITY_POLICY
+        )
+        response.headers.setdefault("Content-Security-Policy", policy)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
@@ -154,6 +165,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     for router in ROUTERS:
         app.include_router(router)
+
+    if neuroglancer_available(settings):
+        assert settings.neuroglancer_dir is not None
+        app.mount(
+            NEUROGLANCER_PATH,
+            StaticFiles(directory=settings.neuroglancer_dir, html=True),
+            name="neuroglancer",
+        )
 
     @app.get("/{path:path}", include_in_schema=False)
     async def web_app(path: str) -> Response:
