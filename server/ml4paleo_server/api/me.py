@@ -89,6 +89,7 @@ async def request_more(
         for admin in admins:
             queue_email(
                 db,
+                settings,
                 admin.email or "",
                 f"ml4paleo: {auth.user.username} asked for more space",
                 f"{auth.user.username} asked for higher limits:\n\n"
