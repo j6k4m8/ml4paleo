@@ -1,5 +1,5 @@
 """
-Label edits as per-chunk mask deltas.
+Label edits as per-chunk mask deltas, and the claims that make undo exact.
 
 The browser turns every committed annotation action (a brush stroke, a closed
 polygon, a fill, an accepted proposal) into one op, made of one `ChunkDelta`
@@ -8,18 +8,25 @@ resulting mask, so what the user saw locally is exactly what gets committed.
 Workers (propagation, interactive models, importers) build deltas the same way
 with `split_into_deltas`.
 
-Applying a delta returns an `UndoPatch` with the previous values of every voxel
-it changed. Reverting a patch only restores voxels that still hold the value
-the op wrote, so undoing an old op never overwrites a collaborator's later
-edits.
+Applying a delta records a `Claim`: the voxels the op actually wrote (after
+its `only_if` condition) and the values it wrote there. The label state of a
+chunk is always the overlay of every live (not undone) op's claim, in op
+order: each voxel holds the value of the last live claim that covers it, or
+0 if none does. Undo and redo therefore only flip an op between live and
+undone and recompute that op's voxels from the remaining live claims
+(`recompute`). The result never depends on the order of undos, and an undo
+never disturbs voxels that a later op also wrote.
+
+Every payload decoded here may come from a browser, so decompression is
+bounded by the size the box allows.
 """
 
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
-from numcodecs import Zstd
+import zstandard
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from . import LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
@@ -27,8 +34,30 @@ from . import LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
 ChunkKey = tuple[int, int, int]
 Box = tuple[int, int, int, int, int, int]
 
-_zstd = Zstd(level=3)
 _ONLY_IF = re.compile(r"any|unlabeled|class:(\d{1,3})")
+# Compressed payloads may exceed their raw size only by a small frame overhead.
+_FRAME_OVERHEAD = 1024
+_MAX_RAW_BYTES = int(np.prod(LABEL_CHUNK_ZYX))
+
+
+def _compress(raw: bytes) -> bytes:
+    return zstandard.ZstdCompressor(level=3).compress(raw)
+
+
+def _decompress(data: bytes, size: int) -> bytes:
+    """
+    Decompress exactly `size` bytes, refusing anything larger without ever
+    allocating more than `size` bytes.
+    """
+    if len(data) > size + _FRAME_OVERHEAD:
+        raise ValueError("Compressed payload is larger than its box allows")
+    try:
+        raw = zstandard.ZstdDecompressor().decompress(data, max_output_size=size)
+    except zstandard.ZstdError as exc:
+        raise ValueError(f"Invalid compressed payload: {exc}") from exc
+    if len(raw) != size:
+        raise ValueError(f"Payload decompressed to {len(raw)} bytes, expected {size}")
+    return raw
 
 
 def pack_mask(mask: np.ndarray) -> bytes:
@@ -38,31 +67,43 @@ def pack_mask(mask: np.ndarray) -> bytes:
     bits = np.packbits(
         np.ascontiguousarray(mask, dtype=bool).ravel(), bitorder="little"
     )
-    return bytes(_zstd.encode(bits))
+    return _compress(bits.tobytes())
 
 
 def unpack_mask(data: bytes, shape: tuple[int, ...]) -> np.ndarray:
     """
     Reverse `pack_mask`.
     """
-    bits = np.frombuffer(_zstd.decode(data), dtype=np.uint8)
     count = int(np.prod(shape))
-    if bits.size != (count + 7) // 8:
-        raise ValueError(f"Packed mask has {bits.size} bytes for {count} voxels")
+    bits = np.frombuffer(_decompress(data, (count + 7) // 8), dtype=np.uint8)
     return (
         np.unpackbits(bits, count=count, bitorder="little").astype(bool).reshape(shape)
     )
 
 
 def pack_values(values: np.ndarray) -> bytes:
-    return bytes(_zstd.encode(np.ascontiguousarray(values, dtype=np.uint8)))
+    return _compress(np.ascontiguousarray(values, dtype=np.uint8).tobytes())
 
 
 def unpack_values(data: bytes, shape: tuple[int, ...]) -> np.ndarray:
-    values = np.frombuffer(_zstd.decode(data), dtype=np.uint8)
-    if values.size != int(np.prod(shape)):
-        raise ValueError(f"Packed values have {values.size} voxels, expected {shape}")
-    return values.reshape(shape).copy()
+    raw = _decompress(data, int(np.prod(shape)))
+    return np.frombuffer(raw, dtype=np.uint8).reshape(shape).copy()
+
+
+def _box_shape(box: Box) -> tuple[int, int, int]:
+    z0, y0, x0, z1, y1, x1 = box
+    return (z1 - z0, y1 - y0, x1 - x0)
+
+
+def _box_slices(box: Box) -> tuple[slice, slice, slice]:
+    z0, y0, x0, z1, y1, x1 = box
+    return (slice(z0, z1), slice(y0, y1), slice(x0, x1))
+
+
+def _check_box(box: Box) -> None:
+    for a, b, size in zip(box[:3], box[3:], LABEL_CHUNK_ZYX, strict=True):
+        if not 0 <= a < b <= size:
+            raise ValueError(f"Box {box} is not inside a {LABEL_CHUNK_ZYX} chunk")
 
 
 class ChunkDelta(BaseModel):
@@ -90,16 +131,14 @@ class ChunkDelta(BaseModel):
     def _check(self) -> "ChunkDelta":
         if any(k < 0 for k in self.key):
             raise ValueError(f"Chunk key must be non-negative: {self.key}")
-        lo, hi = self.box[:3], self.box[3:]
-        for a, b, size in zip(lo, hi, LABEL_CHUNK_ZYX, strict=True):
-            if not 0 <= a < b <= size:
-                raise ValueError(
-                    f"Box {self.box} is not inside a {LABEL_CHUNK_ZYX} chunk"
-                )
+        _check_box(self.box)
         if (self.value is None) == (self.values is None):
             raise ValueError("Set exactly one of value or values")
         if self.value is not None and not 0 <= self.value <= MAX_CLASS:
             raise ValueError(f"Label value {self.value} is out of range")
+        for payload in (self.mask, self.values or b""):
+            if len(payload) > _MAX_RAW_BYTES + _FRAME_OVERHEAD:
+                raise ValueError("Delta payload is too large")
         match = _ONLY_IF.fullmatch(self.only_if)
         if match is None or (match.group(1) and int(match.group(1)) > MAX_CLASS):
             raise ValueError(f"Invalid only_if: {self.only_if!r}")
@@ -107,21 +146,36 @@ class ChunkDelta(BaseModel):
 
     @property
     def box_shape(self) -> tuple[int, int, int]:
-        z0, y0, x0, z1, y1, x1 = self.box
-        return (z1 - z0, y1 - y0, x1 - x0)
+        return _box_shape(self.box)
 
     @property
     def box_slices(self) -> tuple[slice, slice, slice]:
-        z0, y0, x0, z1, y1, x1 = self.box
-        return (slice(z0, z1), slice(y0, y1), slice(x0, x1))
+        return _box_slices(self.box)
+
+    def check_within(self, volume_shape_zyx: Sequence[int]) -> None:
+        """
+        Raise ValueError if the delta's box reaches past the volume's edge.
+        Chunks at the far edges of a volume are only partly inside it.
+        """
+        for k, lo, hi, size, extent in zip(
+            self.key,
+            self.box[:3],
+            self.box[3:],
+            LABEL_CHUNK_ZYX,
+            volume_shape_zyx,
+            strict=True,
+        ):
+            if k * size + lo < 0 or k * size + hi > extent:
+                raise ValueError(
+                    f"Delta for chunk {self.key} reaches outside the volume"
+                )
 
 
-class UndoPatch(BaseModel):
+class Claim(BaseModel):
     """
-    What one delta changed in one chunk, enough to revert it.
-
-    `mask` marks the voxels the delta changed; `prev_*` hold their old values
-    and `new_class` the value the delta wrote (all box-shaped).
+    What one op wrote to one chunk: the claimed voxels (`mask`, within `box`),
+    the class values written there (`values`, box-shaped), and the source it
+    recorded. Erasing claims voxels with value 0.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -129,17 +183,29 @@ class UndoPatch(BaseModel):
     key: ChunkKey
     box: Box
     mask: bytes
-    prev_class: bytes
-    prev_source: bytes
-    new_class: bytes
+    values: bytes
+    source: Source
+
+    @property
+    def box_shape(self) -> tuple[int, int, int]:
+        return _box_shape(self.box)
 
 
 @dataclass(frozen=True)
-class AppliedDelta:
+class Applied:
     class_chunk: np.ndarray
     source_chunk: np.ndarray
+    # Voxels whose class or source changed.
     changed: int
-    undo: UndoPatch
+
+
+@dataclass(frozen=True)
+class AppliedDelta(Applied):
+    claim: Claim
+
+
+def _source_for(values: np.ndarray, source: Source) -> np.ndarray:
+    return np.where(values == UNLABELED, Source.NONE, source).astype(np.uint8)
 
 
 def apply_delta(
@@ -149,15 +215,19 @@ def apply_delta(
     source: Source,
 ) -> AppliedDelta:
     """
-    Apply a delta to copies of a chunk's `class` and `source` arrays.
+    Apply a delta to copies of a chunk's `class` and `source` arrays, and
+    return the claim to record for the op.
 
-    Erased voxels get source `NONE`; written voxels get `source`.
+    Written voxels get `source` (erased voxels get `Source.NONE`), even when
+    their class doesn't change, so a human repainting a model's label marks it
+    as human-made.
     """
     shape = delta.box_shape
     slices = delta.box_slices
     new_class = class_chunk.copy()
     new_source = source_chunk.copy()
     region = new_class[slices]
+    source_region = new_source[slices]
 
     selected = unpack_mask(delta.mask, shape)
     if delta.only_if == "unlabeled":
@@ -168,71 +238,81 @@ def apply_delta(
     if delta.value is not None:
         written = np.full(shape, delta.value, dtype=np.uint8)
     else:
-        written = unpack_values(delta.values, shape)  # type: ignore[arg-type]
+        written = unpack_values(delta.values or b"", shape)
         if written[selected].max(initial=0) > MAX_CLASS:
             raise ValueError("Delta writes a reserved label value")
-    changed = selected & (region != written)
+    written = np.where(selected, written, 0).astype(np.uint8)
+    written_source = _source_for(written, source)
 
-    prev_class = region.copy()
-    prev_source = new_source[slices].copy()
-    region[changed] = written[changed]
-    source_region = new_source[slices]
-    source_region[changed] = np.where(
-        written[changed] == UNLABELED, Source.NONE, source
-    )
-
+    changed = selected & ((region != written) | (source_region != written_source))
+    region[selected] = written[selected]
+    source_region[selected] = written_source[selected]
     return AppliedDelta(
         class_chunk=new_class,
         source_chunk=new_source,
         changed=int(changed.sum()),
-        undo=UndoPatch(
+        claim=Claim(
             key=delta.key,
             box=delta.box,
-            mask=pack_mask(changed),
-            prev_class=pack_values(prev_class),
-            prev_source=pack_values(prev_source),
-            new_class=pack_values(region),
+            mask=pack_mask(selected),
+            values=pack_values(written),
+            source=source,
         ),
     )
 
 
-def revert_patch(
-    class_chunk: np.ndarray, source_chunk: np.ndarray, patch: UndoPatch
-) -> AppliedDelta:
+def recompute(
+    class_chunk: np.ndarray,
+    source_chunk: np.ndarray,
+    region: Claim,
+    live_claims: Sequence[Claim],
+) -> Applied:
     """
-    Undo a patch on copies of a chunk, restoring only voxels that still hold
-    the value the patch's op wrote. The returned `undo` re-applies the change
-    (redo).
+    Recompute the voxels of `region` as the overlay of `live_claims` (every
+    live op's claim on this chunk, in op order). Voxels no live claim covers
+    become unlabeled.
+
+    To undo an op, pass its claim as `region` and the other live claims. To
+    redo it, pass its claim as `region` and the live claims including it.
     """
-    z0, y0, x0, z1, y1, x1 = patch.box
-    shape = (z1 - z0, y1 - y0, x1 - x0)
-    slices = (slice(z0, z1), slice(y0, y1), slice(x0, x1))
-    changed_by_op = unpack_mask(patch.mask, shape)
-    prev_class = unpack_values(patch.prev_class, shape)
-    prev_source = unpack_values(patch.prev_source, shape)
-    op_class = unpack_values(patch.new_class, shape)
+    shape = region.box_shape
+    slices = _box_slices(region.box)
+    target = unpack_mask(region.mask, shape)
+    overlay_class = np.zeros(shape, dtype=np.uint8)
+    overlay_source = np.zeros(shape, dtype=np.uint8)
+
+    for claim in live_claims:
+        if claim.key != region.key:
+            raise ValueError("Claims must all belong to the region's chunk")
+        lo = [max(a, b) for a, b in zip(claim.box[:3], region.box[:3], strict=True)]
+        hi = [min(a, b) for a, b in zip(claim.box[3:], region.box[3:], strict=True)]
+        if any(a >= b for a, b in zip(lo, hi, strict=True)):
+            continue
+        claim_slices = tuple(
+            slice(a - c, b - c) for a, b, c in zip(lo, hi, claim.box[:3], strict=True)
+        )
+        region_slices = tuple(
+            slice(a - r, b - r) for a, b, r in zip(lo, hi, region.box[:3], strict=True)
+        )
+        covers = unpack_mask(claim.mask, claim.box_shape)[claim_slices]
+        covers &= target[region_slices]
+        values = unpack_values(claim.values, claim.box_shape)[claim_slices]
+        overlay_class[region_slices][covers] = values[covers]
+        overlay_source[region_slices][covers] = _source_for(values, claim.source)[
+            covers
+        ]
 
     new_class = class_chunk.copy()
     new_source = source_chunk.copy()
-    region = new_class[slices]
-    source_region = new_source[slices]
-    restorable = changed_by_op & (region == op_class)
-
-    redo = UndoPatch(
-        key=patch.key,
-        box=patch.box,
-        mask=pack_mask(restorable),
-        prev_class=pack_values(region.copy()),
-        prev_source=pack_values(source_region.copy()),
-        new_class=pack_values(np.where(restorable, prev_class, region)),
+    current_class = new_class[slices]
+    current_source = new_source[slices]
+    changed = target & (
+        (current_class != overlay_class) | (current_source != overlay_source)
     )
-    region[restorable] = prev_class[restorable]
-    source_region[restorable] = prev_source[restorable]
-    return AppliedDelta(
-        class_chunk=new_class,
-        source_chunk=new_source,
-        changed=int(restorable.sum()),
-        undo=redo,
+    current_class[target] = overlay_class[target]
+    current_source[target] = overlay_source[target]
+    return Applied(
+        class_chunk=new_class, source_chunk=new_source, changed=int(changed.sum())
     )
 
 
@@ -268,8 +348,16 @@ def split_into_deltas(
     """
     if (value is None) == (values is None):
         raise ValueError("Pass exactly one of value or values")
-    if values is not None and values.shape != mask.shape:
-        raise ValueError("values must have the same shape as mask")
+    if value is not None and not 0 <= value <= MAX_CLASS:
+        raise ValueError(f"Label value {value} is out of range")
+    if values is not None:
+        if values.shape != mask.shape:
+            raise ValueError("values must have the same shape as mask")
+        selected_values = values[np.asarray(mask, dtype=bool)]
+        if selected_values.size and (
+            selected_values.min() < 0 or selected_values.max() > MAX_CLASS
+        ):
+            raise ValueError("values contain label values out of range")
     if any(o < 0 for o in origin_zyx):
         raise ValueError(f"Mask origin must be non-negative: {origin_zyx}")
     mask = np.asarray(mask, dtype=bool)

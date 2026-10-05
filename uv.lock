@@ -1824,6 +1824,7 @@ dependencies = [
     { name = "tqdm" },
     { name = "zarr" },
     { name = "zmesh" },
+    { name = "zstandard" },
 ]
 
 [package.dev-dependencies]
@@ -1861,6 +1862,7 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.65.0" },
     { name = "zarr", specifier = ">=3.4" },
     { name = "zmesh", specifier = ">=1.11.0" },
+    { name = "zstandard", specifier = ">=0.23" },
 ]
 
 [package.metadata.requires-dev]

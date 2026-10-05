@@ -1,7 +1,6 @@
-# Build the image and check it for vulnerabilities using Trivy
+# Build the images and check them for vulnerabilities using Trivy.
 name: Scan Image
 
-# On pushes to main, and PRs to main
 on:
   push:
     branches:
@@ -12,37 +11,53 @@ on:
       - master
       - v2
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # Build the image and check it for vulnerabilities using Trivy
+  # The v1 image ships from master only, so v2 work isn't blocked by CVEs in
+  # code it is replacing.
   build:
     name: Build
+    if: github.ref == 'refs/heads/master' || github.base_ref == 'master'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Build the Docker image
         run: docker build --tag ml4paleo .
-      
+
       - name: Check the Docker image for vulnerabilities
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ml4paleo
           exit-code: '1'
           ignore-unfixed: true
           severity: 'CRITICAL,HIGH'
+
   server:
     name: Build and scan the v2 server image
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Build the server image
         run: docker build --file deploy/docker/server.Dockerfile --tag ml4paleo-server .
 
       - name: Check the server image for vulnerabilities
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ml4paleo-server
           exit-code: '1'

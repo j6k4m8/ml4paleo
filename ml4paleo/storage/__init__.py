@@ -11,18 +11,30 @@ the backend:
   when `endpoint` is set.
 - `gs://bucket/prefix`: Google Cloud Storage.
 
-`object_store` returns an obstore store rooted at the grant's location, and
-`zarr_store` wraps that store for zarr-python. Code that reads or writes arrays
-therefore has one path for every backend.
+`zarr_store` gives zarr-python a store rooted at the grant's location, and
+`get_bytes`, `put_bytes`, and `delete_object` cover plain objects. Code that
+reads or writes data therefore has one path for every backend.
+
+Read-only grants are enforced by these helpers and by the zarr store. The raw
+obstore handle from `object_store` cannot refuse writes, so read-only grants
+should also carry read-only credentials (the credential broker issues those).
 """
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
+import obstore
 import zarr.storage
 from obstore.store import GCSStore, LocalStore, S3Store
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    SecretStr,
+    field_serializer,
+    field_validator,
+)
 
 Scheme = Literal["file", "s3", "gs"]
 SUPPORTED_SCHEMES: tuple[Scheme, ...] = ("file", "s3", "gs")
@@ -31,6 +43,10 @@ SUPPORTED_SCHEMES: tuple[Scheme, ...] = ("file", "s3", "gs")
 S3_CREDENTIAL_KEYS = ("access_key_id", "secret_access_key", "session_token")
 GCS_CREDENTIAL_KEYS = ("service_account_key", "token")
 
+# Characters never allowed in storage paths. Rejecting "%" means a path can't
+# smuggle an encoded "..", and "?" and "#" would end the path part of a URL.
+FORBIDDEN_PATH_CHARACTERS = frozenset("%?#\\")
+
 
 class StorageGrant(BaseModel):
     """
@@ -38,13 +54,17 @@ class StorageGrant(BaseModel):
 
     Grants are immutable and serializable, so the server can hand them to
     workers. Use `child` to narrow a grant to a sub-location.
+
+    Credentials are hidden from `repr` and `str`, so a logged grant doesn't
+    leak them. JSON serialization does include them, because that is how the
+    server sends grants to workers.
     """
 
     model_config = ConfigDict(frozen=True)
 
     url: str
     access: Literal["r", "rw"] = "r"
-    credentials: dict[str, str] = {}
+    credentials: dict[str, SecretStr] = {}
     endpoint: str | None = None
     region: str | None = None
     expires_at: datetime | None = None
@@ -67,8 +87,16 @@ class StorageGrant(BaseModel):
                 raise ValueError("file:// URLs must use an absolute path")
         elif not parts.netloc:
             raise ValueError(f"{parts.scheme}:// URLs must name a bucket")
-        _check_path_segments(unquote(parts.path).strip("/"))
+        _check_path_segments(parts.path.strip("/"))
         return url.rstrip("/") if parts.path not in ("", "/") else url
+
+    @field_serializer("credentials", when_used="json")
+    def _reveal_credentials(self, credentials: dict[str, SecretStr]) -> dict[str, str]:
+        return {key: value.get_secret_value() for key, value in credentials.items()}
+
+    def secret(self, key: str) -> str | None:
+        value = self.credentials.get(key)
+        return value.get_secret_value() if value is not None else None
 
     @property
     def scheme(self) -> Scheme:
@@ -86,47 +114,117 @@ class StorageGrant(BaseModel):
         """
         The path within the bucket (or the absolute path on local disk).
         """
-        path = unquote(urlsplit(self.url).path)
+        path = urlsplit(self.url).path
         return path if self.scheme == "file" else path.strip("/")
 
     def child(self, relative_path: str) -> "StorageGrant":
         """
         Return a grant for `relative_path` under this grant's location.
 
-        The path must be relative and must not contain `.` or `..` segments,
-        so a child grant can never point outside its parent.
+        The path must be relative and must not contain `.` or `..` segments
+        (or `%`, so they can't be encoded), so a child grant can never point
+        outside its parent.
         """
         relative_path = relative_path.strip("/")
         _check_path_segments(relative_path)
         if not relative_path:
             return self
-        return self.model_copy(update={"url": f"{self.url.rstrip('/')}/{relative_path}"})
+        # Validate the new URL as a whole, rather than copying the model.
+        return StorageGrant.model_validate(
+            {**self.model_dump(), "url": f"{self.url.rstrip('/')}/{relative_path}"}
+        )
 
 
-def object_store(grant: StorageGrant) -> LocalStore | S3Store | GCSStore:
+Refresh = Callable[[], StorageGrant]
+
+
+def object_store(
+    grant: StorageGrant, refresh: Refresh | None = None
+) -> LocalStore | S3Store | GCSStore:
     """
     Return an obstore store rooted at the grant's location.
+
+    For long jobs whose temporary credentials expire, pass `refresh`: a
+    function that returns a fresh grant for the same location. The store calls
+    it whenever its credentials are about to expire.
     """
     if grant.scheme == "file":
         return LocalStore(grant.path, mkdir=grant.access == "rw")
     if grant.scheme == "s3":
-        return _s3_store(grant)
-    return _gcs_store(grant)
+        return _s3_store(grant, refresh)
+    return _gcs_store(grant, refresh)
 
 
-def zarr_store(grant: StorageGrant) -> zarr.storage.ObjectStore:
+def zarr_store(
+    grant: StorageGrant, refresh: Refresh | None = None
+) -> zarr.storage.ObjectStore:
     """
     Return a zarr store for the grant's location. Read-only grants give a
     read-only store.
     """
-    return zarr.storage.ObjectStore(object_store(grant), read_only=grant.access == "r")
+    return zarr.storage.ObjectStore(
+        object_store(grant, refresh), read_only=grant.access == "r"
+    )
 
 
-def _s3_store(grant: StorageGrant) -> S3Store:
+def get_bytes(grant: StorageGrant, key: str) -> bytes | None:
+    """
+    Read one object under the grant, or return None if it doesn't exist.
+    """
+    _check_path_segments(key)
+    try:
+        return obstore.get(object_store(grant), key).bytes().to_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def put_bytes(grant: StorageGrant, key: str, data: bytes) -> None:
+    """
+    Write one object under the grant. Refuses read-only grants.
+    """
+    _check_writable(grant)
+    _check_path_segments(key)
+    obstore.put(object_store(grant), key, data)
+
+
+def delete_object(grant: StorageGrant, key: str) -> None:
+    """
+    Delete one object under the grant. Refuses read-only grants.
+    """
+    _check_writable(grant)
+    _check_path_segments(key)
+    obstore.delete(object_store(grant), key)
+
+
+def _check_writable(grant: StorageGrant) -> None:
+    if grant.access != "rw":
+        raise PermissionError(f"The grant for {grant.url} is read-only")
+
+
+def _s3_store(grant: StorageGrant, refresh: Refresh | None) -> S3Store:
     _check_credential_keys(grant, S3_CREDENTIAL_KEYS)
-    config: dict[str, Any] = {
-        key: value for key, value in grant.credentials.items() if value
-    }
+    config: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {}
+    if refresh is not None:
+
+        def provide_credentials():
+            fresh = refresh()
+            return {
+                "access_key_id": fresh.secret("access_key_id") or "",
+                "secret_access_key": fresh.secret("secret_access_key") or "",
+                "token": fresh.secret("session_token"),
+                "expires_at": fresh.expires_at,
+            }
+
+        kwargs["credential_provider"] = provide_credentials
+    else:
+        config.update(
+            {
+                key: value.get_secret_value()
+                for key, value in grant.credentials.items()
+                if value.get_secret_value()
+            }
+        )
     client_options: dict[str, Any] = {}
     if grant.endpoint is not None:
         config["endpoint"] = grant.endpoint
@@ -141,20 +239,24 @@ def _s3_store(grant: StorageGrant) -> S3Store:
         grant.bucket,
         prefix=grant.path or None,
         client_options=client_options or None,  # type: ignore[arg-type]
+        **kwargs,
         **config,
     )
 
 
-def _gcs_store(grant: StorageGrant) -> GCSStore:
+def _gcs_store(grant: StorageGrant, refresh: Refresh | None) -> GCSStore:
     _check_credential_keys(grant, GCS_CREDENTIAL_KEYS)
     kwargs: dict[str, Any] = {}
-    if service_account_key := grant.credentials.get("service_account_key"):
+    if service_account_key := grant.secret("service_account_key"):
         kwargs["service_account_key"] = service_account_key
-    if token := grant.credentials.get("token"):
-        expires_at = grant.expires_at
+    if refresh is not None or grant.secret("token"):
 
         def provide_token():
-            return {"token": token, "expires_at": expires_at}
+            fresh = refresh() if refresh is not None else grant
+            return {
+                "token": fresh.secret("token") or "",
+                "expires_at": fresh.expires_at,
+            }
 
         kwargs["credential_provider"] = provide_token
     return GCSStore(grant.bucket, prefix=grant.path or None, **kwargs)
@@ -172,8 +274,8 @@ def _check_credential_keys(grant: StorageGrant, allowed: tuple[str, ...]) -> Non
 def _check_path_segments(path: str) -> None:
     if not path:
         return
-    if "\\" in path:
-        raise ValueError(f"Storage paths cannot contain backslashes: {path!r}")
+    if forbidden := FORBIDDEN_PATH_CHARACTERS.intersection(path):
+        raise ValueError(f"Storage paths cannot contain {sorted(forbidden)}: {path!r}")
     # Split by hand: PurePosixPath would silently drop "." and empty segments.
     for segment in path.split("/"):
         if segment in ("", ".", ".."):
@@ -185,6 +287,9 @@ def _check_path_segments(path: str) -> None:
 __all__ = [
     "SUPPORTED_SCHEMES",
     "StorageGrant",
+    "delete_object",
+    "get_bytes",
     "object_store",
+    "put_bytes",
     "zarr_store",
 ]

@@ -2,18 +2,20 @@
 The server and worker packages install as workspace members with their CLIs.
 """
 
+import importlib
 import subprocess
 import sys
 
 import pytest
 
 
-@pytest.mark.parametrize("module", ["ml4paleo_server.cli", "ml4paleo_worker.cli"])
-def test_cli_reports_version(module):
+@pytest.mark.parametrize("package", ["ml4paleo_server", "ml4paleo_worker"])
+def test_cli_reports_version(package):
+    version = importlib.import_module(package).__version__
     result = subprocess.run(
-        [sys.executable, "-m", module, "--version"],
+        [sys.executable, "-m", f"{package}.cli", "--version"],
         capture_output=True,
         text=True,
         check=True,
     )
-    assert "0.2.0.dev0" in result.stdout
+    assert version in result.stdout
