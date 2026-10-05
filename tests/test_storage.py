@@ -78,6 +78,9 @@ def test_read_only_grants_reject_writes(grant):
         "s3:///no-bucket",
         "http://example.com/data",
         "s3://bucket/data?versionId=1",
+        "s3://user:secret@bucket/data",
+        "s3://bucket/a\x00b",
+        "file:///tmp/a\nb",
     ],
 )
 def test_unsafe_urls_are_rejected(url):

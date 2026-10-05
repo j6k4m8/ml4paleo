@@ -55,7 +55,7 @@ class ImageStackVolumeProvider(VolumeProvider):
 
         # Read the first slice once, so shape and dtype never need to reopen
         # files (and a bad first file fails here, not deep inside a job).
-        first = _read_slice(self.paths[0])
+        first, self._mode = _read_slice(self.paths[0])
         self._shape_xy: tuple[int, int] = (int(first.shape[0]), int(first.shape[1]))
         self._dtype = first.dtype
 
@@ -66,7 +66,7 @@ class ImageStackVolumeProvider(VolumeProvider):
         v1 silently replaced unreadable or mismatched slices with zeros, which
         corrupted volumes without any error.
         """
-        res = _read_slice(path)
+        res, mode = _read_slice(path)
         if res.shape != self._shape_xy:
             raise ValueError(
                 f"Image slice {path} has size {res.shape} (x, y), but the first "
@@ -76,6 +76,12 @@ class ImageStackVolumeProvider(VolumeProvider):
             raise ValueError(
                 f"Image slice {path} has pixel type {res.dtype}, but the first "
                 f"slice has {self._dtype}."
+            )
+        if mode != self._mode:
+            # For example palette indices mixed with grayscale intensities.
+            raise ValueError(
+                f"Image slice {path} has image mode {mode}, but the first "
+                f"slice has {self._mode}."
             )
         return res
 
@@ -109,9 +115,10 @@ class ImageStackVolumeProvider(VolumeProvider):
         return self._dtype
 
 
-def _read_slice(path: pathlib.Path) -> np.ndarray:
+def _read_slice(path: pathlib.Path) -> tuple[np.ndarray, str]:
     """
-    Read one image file as an (x, y) array, keeping the first channel of
+    Read one image file as an (x, y) array and its PIL mode, keeping the
+    first channel of
     multichannel images. Palette images keep their palette indices, which is
     what label images saved with a palette mean.
 
@@ -120,10 +127,11 @@ def _read_slice(path: pathlib.Path) -> np.ndarray:
     """
     try:
         with Image.open(path) as image:
+            mode = image.mode
             res = np.array(image).T
     except (OSError, ValueError) as exc:
         raise ValueError(f"Could not read image slice {path}: {exc}") from exc
     # If dim is CHW (an RGB or RGBA image), keep the first channel.
     if len(res.shape) == 3:
         res = res[0]
-    return res
+    return res, mode
