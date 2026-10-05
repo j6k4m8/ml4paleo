@@ -72,6 +72,9 @@ class StorageGrant(BaseModel):
     @field_validator("url")
     @classmethod
     def _validate_url(cls, url: str) -> str:
+        # Check before parsing: urlsplit silently drops tabs and newlines.
+        if any(ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+            raise ValueError("Storage URLs cannot contain control characters")
         parts = urlsplit(url)
         if parts.scheme not in SUPPORTED_SCHEMES:
             raise ValueError(
