@@ -1,11 +1,21 @@
 #!/bin/sh
 # Generate secrets and a starter .env for the single-machine compose deploy.
+#
+#   ./setup.sh ml4paleo.example.org   # a real domain, with HTTPS from Let's Encrypt
+#   ./setup.sh localhost              # try it locally (HTTPS with a local CA)
+#
 # Existing files are never overwritten, so it is safe to run again.
 set -eu
 
+if [ $# -ne 1 ]; then
+    echo "usage: $0 DOMAIN   (for example: $0 ml4paleo.example.org, or $0 localhost)" >&2
+    exit 2
+fi
+domain=$1
+
 cd "$(dirname "$0")"
 umask 077
-mkdir -p secrets
+mkdir -p secrets backups
 
 random() {
     head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c "$1"
@@ -35,12 +45,17 @@ write_secret seaweedfs_s3.json "$(cat <<JSON
           "secretKey": "$(cat secrets/s3_secret_access_key)"
         }
       ],
-      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+      "actions": ["Read", "List", "Tagging", "Write"]
     }
   ]
 }
 JSON
 )"
+
+# Fill in to send email with a password (leave empty otherwise).
+write_secret smtp_password ""
+# The first admin account's password. It must be changed at first sign-in.
+write_secret initial_admin_password "$(random 24)"
 
 # Containers run as their own users, and compose mounts these files as-is, so
 # they must be readable. The secrets directory itself stays private (0700).
@@ -48,18 +63,18 @@ chmod 0644 secrets/*
 
 if [ ! -f .env ]; then
     cat > .env <<ENV
-# Your domain, for automatic HTTPS (for example ml4paleo.example.org).
-# ":80" serves plain HTTP for local use.
-M4P_SITE_ADDRESS=:80
-# The URL people use to reach the app.
-M4P_PUBLIC_URL=http://localhost
+# The domain people use to reach ml4paleo. Caddy gets an HTTPS certificate for
+# it automatically ("localhost" uses Caddy's own local certificate authority).
+M4P_DOMAIN=$domain
 # Optional outgoing email (signup verification, password resets). Leave
-# M4P_SMTP__HOST empty to turn email off.
+# M4P_SMTP__HOST empty to turn email off. Put the password in
+# secrets/smtp_password.
 M4P_SMTP__HOST=
 M4P_SMTP__PORT=587
 M4P_SMTP__USERNAME=
-M4P_SMTP__PASSWORD=
-M4P_SMTP__FROM_ADDRESS=ml4paleo <no-reply@localhost>
+M4P_SMTP__FROM_ADDRESS=ml4paleo <no-reply@$domain>
 ENV
-    echo "Created .env"
+    echo "Created .env for https://$domain"
 fi
+
+echo "Sign in at https://$domain as 'admin' with the password in $(pwd)/secrets/initial_admin_password"

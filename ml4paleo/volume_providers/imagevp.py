@@ -72,6 +72,11 @@ class ImageStackVolumeProvider(VolumeProvider):
                 f"Image slice {path} has size {res.shape} (x, y), but the first "
                 f"slice has size {self._shape_xy}."
             )
+        if res.dtype != self._dtype:
+            raise ValueError(
+                f"Image slice {path} has pixel type {res.dtype}, but the first "
+                f"slice has {self._dtype}."
+            )
         return res
 
     @property
@@ -107,15 +112,14 @@ class ImageStackVolumeProvider(VolumeProvider):
 def _read_slice(path: pathlib.Path) -> np.ndarray:
     """
     Read one image file as an (x, y) array, keeping the first channel of
-    multichannel images.
+    multichannel images. Palette images keep their palette indices, which is
+    what label images saved with a palette mean.
 
     Raises:
         ValueError: If the file is not a readable image.
     """
     try:
         with Image.open(path) as image:
-            if image.mode == "P":
-                image = image.convert("L")
             res = np.array(image).T
     except (OSError, ValueError) as exc:
         raise ValueError(f"Could not read image slice {path}: {exc}") from exc

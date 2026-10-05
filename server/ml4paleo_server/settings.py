@@ -11,6 +11,7 @@ Kubernetes secrets are usually mounted. A direct value wins over a `_FILE`.
 import os
 import pathlib
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import (
@@ -88,6 +89,16 @@ class Settings(BaseSettings):
     # The built web app (`web/build`). When missing, the API still runs and
     # serves a placeholder page.
     web_dir: pathlib.Path | None = None
+    # Number of API worker processes.
+    api_workers: int = Field(default=4, ge=1)
+    # Addresses of reverse proxies whose X-Forwarded-For header is trusted
+    # (comma-separated IPs or networks, or "*"). Client IPs feed rate limits,
+    # so only trust proxies that overwrite the header.
+    forwarded_allow_ips: str = "127.0.0.1"
+    # Plain HTTP sends passwords and session cookies in the clear, so the
+    # server refuses an http:// public URL unless it is a local address or
+    # this is set.
+    allow_insecure_http: bool = False
 
     @field_validator("public_url")
     @classmethod
@@ -97,6 +108,11 @@ class Settings(BaseSettings):
     @property
     def is_https(self) -> bool:
         return self.public_url.startswith("https://")
+
+    @property
+    def is_local(self) -> bool:
+        host = urlsplit(self.public_url).hostname or ""
+        return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
 
     @classmethod
     def settings_customise_sources(
@@ -120,6 +136,7 @@ class _FileEnvSource(PydanticBaseSettingsSource):
     """
     Read `M4P_<NAME>_FILE` variables: each one names a file whose contents
     (with surrounding whitespace removed) become the value of `M4P_<NAME>`.
+    Empty files are ignored.
     """
 
     def get_field_value(self, field, field_name):  # pragma: no cover - unused
@@ -132,6 +149,9 @@ class _FileEnvSource(PydanticBaseSettingsSource):
                 continue
             name = key[len(ENV_PREFIX) : -len("_FILE")].lower()
             content = pathlib.Path(path).read_text().strip()
+            if not content:
+                # An empty file means the setting is unset.
+                continue
             target = values
             *parents, leaf = name.split(NESTED_DELIMITER)
             for parent in parents:

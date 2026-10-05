@@ -10,10 +10,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Lint and test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:17.11
@@ -31,6 +36,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -39,12 +46,12 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --locked --all-packages --group dicom
+        run: uv sync --locked --all-packages --all-extras
 
       - name: Lint
         run: |
           uv run ruff check
-          uv run ruff format --check server worker tests
+          uv run ruff format --check
 
       - name: Type-check
         run: uv run pyright
@@ -55,25 +62,33 @@ jobs:
   compose:
     name: Compose smoke test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Generate secrets
-        run: deploy/compose/setup.sh
+        run: deploy/compose/setup.sh localhost
 
       - name: Start the stack
         run: >-
           docker compose -f deploy/compose/compose.yml
-          up --detach --build --wait --wait-timeout 300 api caddy
+          up --detach --build --wait --wait-timeout 300 api caddy housekeeper
 
-      - name: Check the API through Caddy
-        run: curl --fail --silent --show-error http://localhost/api/health
+      - name: Check the API (with database and storage) through Caddy
+        # Caddy serves "localhost" with its own local certificate authority.
+        run: curl --fail --silent --show-error --insecure https://localhost/api/health
 
-      - name: Check the first admin account was created
-        run: >-
-          docker compose -f deploy/compose/compose.yml logs migrate
-          | grep -q "Created the admin account"
+      - name: Sign in as the first admin
+        run: |
+          password=$(cat deploy/compose/secrets/initial_admin_password)
+          curl --fail --silent --show-error --insecure \
+            --header 'Content-Type: application/json' \
+            --header 'Origin: https://localhost' \
+            --data "{\"username\": \"admin\", \"password\": \"$password\"}" \
+            https://localhost/api/auth/login | grep -q change_password
 
       - name: Show logs
         if: failure()

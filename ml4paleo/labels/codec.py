@@ -12,6 +12,7 @@ in `ZARR_CODECS`. The data gateway can serve them as-is to any zarr reader.
 import hashlib
 
 import numpy as np
+import zstandard
 from numcodecs import Zstd
 
 from . import LABEL_CHUNK_ZYX
@@ -47,14 +48,18 @@ def encode_chunk(chunk: np.ndarray) -> bytes:
 def decode_chunk(data: bytes | None) -> np.ndarray:
     """
     Decode zarr v3 chunk bytes into a full chunk. None decodes to zeros.
+    Decompression never produces more than one chunk's worth of bytes.
     """
     if data is None:
         return np.zeros(LABEL_CHUNK_ZYX, dtype=np.uint8)
-    raw = _zstd.decode(data)
-    chunk = np.frombuffer(raw, dtype=np.uint8)
-    if chunk.size != np.prod(LABEL_CHUNK_ZYX):
-        raise ValueError(f"Decoded label chunk has {chunk.size} voxels")
-    return chunk.reshape(LABEL_CHUNK_ZYX).copy()
+    size = int(np.prod(LABEL_CHUNK_ZYX))
+    try:
+        raw = zstandard.ZstdDecompressor().decompress(data, max_output_size=size)
+    except zstandard.ZstdError as exc:
+        raise ValueError(f"Invalid label chunk: {exc}") from exc
+    if len(raw) != size:
+        raise ValueError(f"Decoded label chunk has {len(raw)} bytes, expected {size}")
+    return np.frombuffer(raw, dtype=np.uint8).reshape(LABEL_CHUNK_ZYX).copy()
 
 
 def blob_key(sha256_hex: str) -> str:

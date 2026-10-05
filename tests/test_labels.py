@@ -31,7 +31,7 @@ from ml4paleo.labels.deltas import (
     ChunkDelta,
     apply_delta,
     pack_mask,
-    revert_patch,
+    recompute,
     split_into_deltas,
     unpack_mask,
 )
@@ -154,24 +154,140 @@ def test_source_tracks_writes_and_erases():
     assert erased.source_chunk.max() == Source.NONE
 
 
-def test_undo_keeps_a_collaborators_later_edits_and_redo_restores():
-    base = _zeros()
-    base[0, 0, 0] = 5
-    mine = apply_delta(base, _zeros(), _delta(value=2), Source.HUMAN)
-    # A collaborator then repaints part of my stroke.
-    theirs = apply_delta(
-        mine.class_chunk,
-        mine.source_chunk,
-        _delta(value=3, box=(0, 0, 0, 1, 1, 4)),
-        Source.HUMAN,
-    )
-    undone = revert_patch(theirs.class_chunk, theirs.source_chunk, mine.undo)
-    assert undone.class_chunk[0, 0, :4].tolist() == [3, 3, 3, 3]  # theirs kept
-    assert undone.class_chunk[1, 1, 1] == 0  # mine reverted
-    assert undone.changed == mine.changed - 4
+def _apply_all(ops):
+    """
+    Apply (box, value, only_if) ops to an empty chunk; return the chunks and
+    the claims.
+    """
+    class_chunk, source_chunk, claims = _zeros(), _zeros(), []
+    for box, value, only_if in ops:
+        applied = apply_delta(
+            class_chunk, source_chunk, _delta(value, only_if, box), Source.HUMAN
+        )
+        class_chunk, source_chunk = applied.class_chunk, applied.source_chunk
+        claims.append(applied.claim)
+    return class_chunk, source_chunk, claims
 
-    redone = revert_patch(undone.class_chunk, undone.source_chunk, undone.undo)
-    np.testing.assert_array_equal(redone.class_chunk, theirs.class_chunk)
+
+def _overlay(claims):
+    """
+    The state a chunk must have: the overlay of live claims on an empty chunk.
+    """
+    full = ChunkDelta(
+        key=(0, 0, 0),
+        box=(0, 0, 0, *LABEL_CHUNK_ZYX),
+        mask=pack_mask(np.ones(LABEL_CHUNK_ZYX, dtype=bool)),
+        value=0,
+    )
+    region = apply_delta(_zeros(), _zeros(), full, Source.HUMAN).claim
+    return recompute(_zeros(), _zeros(), region, claims)
+
+
+def test_undo_never_disturbs_a_later_same_value_overwrite():
+    left, full = (0, 0, 0, 4, 4, 2), (0, 0, 0, 4, 4, 4)
+    class_chunk, source_chunk, (mine, theirs) = _apply_all(
+        [(left, 2, "any"), (full, 2, "any")]
+    )
+    undone = recompute(class_chunk, source_chunk, mine, [theirs])
+    np.testing.assert_array_equal(undone.class_chunk, class_chunk)
+    assert undone.changed == 0
+
+
+def test_undoing_overlapping_ops_in_any_order_clears_them():
+    full, left = (0, 0, 0, 4, 4, 4), (0, 0, 0, 4, 4, 2)
+    class_chunk, source_chunk, (first, second) = _apply_all(
+        [(full, 2, "any"), (left, 3, "any")]
+    )
+    step = recompute(class_chunk, source_chunk, first, [second])
+    assert step.class_chunk[0, 0, :4].tolist() == [3, 3, 0, 0]
+    step = recompute(step.class_chunk, step.source_chunk, second, [])
+    assert step.class_chunk.max() == 0
+    assert step.source_chunk.max() == Source.NONE
+    # Redo the first op: it comes back everywhere it claimed.
+    redone = recompute(step.class_chunk, step.source_chunk, first, [first])
+    assert redone.class_chunk[:4, :4, :4].min() == 2
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    ops=st.lists(
+        st.tuples(
+            st.tuples(
+                st.integers(0, 6),
+                st.integers(0, 6),
+                st.integers(0, 6),
+                st.integers(1, 6),
+                st.integers(1, 6),
+                st.integers(1, 6),
+            ),
+            st.integers(0, 4),
+            st.sampled_from(["any", "unlabeled", "class:2"]),
+        ),
+        min_size=1,
+        max_size=8,
+    ),
+    toggles=st.lists(st.integers(0, 7), max_size=10),
+)
+def test_state_always_equals_the_overlay_of_live_claims(ops, toggles):
+    ops = [
+        ((z, y, x, z + dz, y + dy, x + dx), value, only_if)
+        for (z, y, x, dz, dy, dx), value, only_if in ops
+    ]
+    class_chunk, source_chunk, claims = _apply_all(ops)
+    live = [True] * len(claims)
+    for toggle in toggles:
+        index = toggle % len(claims)
+        live[index] = not live[index]
+        result = recompute(
+            class_chunk,
+            source_chunk,
+            claims[index],
+            [c for c, alive in zip(claims, live, strict=True) if alive],
+        )
+        class_chunk, source_chunk = result.class_chunk, result.source_chunk
+    expected = _overlay([c for c, alive in zip(claims, live, strict=True) if alive])
+    np.testing.assert_array_equal(class_chunk, expected.class_chunk)
+    np.testing.assert_array_equal(source_chunk, expected.source_chunk)
+
+
+def test_repainting_a_model_label_marks_it_as_human():
+    proposed = apply_delta(_zeros(), _zeros(), _delta(value=3), Source.MODEL_VERIFIED)
+    repainted = apply_delta(
+        proposed.class_chunk, proposed.source_chunk, _delta(value=3), Source.HUMAN
+    )
+    assert repainted.changed == 64
+    assert (repainted.source_chunk[:4, :4, :4] == Source.HUMAN).all()
+
+
+def test_compressed_payloads_cannot_expand_past_their_box():
+    import zstandard
+
+    bomb = zstandard.ZstdCompressor(level=19).compress(b"\0" * (1 << 28))
+    assert len(bomb) < 70_000
+    delta = ChunkDelta(key=(0, 0, 0), box=(0, 0, 0, 1, 1, 1), mask=bomb, value=2)
+    with pytest.raises(ValueError):
+        apply_delta(_zeros(), _zeros(), delta, Source.HUMAN)
+    # Frames that don't declare their size are bounded too.
+    stream = zstandard.ZstdCompressor(write_content_size=False)
+    with pytest.raises(ValueError):
+        unpack_mask(stream.compress(b"\xff" * 100), (1, 1, 8))
+    # A correctly sized frame without a declared size is fine.
+    assert unpack_mask(stream.compress(b"\xff"), (1, 1, 8)).all()
+
+
+def test_split_rejects_out_of_range_values():
+    mask = np.ones((1, 1, 2), dtype=bool)
+    with pytest.raises(ValueError):
+        split_into_deltas(mask, (0, 0, 0), value=300)
+    with pytest.raises(ValueError):
+        split_into_deltas(mask, (0, 0, 0), values=np.array([[[2, 300]]]))
+
+
+def test_deltas_can_be_checked_against_the_volume_shape():
+    edge = _delta(value=2, box=(0, 0, 0, 4, 4, 4))
+    edge.check_within((4, 4, 4))
+    with pytest.raises(ValueError):
+        edge.check_within((4, 4, 3))
 
 
 @pytest.mark.parametrize(
@@ -183,6 +299,7 @@ def test_undo_keeps_a_collaborators_later_edits_and_redo_restores():
         {"only_if": "class:999"},
         {"only_if": "everything"},
         {"value": None},
+        {"mask": b"x" * 300_000},
     ],
 )
 def test_invalid_deltas_are_rejected(kwargs):
