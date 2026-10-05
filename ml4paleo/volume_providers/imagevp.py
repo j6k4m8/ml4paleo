@@ -100,15 +100,13 @@ class ImageStackVolumeProvider(VolumeProvider):
             key (tuple): The indices to slice.
 
         """
-        # Normalize the indices
         zs, ys, xs = normalize_key(key, self.shape[::-1])
-
-        # Read the images.
-        images = [self._read_image(self.paths[z]) for z in range(zs[0], zs[1])]
-
-        # Return the subvolume.
-        vol = np.stack(images, axis=-1)
-        return vol[xs[0] : xs[1], ys[0] : ys[1], :]
+        # Crop each slice as it is read, so memory holds one whole slice at a
+        # time rather than every whole slice of the request.
+        vol = np.empty((xs[1] - xs[0], ys[1] - ys[0], zs[1] - zs[0]), dtype=self._dtype)
+        for i, z in enumerate(range(zs[0], zs[1])):
+            vol[:, :, i] = self._read_image(self.paths[z])[xs[0] : xs[1], ys[0] : ys[1]]
+        return vol
 
     @property
     def dtype(self) -> np.dtype:

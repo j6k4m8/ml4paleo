@@ -35,6 +35,8 @@ SPATIAL_AXES = ("z", "y", "x")
 MAX_LEVELS = 32
 # Downsampling reads at most about this many source voxels at once.
 DOWNSAMPLE_READ_VOXELS = 1 << 24
+# Ingest reads at most about this many bytes from a volume provider at once.
+INGEST_READ_BYTES = 1 << 29
 
 DownsampleMethod = Literal["mean", "mode"]
 
@@ -261,6 +263,7 @@ def write_from_provider(
     *,
     channel: int = 0,
     z_range: tuple[int, int] | None = None,
+    max_read_bytes: int = INGEST_READ_BYTES,
     progress: Callable[[int, int], None] | None = None,
 ) -> None:
     """
@@ -269,9 +272,14 @@ def write_from_provider(
     This is the single place where ml4paleo converts (x, y, z) volumes into
     (c, z, y, x) storage. `z_range` lets parallel jobs each write their own
     slabs; its bounds must sit on shard boundaries so that no two jobs write
-    the same shard. Data is read one chunk-deep slab at a time, so memory use
-    is about (chunk depth x width x height) voxels; each shard is rewritten
-    once per slab.
+    the same shard.
+
+    Data is read in chunk-deep slabs. A slab that would take more than
+    `max_read_bytes` is read in y, x tiles instead, so memory use stays about
+    `max_read_bytes` however wide the scan is. Tiles follow shard boundaries
+    when a shard column fits the budget (each shard is then rewritten once per
+    slab) and chunk boundaries otherwise. Slice-based providers decode every
+    slice once per tile, so a larger budget means less decoding.
     """
     array = image.array(0)
     _, depth, height, width = array.shape
@@ -282,22 +290,49 @@ def write_from_provider(
             f"shape (z, y, x) {(depth, height, width)}"
         )
     _check_castable(provider.dtype, array.dtype)
-    shard_depth = _shards(array)[1]
+    shards = _shards(array)
     slab_depth = array.chunks[1]
     z0, z1 = z_range or (0, depth)
     for bound in (z0, z1):
-        if bound % shard_depth and bound != depth:
+        if bound % shards[1] and bound != depth:
             raise ValueError(f"z_range bound {bound} is not on a shard boundary")
-    slabs = list(range(z0, z1, slab_depth))
-    for index, slab_start in enumerate(slabs):
+    itemsize = max(np.dtype(provider.dtype).itemsize, array.dtype.itemsize)
+    plane_voxels = max(1, max_read_bytes // (slab_depth * itemsize))
+    align = shards[2:] if math.prod(shards[2:]) <= plane_voxels else array.chunks[2:]
+    tiles = list(
+        iter_blocks((height, width), _plane_tile(height, width, plane_voxels, align))
+    )
+    steps = [
+        (slab_start, tile) for slab_start in range(z0, z1, slab_depth) for tile in tiles
+    ]
+    for index, (slab_start, tile) in enumerate(steps):
         slab_stop = min(slab_start + slab_depth, z1)
-        data_xyz = np.asarray(provider[:, :, slab_start:slab_stop])
+        (y0, x0), (y1, x1) = tile.start, tile.stop
+        data_xyz = np.asarray(provider[x0:x1, y0:y1, slab_start:slab_stop])
         if data_xyz.ndim == 2:
             data_xyz = data_xyz[:, :, np.newaxis]
         _check_castable(data_xyz.dtype, array.dtype)
-        array[channel, slab_start:slab_stop, :, :] = data_xyz.transpose(2, 1, 0)
+        array[channel, slab_start:slab_stop, y0:y1, x0:x1] = data_xyz.transpose(2, 1, 0)
         if progress is not None:
-            progress(index + 1, len(slabs))
+            progress(index + 1, len(steps))
+
+
+def _plane_tile(
+    height: int, width: int, voxels: int, align: Sequence[int]
+) -> tuple[int, int]:
+    """
+    Pick a (y, x) tile of at most about `voxels` voxels for reading one slab.
+
+    Whole planes are best, then full-width bands (whole rows), then narrower
+    tiles. Tile sides are multiples of `align`, and a tile is never smaller
+    than one `align` block.
+    """
+    align_y, align_x = align
+    if height * width <= voxels:
+        return (height, width)
+    if width * align_y <= voxels:
+        return (max(align_y, voxels // width // align_y * align_y), width)
+    return (align_y, max(align_x, voxels // align_y // align_x * align_x))
 
 
 def downsample_level(
