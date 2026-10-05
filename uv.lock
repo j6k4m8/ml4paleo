@@ -1972,6 +1972,7 @@ version = "0.2.0.dev0"
 source = { editable = "server" }
 dependencies = [
     { name = "alembic" },
+    { name = "boto3" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "ml4paleo" },
@@ -1986,6 +1987,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.17" },
+    { name = "boto3", specifier = ">=1.40" },
     { name = "cryptography", specifier = ">=50" },
     { name = "fastapi", specifier = ">=0.120" },
     { name = "ml4paleo", editable = "." },

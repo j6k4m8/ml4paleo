@@ -558,3 +558,58 @@ class ArtifactHead(Base):
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+UPLOAD_STATES = ("uploading", "complete", "aborted", "deleting", "deleted")
+
+
+class Upload(Base):
+    """
+    A file a person uploads into a project, for example a scan to ingest.
+
+    Browsers send it straight to object storage as an S3 multipart upload,
+    with presigned URLs for each part, so an upload can resume after a broken
+    connection. Its declared size counts against the project owner's storage
+    quota from the start. The file lives at `projects/<project>/uploads/<id>/data`.
+
+    - `uploading`: parts are arriving; it is aborted if not finished by
+      `expires_at`.
+    - `complete`: the whole file is stored; it is deleted after `expires_at`
+      unless a job is still using it.
+    - `aborted`: given up; nothing was kept.
+    - `deleting`, `deleted`: garbage collection is removing it, or has.
+    """
+
+    __tablename__ = "uploads"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # The name the person gave the file (its extension says what it is).
+    filename: Mapped[str] = mapped_column(String(255))
+    size: Mapped[int] = mapped_column(BigInteger)
+    part_size: Mapped[int] = mapped_column(BigInteger)
+    # The storage service's id for the multipart upload.
+    multipart_id: Mapped[str | None] = mapped_column(String(1024))
+    state: Mapped[str] = mapped_column(String(16), default="uploading")
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    completed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    expires_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ({})".format(", ".join(f"'{s}'" for s in UPLOAD_STATES)),
+            name="state",
+        ),
+        CheckConstraint("size > 0 AND part_size > 0", name="sizes"),
+    )
