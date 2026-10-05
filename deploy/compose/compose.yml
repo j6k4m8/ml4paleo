@@ -34,6 +34,7 @@ services:
   caddy:
     image: caddy:2.11.6-alpine
     restart: unless-stopped
+    networks: [public]
     ports:
       - "80:80"
       - "443:443"
@@ -50,6 +51,7 @@ services:
   postgres:
     image: postgres:17.11
     restart: unless-stopped
+    networks: [private]
     environment:
       POSTGRES_USER: ml4paleo
       POSTGRES_DB: ml4paleo
@@ -69,6 +71,7 @@ services:
   backup:
     image: postgres:17.11
     restart: unless-stopped
+    networks: [private]
     init: true
     environment:
       PGHOST: postgres
@@ -97,6 +100,7 @@ services:
   seaweedfs:
     image: chrislusf/seaweedfs:4.48
     restart: unless-stopped
+    networks: [private]
     command: >-
       server -dir=/data -ip.bind=0.0.0.0
       -s3 -s3.port=8333 -s3.config=/run/secrets/seaweedfs_s3_config
@@ -108,6 +112,7 @@ services:
   # Creates the ml4paleo bucket (once; it is a no-op afterwards).
   seaweedfs-init:
     image: chrislusf/seaweedfs:4.48
+    networks: [private]
     entrypoint:
       - sh
       - -c
@@ -131,6 +136,7 @@ services:
       context: ../..
       dockerfile: deploy/docker/server.Dockerfile
     image: ml4paleo-server:local
+    networks: [private]
     init: true
     command: ["ml4paleo-server", "migrate"]
     environment:
@@ -152,6 +158,7 @@ services:
   housekeeper:
     image: ml4paleo-server:local
     restart: unless-stopped
+    networks: [public, private]
     init: true
     command: ["ml4paleo-server", "housekeeper"]
     environment: *server-environment
@@ -163,6 +170,7 @@ services:
   api:
     image: ml4paleo-server:local
     restart: unless-stopped
+    networks: [public, private]
     init: true
     environment:
       <<: *server-environment
@@ -185,6 +193,15 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+networks:
+  # Caddy, and outbound traffic (email, certificates).
+  public:
+  # The database and object storage. No internet access, and only the server
+  # processes join it: SeaweedFS serves its master, filer, and volume ports
+  # without authentication, so nothing that parses uploads may reach them.
+  private:
+    internal: true
 
 secrets:
   database_url:
