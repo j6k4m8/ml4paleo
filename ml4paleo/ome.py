@@ -10,8 +10,10 @@ axis conversions were scattered through the code.
 Each image is a zarr v3 group holding one array per resolution level ("0" is
 full resolution). Arrays are sharded: small chunks for fast random reads in
 the viewer, inside larger shards so the object count stays manageable. Writing
-into a shard rewrites the whole shard, so writers must own whole shards; the
-helpers here always work in shard-aligned blocks.
+into a shard rewrites the whole shard, so two writers must never share a
+shard: parallel jobs split work on shard boundaries. A single writer may still
+fill one shard in several partial writes (each rewrites the shard), trading
+some extra I/O for bounded memory.
 """
 
 import math
@@ -130,6 +132,8 @@ class OmeImage:
         """
         if len(shape_czyx) != 4:
             raise ValueError(f"shape_czyx must have 4 dimensions, got {shape_czyx}")
+        if any(c < 1 for c in (*chunk_zyx, *shard_zyx)):
+            raise ValueError("chunk_zyx and shard_zyx must be positive")
         if any(s % c for s, c in zip(shard_zyx, chunk_zyx, strict=True)):
             raise ValueError("shard_zyx must be a multiple of chunk_zyx")
         num_channels, *spatial = (int(s) for s in shape_czyx)
@@ -137,6 +141,12 @@ class OmeImage:
             unit = None
         base_size = tuple(float(v) for v in (voxel_size_zyx or (1.0, 1.0, 1.0)))
         levels = plan_levels(spatial, voxel_size_zyx, chunk_zyx)
+        if not all(
+            math.isfinite(b * f)
+            for level in levels
+            for b, f in zip(base_size, level.factor_zyx, strict=True)
+        ):
+            raise ValueError(f"Voxel size {voxel_size_zyx} is too large")
 
         axes: list[dict[str, str]] = [{"name": "c", "type": "channel"}]
         for axis in SPATIAL_AXES:
@@ -260,7 +270,8 @@ def write_from_provider(
     (c, z, y, x) storage. `z_range` lets parallel jobs each write their own
     slabs; its bounds must sit on shard boundaries so that no two jobs write
     the same shard. Data is read one chunk-deep slab at a time, so memory use
-    is about (chunk depth x width x height) voxels.
+    is about (chunk depth x width x height) voxels; each shard is rewritten
+    once per slab.
     """
     array = image.array(0)
     _, depth, height, width = array.shape
@@ -303,8 +314,9 @@ def downsample_level(
     intensity images; "mode" suits label images and prefers non-zero labels,
     so thin labeled structures survive downsampling.
 
-    Each output shard is assembled in memory and written once. Its source is
-    read in z-slabs of at most about `DOWNSAMPLE_READ_VOXELS` voxels.
+    Each output shard is assembled in memory (one shard of the output dtype)
+    and written once. Its source is read in z-slabs of at most about
+    `DOWNSAMPLE_READ_VOXELS` voxels.
     """
     source = image.array(level)
     target = image.array(level + 1)
@@ -406,7 +418,15 @@ def _shards(array: zarr.Array) -> tuple[int, ...]:
 
 
 def _check_castable(source: np.dtype, target: np.dtype) -> None:
-    if not np.can_cast(source, target, casting="safe"):
+    source, target = np.dtype(source), np.dtype(target)
+    # numpy calls int64 -> float64 "safe", but float64 can't hold every int64
+    # exactly, so integers only go into floats with room to spare.
+    lossy_float = (
+        np.issubdtype(source, np.integer)
+        and np.issubdtype(target, np.floating)
+        and target.itemsize <= source.itemsize
+    )
+    if lossy_float or not np.can_cast(source, target, casting="safe"):
         raise ValueError(
             f"Cannot store {np.dtype(source)} data in a {np.dtype(target)} image "
             "without losing values"
