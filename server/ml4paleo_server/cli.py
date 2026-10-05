@@ -124,7 +124,9 @@ async def _reset_two_factor(username: str) -> None:
     engine = create_engine(Settings().database_url.get_secret_value())
     try:
         async with create_sessionmaker(engine)() as db:
-            user = await db.scalar(select(User).where(User.username == username.lower()))
+            user = await db.scalar(
+                select(User).where(User.username == username.lower())
+            )
             if user is None:
                 raise SystemExit(f"No user named {username!r}.")
             user.totp_secret_enc = None
