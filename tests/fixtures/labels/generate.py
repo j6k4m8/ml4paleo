@@ -6,6 +6,14 @@ Run `uv run python tests/fixtures/labels/generate.py` after changing label
 semantics, and commit the updated `cases.json`. Masks and values are stored as
 raw packed bits and raw bytes (base64), not zstd output, because different
 zstd implementations may produce different (equally valid) compressed bytes.
+
+Three kinds of cases:
+
+- `apply`: one delta applied to a base chunk; the resulting chunk hashes and
+  the claim it records.
+- `split`: a global mask split into per-chunk deltas.
+- `history`: a sequence of ops and undos/redos on one chunk; the final chunk
+  must equal the overlay of the live claims.
 """
 
 import base64
@@ -21,8 +29,10 @@ from ml4paleo.labels.deltas import (
     apply_delta,
     pack_mask,
     pack_values,
+    recompute,
     split_into_deltas,
     unpack_mask,
+    unpack_values,
 )
 
 OUTPUT = pathlib.Path(__file__).with_name("cases.json")
@@ -42,12 +52,24 @@ def _ball(shape, center, radius) -> np.ndarray:
     return distance <= radius**2
 
 
-def _base_chunk(name: str) -> np.ndarray:
+def _base_chunk(name: str) -> tuple[np.ndarray, np.ndarray]:
     chunk = np.zeros(LABEL_CHUNK_ZYX, dtype=np.uint8)
     if name == "quadrants":
         chunk[:32, :32] = 1
         chunk[32:, 32:] = 3
-    return chunk
+    source = np.where(chunk > 0, Source.IMPORTED, Source.NONE).astype(np.uint8)
+    return chunk, source
+
+
+def _delta(box, mask, value=None, values=None, only_if="any") -> ChunkDelta:
+    return ChunkDelta(
+        key=(0, 0, 0),
+        box=box,
+        mask=pack_mask(mask),
+        value=value,
+        values=pack_values(values) if values is not None else None,
+        only_if=only_if,
+    )
 
 
 def _apply_cases() -> list[dict]:
@@ -66,19 +88,13 @@ def _apply_cases() -> list[dict]:
         values = None
         if values_kind == "gradient":
             values = (2 + (np.indices(shape)[2] % 3)).astype(np.uint8)
-        delta = ChunkDelta(
-            key=(0, 0, 0),
-            box=box,
-            mask=pack_mask(mask),
-            value=value,
-            values=pack_values(values) if values is not None else None,
-            only_if=only_if,
+        class_chunk, source_chunk = _base_chunk(base)
+        applied = apply_delta(
+            class_chunk,
+            source_chunk,
+            _delta(box, mask, value, values, only_if),
+            Source.HUMAN,
         )
-        class_chunk = _base_chunk(base)
-        source_chunk = np.where(class_chunk > 0, Source.IMPORTED, Source.NONE).astype(
-            np.uint8
-        )
-        applied = apply_delta(class_chunk, source_chunk, delta, Source.HUMAN)
         cases.append(
             {
                 "name": name,
@@ -93,6 +109,14 @@ def _apply_cases() -> list[dict]:
                     "class_sha256": content_hash(applied.class_chunk),
                     "source_sha256": content_hash(applied.source_chunk),
                     "changed": applied.changed,
+                    "claim_mask_bits": _bits(
+                        unpack_mask(applied.claim.mask, applied.claim.box_shape)
+                    ),
+                    "claim_values": _b64(
+                        unpack_values(
+                            applied.claim.values, applied.claim.box_shape
+                        ).tobytes()
+                    ),
                 },
             }
         )
@@ -128,6 +152,97 @@ def _split_cases() -> list[dict]:
     return cases
 
 
+def _history_cases() -> list[dict]:
+    """
+    Each step is either {"op": ...} (apply a delta, giving it the next op
+    number) or {"undo": n} / {"redo": n} (toggle op n).
+    """
+    full = (0, 0, 0, 8, 8, 8)
+    left = (0, 0, 0, 8, 8, 4)
+    histories = {
+        # B repaints A's voxels with the same class; undoing A keeps B's paint.
+        "same_value_overwrite": [
+            {"op": {"box": left, "value": 2}},
+            {"op": {"box": full, "value": 2}},
+            {"undo": 0},
+        ],
+        # Undoing two overlapping ops in either order leaves nothing behind.
+        "out_of_order_undo": [
+            {"op": {"box": full, "value": 2}},
+            {"op": {"box": left, "value": 3}},
+            {"undo": 0},
+            {"undo": 1},
+        ],
+        # Redo brings an op back underneath a later op.
+        "redo_under_later_op": [
+            {"op": {"box": full, "value": 2}},
+            {"op": {"box": left, "value": 3}},
+            {"undo": 0},
+            {"redo": 0},
+        ],
+        # A fill of unlabeled voxels keeps its original claim after undo.
+        "only_unlabeled_then_undo_under": [
+            {"op": {"box": left, "value": 2}},
+            {"op": {"box": full, "value": 4, "only_if": "unlabeled"}},
+            {"undo": 0},
+        ],
+    }
+    cases = []
+    for name, steps in histories.items():
+        class_chunk, source_chunk = _base_chunk("zeros")
+        claims, live = [], []
+        for step in steps:
+            if "op" in step:
+                spec = step["op"]
+                box = spec["box"]
+                shape = (box[3] - box[0], box[4] - box[1], box[5] - box[2])
+                applied = apply_delta(
+                    class_chunk,
+                    source_chunk,
+                    _delta(
+                        box,
+                        np.ones(shape, dtype=bool),
+                        spec["value"],
+                        only_if=spec.get("only_if", "any"),
+                    ),
+                    Source.HUMAN,
+                )
+                class_chunk, source_chunk = applied.class_chunk, applied.source_chunk
+                claims.append(applied.claim)
+                live.append(True)
+            else:
+                index = step.get("undo", step.get("redo"))
+                live[index] = "redo" in step
+                result = recompute(
+                    class_chunk,
+                    source_chunk,
+                    claims[index],
+                    [c for c, alive in zip(claims, live, strict=True) if alive],
+                )
+                class_chunk, source_chunk = result.class_chunk, result.source_chunk
+        cases.append(
+            {
+                "name": name,
+                "steps": [
+                    {
+                        **{k: v for k, v in step.items() if k != "op"},
+                        **(
+                            {"op": {**step["op"], "box": list(step["op"]["box"])}}
+                            if "op" in step
+                            else {}
+                        ),
+                    }
+                    for step in steps
+                ],
+                "expected": {
+                    "class_sha256": content_hash(class_chunk),
+                    "source_sha256": content_hash(source_chunk),
+                },
+            }
+        )
+    return cases
+
+
 def generate() -> dict:
     return {
         "chunk_shape_zyx": list(LABEL_CHUNK_ZYX),
@@ -138,6 +253,7 @@ def generate() -> dict:
         },
         "apply": _apply_cases(),
         "split": _split_cases(),
+        "history": _history_cases(),
     }
 
 
