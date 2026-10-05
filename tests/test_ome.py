@@ -289,3 +289,30 @@ def test_lossy_dtype_conversions_are_refused(tmp_path):
     )
     with pytest.raises(ValueError, match="losing values"):
         write_from_provider(provider, image)
+
+
+def test_bad_chunking_and_huge_voxel_sizes_are_refused(tmp_path):
+    with pytest.raises(ValueError):
+        OmeImage.create(
+            _grant(tmp_path),
+            shape_czyx=(1, 4, 4, 4),
+            dtype="uint8",
+            chunk_zyx=(0, 2, 2),
+        )
+    with pytest.raises(ValueError):
+        OmeImage.create(
+            _grant(tmp_path, "huge"),
+            shape_czyx=(1, 400, 4, 4),
+            dtype="uint8",
+            voxel_size_zyx=(1e308, 1.0, 1.0),
+            **SMALL_CHUNKS,
+        )
+
+
+def test_wide_integers_are_not_stored_as_floats(tmp_path):
+    provider = NumpyVolumeProvider(np.full((4, 4, 4), 2**60, dtype=np.int64))
+    image = OmeImage.create(
+        _grant(tmp_path), shape_czyx=(1, 4, 4, 4), dtype="float64", **SMALL_CHUNKS
+    )
+    with pytest.raises(ValueError, match="losing values"):
+        write_from_provider(provider, image)
