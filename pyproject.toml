@@ -33,6 +33,7 @@ bossdb = [
     "intern>=1.4.2",
 ]
 dev = [
+    "httpx2>=2.13.1",
     "hypothesis>=6.140",
     "moto[server]>=5.1",
     "pyright>=1.1.400",

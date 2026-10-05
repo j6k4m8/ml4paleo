@@ -1,1 +1,9 @@
 .venv/
+.git/
+**/__pycache__/
+*.pyc
+webapp/volume/
+eda/
+deploy/compose/secrets/
+deploy/compose/.env
+web/node_modules/

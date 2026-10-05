@@ -12,8 +12,42 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
-    parser.parse_args(argv)
-    parser.print_help()
+    commands = parser.add_subparsers(dest="command")
+
+    serve = commands.add_parser("serve", help="Run the API server.")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--workers", type=int, default=1)
+
+    commands.add_parser("migrate", help="Upgrade the database to the latest schema.")
+    commands.add_parser(
+        "check-migrations",
+        help="Fail if the models have changes that no migration covers.",
+    )
+
+    args = parser.parse_args(argv)
+    if args.command == "serve":
+        import uvicorn
+
+        uvicorn.run(
+            "ml4paleo_server.app:create_app",
+            factory=True,
+            host=args.host,
+            port=args.port,
+            workers=args.workers,
+            proxy_headers=True,
+        )
+    elif args.command in ("migrate", "check-migrations"):
+        from ml4paleo_server import migrations
+        from ml4paleo_server.settings import Settings
+
+        database_url = Settings().database_url.get_secret_value()
+        if args.command == "migrate":
+            migrations.upgrade(database_url)
+        else:
+            migrations.check(database_url)
+    else:
+        parser.print_help()
     return 0
 
 

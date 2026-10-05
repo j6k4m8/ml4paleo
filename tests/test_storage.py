@@ -6,7 +6,6 @@ S3-compatible object stores, and grants can never reach outside their prefix.
 import numpy as np
 import pytest
 import zarr
-from conftest import S3_TEST_BUCKET
 
 from ml4paleo.storage import StorageGrant, object_store, zarr_store
 from ml4paleo.volume_providers import NumpyVolumeProvider, ZarrVolumeProvider
@@ -18,8 +17,9 @@ def grant(request, tmp_path):
     if request.param == "file":
         return StorageGrant(url=f"file://{tmp_path}/project", access="rw")
     endpoint = request.getfixturevalue("s3_endpoint")
+    s3_bucket = request.getfixturevalue("s3_bucket")
     return StorageGrant(
-        url=f"s3://{S3_TEST_BUCKET}/projects/{tmp_path.name}",
+        url=f"s3://{s3_bucket}/projects/{tmp_path.name}",
         access="rw",
         endpoint=endpoint,
         credentials={"access_key_id": "test", "secret_access_key": "test"},

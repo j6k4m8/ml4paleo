@@ -1,0 +1,15 @@
+# Caddy is the only service with published ports. Set M4P_SITE_ADDRESS to your
+# domain (for example ml4paleo.example.org) to get automatic HTTPS; the default
+# ":80" serves plain HTTP for local use.
+{$M4P_SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	# Large files go straight to object storage with presigned URLs, so API
+	# requests never need big bodies.
+	@api path /api/*
+	request_body @api {
+		max_size 8MB
+	}
+
+	reverse_proxy api:8000
+}

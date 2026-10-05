@@ -8,7 +8,6 @@ changes a shape or a value and fails loudly.
 
 import numpy as np
 import pytest
-from conftest import S3_TEST_BUCKET
 from PIL import Image
 
 from ml4paleo.ome import (
@@ -178,9 +177,9 @@ def test_mode_pyramid_keeps_thin_labels(tmp_path):
     assert set(np.unique(level1)) == {0, 2, 7}
 
 
-def test_images_work_on_s3(tmp_path, s3_endpoint):
+def test_images_work_on_s3(tmp_path, s3_endpoint, s3_bucket):
     grant = StorageGrant(
-        url=f"s3://{S3_TEST_BUCKET}/ome/{tmp_path.name}",
+        url=f"s3://{s3_bucket}/ome/{tmp_path.name}",
         access="rw",
         endpoint=s3_endpoint,
         credentials={"access_key_id": "test", "secret_access_key": "test"},

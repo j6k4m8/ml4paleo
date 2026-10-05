@@ -31,3 +31,20 @@ jobs:
           exit-code: '1'
           ignore-unfixed: true
           severity: 'CRITICAL,HIGH'
+  server:
+    name: Build and scan the v2 server image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build the server image
+        run: docker build --file deploy/docker/server.Dockerfile --tag ml4paleo-server .
+
+      - name: Check the server image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ml4paleo-server
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'

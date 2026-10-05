@@ -14,6 +14,20 @@ jobs:
   test:
     name: Lint and test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      M4P_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,3 +51,29 @@ jobs:
 
       - name: Test
         run: uv run pytest
+
+  compose:
+    name: Compose smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Generate secrets
+        run: deploy/compose/setup.sh
+
+      - name: Start the stack
+        run: >-
+          docker compose -f deploy/compose/compose.yml
+          up --detach --build --wait --wait-timeout 300 api caddy
+
+      - name: Check the API through Caddy
+        run: curl --fail --silent --show-error http://localhost/api/health
+
+      - name: Show logs
+        if: failure()
+        run: docker compose -f deploy/compose/compose.yml logs
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose -f deploy/compose/compose.yml down --volumes

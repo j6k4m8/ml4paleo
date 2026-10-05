@@ -35,6 +35,14 @@ def s3_endpoint():
 
 
 @pytest.fixture
+def s3_bucket(s3_endpoint):
+    """
+    The name of the bucket created on the test S3 server.
+    """
+    return S3_TEST_BUCKET
+
+
+@pytest.fixture
 def make_dicom_series():
     """
     Return a function that writes a synthetic single-frame DICOM series.
