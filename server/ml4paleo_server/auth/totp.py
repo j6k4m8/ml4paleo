@@ -1,22 +1,18 @@
 """
 Time-based one-time passwords (TOTP) for two-factor sign-in.
 
-Secrets are stored encrypted (AES-GCM) with a key derived from the server's
-secret key, so a database dump alone can't generate codes. After the server
+Secrets are sealed with the server's secret key (`ml4paleo_server.sealing`),
+so a database dump alone can't generate codes. After the server
 secret key changes, stored secrets can't be read: an admin must reset each
 user's two-factor setup (`ml4paleo-server reset-two-factor USERNAME`).
 """
 
-import base64
 import hmac
-import os
 import time
 
 import pyotp
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+from .. import sealing
 
 ISSUER = "ml4paleo"
 STEP_SECONDS = 30
@@ -28,12 +24,6 @@ class UnreadableSecret(Exception):
     """
 
 
-def _key(secret_key: str) -> bytes:
-    return HKDF(
-        algorithm=hashes.SHA256(), length=32, salt=None, info=b"ml4paleo totp"
-    ).derive(secret_key.encode())
-
-
 def new_secret() -> str:
     return pyotp.random_base32()
 
@@ -43,16 +33,13 @@ def provisioning_uri(secret: str, username: str) -> str:
 
 
 def encrypt(secret_key: str, secret: str) -> str:
-    nonce = os.urandom(12)
-    sealed = AESGCM(_key(secret_key)).encrypt(nonce, secret.encode(), None)
-    return base64.urlsafe_b64encode(nonce + sealed).decode()
+    return sealing.seal(secret_key, "totp", secret)
 
 
 def decrypt(secret_key: str, encrypted: str) -> str:
-    raw = base64.urlsafe_b64decode(encrypted)
     try:
-        return AESGCM(_key(secret_key)).decrypt(raw[:12], raw[12:], None).decode()
-    except InvalidTag as exc:
+        return sealing.unseal(secret_key, "totp", encrypted)
+    except sealing.CannotUnseal as exc:
         raise UnreadableSecret from exc
 
 

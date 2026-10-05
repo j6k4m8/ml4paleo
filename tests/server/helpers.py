@@ -5,14 +5,17 @@ Helpers shared by the server tests.
 import asyncio
 import re
 import time
+from types import SimpleNamespace
 
 import pyotp
+from ml4paleo_server import email, sealing
 from ml4paleo_server.auth import ensure_admin
 from ml4paleo_server.db import EmailOutbox, create_engine, create_sessionmaker
 from sqlalchemy import select
 
 PASSWORD = "correct horse battery staple"
 ADMIN_PASSWORD = "fossil dig site 1923"
+SECRET_KEY = "test-secret-key-that-is-long-enough-0123456789"
 
 
 def run_db(database_url, fn):
@@ -40,12 +43,28 @@ def signup(browser, username="ada", password=PASSWORD, **extra):
 
 
 def outbox(database_url):
+    """
+    Return the queued emails, with their sealed bodies opened as `body`.
+    """
+
     async def fetch(db):
         return (
             await db.scalars(select(EmailOutbox).order_by(EmailOutbox.created_at))
         ).all()
 
-    return run_db(database_url, fetch)
+    return [
+        SimpleNamespace(
+            to_address=row.to_address,
+            subject=row.subject,
+            status=row.status,
+            attempts=row.attempts,
+            body_sealed=row.body_sealed,
+            body=sealing.unseal(
+                SECRET_KEY, email.SEAL_PURPOSE, row.body_sealed, row.to_address
+            ),
+        )
+        for row in run_db(database_url, fetch)
+    ]
 
 
 def link_token(body: str) -> str:

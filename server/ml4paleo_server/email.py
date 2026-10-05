@@ -5,8 +5,10 @@ Requests never talk to the mail server: they add a row to `email_outbox`, and
 the housekeeper sends queued mail in the background (`send_pending`). A slow
 or broken mail server therefore never slows down or breaks a request.
 
-Messages carry single-use links, so each row is deleted as soon as its message
-is sent, and the housekeeper deletes rows that failed for good after a week.
+Messages carry single-use links. Message text is sealed with the server secret
+key (`ml4paleo_server.sealing`), so a database dump or backup taken while mail
+is queued holds no usable links. Each row is deleted as soon as its message is
+sent, and the housekeeper deletes rows that failed for good after a week.
 """
 
 import datetime
@@ -20,8 +22,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.concurrency import run_in_threadpool
 
+from . import sealing
 from .db import EmailOutbox
-from .settings import SmtpSettings
+from .settings import Settings, SmtpSettings
 
 log = logging.getLogger(__name__)
 
@@ -32,11 +35,21 @@ FIRST_RETRY = datetime.timedelta(minutes=1)
 Sender = Callable[[SmtpSettings, email.message.EmailMessage], None]
 
 
-def queue_email(db: AsyncSession, to_address: str, subject: str, body: str) -> None:
+SEAL_PURPOSE = "email"
+
+
+def queue_email(
+    db: AsyncSession, settings: Settings, to_address: str, subject: str, body: str
+) -> None:
     """
     Queue an email. It is sent after the caller's transaction commits.
+
+    Subjects are stored as they are, so keep anything secret in `body`.
     """
-    db.add(EmailOutbox(to_address=to_address, subject=subject, body=body))
+    sealed = sealing.seal(
+        settings.secret_key.get_secret_value(), SEAL_PURPOSE, body, to_address
+    )
+    db.add(EmailOutbox(to_address=to_address, subject=subject, body_sealed=sealed))
 
 
 def send_with_smtp(smtp: SmtpSettings, message: email.message.EmailMessage) -> None:
@@ -57,7 +70,7 @@ def send_with_smtp(smtp: SmtpSettings, message: email.message.EmailMessage) -> N
 
 async def send_pending(
     sessionmaker: async_sessionmaker[AsyncSession],
-    smtp: SmtpSettings,
+    settings: Settings,
     send: Sender = send_with_smtp,
     batch_size: int = 20,
 ) -> int:
@@ -66,8 +79,10 @@ async def send_pending(
 
     Each message is claimed, sent, and recorded in its own transaction, so a
     crash re-sends at most the one message in flight. Failed sends are retried
-    on later calls, up to `MAX_ATTEMPTS` times.
+    on later calls, up to `MAX_ATTEMPTS` times. Messages sealed with an older
+    secret key can't be read, so they fail without a send.
     """
+    smtp = settings.smtp
     if not smtp.enabled:
         return 0
     sent = 0
@@ -85,11 +100,24 @@ async def send_pending(
             )
             if item is None:
                 break
+            try:
+                body = sealing.unseal(
+                    settings.secret_key.get_secret_value(),
+                    SEAL_PURPOSE,
+                    item.body_sealed,
+                    item.to_address,
+                )
+            except sealing.CannotUnseal:
+                log.warning("Email %s was sealed with another secret key", item.id)
+                item.status = "failed"
+                item.last_error = "sealed with a different server secret key"
+                await db.commit()
+                continue
             message = email.message.EmailMessage()
             message["From"] = smtp.from_address
             message["To"] = item.to_address
             message["Subject"] = item.subject
-            message.set_content(item.body)
+            message.set_content(body)
             item.attempts += 1
             try:
                 await run_in_threadpool(send, smtp, message)

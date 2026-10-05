@@ -17,11 +17,11 @@ from helpers import (
     run_db,
     signup,
 )
-from ml4paleo_server import housekeeper
+from ml4paleo_server import email, housekeeper
 from ml4paleo_server.auth import ensure_admin
-from ml4paleo_server.db import AuthToken, RateLimit, User, UserSession
+from ml4paleo_server.db import AuthToken, EmailOutbox, RateLimit, User, UserSession
 from pydantic import SecretStr
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 
 
 def test_username_and_email_share_one_login_limit(new_browser):
@@ -350,3 +350,46 @@ def test_the_reset_password_command_voids_reset_links(
 )
 def test_reserved_name_look_alikes_are_refused(new_browser, name, status):
     assert signup(new_browser(), username=name).status_code == status
+
+
+def test_queued_links_are_not_readable_in_the_database(
+    new_browser, smtp_settings, migrated_database_url
+):
+    signup(new_browser(smtp_settings), email="ada@example.org")
+    [message] = outbox(migrated_database_url)
+    token = link_token(message.body)
+    assert token not in message.body_sealed
+    assert "token=" not in message.body_sealed
+
+    async def raw_rows(db):
+        result = await db.execute(text("SELECT * FROM email_outbox"))
+        return [str(row) for row in result]
+
+    assert all(token not in row for row in run_db(migrated_database_url, raw_rows))
+
+
+def test_mail_sealed_with_an_old_key_fails_without_sending(
+    new_browser, smtp_settings, migrated_database_url
+):
+    signup(new_browser(smtp_settings), email="ada@example.org")
+    rotated = smtp_settings.model_copy(
+        update={"secret_key": SecretStr("a-completely-different-secret-key-0123456789")}
+    )
+    sent = []
+
+    async def send(db):
+        from ml4paleo_server.db import create_sessionmaker
+
+        return await email.send_pending(
+            create_sessionmaker(db.bind),
+            rotated,
+            send=lambda smtp, message: sent.append(message),
+        )
+
+    assert run_db(migrated_database_url, send) == 0
+    assert sent == []
+
+    async def statuses(db):
+        return (await db.scalars(select(EmailOutbox.status))).all()
+
+    assert run_db(migrated_database_url, statuses) == ["failed"]

@@ -303,16 +303,23 @@ class DicomVolumeProvider(VolumeProvider):
     def _read_slice_xyz(self, z_index: int) -> np.ndarray:
         if self._volume_xyz is not None:
             return self._volume_xyz[:, :, z_index]
-        return pydicom.dcmread(str(self._files[z_index])).pixel_array.T
+        pixels = pydicom.dcmread(str(self._files[z_index])).pixel_array
+        if pixels.dtype != self._dtype:
+            # Reading into a preallocated array would cast silently.
+            raise ValueError(
+                f"DICOM slice {self._files[z_index]} has pixel type {pixels.dtype}, "
+                f"but the first slice has {self._dtype}."
+            )
+        return pixels.T
 
     def _get_subvolume(self, xs, ys, zs):
         if self._volume_xyz is not None:
             return self._volume_xyz[xs[0] : xs[1], ys[0] : ys[1], zs[0] : zs[1]]
 
-        slices = []
-        for z in range(zs[0], zs[1]):
-            slices.append(self._read_slice_xyz(z)[xs[0] : xs[1], ys[0] : ys[1]])
-        return np.stack(slices, axis=-1)
+        vol = np.empty((xs[1] - xs[0], ys[1] - ys[0], zs[1] - zs[0]), dtype=self.dtype)
+        for i, z in enumerate(range(zs[0], zs[1])):
+            vol[:, :, i] = self._read_slice_xyz(z)[xs[0] : xs[1], ys[0] : ys[1]]
+        return vol
 
     @property
     def shape(self):

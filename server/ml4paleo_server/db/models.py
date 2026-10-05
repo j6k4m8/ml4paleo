@@ -151,7 +151,9 @@ class EmailOutbox(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     to_address: Mapped[str] = mapped_column(String(254))
     subject: Mapped[str] = mapped_column(String(255))
-    body: Mapped[str] = mapped_column(Text)
+    # The message text, sealed (`ml4paleo_server.sealing`): it holds
+    # single-use links that must not sit readable in the database.
+    body_sealed: Mapped[str] = mapped_column(Text)
     # "queued", "sent", or "failed".
     status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
     attempts: Mapped[int] = mapped_column(default=0)

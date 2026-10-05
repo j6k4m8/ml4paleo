@@ -285,7 +285,7 @@ def test_password_reset_flow(new_browser, smtp_settings, migrated_database_url):
 
 def test_queued_email_is_sent_and_retried(smtp_settings, migrated_database_url):
     async def queue(db):
-        email_module.queue_email(db, "a@example.org", "Hello", "Body")
+        email_module.queue_email(db, smtp_settings, "a@example.org", "Hello", "Body")
 
     run_db(migrated_database_url, queue)
     sent_messages, failures = [], []
@@ -298,7 +298,7 @@ def test_queued_email_is_sent_and_retried(smtp_settings, migrated_database_url):
 
     async def send(db):
         return await email_module.send_pending(
-            create_sessionmaker(db.bind), smtp_settings.smtp, send=flaky_send
+            create_sessionmaker(db.bind), smtp_settings, send=flaky_send
         )
 
     assert run_db(migrated_database_url, send) == 0
