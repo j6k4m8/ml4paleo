@@ -148,6 +148,9 @@ class Browser:
     def put(self, url, **kwargs):
         return self.request("PUT", url, **kwargs)
 
+    def patch(self, url, **kwargs):
+        return self.request("PATCH", url, **kwargs)
+
 
 @pytest.fixture
 def app(settings):

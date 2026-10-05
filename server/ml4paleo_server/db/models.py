@@ -12,10 +12,12 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     String,
     Text,
     false,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -62,6 +64,11 @@ class User(TimestampMixin, Base):
     totp_last_step: Mapped[int | None] = mapped_column(BigInteger)
     last_login_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True)
+    )
+    # Per-user limits that replace the deploy defaults, for example
+    # {"storage_gb": 100}. A null value means unlimited.
+    quota_override: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
     )
 
     __table_args__ = (
@@ -157,3 +164,120 @@ class EmailOutbox(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     sent_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Project(TimestampMixin, Base):
+    """
+    One scan and everything made from it. The owner and collaborators all
+    have full access; only the owner can delete the project. Storage used by
+    the project counts against the owner's quota.
+    """
+
+    __tablename__ = "projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str] = mapped_column(String(100))
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    settings: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # The v1 job this project was imported from, if any.
+    v1_job_id: Mapped[str | None] = mapped_column(String(6), unique=True)
+    deleted_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+
+class ProjectMember(Base):
+    """
+    A person with access to a project. The owner has a row too.
+    """
+
+    __tablename__ = "project_members"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    added_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AuditEvent(Base):
+    """
+    Who did what, for actions on accounts and projects.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    ip: Mapped[str | None] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(64))
+    target_type: Mapped[str] = mapped_column(String(32))
+    target_id: Mapped[str] = mapped_column(String(64))
+    details: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+
+    __table_args__ = (Index("ix_audit_log_target", "target_type", "target_id"),)
+
+
+class UserUsage(Base):
+    """
+    What each user currently uses against their quota. Storage is updated as
+    project artifacts are committed or deleted; trained models as models are
+    saved or deleted.
+    """
+
+    __tablename__ = "user_usage"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    storage_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0")
+    )
+    trained_models: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+
+
+class QuotaRequest(Base):
+    """
+    A user's request for higher limits, for an admin to grant or decline.
+    """
+
+    __tablename__ = "quota_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    message: Mapped[str] = mapped_column(Text)
+    # "open", "granted", or "declined".
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    resolved_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('open', 'granted', 'declined')", name="status"),
+    )

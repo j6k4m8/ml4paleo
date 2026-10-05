@@ -69,6 +69,23 @@ class SmtpSettings(BaseModel):
         return bool(self.host)
 
 
+class QuotaSettings(BaseModel):
+    """
+    Default per-user limits for this deploy. Each is independent, and unset
+    (None) means unlimited. Admins can override any of them per user.
+
+    People see two plain limits: how much they can store, and how many trained
+    models they can keep. Compute-time limits exist for deploys that need
+    them, but are off by default; the queue and the available machines limit
+    how much runs at once.
+    """
+
+    storage_gb: float | None = Field(default=10, ge=0)
+    trained_models: int | None = Field(default=20, ge=0)
+    cpu_hours_per_day: float | None = Field(default=None, ge=0)
+    gpu_hours_per_day: float | None = Field(default=None, ge=0)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix=ENV_PREFIX,
@@ -86,6 +103,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = StorageSettings()
     auth: AuthSettings = AuthSettings()
     smtp: SmtpSettings = SmtpSettings()
+    quota: QuotaSettings = QuotaSettings()
     # The first admin account's password (usually M4P_INITIAL_ADMIN_PASSWORD_FILE).
     # Without it, `migrate` generates one and prints it once.
     initial_admin_password: SecretStr | None = None
