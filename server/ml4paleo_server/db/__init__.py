@@ -13,7 +13,14 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from .base import Base, uuid7
-from .models import SiteSetting
+from .models import (
+    AuthToken,
+    EmailOutbox,
+    RateLimit,
+    SiteSetting,
+    User,
+    UserSession,
+)
 
 
 def create_engine(database_url: str) -> AsyncEngine:
@@ -33,8 +40,13 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 __all__ = [
+    "AuthToken",
     "Base",
+    "EmailOutbox",
+    "RateLimit",
     "SiteSetting",
+    "User",
+    "UserSession",
     "create_engine",
     "create_sessionmaker",
     "get_session",

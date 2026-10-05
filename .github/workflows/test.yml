@@ -70,6 +70,11 @@ jobs:
       - name: Check the API through Caddy
         run: curl --fail --silent --show-error http://localhost/api/health
 
+      - name: Check the first admin account was created
+        run: >-
+          docker compose -f deploy/compose/compose.yml logs migrate
+          | grep -q "Created the admin account"
+
       - name: Show logs
         if: failure()
         run: docker compose -f deploy/compose/compose.yml logs

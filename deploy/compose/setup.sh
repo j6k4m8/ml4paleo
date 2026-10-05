@@ -53,6 +53,13 @@ if [ ! -f .env ]; then
 M4P_SITE_ADDRESS=:80
 # The URL people use to reach the app.
 M4P_PUBLIC_URL=http://localhost
+# Optional outgoing email (signup verification, password resets). Leave
+# M4P_SMTP__HOST empty to turn email off.
+M4P_SMTP__HOST=
+M4P_SMTP__PORT=587
+M4P_SMTP__USERNAME=
+M4P_SMTP__PASSWORD=
+M4P_SMTP__FROM_ADDRESS=ml4paleo <no-reply@localhost>
 ENV
     echo "Created .env"
 fi

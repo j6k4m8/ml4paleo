@@ -10,7 +10,7 @@ Kubernetes secrets are usually mounted. A direct value wins over a `_FILE`.
 
 import os
 import pathlib
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import (
@@ -40,6 +40,34 @@ class StorageSettings(BaseModel):
     secret_access_key: SecretStr | None = None
 
 
+class AuthSettings(BaseModel):
+    # "open": anyone can sign up. "invite": only people with an invite link.
+    # Admins can change this at runtime; this is the starting value.
+    signup_mode: Literal["open", "invite"] = "open"
+    password_min_length: int = Field(default=12, ge=8)
+    session_idle_days: float = 7
+    session_max_days: float = 30
+
+
+class SmtpSettings(BaseModel):
+    """
+    Outgoing email. Email is off when `host` is unset: signups are not
+    verified, and admins reset passwords from the command line.
+    """
+
+    host: str | None = None
+    port: int = 587
+    username: str | None = None
+    password: SecretStr | None = None
+    from_address: str = "ml4paleo <no-reply@localhost>"
+    # "starttls" upgrades a plain connection; "tls" connects with TLS.
+    security: Literal["starttls", "tls", "none"] = "starttls"
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.host)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix=ENV_PREFIX,
@@ -55,6 +83,8 @@ class Settings(BaseSettings):
     # Signs session and CSRF tokens. Must be long and random in production.
     secret_key: SecretStr = Field(default=SecretStr(""), repr=False)
     storage: StorageSettings = StorageSettings()
+    auth: AuthSettings = AuthSettings()
+    smtp: SmtpSettings = SmtpSettings()
     # The built web app (`web/build`). When missing, the API still runs and
     # serves a placeholder page.
     web_dir: pathlib.Path | None = None

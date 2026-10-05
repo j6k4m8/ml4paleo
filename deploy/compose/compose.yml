@@ -1,7 +1,8 @@
 # ml4paleo v2 on a single machine.
 #
 # First run `./setup.sh` in this directory to generate secrets and `.env`,
-# then `docker compose up -d --build`.
+# then `docker compose up -d --build`. The first start creates an `admin`
+# account and prints its password once: `docker compose logs migrate`.
 
 name: ml4paleo
 
@@ -13,6 +14,12 @@ x-server-environment: &server-environment
   M4P_STORAGE__ENDPOINT: http://seaweedfs:8333
   M4P_STORAGE__ACCESS_KEY_ID_FILE: /run/secrets/s3_access_key_id
   M4P_STORAGE__SECRET_ACCESS_KEY_FILE: /run/secrets/s3_secret_access_key
+  # Optional outgoing email; see .env.
+  M4P_SMTP__HOST: ${M4P_SMTP__HOST:-}
+  M4P_SMTP__PORT: ${M4P_SMTP__PORT:-587}
+  M4P_SMTP__USERNAME: ${M4P_SMTP__USERNAME:-}
+  M4P_SMTP__PASSWORD: ${M4P_SMTP__PASSWORD:-}
+  M4P_SMTP__FROM_ADDRESS: ${M4P_SMTP__FROM_ADDRESS:-ml4paleo <no-reply@localhost>}
 
 services:
   caddy:
@@ -75,6 +82,16 @@ services:
       postgres:
         condition: service_healthy
     restart: "no"
+
+  housekeeper:
+    image: ml4paleo-server:local
+    restart: unless-stopped
+    command: ["ml4paleo-server", "housekeeper"]
+    environment: *server-environment
+    secrets: *server-secrets
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   api:
     image: ml4paleo-server:local

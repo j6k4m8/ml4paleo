@@ -108,3 +108,66 @@ def settings(migrated_database_url, tmp_path):
 def client(settings):
     with TestClient(create_app(settings)) as test_client:
         yield test_client
+
+
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+class Browser:
+    """
+    A test client that behaves like the web app: it keeps cookies and sends
+    the CSRF token it got from the last session response.
+    """
+
+    def __init__(self, client: TestClient):
+        self.client = client
+        self.csrf_token: str | None = None
+
+    def request(self, method: str, url: str, **kwargs):
+        headers = dict(kwargs.pop("headers", None) or {})
+        if self.csrf_token and method.upper() not in SAFE_METHODS:
+            headers.setdefault("X-CSRF-Token", self.csrf_token)
+        response = self.client.request(method, url, headers=headers, **kwargs)
+        if response.content and response.headers.get("content-type", "").startswith(
+            "application/json"
+        ):
+            body = response.json()
+            if isinstance(body, dict) and "csrf_token" in body:
+                self.csrf_token = body["csrf_token"]
+        return response
+
+    def get(self, url, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+    def put(self, url, **kwargs):
+        return self.request("PUT", url, **kwargs)
+
+
+@pytest.fixture
+def app(settings):
+    return create_app(settings)
+
+
+@pytest.fixture
+def new_browser(app):
+    """
+    Return a function that opens a new browser (its own cookies) on the app.
+    """
+    clients = []
+
+    def open_browser(custom_settings: Settings | None = None) -> Browser:
+        """
+        Open a browser on the shared app, or on a new app built from
+        `custom_settings`.
+        """
+        client = TestClient(create_app(custom_settings) if custom_settings else app)
+        client.__enter__()
+        clients.append(client)
+        return Browser(client)
+
+    yield open_browser
+    for client in clients:
+        client.__exit__(None, None, None)
