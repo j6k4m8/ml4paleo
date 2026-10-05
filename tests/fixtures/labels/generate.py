@@ -1,0 +1,150 @@
+"""
+Generate the golden label-edit fixtures shared by the Python and TypeScript
+implementations.
+
+Run `uv run python tests/fixtures/labels/generate.py` after changing label
+semantics, and commit the updated `cases.json`. Masks and values are stored as
+raw packed bits and raw bytes (base64), not zstd output, because different
+zstd implementations may produce different (equally valid) compressed bytes.
+"""
+
+import base64
+import json
+import pathlib
+
+import numpy as np
+
+from ml4paleo.labels import LABEL_CHUNK_ZYX, Source
+from ml4paleo.labels.codec import content_hash
+from ml4paleo.labels.deltas import (
+    ChunkDelta,
+    apply_delta,
+    pack_mask,
+    pack_values,
+    split_into_deltas,
+    unpack_mask,
+)
+
+OUTPUT = pathlib.Path(__file__).with_name("cases.json")
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def _bits(mask: np.ndarray) -> str:
+    return _b64(np.packbits(mask.astype(bool).ravel(), bitorder="little").tobytes())
+
+
+def _ball(shape, center, radius) -> np.ndarray:
+    grid = np.indices(shape)
+    distance = sum((g - c) ** 2 for g, c in zip(grid, center, strict=True))
+    return distance <= radius**2
+
+
+def _base_chunk(name: str) -> np.ndarray:
+    chunk = np.zeros(LABEL_CHUNK_ZYX, dtype=np.uint8)
+    if name == "quadrants":
+        chunk[:32, :32] = 1
+        chunk[32:, 32:] = 3
+    return chunk
+
+
+def _apply_cases() -> list[dict]:
+    cases = []
+    specs = [
+        ("paint_empty", "zeros", 2, None, "any"),
+        ("paint_over_classes", "quadrants", 2, None, "any"),
+        ("paint_only_unlabeled", "quadrants", 2, None, "unlabeled"),
+        ("erase_class_3_only", "quadrants", 0, None, "class:3"),
+        ("multiclass_values", "quadrants", None, "gradient", "any"),
+    ]
+    for name, base, value, values_kind, only_if in specs:
+        box = (16, 20, 24, 48, 44, 56)
+        shape = (box[3] - box[0], box[4] - box[1], box[5] - box[2])
+        mask = _ball(shape, (16, 12, 16), 13)
+        values = None
+        if values_kind == "gradient":
+            values = (2 + (np.indices(shape)[2] % 3)).astype(np.uint8)
+        delta = ChunkDelta(
+            key=(0, 0, 0),
+            box=box,
+            mask=pack_mask(mask),
+            value=value,
+            values=pack_values(values) if values is not None else None,
+            only_if=only_if,
+        )
+        class_chunk = _base_chunk(base)
+        source_chunk = np.where(class_chunk > 0, Source.IMPORTED, Source.NONE).astype(
+            np.uint8
+        )
+        applied = apply_delta(class_chunk, source_chunk, delta, Source.HUMAN)
+        cases.append(
+            {
+                "name": name,
+                "base": base,
+                "box": list(box),
+                "mask_bits": _bits(mask),
+                "value": value,
+                "values": _b64(values.tobytes()) if values is not None else None,
+                "only_if": only_if,
+                "source": int(Source.HUMAN),
+                "expected": {
+                    "class_sha256": content_hash(applied.class_chunk),
+                    "source_sha256": content_hash(applied.source_chunk),
+                    "changed": applied.changed,
+                },
+            }
+        )
+    return cases
+
+
+def _split_cases() -> list[dict]:
+    cases = []
+    # A brush stroke (a slab of a ball) that crosses chunk boundaries in y and x.
+    for name, origin, shape, center, radius in [
+        ("ball_across_corner", (60, 58, 50), (9, 13, 29), (4, 6, 14), 7),
+        ("thin_plane_stroke", (10, 0, 0), (1, 70, 130), (0, 35, 65), 40),
+    ]:
+        mask = _ball(shape, center, radius)
+        deltas = split_into_deltas(mask, origin, value=4)
+        cases.append(
+            {
+                "name": name,
+                "origin": list(origin),
+                "shape": list(shape),
+                "mask_bits": _bits(mask),
+                "value": 4,
+                "expected_deltas": [
+                    {
+                        "key": list(d.key),
+                        "box": list(d.box),
+                        "mask_bits": _bits(unpack_mask(d.mask, d.box_shape)),
+                    }
+                    for d in deltas
+                ],
+            }
+        )
+    return cases
+
+
+def generate() -> dict:
+    return {
+        "chunk_shape_zyx": list(LABEL_CHUNK_ZYX),
+        "bases": {
+            "zeros": "all voxels 0",
+            "quadrants": "[:32, :32] = 1 and [32:, 32:] = 3; source is IMPORTED (5) "
+            "wherever class > 0",
+        },
+        "apply": _apply_cases(),
+        "split": _split_cases(),
+    }
+
+
+def render() -> str:
+    return json.dumps(generate(), indent=1, sort_keys=True) + "\n"
+
+
+if __name__ == "__main__":
+    OUTPUT.write_text(render())
+    print(f"Wrote {OUTPUT}")
