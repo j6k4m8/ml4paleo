@@ -66,6 +66,7 @@ def upgrade() -> None:
         ),
         sa.Column("totp_secret_enc", sa.String(length=255), nullable=True),
         sa.Column("totp_pending_enc", sa.String(length=255), nullable=True),
+        sa.Column("totp_last_step", sa.BigInteger(), nullable=True),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "created_at",

@@ -10,8 +10,8 @@ import datetime
 import uuid
 
 from fastapi import Request, Response
-from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import delete, select, update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from ..db import User, UserSession
 from ..settings import Settings
@@ -88,11 +88,14 @@ def clear_session_cookie(response: Response, settings: Settings) -> None:
 
 
 async def load_session(
-    db: AsyncSession, settings: Settings, token: str
+    db: AsyncSession, engine: AsyncEngine, settings: Settings, token: str
 ) -> tuple[UserSession, User] | None:
     """
     Return the session and its user for a token, or None if the token is
     unknown, expired, or belongs to a disabled user.
+
+    Sliding the idle expiry is written on its own connection, so it never
+    commits the request's own work.
     """
     row = (
         await db.execute(
@@ -112,11 +115,15 @@ async def load_session(
     ):
         return None
     if now - user_session.last_seen_at > _TOUCH_INTERVAL:
-        user_session.last_seen_at = now
-        user_session.expires_at = min(
+        expires_at = min(
             user_session.created_at + _max_age(settings), now + _idle(settings)
         )
-        await db.commit()
+        async with engine.begin() as connection:
+            await connection.execute(
+                update(UserSession)
+                .where(UserSession.token_hash == user_session.token_hash)
+                .values(last_seen_at=now, expires_at=expires_at)
+            )
     return user_session, user
 
 

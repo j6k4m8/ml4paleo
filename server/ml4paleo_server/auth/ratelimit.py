@@ -1,13 +1,18 @@
 """
 Fixed-window rate limits, counted in Postgres so they hold across API
 processes.
+
+Counts are written on their own short transaction, never the request's: a
+count must stick even when the request then fails, and committing it must
+not commit (or release locks held by) the request's own work.
 """
 
 import datetime
+import ipaddress
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 _INCREMENT = text(
     """
@@ -23,18 +28,32 @@ _INCREMENT = text(
 )
 
 
+def client_key(request: Request) -> str:
+    """
+    The client address to count against. IPv6 clients usually control a
+    whole /64, so they are counted per /64.
+    """
+    host = request.client.host if request.client else "unknown"
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if address.version == 6:
+        return str(ipaddress.ip_network(f"{address}/64", strict=False))
+    return str(address)
+
+
 async def hit(
-    session: AsyncSession, key: str, *, limit: int, window: datetime.timedelta
+    engine: AsyncEngine, key: str, *, limit: int, window: datetime.timedelta
 ) -> None:
     """
     Count one request against `key`, and raise 429 once more than `limit`
-    requests arrive within `window`. Commits immediately, so the count sticks
-    even if the request then fails.
+    requests arrive within `window`.
     """
-    count, window_start = (
-        await session.execute(_INCREMENT, {"key": key, "window": window})
-    ).one()
-    await session.commit()
+    async with engine.begin() as connection:
+        count, window_start = (
+            await connection.execute(_INCREMENT, {"key": key, "window": window})
+        ).one()
     if count > limit:
         retry_after = window_start + window - datetime.datetime.now(datetime.UTC)
         raise HTTPException(

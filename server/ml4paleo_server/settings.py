@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     storage: StorageSettings = StorageSettings()
     auth: AuthSettings = AuthSettings()
     smtp: SmtpSettings = SmtpSettings()
+    # The first admin account's password (usually M4P_INITIAL_ADMIN_PASSWORD_FILE).
+    # Without it, `migrate` generates one and prints it once.
+    initial_admin_password: SecretStr | None = None
     # The built web app (`web/build`). When missing, the API still runs and
     # serves a placeholder page.
     web_dir: pathlib.Path | None = None

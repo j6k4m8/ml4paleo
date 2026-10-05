@@ -8,6 +8,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -57,6 +58,8 @@ class User(TimestampMixin, Base):
     # TOTP secrets are encrypted with a key derived from the server secret.
     totp_secret_enc: Mapped[str | None] = mapped_column(String(255))
     totp_pending_enc: Mapped[str | None] = mapped_column(String(255))
+    # The time step of the last accepted code, so a code can't be reused.
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger)
     last_login_at: Mapped[datetime.datetime | None] = mapped_column(
         DateTime(timezone=True)
     )

@@ -12,7 +12,8 @@ from pydantic import AfterValidator, BaseModel, Field
 from sqlalchemy import or_, select, update
 
 from ..auth import passwords, ratelimit, totp
-from ..auth.deps import DbSession, OptionalAuth, SettingsDep, SetupAuth
+from ..auth.deps import DbSession, EngineDep, OptionalAuth, SettingsDep, SetupAuth
+from ..auth.ratelimit import client_key
 from ..auth.sessions import (
     clear_session_cookie,
     create_session,
@@ -33,7 +34,12 @@ EMAIL_PATTERN = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 VERIFY_TOKEN_LIFETIME = datetime.timedelta(days=3)
 RESET_TOKEN_LIFETIME = datetime.timedelta(hours=1)
 MINUTE = datetime.timedelta(minutes=1)
+QUARTER_HOUR = datetime.timedelta(minutes=15)
 HOUR = datetime.timedelta(hours=1)
+# Names people could mistake for the site's own accounts.
+RESERVED_USERNAMES = frozenset(
+    {"admin", "administrator", "root", "system", "support", "ml4paleo", "staff"}
+)
 
 
 def _username(value: str) -> str:
@@ -106,10 +112,6 @@ def _session_out(settings: Settings, user: User, token: str) -> SessionOut:
     )
 
 
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
 def _check_password(settings: Settings, password: str, user: User) -> None:
     problems = passwords.password_problems(
         password,
@@ -160,6 +162,22 @@ async def _use_token(db: DbSession, kind: str, token: str) -> AuthToken:
     return used
 
 
+async def _expire_reset_tokens(db: DbSession, user: User) -> None:
+    """
+    Use up every outstanding reset link for a user, after their password
+    changes by any route.
+    """
+    await db.execute(
+        update(AuthToken)
+        .where(
+            AuthToken.user_id == user.id,
+            AuthToken.kind == "reset",
+            AuthToken.used_at.is_(None),
+        )
+        .values(used_at=datetime.datetime.now(datetime.UTC))
+    )
+
+
 def _queue_verification(db: DbSession, settings: Settings, user: User, token: str):
     queue_email(
         db,
@@ -199,9 +217,14 @@ async def signup(
     request: Request,
     response: Response,
     db: DbSession,
+    engine: EngineDep,
     settings: SettingsDep,
 ) -> SessionOut:
-    await ratelimit.hit(db, f"signup:ip:{_client_ip(request)}", limit=5, window=HOUR)
+    await ratelimit.hit(
+        engine, f"signup:ip:{client_key(request)}", limit=5, window=HOUR
+    )
+    if body.username in RESERVED_USERNAMES:
+        raise HTTPException(status_code=422, detail="That username is reserved.")
     invite = None
     if await get_signup_mode(db, settings) == "invite":
         if not body.invite:
@@ -222,11 +245,14 @@ async def signup(
     user = User(username=body.username, email=body.email)
     _check_password(settings, body.password, user)
     user.password_hash = await passwords.hash_password(body.password)
+    # An address counts as verified only when ml4paleo has emailed it: a
+    # verification link, or an admin's invite addressed to it. Without SMTP,
+    # addresses stay unverified, so password resets never go to them.
     invited_email = invite is not None and invite.email and invite.email == body.email
-    if settings.smtp.enabled and not invited_email:
-        user.status = "unverified"
-    elif body.email:
+    if invited_email:
         user.email_verified_at = datetime.datetime.now(datetime.UTC)
+    elif settings.smtp.enabled:
+        user.status = "unverified"
     db.add(user)
     await db.flush()
     if user.status == "unverified":
@@ -252,14 +278,20 @@ async def login(
     request: Request,
     response: Response,
     db: DbSession,
+    engine: EngineDep,
     settings: SettingsDep,
 ) -> SessionOut:
     name = body.username.strip().lower()
-    await ratelimit.hit(db, f"login:ip:{_client_ip(request)}", limit=30, window=MINUTE)
-    await ratelimit.hit(db, f"login:user:{name}", limit=5, window=MINUTE)
+    client = client_key(request)
+    await ratelimit.hit(engine, f"login:ip:{client}", limit=30, window=MINUTE)
     user = await db.scalar(
         select(User).where(or_(User.username == name, User.email == name))
     )
+    # Limit guesses per account, whichever name it was given by. Counting per
+    # client as well keeps one attacker from locking everyone else out.
+    account = f"user:{user.id}" if user else f"name:{name}"
+    await ratelimit.hit(engine, f"login:{account}:{client}", limit=5, window=MINUTE)
+    await ratelimit.hit(engine, f"login:{account}", limit=30, window=HOUR)
     valid = await passwords.verify_password(
         body.password, user.password_hash if user else None
     )
@@ -268,11 +300,23 @@ async def login(
     if user.totp_secret_enc is not None:
         if not body.totp_code:
             raise HTTPException(status_code=401, detail="totp_required")
-        secret = totp.decrypt(
-            settings.secret_key.get_secret_value(), user.totp_secret_enc
+        await ratelimit.hit(
+            engine, f"totp:user:{user.id}", limit=5, window=QUARTER_HOUR
         )
-        if not totp.verify(secret, body.totp_code):
+        try:
+            secret = totp.decrypt(
+                settings.secret_key.get_secret_value(), user.totp_secret_enc
+            )
+        except totp.UnreadableSecret:
+            raise HTTPException(
+                status_code=401,
+                detail="Two-factor sign-in can't be checked for this account. "
+                "Ask an administrator to reset it.",
+            ) from None
+        step = totp.verify(secret, body.totp_code, after_step=user.totp_last_step)
+        if step is None:
             raise HTTPException(status_code=401, detail="Wrong two-factor code.")
+        user.totp_last_step = step
     session_token = await create_session(db, settings, user, request)
     await db.commit()
     set_session_cookie(response, settings, session_token)
@@ -301,9 +345,13 @@ class PasswordChangeIn(BaseModel):
 
 @router.post("/password", status_code=204)
 async def change_password(
-    body: PasswordChangeIn, auth: SetupAuth, db: DbSession, settings: SettingsDep
+    body: PasswordChangeIn,
+    auth: SetupAuth,
+    db: DbSession,
+    engine: EngineDep,
+    settings: SettingsDep,
 ) -> None:
-    await ratelimit.hit(db, f"password:user:{auth.user.id}", limit=5, window=MINUTE)
+    await ratelimit.hit(engine, f"password:user:{auth.user.id}", limit=5, window=MINUTE)
     if not await passwords.verify_password(
         body.current_password, auth.user.password_hash
     ):
@@ -314,6 +362,7 @@ async def change_password(
     auth.user.password_hash = await passwords.hash_password(body.new_password)
     auth.user.must_change_password = False
     await delete_user_sessions(db, auth.user.id, keep_token=auth.token)
+    await _expire_reset_tokens(db, auth.user)
     await db.commit()
 
 
@@ -344,18 +393,24 @@ class TotpConfirmIn(BaseModel):
 
 @router.post("/totp/confirm", status_code=204)
 async def confirm_totp_setup(
-    body: TotpConfirmIn, auth: SetupAuth, db: DbSession, settings: SettingsDep
+    body: TotpConfirmIn,
+    auth: SetupAuth,
+    db: DbSession,
+    engine: EngineDep,
+    settings: SettingsDep,
 ) -> None:
-    await ratelimit.hit(db, f"totp:user:{auth.user.id}", limit=5, window=MINUTE)
+    await ratelimit.hit(engine, f"totp:user:{auth.user.id}", limit=5, window=MINUTE)
     if auth.user.totp_pending_enc is None:
         raise HTTPException(status_code=409, detail="Start two-factor setup first.")
     key = settings.secret_key.get_secret_value()
-    if not totp.verify(totp.decrypt(key, auth.user.totp_pending_enc), body.code):
+    step = totp.verify(totp.decrypt(key, auth.user.totp_pending_enc), body.code)
+    if step is None:
         raise HTTPException(
             status_code=422, detail="That code is wrong. Try the next one."
         )
     auth.user.totp_secret_enc = auth.user.totp_pending_enc
     auth.user.totp_pending_enc = None
+    auth.user.totp_last_step = step
     await db.commit()
 
 
@@ -383,7 +438,11 @@ class ResetRequestIn(BaseModel):
 
 @router.post("/password-reset/request", status_code=202)
 async def request_password_reset(
-    body: ResetRequestIn, request: Request, db: DbSession, settings: SettingsDep
+    body: ResetRequestIn,
+    request: Request,
+    db: DbSession,
+    engine: EngineDep,
+    settings: SettingsDep,
 ) -> None:
     """
     Always answers 202, so the response doesn't reveal which emails have
@@ -391,8 +450,10 @@ async def request_password_reset(
     """
     if not settings.smtp.enabled or body.email is None:
         return
-    await ratelimit.hit(db, f"reset:ip:{_client_ip(request)}", limit=10, window=HOUR)
-    await ratelimit.hit(db, f"reset:email:{body.email}", limit=3, window=HOUR)
+    await ratelimit.hit(
+        engine, f"reset:ip:{client_key(request)}", limit=10, window=HOUR
+    )
+    await ratelimit.hit(engine, f"reset:email:{body.email}", limit=3, window=HOUR)
     user = await db.scalar(select(User).where(User.email == body.email))
     if user is None or user.email_verified_at is None or user.status == "disabled":
         return
@@ -429,4 +490,19 @@ async def confirm_password_reset(
     user.password_hash = await passwords.hash_password(body.new_password)
     user.must_change_password = False
     await delete_user_sessions(db, user.id)
+    await _expire_reset_tokens(db, user)
+    await db.commit()
+
+
+@router.post("/verify-email/resend", status_code=202)
+async def resend_verification(
+    auth: SetupAuth, db: DbSession, engine: EngineDep, settings: SettingsDep
+) -> None:
+    if auth.user.status != "unverified" or not auth.user.email:
+        return
+    await ratelimit.hit(engine, f"verify:user:{auth.user.id}", limit=3, window=HOUR)
+    token = await _issue_token(
+        db, "verify", VERIFY_TOKEN_LIFETIME, user_id=auth.user.id, email=auth.user.email
+    )
+    _queue_verification(db, settings, auth.user, token)
     await db.commit()

@@ -2,16 +2,16 @@
 FastAPI dependencies that identify the signed-in user.
 
 Use `CurrentAuth` on every route that needs a signed-in user. It refuses
-users who still have a required setup step: a forced password change, or
-two-factor setup for admins. The few routes that complete those steps use
-`SetupAuth` instead.
+users who still have a required setup step: a forced password change,
+two-factor setup for admins, or email verification. The few routes that
+complete those steps use `SetupAuth` instead.
 """
 
 from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from ..db import User, UserSession, get_session
 from ..settings import Settings
@@ -30,17 +30,22 @@ def get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
+def get_engine(request: Request) -> AsyncEngine:
+    return request.app.state.engine
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 DbSession = Annotated[AsyncSession, Depends(get_session)]
+EngineDep = Annotated[AsyncEngine, Depends(get_engine)]
 
 
 async def optional_auth(
-    request: Request, db: DbSession, settings: SettingsDep
+    request: Request, db: DbSession, engine: EngineDep, settings: SettingsDep
 ) -> Auth | None:
     token = request.cookies.get(cookie_name(settings))
     if not token:
         return None
-    loaded = await load_session(db, settings, token)
+    loaded = await load_session(db, engine, settings, token)
     if loaded is None:
         return None
     user_session, user = loaded
@@ -58,6 +63,8 @@ async def current_auth(auth: Annotated[Auth, Depends(setup_auth)]) -> Auth:
         raise HTTPException(status_code=403, detail="password_change_required")
     if auth.user.is_admin and auth.user.totp_secret_enc is None:
         raise HTTPException(status_code=403, detail="two_factor_required")
+    if auth.user.status == "unverified":
+        raise HTTPException(status_code=403, detail="email_verification_required")
     return auth
 
 

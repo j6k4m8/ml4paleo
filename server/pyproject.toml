@@ -5,7 +5,7 @@ description = "API server for ml4paleo v2"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.17",
-    "cryptography>=46",
+    "cryptography>=50",
     "fastapi>=0.120",
     "ml4paleo",
     "psycopg[binary]>=3.2",

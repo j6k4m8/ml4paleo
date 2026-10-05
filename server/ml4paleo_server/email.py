@@ -4,12 +4,15 @@ Outgoing email.
 Requests never talk to the mail server: they add a row to `email_outbox`, and
 the housekeeper sends queued mail in the background (`send_pending`). A slow
 or broken mail server therefore never slows down or breaks a request.
+
+Messages carry single-use links, so each row is deleted as soon as its message
+is sent, and the housekeeper deletes rows that failed for good after a week.
 """
 
-import datetime
 import email.message
 import logging
 import smtplib
+import ssl
 from collections.abc import Callable
 
 from sqlalchemy import select
@@ -35,10 +38,15 @@ def queue_email(db: AsyncSession, to_address: str, subject: str, body: str) -> N
 
 def send_with_smtp(smtp: SmtpSettings, message: email.message.EmailMessage) -> None:
     assert smtp.host is not None
-    connect = smtplib.SMTP_SSL if smtp.security == "tls" else smtplib.SMTP
-    with connect(smtp.host, smtp.port, timeout=30) as server:
+    # Verify the mail server's certificate; smtplib doesn't by default.
+    context = ssl.create_default_context()
+    if smtp.security == "tls":
+        server = smtplib.SMTP_SSL(smtp.host, smtp.port, timeout=30, context=context)
+    else:
+        server = smtplib.SMTP(smtp.host, smtp.port, timeout=30)
+    with server:
         if smtp.security == "starttls":
-            server.starttls()
+            server.starttls(context=context)
         if smtp.username and smtp.password:
             server.login(smtp.username, smtp.password.get_secret_value())
         server.send_message(message)
@@ -52,22 +60,25 @@ async def send_pending(
 ) -> int:
     """
     Send up to `batch_size` queued emails and return how many were sent.
-    Failed sends are retried on later calls, up to `MAX_ATTEMPTS` times.
+
+    Each message is claimed, sent, and recorded in its own transaction, so a
+    crash re-sends at most the one message in flight. Failed sends are retried
+    on later calls, up to `MAX_ATTEMPTS` times.
     """
     if not smtp.enabled:
         return 0
     sent = 0
-    async with sessionmaker() as db:
-        queued = (
-            await db.scalars(
+    for _ in range(batch_size):
+        async with sessionmaker() as db:
+            item = await db.scalar(
                 select(EmailOutbox)
                 .where(EmailOutbox.status == "queued")
                 .order_by(EmailOutbox.created_at)
-                .limit(batch_size)
+                .limit(1)
                 .with_for_update(skip_locked=True)
             )
-        ).all()
-        for item in queued:
+            if item is None:
+                break
             message = email.message.EmailMessage()
             message["From"] = smtp.from_address
             message["To"] = item.to_address
@@ -81,9 +92,13 @@ async def send_pending(
                 item.last_error = str(exc)[:2000]
                 if item.attempts >= MAX_ATTEMPTS:
                     item.status = "failed"
+                await db.commit()
+                if item.status == "queued":
+                    # Leave the rest for the next pass rather than hammering a
+                    # mail server that is down.
+                    break
             else:
-                item.status = "sent"
-                item.sent_at = datetime.datetime.now(datetime.UTC)
+                await db.delete(item)
+                await db.commit()
                 sent += 1
-        await db.commit()
     return sent

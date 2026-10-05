@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import User
 from .passwords import hash_password
+from .sessions import delete_user_sessions
 
 
 def random_password() -> str:
@@ -18,32 +19,35 @@ def random_password() -> str:
     return secrets.token_urlsafe(18)
 
 
-async def ensure_admin(db: AsyncSession) -> str | None:
+async def ensure_admin(db: AsyncSession, password: str | None = None) -> str | None:
     """
-    If no admin exists, create the `admin` account with a random password and
-    return that password (so the caller can show it once). The admin must
-    change the password and set up two-factor sign-in at first login.
+    If no admin exists, make the `admin` account an admin with `password` (or
+    a random one), and return the random password so the caller can show it
+    once. Returns None if an admin already exists or `password` was given.
+
+    The admin must change the password and set up two-factor sign-in at
+    first login. If someone already holds the `admin` username, that account
+    is taken over: its two-factor setup is cleared and its sessions end.
     """
     admins = await db.scalar(
         select(func.count()).select_from(User).where(User.is_admin)
     )
     if admins:
         return None
-    password = random_password()
-    existing = await db.scalar(select(User).where(User.username == "admin"))
-    if existing is not None:
-        existing.is_admin = True
-        existing.password_hash = await hash_password(password)
-        existing.must_change_password = True
-        existing.status = "active"
+    generated = password is None
+    password = password or random_password()
+    user = await db.scalar(select(User).where(User.username == "admin"))
+    if user is None:
+        user = User(username="admin")
+        db.add(user)
     else:
-        db.add(
-            User(
-                username="admin",
-                password_hash=await hash_password(password),
-                is_admin=True,
-                must_change_password=True,
-            )
-        )
+        await delete_user_sessions(db, user.id)
+    user.is_admin = True
+    user.status = "active"
+    user.password_hash = await hash_password(password)
+    user.must_change_password = True
+    user.totp_secret_enc = None
+    user.totp_pending_enc = None
+    user.totp_last_step = None
     await db.commit()
-    return password
+    return password if generated else None

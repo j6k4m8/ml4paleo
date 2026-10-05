@@ -3,61 +3,28 @@ Accounts and sign-in: signup, login, sessions, CSRF, password changes and
 resets, email verification, admin bootstrap with two-factor, and invites.
 """
 
-import asyncio
 import re
 
 import pyotp
 import pytest
+from helpers import (
+    PASSWORD,
+    link_token,
+    make_admin,
+    next_code,
+    outbox,
+    run_db,
+    signup,
+)
 from ml4paleo_server import email as email_module
 from ml4paleo_server.app import create_app
 from ml4paleo_server.auth import ensure_admin
 from ml4paleo_server.db import (
-    EmailOutbox,
     User,
-    create_engine,
     create_sessionmaker,
 )
 from pydantic import SecretStr
-from sqlalchemy import select, update
-
-PASSWORD = "correct horse battery staple"
-
-
-def run_db(database_url, fn):
-    """
-    Run `await fn(db)` against the test database and return the result.
-    """
-
-    async def runner():
-        engine = create_engine(database_url)
-        try:
-            async with create_sessionmaker(engine)() as db:
-                result = await fn(db)
-                await db.commit()
-                return result
-        finally:
-            await engine.dispose()
-
-    return asyncio.run(runner())
-
-
-def signup(browser, username="ada", password=PASSWORD, **extra):
-    return browser.post(
-        "/api/auth/signup", json={"username": username, "password": password, **extra}
-    )
-
-
-def outbox(database_url):
-    async def fetch(db):
-        return (
-            await db.scalars(select(EmailOutbox).order_by(EmailOutbox.created_at))
-        ).all()
-
-    return run_db(database_url, fetch)
-
-
-def link_token(body: str) -> str:
-    return re.search(r"token=([A-Za-z0-9_-]+)", body).group(1)
+from sqlalchemy import update
 
 
 def test_signup_signs_in_and_normalizes_the_username(new_browser):
@@ -216,28 +183,20 @@ def test_bootstrap_admin_must_change_password_and_set_up_two_factor(
     credentials = {"username": "admin", "password": "fossil dig site 1923"}
     needs_code = fresh.post("/api/auth/login", json=credentials)
     assert needs_code.json()["detail"] == "totp_required"
-    with_code = fresh.post(
+    # The code used to confirm setup can't be used again, so use the next one.
+    reused = fresh.post(
         "/api/auth/login", json={**credentials, "totp_code": pyotp.TOTP(secret).now()}
+    )
+    assert reused.json()["detail"] == "Wrong two-factor code."
+    with_code = fresh.post(
+        "/api/auth/login", json={**credentials, "totp_code": next_code(secret)}
     )
     assert with_code.status_code == 200
     assert with_code.json()["required_steps"] == []
 
 
-def make_admin(new_browser, database_url):
-    password = run_db(database_url, ensure_admin)
-    admin = new_browser()
-    admin.post("/api/auth/login", json={"username": "admin", "password": password})
-    admin.post(
-        "/api/auth/password",
-        json={"current_password": password, "new_password": "fossil dig site 1923"},
-    )
-    secret = admin.post("/api/auth/totp/setup").json()["secret"]
-    admin.post("/api/auth/totp/confirm", json={"code": pyotp.TOTP(secret).now()})
-    return admin
-
-
 def test_invite_only_signup(new_browser, migrated_database_url):
-    admin = make_admin(new_browser, migrated_database_url)
+    admin, _ = make_admin(new_browser, migrated_database_url)
     assert (
         admin.put("/api/admin/settings", json={"signup_mode": "invite"}).status_code
         == 200
@@ -341,9 +300,11 @@ def test_queued_email_is_sent_and_retried(smtp_settings, migrated_database_url):
         )
 
     assert run_db(migrated_database_url, send) == 0
-    assert run_db(migrated_database_url, send) == 1
     [message] = outbox(migrated_database_url)
-    assert (message.status, message.attempts) == ("sent", 2)
+    assert (message.status, message.attempts) == ("queued", 1)
+    assert run_db(migrated_database_url, send) == 1
+    # Sent mail is deleted, so its single-use links don't linger.
+    assert outbox(migrated_database_url) == []
     assert sent_messages[0]["Subject"] == "Hello"
 
 

@@ -30,4 +30,7 @@ def csrf_token(secret_key: str, session_token: str) -> str:
 
 
 def tokens_match(expected: str, given: str | None) -> bool:
-    return given is not None and hmac.compare_digest(expected, given)
+    # compare_digest refuses non-ASCII strings, and real tokens are hex.
+    return (
+        given is not None and given.isascii() and hmac.compare_digest(expected, given)
+    )
