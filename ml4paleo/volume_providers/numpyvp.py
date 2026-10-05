@@ -1,5 +1,6 @@
-from typing import Tuple
+
 import numpy as np
+
 from .volume_provider import VolumeProvider
 
 
@@ -27,7 +28,7 @@ class NumpyVolumeProvider(VolumeProvider):
         return self.data[key]
 
     @property
-    def shape(self) -> Tuple[int, int, int]:
+    def shape(self) -> tuple[int, int, int]:
         return self.data.shape
 
     @property

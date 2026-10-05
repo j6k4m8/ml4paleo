@@ -1,6 +1,4 @@
 import pathlib
-from functools import lru_cache
-from typing import List, Tuple, Union
 
 import numpy as np
 import psutil
@@ -17,9 +15,9 @@ class ImageStackVolumeProvider(VolumeProvider):
 
     def __init__(
         self,
-        path_or_list_of_images: Union[pathlib.Path, List[pathlib.Path]],
+        path_or_list_of_images: pathlib.Path | list[pathlib.Path],
         image_glob: str = "*",
-        cache_size: Union[int, str] = "guess",
+        cache_size: int | str = "guess",
     ):
         """
         Create a new ImageStackVolumeProvider.
@@ -88,7 +86,7 @@ class ImageStackVolumeProvider(VolumeProvider):
         """
         try:
             res = np.array(Image.open(path)).T
-        except:
+        except Exception:
             res = np.zeros(self.shape[:2], dtype=self.dtype)
         # If dim is CHW, chop off the C dimension.
         if len(res.shape) == 3:
@@ -96,7 +94,7 @@ class ImageStackVolumeProvider(VolumeProvider):
         return res
 
     @property
-    def shape(self) -> Tuple[int, int, int]:
+    def shape(self) -> tuple[int, int, int]:
         return (*Image.open(self.paths[0]).size, len(self.paths))
 
     def __getitem__(self, key):

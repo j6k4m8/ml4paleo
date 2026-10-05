@@ -1,0 +1,16 @@
+[project]
+name = "ml4paleo-worker"
+version = "0.2.0.dev0"
+description = "Job worker for ml4paleo v2"
+requires-python = ">=3.12"
+dependencies = ["ml4paleo"]
+
+[project.scripts]
+ml4paleo-worker = "ml4paleo_worker.cli:main"
+
+[tool.uv.sources]
+ml4paleo = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,9 +1,9 @@
 import math
 import pathlib
-from typing import Tuple, Union
-import zarr
+
 import numpy as np
 import tqdm
+import zarr
 from joblib import Parallel, delayed
 from numcodecs import Blosc
 from PIL import Image
@@ -13,11 +13,11 @@ from . import VolumeProvider
 
 def export_zarr_array(
     volume_provider: VolumeProvider,
-    zarr_file: Union[pathlib.Path, str],
-    downsample_factor: Tuple[int, int, int] = None,
+    zarr_file: pathlib.Path | str,
+    downsample_factor: tuple[int, int, int] = None,
     dtype: np.dtype = None,
     compression=None,
-    chunk_size: Tuple[int, int, int] = None,
+    chunk_size: tuple[int, int, int] = None,
     slice_count: int = None,
     progress: bool = False,
     parallel_jobs: int = False,
@@ -79,7 +79,7 @@ def export_zarr_array(
     if voxel_size_xyz_mm is not None:
         zarr_array.attrs["voxel_size_xyz_mm"] = [
             float(size) * factor
-            for size, factor in zip(voxel_size_xyz_mm, downsample_factor)
+            for size, factor in zip(voxel_size_xyz_mm, downsample_factor, strict=True)
         ]
 
     # Write the data
@@ -145,7 +145,7 @@ def export_zarr_array(
 
 def get_random_tile(
     volume_provider,
-    tile_size: Tuple[int, int],
+    tile_size: tuple[int, int],
 ) -> np.ndarray:
     """
     Get a random tile from the volume.
@@ -183,7 +183,7 @@ def get_random_tile(
 
 def get_random_zyx_subvolume(
     volume_provider,
-    subvolume_size_zyx: Tuple[int, int, int],
+    subvolume_size_zyx: tuple[int, int, int],
     return_metadata: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict]:
     """
@@ -262,11 +262,11 @@ def get_random_zyx_subvolume(
 
 def export_to_img_stack(
     volume_provider: VolumeProvider,
-    img_dir: Union[str, pathlib.Path],
+    img_dir: str | pathlib.Path,
     img_format: str = "png",
-    downsample_factor: Tuple[int, int, int] = (1, 1, 1),
+    downsample_factor: tuple[int, int, int] = (1, 1, 1),
     progress: bool = True,
-    parallel_jobs: Union[int, bool] = False,
+    parallel_jobs: int | bool = False,
     **kwargs,
 ):
     """

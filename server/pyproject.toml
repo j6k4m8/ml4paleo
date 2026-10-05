@@ -1,0 +1,16 @@
+[project]
+name = "ml4paleo-server"
+version = "0.2.0.dev0"
+description = "API server for ml4paleo v2"
+requires-python = ">=3.12"
+dependencies = ["ml4paleo"]
+
+[project.scripts]
+ml4paleo-server = "ml4paleo_server.cli:main"
+
+[tool.uv.sources]
+ml4paleo = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

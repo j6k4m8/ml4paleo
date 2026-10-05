@@ -1,20 +1,22 @@
 import pathlib
-from typing import Any, Callable, Iterable, Optional, Tuple, Union
-from intern.utils.parallel import block_compute
-import zarr
-import numpy as np
-from ml4paleo.volume_providers import VolumeProvider
-from .segmenter import Segmenter3D
-from .rf import RandomForest3DSegmenter
+from collections.abc import Callable
+from typing import Any
 
 import tqdm
+import zarr
+from intern.utils.parallel import block_compute
 from joblib import Parallel, delayed
+
+from ml4paleo.volume_providers import VolumeProvider
+
+from .rf import RandomForest3DSegmenter
+from .segmenter import Segmenter3D
 
 
 def segment_chunk_and_write(
-    xs: Tuple[int, int],
-    ys: Tuple[int, int],
-    zs: Tuple[int, int],
+    xs: tuple[int, int],
+    ys: tuple[int, int],
+    zs: tuple[int, int],
     volume_provider: VolumeProvider,
     segmenter: Segmenter3D,
     seg_path: str,
@@ -38,9 +40,9 @@ def segment_volume_to_zarr(
     seg_path: pathlib.Path,
     segmenter: Segmenter3D,
     chunk_size,
-    parallel: Union[bool, int] = True,
+    parallel: bool | int = True,
     progress: bool = True,
-    progress_callback: Optional[Callable[[int, Any, int], Any]] = None,
+    progress_callback: Callable[[int, Any, int], Any] | None = None,
 ):
     seg_path.mkdir(parents=True, exist_ok=True)
 

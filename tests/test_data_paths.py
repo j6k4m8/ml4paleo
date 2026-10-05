@@ -127,10 +127,10 @@ class PngExportOrientationTests(TempWorkdirTestCase):
             Image.fromarray(image).save(path)
             paths.append(path)
 
-        export_zarr_array(
-            ImageStackVolumeProvider(paths, cache_size=0), "volume.zarr"
+        export_zarr_array(ImageStackVolumeProvider(paths, cache_size=0), "volume.zarr")
+        export_to_img_stack(
+            ZarrVolumeProvider("volume.zarr"), "exported", progress=False
         )
-        export_to_img_stack(ZarrVolumeProvider("volume.zarr"), "exported", progress=False)
 
         for z, image in enumerate(slices):
             exported = np.array(Image.open(pathlib.Path("exported", f"{z:04d}.png")))
@@ -224,7 +224,11 @@ class MeshOrientationTests(TempWorkdirTestCase):
         )
         self.assertEqual(
             mesh_info,
-            {"axis_order": "xyz", "units": "mm", "voxel_size_xyz": list(self.VOXEL_SIZE)},
+            {
+                "axis_order": "xyz",
+                "units": "mm",
+                "voxel_size_xyz": list(self.VOXEL_SIZE),
+            },
         )
 
     def test_normals_point_outward(self):
@@ -252,7 +256,9 @@ class NeuroglancerMeshTransformTests(TempWorkdirTestCase):
         (legacy_dir / "255.combined.stl").write_bytes(b"")
 
         self.assertEqual(
-            self.apputils.mesh_to_voxel_transform(self.apputils.load_mesh_info(legacy_dir)),
+            self.apputils.mesh_to_voxel_transform(
+                self.apputils.load_mesh_info(legacy_dir)
+            ),
             [[0, 0, 1, 0], [0, 1, 0, 0], [1, 0, 0, 0]],
         )
         freshness = self.apputils.get_job_artifact_freshness("ABC123")

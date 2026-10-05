@@ -124,7 +124,9 @@ class ConversionRunnerTests(unittest.TestCase):
             manager.update_job(job_id, update={"name": "renamed mid-conversion"})
             return real_export(*args, **kwargs)
 
-        with mock.patch.object(conversionrunner, "export_zarr_array", rename_then_export):
+        with mock.patch.object(
+            conversionrunner, "export_zarr_array", rename_then_export
+        ):
             conversionrunner.convert_next()
 
         converted = manager.get_job(job_id)
