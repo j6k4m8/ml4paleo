@@ -57,6 +57,18 @@ class UploadsUnsupported(Exception):
     """
 
 
+class PartsMissing(Exception):
+    def __init__(self, parts: list[int]):
+        super().__init__(f"parts {parts} are missing or the wrong size")
+        self.parts = parts
+
+
+class UploadLost(Exception):
+    """
+    Storage has neither the assembled file nor the parts.
+    """
+
+
 def now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 
@@ -138,19 +150,25 @@ class MultipartStorage:
             ExpiresIn=int(PART_URL_LIFETIME.total_seconds()),
         )
 
-    def stored_parts(self, upload: Upload) -> dict[int, tuple[int, str]]:
+    def stored_parts(self, upload: Upload) -> dict[int, tuple[int, str]] | None:
         """
-        The parts storage has: {part number: (size, ETag)}.
+        The parts storage has: {part number: (size, ETag)}, or None if the
+        multipart upload is gone (assembled or aborted).
         """
         parts: dict[int, tuple[int, str]] = {}
         marker = 0
         while True:
-            response = self._client.list_parts(
-                Bucket=self.bucket,
-                Key=self.key(upload),
-                UploadId=upload.multipart_id,
-                PartNumberMarker=marker,
-            )
+            try:
+                response = self._client.list_parts(
+                    Bucket=self.bucket,
+                    Key=self.key(upload),
+                    UploadId=upload.multipart_id,
+                    PartNumberMarker=marker,
+                )
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") == "NoSuchUpload":
+                    return None
+                raise
             for part in response.get("Parts", []):
                 parts[part["PartNumber"]] = (part["Size"], part["ETag"])
             if not response.get("IsTruncated"):
@@ -194,6 +212,73 @@ class MultipartStorage:
         self._client.delete_object(Bucket=self.bucket, Key=self.key(upload))
 
 
+def good_parts(upload: Upload, stored: dict[int, tuple[int, str]]) -> list[int]:
+    """
+    The stored parts that belong to the upload and have the expected size.
+    """
+    return sorted(
+        number
+        for number, (size, _) in stored.items()
+        if 1 <= number <= part_count(upload)
+        and size == expected_part_size(upload, number)
+    )
+
+
+async def _lock(db: AsyncSession, upload_id: uuid.UUID) -> Upload:
+    upload = await db.scalar(
+        select(Upload)
+        .where(Upload.id == upload_id)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
+    assert upload is not None
+    return upload
+
+
+async def finish(db: AsyncSession, storage: MultipartStorage, upload: Upload) -> Upload:
+    """
+    Assemble an upload's parts into its file, and commit. The caller holds a
+    lock on the row.
+
+    `completing` is committed before storage is asked to assemble the parts,
+    so a crash (or a failed commit) at any point leaves something a retry
+    can finish: if the file is there with the right size it is accepted,
+    and if the parts are still there they are assembled. Raises
+    `PartsMissing` while parts are missing, and `UploadLost` if storage has
+    neither the file nor the parts.
+    """
+    if upload.state == "uploading":
+        stored = await run_in_threadpool(storage.stored_parts, upload)
+        if stored is None:
+            raise UploadLost
+        good = set(good_parts(upload, stored))
+        missing = [n for n in range(1, part_count(upload) + 1) if n not in good]
+        if missing:
+            raise PartsMissing(missing)
+        upload.state = "completing"
+        await db.commit()
+        upload = await _lock(db, upload.id)
+    if upload.state != "completing":
+        return upload
+    size = await run_in_threadpool(storage.stored_size, upload)
+    if size is None:
+        stored = await run_in_threadpool(storage.stored_parts, upload)
+        if stored is None:
+            raise UploadLost
+        good = good_parts(upload, stored)
+        if len(good) != part_count(upload):
+            raise UploadLost
+        await run_in_threadpool(storage.finish, upload, {n: stored[n] for n in good})
+        size = await run_in_threadpool(storage.stored_size, upload)
+    if size != upload.size:
+        raise UploadLost
+    upload.state = "complete"
+    upload.completed_at = now()
+    upload.expires_at = now() + KEEP_FINISHED
+    await db.commit()
+    return upload
+
+
 def multipart_storage(settings: Settings) -> MultipartStorage:
     root = project_storage(settings)
     if root.scheme != "s3" or root.bucket is None:
@@ -227,8 +312,11 @@ async def abort_or_delete(
         select(Project.owner_id).where(Project.id == upload.project_id)
     )
     storage = multipart_storage(settings)
-    if upload.state == "uploading":
+    if upload.state in ("uploading", "completing"):
         await run_in_threadpool(storage.abort, upload)
+        if upload.state == "completing":
+            # Storage may have assembled the file before the row said so.
+            await run_in_threadpool(storage.delete, upload)
         upload.state = "aborted"
         if owner_id is not None:
             await quotas.release_storage(db, owner_id, upload.size)
@@ -271,7 +359,7 @@ def _collectable():
         or_(
             Upload.state == "deleting",
             and_(
-                Upload.state.in_(("uploading", "complete")),
+                Upload.state.in_(("uploading", "completing", "complete")),
                 ~in_use(),
                 or_(Upload.expires_at < now(), deleted_project),
             ),

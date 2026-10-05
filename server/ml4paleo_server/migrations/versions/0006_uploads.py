@@ -37,7 +37,7 @@ def upgrade() -> None:
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
-            "state IN ('uploading', 'complete', 'aborted', 'deleting', 'deleted')",
+            "state IN ('uploading', 'completing', 'complete', 'aborted', 'deleting', 'deleted')",
             name=op.f("ck_uploads_state"),
         ),
         sa.CheckConstraint("size > 0 AND part_size > 0", name=op.f("ck_uploads_sizes")),

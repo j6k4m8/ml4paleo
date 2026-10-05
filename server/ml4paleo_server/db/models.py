@@ -560,7 +560,14 @@ class ArtifactHead(Base):
     )
 
 
-UPLOAD_STATES = ("uploading", "complete", "aborted", "deleting", "deleted")
+UPLOAD_STATES = (
+    "uploading",
+    "completing",
+    "complete",
+    "aborted",
+    "deleting",
+    "deleted",
+)
 
 
 class Upload(Base):
@@ -574,6 +581,8 @@ class Upload(Base):
 
     - `uploading`: parts are arriving; it is aborted if not finished by
       `expires_at`.
+    - `completing`: recorded just before asking storage to assemble the parts,
+      so a crash at any point can be finished (or cleaned up) later.
     - `complete`: the whole file is stored; it is deleted after `expires_at`
       unless a job is still using it.
     - `aborted`: given up; nothing was kept.
