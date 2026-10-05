@@ -51,7 +51,7 @@ class RandomForest3DSegmenter(Segmenter3D):
             n_estimators=estimators,
             max_depth=max_depth,
             n_jobs=n_jobs,
-            **self.rf_kwargs
+            **self.rf_kwargs,
         )
 
     def segment(self, volume: np.ndarray) -> np.ndarray:
