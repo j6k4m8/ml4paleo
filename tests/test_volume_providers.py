@@ -63,3 +63,11 @@ def test_mixed_pixel_types_raise(tmp_path):
     provider = ImageStackVolumeProvider([first, second])
     with pytest.raises(ValueError, match="pixel type"):
         provider[:, :, 0:2]
+
+
+def test_mixed_palette_and_grayscale_slices_raise(tmp_path):
+    gray = _save(tmp_path / "0.png", np.zeros((3, 5), dtype=np.uint8))
+    palette = _save(tmp_path / "1.png", np.zeros((3, 5), dtype=np.uint8), mode="P")
+    provider = ImageStackVolumeProvider([gray, palette])
+    with pytest.raises(ValueError, match="image mode"):
+        provider[:, :, 0:2]

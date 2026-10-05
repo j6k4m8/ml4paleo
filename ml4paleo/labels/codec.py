@@ -45,6 +45,35 @@ def encode_chunk(chunk: np.ndarray) -> bytes:
     return bytes(_zstd.encode(np.ascontiguousarray(_check_chunk(chunk))))
 
 
+# A compressed payload may exceed its raw size only by a small frame overhead.
+FRAME_OVERHEAD = 1024
+
+
+def decompress_exact(data: bytes, size: int) -> bytes:
+    """
+    Decompress zstd `data` that must expand to exactly `size` bytes, without
+    ever producing more than `size + 1` bytes, whatever the frame claims.
+
+    Used for everything that may come from a client: zstd frames can declare
+    (and expand to) far more than their compressed size.
+    """
+    if len(data) > size + FRAME_OVERHEAD:
+        raise ValueError("Compressed payload is larger than its contents allow")
+    try:
+        declared = zstandard.get_frame_parameters(data).content_size
+        if declared != zstandard.CONTENTSIZE_UNKNOWN and declared != size:
+            raise ValueError(f"Payload declares {declared} bytes, expected {size}")
+        with zstandard.ZstdDecompressor().stream_reader(
+            data, read_across_frames=True
+        ) as reader:
+            raw = reader.read(size + 1)
+    except zstandard.ZstdError as exc:
+        raise ValueError(f"Invalid compressed payload: {exc}") from exc
+    if len(raw) != size:
+        raise ValueError(f"Payload decompressed to {len(raw)} bytes, expected {size}")
+    return raw
+
+
 def decode_chunk(data: bytes | None) -> np.ndarray:
     """
     Decode zarr v3 chunk bytes into a full chunk. None decodes to zeros.
@@ -52,13 +81,7 @@ def decode_chunk(data: bytes | None) -> np.ndarray:
     """
     if data is None:
         return np.zeros(LABEL_CHUNK_ZYX, dtype=np.uint8)
-    size = int(np.prod(LABEL_CHUNK_ZYX))
-    try:
-        raw = zstandard.ZstdDecompressor().decompress(data, max_output_size=size)
-    except zstandard.ZstdError as exc:
-        raise ValueError(f"Invalid label chunk: {exc}") from exc
-    if len(raw) != size:
-        raise ValueError(f"Decoded label chunk has {len(raw)} bytes, expected {size}")
+    raw = decompress_exact(data, int(np.prod(LABEL_CHUNK_ZYX)))
     return np.frombuffer(raw, dtype=np.uint8).reshape(LABEL_CHUNK_ZYX).copy()
 
 

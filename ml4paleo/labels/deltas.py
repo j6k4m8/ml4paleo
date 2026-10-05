@@ -30,13 +30,12 @@ import zstandard
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from . import LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
+from .codec import FRAME_OVERHEAD, decompress_exact
 
 ChunkKey = tuple[int, int, int]
 Box = tuple[int, int, int, int, int, int]
 
 _ONLY_IF = re.compile(r"any|unlabeled|class:(\d{1,3})")
-# Compressed payloads may exceed their raw size only by a small frame overhead.
-_FRAME_OVERHEAD = 1024
 _MAX_RAW_BYTES = int(np.prod(LABEL_CHUNK_ZYX))
 
 
@@ -45,19 +44,7 @@ def _compress(raw: bytes) -> bytes:
 
 
 def _decompress(data: bytes, size: int) -> bytes:
-    """
-    Decompress exactly `size` bytes, refusing anything larger without ever
-    allocating more than `size` bytes.
-    """
-    if len(data) > size + _FRAME_OVERHEAD:
-        raise ValueError("Compressed payload is larger than its box allows")
-    try:
-        raw = zstandard.ZstdDecompressor().decompress(data, max_output_size=size)
-    except zstandard.ZstdError as exc:
-        raise ValueError(f"Invalid compressed payload: {exc}") from exc
-    if len(raw) != size:
-        raise ValueError(f"Payload decompressed to {len(raw)} bytes, expected {size}")
-    return raw
+    return decompress_exact(data, size)
 
 
 def pack_mask(mask: np.ndarray) -> bytes:
@@ -137,7 +124,7 @@ class ChunkDelta(BaseModel):
         if self.value is not None and not 0 <= self.value <= MAX_CLASS:
             raise ValueError(f"Label value {self.value} is out of range")
         for payload in (self.mask, self.values or b""):
-            if len(payload) > _MAX_RAW_BYTES + _FRAME_OVERHEAD:
+            if len(payload) > _MAX_RAW_BYTES + FRAME_OVERHEAD:
                 raise ValueError("Delta payload is too large")
         match = _ONLY_IF.fullmatch(self.only_if)
         if match is None or (match.group(1) and int(match.group(1)) > MAX_CLASS):
