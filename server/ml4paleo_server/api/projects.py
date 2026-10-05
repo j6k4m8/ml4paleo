@@ -12,7 +12,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 
 from .. import audit
 from ..auth.deps import CurrentAuth, DbSession
@@ -184,8 +184,9 @@ async def delete_project(
 
 
 class MemberIn(BaseModel):
-    # A username or an email address.
-    user: str = Field(min_length=1, max_length=254)
+    # Collaborators are added by username only. Looking people up by email
+    # would let anyone learn which addresses have accounts.
+    username: str = Field(min_length=1, max_length=64)
 
 
 @router.get("/{project_id}/members")
@@ -201,16 +202,12 @@ async def add_member(
     auth: CurrentAuth,
     db: DbSession,
 ) -> list[MemberOut]:
-    name = body.user.strip().lower()
+    name = body.username.strip().lower()
     user = await db.scalar(
-        select(User).where(
-            or_(User.username == name, User.email == name), User.status == "active"
-        )
+        select(User).where(User.username == name, User.status == "active")
     )
     if user is None:
-        raise HTTPException(
-            status_code=404, detail="No one with that username or email."
-        )
+        raise HTTPException(status_code=404, detail="No one with that username.")
     already = await db.scalar(
         select(func.count())
         .select_from(ProjectMember)

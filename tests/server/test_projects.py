@@ -54,7 +54,7 @@ def test_other_peoples_projects_look_missing(new_browser):
         assert bob.patch(url, json={"name": "mine now"}).status_code == 404
         assert bob.request("DELETE", url).status_code == 404
         assert bob.get(f"{url}/members").status_code == 404
-        assert bob.post(f"{url}/members", json={"user": "bob"}).status_code == 404
+        assert bob.post(f"{url}/members", json={"username": "bob"}).status_code == 404
     assert bob.get("/api/projects").json() == []
 
 
@@ -63,7 +63,7 @@ def test_collaborators_get_full_access_but_cannot_delete(new_browser):
     bob = make_user(new_browser, "bob", email="bob@example.org")
     project_id = create_project(ada)["id"]
     members = ada.post(
-        f"/api/projects/{project_id}/members", json={"user": "Bob@Example.org"}
+        f"/api/projects/{project_id}/members", json={"username": "Bob"}
     ).json()
     assert sorted(m["username"] for m in members) == ["ada", "bob"]
 
@@ -84,19 +84,29 @@ def test_membership_changes(new_browser):
     project_id = project["id"]
     ada_id = project["members"][0]["user_id"]
     url = f"/api/projects/{project_id}/members"
-    assert ada.post(url, json={"user": "nobody"}).status_code == 404
+    assert ada.post(url, json={"username": "nobody"}).status_code == 404
     bob_id = next(
         m["user_id"]
-        for m in ada.post(url, json={"user": "bob"}).json()
+        for m in ada.post(url, json={"username": "bob"}).json()
         if m["username"] == "bob"
     )
     # Adding twice is harmless.
-    assert len(ada.post(url, json={"user": "bob"}).json()) == 2
+    assert len(ada.post(url, json={"username": "bob"}).json()) == 2
     # Nobody can remove the owner; a collaborator can leave.
     assert bob.request("DELETE", f"{url}/{ada_id}").status_code == 403
     assert bob.request("DELETE", f"{url}/{bob_id}").status_code == 204
     assert bob.get(f"/api/projects/{project_id}").status_code == 404
     assert ada.request("DELETE", f"{url}/{bob_id}").status_code == 404
+
+
+def test_collaborators_cannot_be_found_by_email(new_browser):
+    ada = make_user(new_browser, "ada")
+    make_user(new_browser, "bob", email="bob@example.org")
+    url = f"/api/projects/{create_project(ada)['id']}/members"
+    registered = ada.post(url, json={"username": "bob@example.org"})
+    unregistered = ada.post(url, json={"username": "carol@example.org"})
+    assert registered.status_code == unregistered.status_code == 404
+    assert registered.json() == unregistered.json()
 
 
 def test_disabled_accounts_cannot_be_added(new_browser, migrated_database_url):
@@ -110,7 +120,7 @@ def test_disabled_accounts_cannot_be_added(new_browser, migrated_database_url):
 
     run_db(migrated_database_url, disable)
     project_id = create_project(ada)["id"]
-    response = ada.post(f"/api/projects/{project_id}/members", json={"user": "bob"})
+    response = ada.post(f"/api/projects/{project_id}/members", json={"username": "bob"})
     assert response.status_code == 404
 
 
@@ -119,7 +129,7 @@ def test_project_actions_are_audited(new_browser, migrated_database_url):
     make_user(new_browser, "bob")
     project_id = create_project(ada)["id"]
     ada.patch(f"/api/projects/{project_id}", json={"name": "Renamed"})
-    ada.post(f"/api/projects/{project_id}/members", json={"user": "bob"})
+    ada.post(f"/api/projects/{project_id}/members", json={"username": "bob"})
 
     async def actions(db):
         return (
