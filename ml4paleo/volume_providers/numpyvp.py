@@ -1,4 +1,3 @@
-
 import numpy as np
 
 from .volume_provider import VolumeProvider

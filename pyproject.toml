@@ -58,5 +58,5 @@ select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
 testpaths = ["tests"]
 
 [tool.pyright]
-include = ["server", "worker"]
+include = ["server", "worker", "ml4paleo/storage", "ml4paleo/blocks.py"]
 pythonVersion = "3.12"
