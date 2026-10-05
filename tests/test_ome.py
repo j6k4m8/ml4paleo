@@ -150,6 +150,69 @@ def test_parallel_slabs_fill_the_volume_and_must_be_shard_aligned(tmp_path):
     )
 
 
+class _RecordingProvider(NumpyVolumeProvider):
+    """
+    Records the size of every read, so tests can check the ingest budget.
+    """
+
+    def __init__(self, data):
+        super().__init__(data)
+        self.read_bytes = []
+
+    def __getitem__(self, key):
+        result = super().__getitem__(key)
+        self.read_bytes.append(result.nbytes)
+        return result
+
+
+@pytest.mark.parametrize(
+    ("max_read_bytes", "reads_per_slab"),
+    [
+        (10**9, 1),  # the whole slab fits
+        (2 * 4 * 23 * 2, 3),  # full-width bands, shard aligned
+        (2 * 4 * 8 * 2, 9),  # narrower tiles, shard aligned
+        (2 * 2 * 2 * 2, 6 * 12),  # below one shard column: chunk aligned
+    ],
+)
+def test_ingest_reads_stay_within_the_byte_budget(
+    tmp_path, max_read_bytes, reads_per_slab
+):
+    rng = np.random.default_rng(3)
+    data = rng.integers(0, 60000, size=(23, 11, 5), dtype=np.uint16)  # (x, y, z)
+    provider = _RecordingProvider(data)
+    image = _image_for(provider, _grant(tmp_path))
+    steps = []
+    write_from_provider(
+        provider,
+        image,
+        max_read_bytes=max_read_bytes,
+        progress=lambda done, total: steps.append((done, total)),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(image.array(0)[0]), data.transpose(2, 1, 0)
+    )
+    slabs = 3  # depth 5 in chunk-deep slabs of 2
+    assert len(provider.read_bytes) == slabs * reads_per_slab
+    assert max(provider.read_bytes) <= max_read_bytes
+    assert steps[-1] == (slabs * reads_per_slab,) * 2
+
+
+def test_image_stack_tiles_read_only_their_region(tmp_path):
+    rng = np.random.default_rng(4)
+    slices = [rng.integers(0, 255, size=(9, 13), dtype=np.uint8) for _ in range(3)]
+    paths = []
+    for z, pixels in enumerate(slices):
+        paths.append(tmp_path / f"slice_{z}.png")
+        Image.fromarray(pixels).save(paths[-1])
+    provider = ImageStackVolumeProvider(paths)
+    image = _image_for(provider, _grant(tmp_path))
+    write_from_provider(provider, image, max_read_bytes=2 * 4 * 4)
+    np.testing.assert_array_equal(np.asarray(image.array(0)[0]), np.stack(slices))
+    region = provider[2:7, 3:5, 1:3]
+    assert region.shape == (5, 2, 2)
+    np.testing.assert_array_equal(region[:, :, 0], slices[1][3:5, 2:7].T)
+
+
 def test_mean_pyramid_matches_block_means(tmp_path):
     rng = np.random.default_rng(1)
     data = rng.integers(0, 1000, size=(6, 8, 4), dtype=np.uint16)  # (x, y, z)
