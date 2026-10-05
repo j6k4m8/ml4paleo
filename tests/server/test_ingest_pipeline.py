@@ -160,9 +160,9 @@ def test_an_upload_becomes_the_projects_image(
     np.testing.assert_array_equal(np.asarray(stored.array(0)[0]), np.stack(slices))
     assert stored.num_levels == manifest["levels"]
 
-    # A finished pipeline's event stream sends its final state and ends.
-    streamed = events(browser, project, pipeline["id"])
-    assert streamed[-1]["status"] == "succeeded"
+    # A finished pipeline has no events left: 204 tells EventSource to stop.
+    finished = browser.get(f"/api/projects/{project}/pipelines/{pipeline['id']}/events")
+    assert finished.status_code == 204
     listed = browser.get(f"/api/projects/{project}/pipelines").json()
     assert [p["id"] for p in listed] == [pipeline["id"]]
 
@@ -197,3 +197,89 @@ def test_ingest_needs_a_finished_upload_in_this_project(new_browser):
             f"/api/projects/{project}/ingest", json={"upload_id": upload_id}
         )
         assert response.status_code == 404
+
+
+def test_a_malformed_probe_result_fails_the_pipeline(
+    new_browser, migrated_database_url, live_server, monkeypatch
+):
+    browser = new_browser()
+    signup(browser)
+    project = browser.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    upload_id = upload(
+        browser, project, _zip({"a.png": _png(np.zeros((4, 4), np.uint8))})
+    )
+    pipeline = browser.post(
+        f"/api/projects/{project}/ingest", json={"upload_id": upload_id}
+    ).json()
+    # A probe that reports slabs that don't cover the volume.
+    monkeypatch.setitem(
+        HANDLERS,
+        "ingest.probe",
+        lambda ctx: {
+            "kind": "images",
+            "slices": 1,
+            "shape_zyx": [3, 4, 4],
+            "dtype": "|u1",
+            "levels": 1,
+            "slabs": [[0, 2]],
+        },
+    )
+    token = add_worker(migrated_database_url)
+    done = run_until_finished(browser, project, pipeline["id"], token, live_server)
+    assert done["status"] == "failed"
+    assert done["error"].startswith("The job's result is malformed")
+    assert done["jobs"] == 1  # nothing was built on it
+
+
+def test_the_event_stream_stops_when_access_ends(new_browser, migrated_database_url):
+    ada = new_browser()
+    signup(ada)
+    bob = new_browser()
+    signup(bob, username="bob")
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    members = ada.post(f"/api/projects/{project}/members", json={"username": "bob"})
+    bob_id = next(m["user_id"] for m in members.json() if m["username"] == "bob")
+    upload_id = upload(ada, project, _zip({"a.png": _png(np.zeros((4, 4), np.uint8))}))
+    pipeline = ada.post(
+        f"/api/projects/{project}/ingest", json={"upload_id": upload_id}
+    ).json()
+    # No worker runs, so the pipeline stays waiting; bob watches it...
+    watched: list[dict] = []
+    watcher = threading.Thread(
+        target=lambda: watched.extend(events(bob, project, pipeline["id"]))
+    )
+    watcher.start()
+    time.sleep(1.5)
+    # ...until he is removed from the project.
+    removed = ada.request("DELETE", f"/api/projects/{project}/members/{bob_id}")
+    assert removed.status_code == 204
+    watcher.join(timeout=10)
+    assert not watcher.is_alive()
+    assert watched and watched[0]["status"] == "waiting"
+
+
+def test_an_image_is_not_abandoned_while_its_probe_waits(
+    new_browser, settings, migrated_database_url
+):
+    import datetime
+
+    from helpers import run_db
+    from ml4paleo_server import artifacts
+    from ml4paleo_server.db import Artifact
+    from sqlalchemy import select, update
+
+    browser = new_browser()
+    signup(browser)
+    project = browser.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    upload_id = upload(
+        browser, project, _zip({"a.png": _png(np.zeros((4, 4), np.uint8))})
+    )
+    browser.post(f"/api/projects/{project}/ingest", json={"upload_id": upload_id})
+
+    async def age_and_sweep(db):
+        old = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=3)
+        await db.execute(update(Artifact).values(created_at=old))
+        await artifacts.abandon_staging(db)
+        return await db.scalar(select(Artifact.state))
+
+    assert run_db(migrated_database_url, age_and_sweep) == "staging"

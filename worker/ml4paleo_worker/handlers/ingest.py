@@ -45,6 +45,10 @@ def probe(ctx: JobContext) -> dict[str, Any]:
     except IngestError as exc:
         raise PermanentError(str(exc)) from exc
     x, y, z = index.shape_xyz
+    # Creating the image replaces whatever is there, so make sure this job
+    # still holds its lease (the storage proxy also refuses writes after a
+    # lease ends).
+    ctx.check()
     image = OmeImage.create(
         image_grant,
         shape_czyx=(1, z, y, x),

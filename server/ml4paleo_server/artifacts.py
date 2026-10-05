@@ -218,7 +218,9 @@ async def head(db: AsyncSession, project_id: uuid.UUID, slot: str) -> Artifact |
 async def abandon_staging(db: AsyncSession) -> int:
     """
     Mark failed the staging artifacts that nothing will commit: their job
-    finished without committing them, or they have no job and are old.
+    finished without committing them, or they have no job, are old, and no
+    waiting or running job has a grant for them (a pipeline's first job may
+    wait a long time before the job that commits it exists).
     """
     result = await db.execute(
         update(Artifact)
@@ -232,6 +234,7 @@ async def abandon_staging(db: AsyncSession) -> int:
                 and_(
                     Artifact.produced_by_job.is_(None),
                     Artifact.created_at < now() - ABANDONED_AFTER,
+                    ~_in_use(),
                 ),
             ),
         )
@@ -242,6 +245,19 @@ async def abandon_staging(db: AsyncSession) -> int:
     return len(result.all())
 
 
+def _in_use():
+    """
+    SQL: a waiting or running job has a grant for the artifact's files.
+    """
+    path = func.concat("projects/", Artifact.project_id, "/artifacts/", Artifact.id)
+    return exists().where(
+        Job.status.in_(("blocked", "queued", "leased")),
+        Job.grants.contains(
+            func.jsonb_build_array(func.jsonb_build_object("path", path))
+        ),
+    )
+
+
 def _collectable(settings: Settings):
     """
     SQL: artifacts whose files garbage collection may delete now. A current
@@ -249,13 +265,7 @@ def _collectable(settings: Settings):
     """
     current = now()
     storage = settings.storage
-    path = func.concat("projects/", Artifact.project_id, "/artifacts/", Artifact.id)
-    in_use = exists().where(
-        Job.status.in_(("blocked", "queued", "leased")),
-        Job.grants.contains(
-            func.jsonb_build_array(func.jsonb_build_object("path", path))
-        ),
-    )
+    in_use = _in_use()
     deleted_project = exists().where(
         Project.id == Artifact.project_id, Project.deleted_at.is_not(None)
     )

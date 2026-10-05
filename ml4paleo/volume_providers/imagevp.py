@@ -6,6 +6,9 @@ from PIL import Image
 from .sources import open_binary
 from .volume_provider import VolumeProvider, normalize_key
 
+# The most memory one decoded slice may take (estimated generously).
+MAX_DECODED_SLICE_BYTES = 8 * 1024**3
+
 
 class ImageStackVolumeProvider(VolumeProvider):
     """
@@ -127,8 +130,17 @@ def _read_slice(path: pathlib.Path) -> tuple[np.ndarray, str]:
     try:
         with open_binary(path) as source, Image.open(source) as image:
             mode = image.mode
+            width, height = image.size
+            # Image files can compress hugely: check the decoded size (at
+            # most four bytes per band) before decoding.
+            decoded = width * height * len(image.getbands()) * 4
+            if decoded > MAX_DECODED_SLICE_BYTES:
+                raise ValueError(
+                    f"it is {width} x {height} pixels in mode {mode}, too large "
+                    "for one slice"
+                )
             res = np.array(image).T
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
         raise ValueError(f"Could not read image slice {path}: {exc}") from exc
     # If dim is CHW (an RGB or RGBA image), keep the first channel.
     if len(res.shape) == 3:

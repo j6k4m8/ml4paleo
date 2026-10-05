@@ -16,14 +16,14 @@ import datetime
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from .. import artifacts, audit, jobs, pipelines
 from ..auth.deps import CurrentAuth, DbSession
-from ..db import Job, Upload
+from ..db import Job, Project, ProjectMember, Upload, UserSession
 from ..jobs.queue import FINISHED
 from .projects import MemberProject
 
@@ -139,26 +139,63 @@ async def get_pipeline(
     return await _pipeline_out(db, await _root(db, project, pipeline_id))
 
 
-@router.get("/pipelines/{pipeline_id}/events")
+@router.get("/pipelines/{pipeline_id}/events", response_model=None)
 async def pipeline_events(
-    pipeline_id: uuid.UUID, project: MemberProject, db: DbSession, request: Request
-) -> StreamingResponse:
+    pipeline_id: uuid.UUID,
+    project: MemberProject,
+    auth: CurrentAuth,
+    db: DbSession,
+    request: Request,
+) -> StreamingResponse | Response:
     """
     Server-sent events: a `status` event (a pipeline, as JSON) whenever the
-    pipeline changes, ending once it has finished.
+    pipeline changes, ending once it has finished. For a pipeline that has
+    already finished the answer is 204, which tells a browser's EventSource
+    not to reconnect (fetch the pipeline instead).
     """
     root = await _root(db, project, pipeline_id)
-    # Give the request's connection back; each update uses a short session.
-    # (Detach the job first, so ending the transaction doesn't expire it.)
+    if (await _pipeline_out(db, root)).status in FINISHED:
+        return Response(status_code=204)
+    # Read what the stream needs before ending the transaction, which
+    # expires loaded objects (the job is detached, so it keeps its values).
+    user_id, session_hash, project_id = (
+        auth.user.id,
+        auth.session.token_hash,
+        project.id,
+    )
     db.expunge(root)
+    # Give the request's connection back; each update uses a short session.
     await db.rollback()
     sessionmaker = request.app.state.sessionmaker
+
+    async def still_allowed(session) -> bool:
+        """
+        The person is still signed in and still a member.
+        """
+        allowed = await session.scalar(
+            select(ProjectMember.user_id)
+            .join(Project, Project.id == ProjectMember.project_id)
+            .where(
+                ProjectMember.project_id == project_id,
+                ProjectMember.user_id == user_id,
+                Project.deleted_at.is_(None),
+            )
+        )
+        signed_in = await session.scalar(
+            select(UserSession.token_hash).where(
+                UserSession.token_hash == session_hash,
+                UserSession.expires_at > datetime.datetime.now(datetime.UTC),
+            )
+        )
+        return allowed is not None and signed_in is not None
 
     async def events():
         deadline = datetime.datetime.now(datetime.UTC) + STREAM_FOR
         last = None
         while datetime.datetime.now(datetime.UTC) < deadline:
             async with sessionmaker() as session:
+                if not await still_allowed(session):
+                    return
                 current = await _pipeline_out(session, root)
             payload = current.model_dump_json()
             if payload != last:

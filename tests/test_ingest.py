@@ -139,3 +139,103 @@ def test_natural_sort_and_intensity_summary():
     assert summary["max"] == 65535
     assert 0 <= summary["window"][0] < summary["window"][1] < 65535
     assert sum(summary["histogram"]["counts"]) == values.size
+
+
+@pytest.mark.parametrize("method", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+def test_unbounded_compression_methods_are_refused(tmp_path, method):
+    archive = _zip({"a.png": _png(np.zeros((4, 4), dtype=np.uint8))}, method)
+    with pytest.raises(IngestError, match="compression method"):
+        probe(_stored(tmp_path, archive)())
+
+
+def _understate(archive: bytes, name: str, declared: int) -> bytes:
+    """
+    Rewrite a member's declared uncompressed size, as a hostile archive would.
+    """
+    data = bytearray(archive)
+    info = zipfile.ZipFile(io.BytesIO(archive)).getinfo(name)
+    # The local header and the central directory entry both record it.
+    data[info.header_offset + 22 : info.header_offset + 26] = declared.to_bytes(
+        4, "little"
+    )
+    central = archive.rfind(b"PK\x01\x02")
+    data[central + 24 : central + 28] = declared.to_bytes(4, "little")
+    return bytes(data)
+
+
+def test_a_member_cannot_expand_past_its_declared_size(tmp_path):
+    import tracemalloc
+
+    archive = _understate(_zip({"a.tif": bytes(64 * 1024 * 1024)}), "a.tif", 1000)
+    opener = _stored(tmp_path, archive)
+    tracemalloc.start()
+    with pytest.raises(IngestError, match="damaged"):
+        probe(opener())
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 16 * 1024 * 1024
+
+
+def test_entry_counts_come_from_the_end_record(tmp_path, monkeypatch):
+    from ml4paleo import ingest
+
+    small = _zip({f"s{i}.png": b"x" for i in range(3)})
+    assert ingest.entry_count(io.BytesIO(small)) == 3
+    # More than 65535 entries need the ZIP64 end record.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for i in range(70_000):
+            archive.writestr(f"{i}", b"")
+    assert ingest.entry_count(io.BytesIO(buffer.getvalue())) == 70_000
+    # A too-large archive is refused before its directory is read.
+    monkeypatch.setattr(ingest, "MAX_MEMBERS", 2)
+    with pytest.raises(IngestError, match="more than 2 files"):
+        probe(_stored(tmp_path, small)())
+
+
+def test_a_multiframe_dicom_is_ingested(tmp_path):
+    from pydicom.dataset import Dataset, FileMetaDataset
+    from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
+
+    frames = np.stack([np.full((4, 6), 10 * i, dtype=np.uint16) for i in range(5)])
+    meta = FileMetaDataset()
+    meta.MediaStorageSOPClassUID = CTImageStorage
+    meta.MediaStorageSOPInstanceUID = generate_uid()
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds = Dataset()
+    ds.file_meta = meta
+    ds.SOPClassUID = CTImageStorage
+    ds.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
+    ds.Rows, ds.Columns = 4, 6
+    ds.NumberOfFrames = 5
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.BitsAllocated = ds.BitsStored = 16
+    ds.HighBit = 15
+    ds.PixelRepresentation = 0
+    ds.PixelData = frames.tobytes()
+    buffer = io.BytesIO()
+    ds.save_as(buffer, enforce_file_format=True)
+    opener = _stored(tmp_path, _zip({"volume.dcm": buffer.getvalue()}))
+
+    index = probe(opener())
+    assert (index.kind, index.shape_xyz) == ("dicom", (6, 4, 5))
+    provider = slab_provider(opener(), index)
+    np.testing.assert_array_equal(provider[:, :, 2:4], frames[2:4].transpose(2, 1, 0))
+
+
+def test_summaries_skip_values_that_cant_be_displayed():
+    floats = np.array([np.nan, np.inf, -np.inf, 1.0, 2.0, 3.0], dtype=np.float32)
+    summary = intensity_summary(floats)
+    assert (summary["min"], summary["max"]) == (1.0, 3.0)
+    assert intensity_summary(np.array([True, False]))["max"] == 1
+    assert intensity_summary(np.array([np.nan]))["window"] == [0, 0]
+
+
+def test_huge_slices_are_refused_before_decoding(tmp_path, monkeypatch):
+    from ml4paleo.volume_providers import imagevp
+
+    monkeypatch.setattr(imagevp, "MAX_DECODED_SLICE_BYTES", 100)
+    opener = _stored(tmp_path, _zip({"a.png": _png(np.zeros((8, 8), dtype=np.uint8))}))
+    with pytest.raises(IngestError, match="too large"):
+        probe(opener())

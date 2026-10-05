@@ -51,6 +51,40 @@ async def start(
     return probe, artifact
 
 
+def check_probe_result(result: dict) -> None:
+    """
+    Refuse a probe result the rest of the pipeline can't be built from.
+    """
+    shape = result.get("shape_zyx")
+    if not (
+        isinstance(shape, list)
+        and len(shape) == 3
+        and all(isinstance(n, int) and n > 0 for n in shape)
+    ):
+        raise ValueError("shape_zyx must be three positive integers")
+    levels = result.get("levels")
+    if not (isinstance(levels, int) and 1 <= levels <= 32):
+        raise ValueError("levels must be between 1 and 32")
+    slabs = result.get("slabs")
+    if not isinstance(slabs, list) or not 0 < len(slabs) <= 10_000:
+        raise ValueError("slabs must be a list of up to 10000 ranges")
+    position = 0
+    for slab in slabs:
+        if not (
+            isinstance(slab, list)
+            and len(slab) == 2
+            and slab[0] == position
+            and isinstance(slab[1], int)
+            and slab[1] > slab[0]
+        ):
+            raise ValueError("slabs must cover the volume in order")
+        position = slab[1]
+    if position != shape[0]:
+        raise ValueError("slabs must cover the whole depth")
+    if result.get("kind") not in ("images", "dicom"):
+        raise ValueError("kind must be images or dicom")
+
+
 async def after_probe(db: AsyncSession, probe: Job) -> None:
     result = probe.result or {}
     image_grant = probe.grants[:1]

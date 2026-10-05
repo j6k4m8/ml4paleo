@@ -19,7 +19,9 @@ person who uploaded it.
 import io
 import json
 import re
+import struct
 import zipfile
+import zlib
 from dataclasses import asdict, dataclass
 from typing import BinaryIO, Literal
 
@@ -29,9 +31,13 @@ from .volume_providers.imagevp import ImageStackVolumeProvider
 from .volume_providers.volume_provider import VolumeProvider, normalize_key
 
 MAX_MEMBERS = 200_000
-MAX_SLICE_BYTES = 4 * 1024**3
+MAX_SLICE_BYTES = 2 * 1024**3
 # Archives that expand by more than this look like zip bombs.
 MAX_EXPANSION = 1000
+# Python decompresses bzip2 and LZMA members without bounding the output, so
+# only these methods are read.
+SUPPORTED_COMPRESSION = {zipfile.ZIP_STORED: "stored", zipfile.ZIP_DEFLATED: "deflate"}
+READ_CHUNK = 1024 * 1024
 SourceKind = Literal["images", "dicom"]
 
 
@@ -78,22 +84,69 @@ class ZipMember:
         return self.info.filename
 
     def open(self) -> BinaryIO:
-        # zipfile stops at the member's declared size and checks its CRC.
-        with self.archive.open(self.info) as member:
-            return io.BytesIO(member.read())
+        """
+        Read the member into memory, in bounded chunks: zipfile stops at the
+        declared size, and small reads keep each decompression step small.
+        """
+        data = io.BytesIO()
+        try:
+            with self.archive.open(self.info) as member:
+                while chunk := member.read(READ_CHUNK):
+                    data.write(chunk)
+        except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError) as exc:
+            raise IngestError(f"The archive is damaged ({self.name}: {exc}).") from None
+        data.seek(0)
+        return data
 
     def __str__(self) -> str:
         return self.name
 
 
+NOT_A_ZIP = (
+    "The upload is not a zip archive. Put the slices (image files or a DICOM "
+    "series) in one zip file."
+)
+
+
+def entry_count(fileobj: BinaryIO) -> int | None:
+    """
+    The number of entries an archive says it has, from its end-of-directory
+    record, without reading the directory itself (which could be huge).
+    None if there is no such record.
+    """
+    fileobj.seek(0, io.SEEK_END)
+    size = fileobj.tell()
+    fileobj.seek(max(0, size - (65536 + 22)))
+    tail = fileobj.read()
+    end = tail.rfind(b"PK\x05\x06")
+    if end < 0 or len(tail) < end + 22:
+        return None
+    count = struct.unpack("<H", tail[end + 10 : end + 12])[0]
+    if count != 0xFFFF:
+        return count
+    # A ZIP64 archive: the real count is in the ZIP64 end record.
+    locator = tail.rfind(b"PK\x06\x07", 0, end)
+    if locator < 0 or len(tail) < locator + 20:
+        return None
+    record = struct.unpack("<Q", tail[locator + 8 : locator + 16])[0]
+    fileobj.seek(record)
+    header = fileobj.read(56)
+    if len(header) < 40 or header[:4] != b"PK\x06\x06":
+        return None
+    return struct.unpack("<Q", header[32:40])[0]
+
+
 def open_archive(fileobj: BinaryIO) -> zipfile.ZipFile:
+    count = entry_count(fileobj)
+    if count is None:
+        raise IngestError(NOT_A_ZIP)
+    if count > MAX_MEMBERS:
+        raise IngestError(f"The archive has more than {MAX_MEMBERS} files.")
+    fileobj.seek(0)
     try:
         return zipfile.ZipFile(fileobj)
     except zipfile.BadZipFile:
-        raise IngestError(
-            "The upload is not a zip archive. Put the slices (image files or a "
-            "DICOM series) in one zip file."
-        ) from None
+        raise IngestError(NOT_A_ZIP) from None
 
 
 def slice_members(archive: zipfile.ZipFile) -> list[ZipMember]:
@@ -117,6 +170,13 @@ def slice_members(archive: zipfile.ZipFile) -> list[ZipMember]:
         if info.file_size > MAX_SLICE_BYTES:
             raise IngestError(
                 f"{info.filename} is larger than {MAX_SLICE_BYTES} bytes."
+            )
+        if info.flag_bits & 0x1:
+            raise IngestError("The archive is encrypted; upload it without a password.")
+        if info.compress_type not in SUPPORTED_COMPRESSION:
+            raise IngestError(
+                f"{info.filename} uses a compression method ml4paleo doesn't read; "
+                "make the zip with ordinary (deflate) compression."
             )
     expanded = sum(info.file_size for info in infos)
     compressed = sum(info.compress_size for info in infos) or 1
@@ -162,8 +222,9 @@ def _is_dicom(member: ZipMember) -> bool:
     import pydicom
     from pydicom.errors import InvalidDicomError
 
+    data = member.open()  # IngestError if the archive is damaged
     try:
-        pydicom.dcmread(member.open(), stop_before_pixels=True)
+        pydicom.dcmread(data, stop_before_pixels=True)
     except (InvalidDicomError, EOFError, ValueError, TypeError, OSError):
         return False
     return True
@@ -227,6 +288,8 @@ def slab_provider(fileobj: BinaryIO, index: SourceIndex) -> VolumeProvider:
         raise IngestError(f"The archive changed: {exc.args[0]} is missing.") from None
     if index.kind == "images":
         return ImageStackVolumeProvider(members)  # type: ignore[arg-type]
+    if len(members) == 1 and index.shape_xyz[2] > 1:
+        return _DicomFrames(members[0], index.shape_xyz, np.dtype(index.dtype))
     return _DicomSlices(members, index.shape_xyz, np.dtype(index.dtype))
 
 
@@ -273,6 +336,40 @@ class _DicomSlices(VolumeProvider):
         return volume
 
 
+class _DicomFrames(VolumeProvider):
+    """
+    One multi-frame DICOM file, read once (it is at most `MAX_SLICE_BYTES`).
+    """
+
+    def __init__(
+        self, member: ZipMember, shape_xyz: tuple[int, int, int], dtype: np.dtype
+    ):
+        self._member = member
+        self._shape_xyz = shape_xyz
+        self._dtype = dtype
+        self._volume_xyz: np.ndarray | None = None
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return self._shape_xyz
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self._dtype
+
+    def __getitem__(self, key) -> np.ndarray:
+        import pydicom
+
+        if self._volume_xyz is None:
+            frames = pydicom.dcmread(self._member.open()).pixel_array
+            volume = np.transpose(frames, (2, 1, 0))
+            if volume.shape != self._shape_xyz or volume.dtype != self._dtype:
+                raise IngestError(f"The DICOM file {self._member.name} changed.")
+            self._volume_xyz = volume
+        zs, ys, xs = normalize_key(key, self._shape_xyz[::-1])
+        return self._volume_xyz[xs[0] : xs[1], ys[0] : ys[1], zs[0] : zs[1]]
+
+
 def intensity_summary(values: np.ndarray, bins: int = 256) -> dict:
     """
     A histogram and a default display window (the 0.5th to 99.5th
@@ -280,6 +377,12 @@ def intensity_summary(values: np.ndarray, bins: int = 256) -> dict:
     coarsest pyramid level).
     """
     values = np.asarray(values).ravel()
+    if values.dtype == bool:
+        values = values.astype(np.uint8)
+    if np.issubdtype(values.dtype, np.floating):
+        # NaN and infinity (for example outside a specimen) have no place on
+        # a display scale.
+        values = values[np.isfinite(values)]
     if values.size == 0:
         return {"min": 0, "max": 0, "window": [0, 0], "histogram": []}
     low, high = float(values.min()), float(values.max())

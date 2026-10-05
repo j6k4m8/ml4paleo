@@ -15,6 +15,16 @@ from . import ingest
 NAMES = {"ingest.probe": "ingest", "noop": "check"}
 
 _CONTINUATIONS = {"ingest.probe": ingest.after_probe}
+_RESULT_CHECKS = {"ingest.probe": ingest.check_probe_result}
+
+
+def check_result(job: Job, result: dict) -> None:
+    """
+    Raise ValueError if a job's result can't continue its pipeline. Runs
+    before the success is recorded, so a bad result fails the job instead.
+    """
+    if check := _RESULT_CHECKS.get(job.kind):
+        check(result)
 
 
 async def after_success(db: AsyncSession, job: Job) -> None:
@@ -22,4 +32,4 @@ async def after_success(db: AsyncSession, job: Job) -> None:
         await continuation(db, job)
 
 
-__all__ = ["NAMES", "after_success", "ingest"]
+__all__ = ["NAMES", "after_success", "check_result", "ingest"]

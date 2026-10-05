@@ -140,6 +140,12 @@ async def complete(
     """
 
     async def commit_artifacts(job):
+        try:
+            pipelines.check_result(job, body.result)
+        except ValueError as exc:
+            raise jobs.Rejected(
+                f"The job's result is malformed: {exc}", retryable=False
+            ) from None
         await artifacts.commit_outputs(db, settings, job)
 
     async def continue_pipeline(job):
