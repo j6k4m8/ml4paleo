@@ -2,7 +2,17 @@
 API routes, grouped by area. Every router's paths start with `/api`.
 """
 
-from . import admin, admin_jobs, auth, me, projects, storage_proxy, uploads, worker
+from . import (
+    admin,
+    admin_jobs,
+    auth,
+    me,
+    pipelines,
+    projects,
+    storage_proxy,
+    uploads,
+    worker,
+)
 
 ROUTERS = [
     auth.router,
@@ -11,6 +21,7 @@ ROUTERS = [
     me.router,
     projects.router,
     uploads.router,
+    pipelines.router,
     worker.router,
     storage_proxy.router,
 ]

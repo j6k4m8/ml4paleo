@@ -11,9 +11,17 @@ except ImportError as e:
         "pydicom was not found. Install pydicom or sync the dicom dependency group."
     ) from e
 
+from .sources import is_source
 from .volume_provider import VolumeProvider, normalize_key
 
 log = logging.getLogger(__name__)
+
+
+def _readable(path):
+    """
+    What pydicom should read: a path, or an open `SliceSource`.
+    """
+    return path.open() if is_source(path) else str(path)
 
 
 class DicomVolumeProvider(VolumeProvider):
@@ -45,7 +53,7 @@ class DicomVolumeProvider(VolumeProvider):
 
     @staticmethod
     def _read_header(path: pathlib.Path):
-        return pydicom.dcmread(str(path), stop_before_pixels=True)
+        return pydicom.dcmread(_readable(path), stop_before_pixels=True)
 
     @staticmethod
     def _slice_normal(dataset) -> np.ndarray | None:
@@ -162,7 +170,7 @@ class DicomVolumeProvider(VolumeProvider):
         return (*in_plane_spacing, slice_spacing)
 
     def _load_single_file(self, dicom_path: pathlib.Path) -> None:
-        dataset = pydicom.dcmread(str(dicom_path))
+        dataset = pydicom.dcmread(_readable(dicom_path))
         pixel_array = dataset.pixel_array
 
         if pixel_array.ndim == 2:
@@ -186,7 +194,9 @@ class DicomVolumeProvider(VolumeProvider):
         if len(dicom_files) == 0:
             raise ValueError("No DICOM files were provided.")
 
-        self._files = [pathlib.Path(path) for path in dicom_files]
+        self._files = [
+            path if is_source(path) else pathlib.Path(path) for path in dicom_files
+        ]
         if len(self._files) == 1:
             self._load_single_file(self._files[0])
             return
@@ -272,7 +282,7 @@ class DicomVolumeProvider(VolumeProvider):
         )
         self._files = [path for path, _ in headers]
 
-        dataset = pydicom.dcmread(str(self._files[0]))
+        dataset = pydicom.dcmread(_readable(self._files[0]))
         rows = int(dataset.Rows)
         cols = int(dataset.Columns)
 
@@ -303,7 +313,7 @@ class DicomVolumeProvider(VolumeProvider):
     def _read_slice_xyz(self, z_index: int) -> np.ndarray:
         if self._volume_xyz is not None:
             return self._volume_xyz[:, :, z_index]
-        pixels = pydicom.dcmread(str(self._files[z_index])).pixel_array
+        pixels = pydicom.dcmread(_readable(self._files[z_index])).pixel_array
         if pixels.dtype != self._dtype:
             # Reading into a preallocated array would cast silently.
             raise ValueError(
@@ -320,6 +330,13 @@ class DicomVolumeProvider(VolumeProvider):
         for i, z in enumerate(range(zs[0], zs[1])):
             vol[:, :, i] = self._read_slice_xyz(z)[xs[0] : xs[1], ys[0] : ys[1]]
         return vol
+
+    @property
+    def files(self) -> list:
+        """
+        The slices in stacking order (paths, or `SliceSource`s).
+        """
+        return list(self._files)
 
     @property
     def shape(self):

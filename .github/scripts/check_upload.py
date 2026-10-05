@@ -4,21 +4,49 @@ create a project, start an upload, PUT its part straight to SeaweedFS through
 Caddy with the presigned URL, and complete it. Also check that storage
 refuses a part of the wrong length (the URL signs it), that a part URL can't
 be turned into a copy of another object, and that requests other than signed
-part uploads never reach SeaweedFS.
+part uploads never reach SeaweedFS. Then upload a zip of image slices and
+ingest it: the local worker turns it into the project's image.
 
     python check_upload.py https://localhost
 """
 
 import http.cookiejar
+import io
 import json
 import secrets
 import ssl
+import struct
 import sys
+import time
 import urllib.error
 import urllib.request
+import zipfile
+import zlib
 
 # Caddy serves "localhost" with its own certificate authority.
 CONTEXT = ssl._create_unverified_context()
+
+
+def png(width: int, height: int, value: int) -> bytes:
+    """
+    A grayscale PNG (the runner's Python has no imaging library).
+    """
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(kind + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
+
+    rows = b"".join(
+        b"\x00" + bytes([(value + x) % 256 for x in range(width)])
+        for _ in range(height)
+    )
+    header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
 
 
 def main(origin: str) -> int:
@@ -117,6 +145,38 @@ def main(origin: str) -> int:
         body = error.read()
     if data[:64] in body or b"<?xml" in body:
         problems.append("a GET of the uploaded file reached storage")
+    # Ingest a small stack of slices end to end.
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as stack:
+        for z in range(20):
+            stack.writestr(f"stack/slice_{z}.png", png(16, 12, z * 10))
+    scan = archive.getvalue()
+    upload = api(
+        "POST",
+        f"/api/projects/{project}/uploads",
+        {"filename": "stack.zip", "size": len(scan)},
+    )
+    base = f"/api/projects/{project}/uploads/{upload['id']}"
+    status, body = put(
+        api("POST", f"{base}/part-urls", {"parts": [1]})["urls"]["1"], scan
+    )
+    if status != 200 or api("POST", f"{base}/complete")["state"] != "complete":
+        problems.append(f"uploading the stack failed (HTTP {status}): {body[:200]!r}")
+    pipeline = api(
+        "POST", f"/api/projects/{project}/ingest", {"upload_id": upload["id"]}
+    )
+    deadline = time.monotonic() + 300
+    while pipeline["status"] not in ("succeeded", "failed", "cancelled"):
+        if time.monotonic() > deadline:
+            break
+        time.sleep(2)
+        pipeline = api("GET", f"/api/projects/{project}/pipelines/{pipeline['id']}")
+    if pipeline["status"] != "succeeded":
+        problems.append(f"ingest ended {pipeline['status']}: {pipeline.get('error')}")
+    else:
+        manifest = api("GET", f"/api/projects/{project}/image")["manifest"]
+        if manifest["shape_czyx"] != [1, 20, 12, 16]:
+            problems.append(f"the image has shape {manifest['shape_czyx']}")
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems else 0

@@ -27,6 +27,7 @@ obstore handle from `object_store` cannot refuse writes, so read-only grants
 should also carry read-only credentials (the credential broker issues those).
 """
 
+import io
 import json
 from collections.abc import Callable
 from datetime import datetime
@@ -222,6 +223,58 @@ def get_bytes(grant: StorageGrant, key: str) -> bytes | None:
         return None
 
 
+class _RangeReader(io.RawIOBase):
+    """
+    A seekable, read-only file over one stored object, fetching byte ranges
+    as they are read. Wrap it in `io.BufferedReader` to fetch in large blocks.
+    """
+
+    def __init__(self, store, key: str, size: int):
+        self._store = store
+        self._key = key
+        self._size = size
+        self._position = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._position, io.SEEK_END: self._size}
+        self._position = max(0, base[whence] + offset)
+        return self._position
+
+    def readinto(self, buffer) -> int:
+        start = self._position
+        length = min(len(buffer), self._size - start)
+        if length <= 0:
+            return 0
+        data = obstore.get_range(self._store, self._key, start=start, length=length)
+        view = memoryview(data)
+        buffer[: len(view)] = view
+        self._position += len(view)
+        return len(view)
+
+
+def open_object(
+    grant: StorageGrant, key: str, buffer_size: int = 4 * 1024 * 1024
+) -> io.BufferedReader:
+    """
+    Open one stored object as a seekable binary file, without downloading it:
+    reads fetch byte ranges of `buffer_size` (so, for example, `zipfile` can
+    read single members of a huge archive).
+    """
+    _check_path_segments(key)
+    store = object_store(grant)
+    size = obstore.head(store, key)["size"]
+    return io.BufferedReader(_RangeReader(store, key, size), buffer_size=buffer_size)
+
+
 def put_bytes(grant: StorageGrant, key: str, data: bytes) -> None:
     """
     Write one object under the grant. Refuses read-only grants.
@@ -360,6 +413,7 @@ __all__ = [
     "delete_object",
     "get_bytes",
     "object_store",
+    "open_object",
     "put_bytes",
     "write_manifest",
     "zarr_store",

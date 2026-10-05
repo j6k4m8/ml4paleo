@@ -3,6 +3,7 @@ import pathlib
 import numpy as np
 from PIL import Image
 
+from .sources import open_binary
 from .volume_provider import VolumeProvider, normalize_key
 
 
@@ -124,7 +125,7 @@ def _read_slice(path: pathlib.Path) -> tuple[np.ndarray, str]:
         ValueError: If the file is not a readable image.
     """
     try:
-        with Image.open(path) as image:
+        with open_binary(path) as source, Image.open(source) as image:
             mode = image.mode
             res = np.array(image).T
     except (OSError, ValueError) as exc:

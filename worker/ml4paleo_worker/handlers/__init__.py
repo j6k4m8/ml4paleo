@@ -10,10 +10,14 @@ from collections.abc import Callable
 from typing import Any
 
 from ..context import JobContext
-from . import noop
+from . import ingest, noop
 
 Handler = Callable[[JobContext], dict[str, Any]]
 
 HANDLERS: dict[str, Handler] = {
     "noop": noop.run,
+    "ingest.probe": ingest.probe,
+    "ingest.slab": ingest.slab,
+    "pyramid.level": ingest.pyramid,
+    "artifact.finalize": ingest.finalize,
 }

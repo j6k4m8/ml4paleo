@@ -198,7 +198,8 @@ class Worker:
         except Exception as exc:  # noqa: BLE001 - any handler error fails the job
             permanent = isinstance(exc, PermanentError)
             log.warning("Job %s failed: %s", lease.job_id, exc)
-            error = traceback.format_exc()[-MAX_ERROR_CHARS:]
+            # The first line is the message people see; the rest is detail.
+            error = f"{exc}\n\n{traceback.format_exc()}"[:MAX_ERROR_CHARS]
             self._report(
                 ctx,
                 "failure",
