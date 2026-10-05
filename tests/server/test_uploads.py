@@ -280,3 +280,82 @@ def test_other_peoples_uploads_look_missing(ada, new_browser):
         ("DELETE", f"/api/projects/{project}/uploads/{upload['id']}"),
     ]:
         assert bob.request(method, path, json={}).status_code == 404
+
+
+def _ready_upload(browser, project, data: bytes) -> dict:
+    """
+    An upload whose only part is stored, not yet completed.
+    """
+    base = f"/api/projects/{project}/uploads"
+    upload = browser.post(base, json={"filename": "f.zip", "size": len(data)}).json()
+    urls = browser.post(f"{base}/{upload['id']}/part-urls", json={"parts": [1]})
+    assert put_part(urls.json()["urls"]["1"], data) == 200
+    return upload
+
+
+def _state(database_url) -> str:
+    async def get(db):
+        return await db.scalar(select(Upload.state))
+
+    return run_db(database_url, get)
+
+
+@pytest.mark.parametrize("crash_in", ["finish", "stored_size"])
+def test_completion_survives_a_crash_around_the_storage_call(
+    ada, settings, migrated_database_url, monkeypatch, crash_in
+):
+    project = make_project(ada)
+    data = b"q" * MiB
+    upload = _ready_upload(ada, project, data)
+    real = getattr(uploads.MultipartStorage, crash_in)
+
+    def crash(self, *args):
+        if crash_in == "stored_size":
+            # Storage assembled the file; the server dies before recording it.
+            if self.stored_parts(args[0]) is None:
+                raise RuntimeError("the server went away")
+            return real(self, *args)
+        raise RuntimeError("the server went away")
+
+    monkeypatch.setattr(uploads.MultipartStorage, crash_in, crash)
+    with pytest.raises(RuntimeError):
+        ada.post(f"/api/projects/{project}/uploads/{upload['id']}/complete")
+    assert _state(migrated_database_url) == "completing"
+
+    # Trying again finishes the job, whichever side of the storage call the
+    # crash was on.
+    monkeypatch.setattr(uploads.MultipartStorage, crash_in, real)
+    done = ada.post(f"/api/projects/{project}/uploads/{upload['id']}/complete")
+    assert done.json()["state"] == "complete"
+    assert file_bytes(settings, project, upload["id"]) == data
+    assert storage_used(migrated_database_url) == len(data)
+
+
+def test_an_abandoned_completion_is_cleaned_up(
+    ada, settings, migrated_database_url, monkeypatch
+):
+    project = make_project(ada)
+    upload = _ready_upload(ada, project, b"w" * MiB)
+    real = uploads.MultipartStorage.stored_size
+
+    def crash_after_assembly(self, upload_row):
+        if self.stored_parts(upload_row) is None:
+            raise RuntimeError("the server went away")
+        return real(self, upload_row)
+
+    monkeypatch.setattr(uploads.MultipartStorage, "stored_size", crash_after_assembly)
+    with pytest.raises(RuntimeError):
+        ada.post(f"/api/projects/{project}/uploads/{upload['id']}/complete")
+    monkeypatch.setattr(uploads.MultipartStorage, "stored_size", real)
+    # Storage has the assembled file, but nobody comes back for it.
+    assert file_bytes(settings, project, upload["id"]) is not None
+
+    async def expire_and_collect(db):
+        await db.execute(update(Upload).values(expires_at=PAST))
+        await db.commit()
+        return await uploads.collect_garbage(create_sessionmaker(db.bind), settings)
+
+    assert run_db(migrated_database_url, expire_and_collect) == 1
+    assert _state(migrated_database_url) == "aborted"
+    assert file_bytes(settings, project, upload["id"]) is None
+    assert storage_used(migrated_database_url) == 0

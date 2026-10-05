@@ -3,6 +3,7 @@ Work out what this machine can run: CPUs, memory, and GPUs.
 """
 
 import os
+import pathlib
 import subprocess
 
 from ml4paleo.protocol import WorkerCaps
@@ -47,13 +48,29 @@ def _cpus() -> int:
     return os.cpu_count() or 1
 
 
+# Where a container's memory limit shows up (cgroup v2, then v1).
+CGROUP_MEMORY_LIMITS = (
+    "/sys/fs/cgroup/memory.max",
+    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+)
+
+
 def _memory_gb() -> float:
+    """
+    The memory this process may use: the machine's, or its container's limit
+    if that is lower.
+    """
     try:
-        return round(
-            os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1024**3, 1
-        )
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     except (OSError, ValueError):
-        return 0
+        total = 0
+    for path in CGROUP_MEMORY_LIMITS:
+        try:
+            limit = int(pathlib.Path(path).read_text().strip())
+        except (OSError, ValueError):  # missing, or "max" (no limit)
+            continue
+        total = min(total, limit) if total else limit
+    return round(total / 1024**3, 1)
 
 
 def detect(labels: list[str] | None = None, slots: int = 1) -> WorkerCaps:

@@ -232,10 +232,40 @@ def test_summaries_skip_values_that_cant_be_displayed():
     assert intensity_summary(np.array([np.nan]))["window"] == [0, 0]
 
 
-def test_huge_slices_are_refused_before_decoding(tmp_path, monkeypatch):
-    from ml4paleo.volume_providers import imagevp
+def test_slice_limits_follow_the_memory_budget():
+    from ml4paleo.ingest import SliceLimits
 
-    monkeypatch.setattr(imagevp, "MAX_DECODED_SLICE_BYTES", 100)
-    opener = _stored(tmp_path, _zip({"a.png": _png(np.zeros((8, 8), dtype=np.uint8))}))
+    MiB = 1024**2
+    assert SliceLimits.for_memory(1024 * MiB).max_member_bytes == 256 * MiB
+    assert SliceLimits.for_memory(10 * MiB).max_decoded_bytes == 64 * MiB
+    assert SliceLimits.for_memory(64 * 1024 * MiB).max_member_bytes == 2048 * MiB
+
+
+def test_slices_too_large_for_the_budget_are_refused_before_decoding(tmp_path):
+    from ml4paleo.ingest import SliceLimits
+
+    pixels = np.random.default_rng(0).integers(0, 255, (64, 64), dtype=np.uint8)
+    opener = _stored(tmp_path, _zip({"a.png": _png(pixels)}))
+    # 64 x 64 pixels decode to 4 KiB, more than this budget allows...
+    tight = SliceLimits(max_member_bytes=10**6, max_decoded_bytes=4000)
     with pytest.raises(IngestError, match="too large"):
-        probe(opener())
+        probe(opener(), tight)
+    # ...and the member itself can be too big as well.
+    with pytest.raises(IngestError, match="this server reads slices of up to"):
+        probe(opener(), SliceLimits(max_member_bytes=100, max_decoded_bytes=10**6))
+    index = probe(opener())
+    with pytest.raises(ValueError, match="too large"):
+        slab_provider(opener(), index, tight)[:, :, :]
+
+
+def test_dicom_slices_are_sized_from_their_headers(tmp_path, make_dicom_series):
+    from ml4paleo.ingest import SliceLimits
+
+    paths = make_dicom_series(
+        tmp_path / "series", lambda i: np.zeros((40, 50)), count=2
+    )
+    opener = _stored(tmp_path, _zip({path.name: path.read_bytes() for path in paths}))
+    # 40 x 50 pixels of 16 bits: 4000 bytes each.
+    with pytest.raises(IngestError, match="decodes to"):
+        probe(opener(), SliceLimits(max_member_bytes=10**6, max_decoded_bytes=3999))
+    assert probe(opener(), SliceLimits(10**6, 4000)).shape_xyz == (50, 40, 2)

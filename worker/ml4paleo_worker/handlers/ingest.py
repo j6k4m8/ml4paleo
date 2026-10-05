@@ -15,7 +15,13 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from ml4paleo.ingest import IngestError, SourceIndex, intensity_summary, slab_provider
+from ml4paleo.ingest import (
+    IngestError,
+    SliceLimits,
+    SourceIndex,
+    intensity_summary,
+    slab_provider,
+)
 from ml4paleo.ingest import probe as probe_archive
 from ml4paleo.ome import OmeImage, downsample_level, write_from_provider
 from ml4paleo.storage import (
@@ -30,7 +36,8 @@ from ..context import JobContext, PermanentError
 
 UPLOAD_KEY = "data"
 INDEX_KEY = "ingest/source.json"
-# CT slices can be large; Pillow's default limit is meant for web images.
+# Pillow's own limit is meant for web images. Ingest checks each slice's
+# decoded size against the job's memory budget before decoding instead.
 Image.MAX_IMAGE_PIXELS = 2**30
 
 
@@ -41,7 +48,10 @@ def probe(ctx: JobContext) -> dict[str, Any]:
     """
     image_grant, upload_grant = ctx.grants
     try:
-        index = probe_archive(open_object(upload_grant, UPLOAD_KEY))
+        index = probe_archive(
+            open_object(upload_grant, UPLOAD_KEY),
+            SliceLimits.for_memory(ctx.memory_budget_bytes),
+        )
     except IngestError as exc:
         raise PermanentError(str(exc)) from exc
     x, y, z = index.shape_xyz
@@ -86,7 +96,11 @@ def slab(ctx: JobContext) -> dict[str, Any]:
         ctx.check()
 
     try:
-        provider = slab_provider(open_object(upload_grant, UPLOAD_KEY), index)
+        provider = slab_provider(
+            open_object(upload_grant, UPLOAD_KEY),
+            index,
+            SliceLimits.for_memory(ctx.memory_budget_bytes),
+        )
         write_from_provider(
             provider, OmeImage.open(image_grant), z_range=(z0, z1), progress=progress
         )

@@ -236,12 +236,16 @@ services:
       dockerfile: deploy/docker/worker.Dockerfile
     environment:
       M4PW_SLOTS: ${M4P_CPU_WORKER_SLOTS:-1}
+    # A hard ceiling on what parsing uploads can take; the worker also sizes
+    # each job from this limit.
+    mem_limit: ${M4P_CPU_WORKER_MEMORY:-4g}
 
   worker-gpu:
     <<: *worker
     profiles: [gpu]
     environment:
       M4PW_SLOTS: "1"
+    mem_limit: ${M4P_GPU_WORKER_MEMORY:-16g}
     deploy:
       resources:
         reservations:

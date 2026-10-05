@@ -31,7 +31,6 @@ from .volume_providers.imagevp import ImageStackVolumeProvider
 from .volume_providers.volume_provider import VolumeProvider, normalize_key
 
 MAX_MEMBERS = 200_000
-MAX_SLICE_BYTES = 2 * 1024**3
 # Archives that expand by more than this look like zip bombs.
 MAX_EXPANSION = 1000
 # Python decompresses bzip2 and LZMA members without bounding the output, so
@@ -39,6 +38,34 @@ MAX_EXPANSION = 1000
 SUPPORTED_COMPRESSION = {zipfile.ZIP_STORED: "stored", zipfile.ZIP_DEFLATED: "deflate"}
 READ_CHUNK = 1024 * 1024
 SourceKind = Literal["images", "dicom"]
+
+
+@dataclass(frozen=True)
+class SliceLimits:
+    """
+    How large one slice may be: its bytes in the archive (held in memory
+    while it is decoded) and its decoded pixels. Reading a slice takes about
+    the member plus twice the decoded size at the peak.
+    """
+
+    max_member_bytes: int
+    max_decoded_bytes: int
+
+    @classmethod
+    def for_memory(cls, budget_bytes: int) -> "SliceLimits":
+        """
+        Limits that keep one slice within a job's memory budget, between
+        64 MiB and 2 GiB each.
+        """
+        share = min(2 * 1024**3, max(64 * 1024**2, budget_bytes // 4))
+        return cls(max_member_bytes=share, max_decoded_bytes=share)
+
+
+DEFAULT_LIMITS = SliceLimits.for_memory(4 * 1024**3)
+
+
+def _megabytes(size: int) -> str:
+    return f"{size / 1024**2:,.0f} MB"
 
 
 class IngestError(ValueError):
@@ -149,7 +176,9 @@ def open_archive(fileobj: BinaryIO) -> zipfile.ZipFile:
         raise IngestError(NOT_A_ZIP) from None
 
 
-def slice_members(archive: zipfile.ZipFile) -> list[ZipMember]:
+def slice_members(
+    archive: zipfile.ZipFile, limits: SliceLimits = DEFAULT_LIMITS
+) -> list[ZipMember]:
     """
     The archive's slices in name order, after checking the archive is safe
     to read.
@@ -167,9 +196,10 @@ def slice_members(archive: zipfile.ZipFile) -> list[ZipMember]:
     if len(infos) > MAX_MEMBERS:
         raise IngestError(f"The archive has more than {MAX_MEMBERS} files.")
     for info in infos:
-        if info.file_size > MAX_SLICE_BYTES:
+        if info.file_size > limits.max_member_bytes:
             raise IngestError(
-                f"{info.filename} is larger than {MAX_SLICE_BYTES} bytes."
+                f"{info.filename} is {_megabytes(info.file_size)}; this server "
+                f"reads slices of up to {_megabytes(limits.max_member_bytes)}."
             )
         if info.flag_bits & 0x1:
             raise IngestError("The archive is encrypted; upload it without a password.")
@@ -218,6 +248,30 @@ class SourceIndex:
         )
 
 
+def _decoded_dicom_bytes(dataset) -> int:
+    """
+    How much memory a DICOM dataset's pixels take once decoded, from its
+    header.
+    """
+    rows, columns = (
+        int(getattr(dataset, "Rows", 0)),
+        int(getattr(dataset, "Columns", 0)),
+    )
+    frames = int(getattr(dataset, "NumberOfFrames", 1) or 1)
+    samples = int(getattr(dataset, "SamplesPerPixel", 1) or 1)
+    per_sample = -(-int(getattr(dataset, "BitsAllocated", 16) or 16) // 8)
+    return rows * columns * frames * samples * per_sample
+
+
+def _check_dicom_size(dataset, name: str, limits: SliceLimits) -> None:
+    decoded = _decoded_dicom_bytes(dataset)
+    if decoded > limits.max_decoded_bytes:
+        raise IngestError(
+            f"{name} decodes to {_megabytes(decoded)}; this server reads slices "
+            f"of up to {_megabytes(limits.max_decoded_bytes)}."
+        )
+
+
 def _is_dicom(member: ZipMember) -> bool:
     import pydicom
     from pydicom.errors import InvalidDicomError
@@ -230,11 +284,12 @@ def _is_dicom(member: ZipMember) -> bool:
     return True
 
 
-def probe(fileobj: BinaryIO) -> SourceIndex:
+def probe(fileobj: BinaryIO, limits: SliceLimits = DEFAULT_LIMITS) -> SourceIndex:
     """
-    Look at an archive and work out the volume in it.
+    Look at an archive and work out the volume in it, refusing slices too
+    large for `limits` before decoding them.
     """
-    members = slice_members(open_archive(fileobj))
+    members = slice_members(open_archive(fileobj), limits)
     if _is_dicom(members[0]):
         from .volume_providers.dicomvp import DicomVolumeProvider
 
@@ -243,6 +298,11 @@ def probe(fileobj: BinaryIO) -> SourceIndex:
                 "The archive mixes DICOM files with other files. Upload one "
                 "kind of slice per archive."
             )
+        import pydicom
+
+        for member in members:
+            header = pydicom.dcmread(member.open(), stop_before_pixels=True)
+            _check_dicom_size(header, member.name, limits)
         try:
             provider = DicomVolumeProvider(members)  # type: ignore[arg-type]
         except ValueError as exc:
@@ -257,7 +317,10 @@ def probe(fileobj: BinaryIO) -> SourceIndex:
             unit="millimeter" if spacing else None,
         )
     try:
-        provider = ImageStackVolumeProvider(members)  # type: ignore[arg-type]
+        provider = ImageStackVolumeProvider(
+            members,  # type: ignore[arg-type]
+            max_decoded_bytes=limits.max_decoded_bytes,
+        )
     except ValueError as exc:
         raise IngestError(str(exc)) from exc
     return SourceIndex(
@@ -275,7 +338,9 @@ def _shape(provider: VolumeProvider) -> tuple[int, int, int]:
     return (x, y, z)
 
 
-def slab_provider(fileobj: BinaryIO, index: SourceIndex) -> VolumeProvider:
+def slab_provider(
+    fileobj: BinaryIO, index: SourceIndex, limits: SliceLimits = DEFAULT_LIMITS
+) -> VolumeProvider:
     """
     A provider over the archive's slices in stacking order, reading each
     slice only when it is asked for.
@@ -286,11 +351,20 @@ def slab_provider(fileobj: BinaryIO, index: SourceIndex) -> VolumeProvider:
         members = [ZipMember(archive, by_name[name]) for name in index.members]
     except KeyError as exc:
         raise IngestError(f"The archive changed: {exc.args[0]} is missing.") from None
+    for name, member in zip(index.members, members, strict=True):
+        if member.info.file_size > limits.max_member_bytes:
+            raise IngestError(
+                f"{name} is {_megabytes(member.info.file_size)}; this server reads "
+                f"slices of up to {_megabytes(limits.max_member_bytes)}."
+            )
     if index.kind == "images":
-        return ImageStackVolumeProvider(members)  # type: ignore[arg-type]
+        return ImageStackVolumeProvider(
+            members,  # type: ignore[arg-type]
+            max_decoded_bytes=limits.max_decoded_bytes,
+        )
     if len(members) == 1 and index.shape_xyz[2] > 1:
-        return _DicomFrames(members[0], index.shape_xyz, np.dtype(index.dtype))
-    return _DicomSlices(members, index.shape_xyz, np.dtype(index.dtype))
+        return _DicomFrames(members[0], index.shape_xyz, np.dtype(index.dtype), limits)
+    return _DicomSlices(members, index.shape_xyz, np.dtype(index.dtype), limits)
 
 
 class _DicomSlices(VolumeProvider):
@@ -304,10 +378,12 @@ class _DicomSlices(VolumeProvider):
         members: list[ZipMember],
         shape_xyz: tuple[int, int, int],
         dtype: np.dtype,
+        limits: SliceLimits = DEFAULT_LIMITS,
     ):
         self._members = members
         self._shape_xyz = shape_xyz
         self._dtype = dtype
+        self._limits = limits
 
     @property
     def shape(self) -> tuple[int, int, int]:
@@ -326,7 +402,9 @@ class _DicomSlices(VolumeProvider):
         )
         for i, z in enumerate(range(zs[0], zs[1])):
             member = self._members[z]
-            pixels = pydicom.dcmread(member.open()).pixel_array.T
+            dataset = pydicom.dcmread(member.open())
+            _check_dicom_size(dataset, member.name, self._limits)
+            pixels = dataset.pixel_array.T
             if pixels.shape != self._shape_xyz[:2] or pixels.dtype != self._dtype:
                 raise IngestError(
                     f"DICOM slice {member.name} is {pixels.shape} {pixels.dtype}, "
@@ -338,12 +416,17 @@ class _DicomSlices(VolumeProvider):
 
 class _DicomFrames(VolumeProvider):
     """
-    One multi-frame DICOM file, read once (it is at most `MAX_SLICE_BYTES`).
+    One multi-frame DICOM file, read once (within the slice limits).
     """
 
     def __init__(
-        self, member: ZipMember, shape_xyz: tuple[int, int, int], dtype: np.dtype
+        self,
+        member: ZipMember,
+        shape_xyz: tuple[int, int, int],
+        dtype: np.dtype,
+        limits: SliceLimits = DEFAULT_LIMITS,
     ):
+        self._limits = limits
         self._member = member
         self._shape_xyz = shape_xyz
         self._dtype = dtype
@@ -361,7 +444,9 @@ class _DicomFrames(VolumeProvider):
         import pydicom
 
         if self._volume_xyz is None:
-            frames = pydicom.dcmread(self._member.open()).pixel_array
+            dataset = pydicom.dcmread(self._member.open())
+            _check_dicom_size(dataset, self._member.name, self._limits)
+            frames = dataset.pixel_array
             volume = np.transpose(frames, (2, 1, 0))
             if volume.shape != self._shape_xyz or volume.dtype != self._dtype:
                 raise IngestError(f"The DICOM file {self._member.name} changed.")

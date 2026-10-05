@@ -21,13 +21,15 @@ from .. import audit, quotas
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import Upload, User
 from ..uploads import (
-    KEEP_FINISHED,
     MAX_UPLOAD_BYTES,
     PART_URL_LIFETIME,
     MultipartStorage,
+    PartsMissing,
+    UploadLost,
     UploadsUnsupported,
     abort_or_delete,
-    expected_part_size,
+    finish,
+    good_parts,
     in_use,
     multipart_storage,
     new_upload,
@@ -105,7 +107,7 @@ async def _upload(
     query = select(Upload).where(
         Upload.id == upload_id,
         Upload.project_id == project.id,
-        Upload.state.in_(("uploading", "complete")),
+        Upload.state.in_(("uploading", "completing", "complete")),
     )
     if lock:
         query = query.with_for_update(key_share=True).execution_options(
@@ -115,15 +117,6 @@ async def _upload(
     if upload is None:
         raise HTTPException(status_code=404, detail="No such upload.")
     return upload
-
-
-def _good_parts(upload: Upload, stored: dict[int, tuple[int, str]]) -> list[int]:
-    return sorted(
-        number
-        for number, (size, _) in stored.items()
-        if 1 <= number <= part_count(upload)
-        and size == expected_part_size(upload, number)
-    )
 
 
 @router.post("", status_code=201)
@@ -197,7 +190,7 @@ async def get_upload(
     if upload.state != "uploading":
         return _out(upload)
     stored = await run_in_threadpool(storage.stored_parts, upload)
-    return _out(upload, _good_parts(upload, stored))
+    return _out(upload, good_parts(upload, stored or {}))
 
 
 class PartUrlsIn(BaseModel):
@@ -235,36 +228,31 @@ async def complete_upload(
     request: Request,
     auth: CurrentAuth,
     db: DbSession,
+    settings: SettingsDep,
     storage: Storage,
 ) -> UploadOut:
     """
-    Finish an upload once every part is stored. Finishing twice is harmless.
+    Finish an upload once every part is stored. Finishing twice is harmless,
+    and finishing again after an interrupted attempt completes it.
     """
     upload = await _upload(db, project, upload_id, lock=True)
     if upload.state == "complete":
         return _out(upload)
-    stored = await run_in_threadpool(storage.stored_parts, upload)
-    good = set(_good_parts(upload, stored))
-    missing = [n for n in range(1, part_count(upload) + 1) if n not in good]
-    if missing:
+    try:
+        upload = await finish(db, storage, upload)
+    except PartsMissing as exc:
         raise HTTPException(
             status_code=409,
             detail={
                 "message": "Some parts are missing or the wrong size; send them again.",
-                "parts": missing,
+                "parts": exc.parts,
             },
-        )
-    await run_in_threadpool(
-        storage.finish, upload, {n: stored[n] for n in sorted(good)}
-    )
-    stored_size = await run_in_threadpool(storage.stored_size, upload)
-    if stored_size != upload.size:
+        ) from None
+    except UploadLost:
+        await abort_or_delete(db, settings, upload, "deleted")
         raise HTTPException(
-            status_code=500, detail="Storage holds a file of the wrong size."
-        )
-    upload.state = "complete"
-    upload.completed_at = now()
-    upload.expires_at = now() + KEEP_FINISHED
+            status_code=409, detail="The upload was lost in storage; start it again."
+        ) from None
     audit.record(
         db,
         actor_id=auth.user.id,
