@@ -19,39 +19,15 @@ from ml4paleo.storage import (
 from ml4paleo.volume_providers import NumpyVolumeProvider, ZarrVolumeProvider
 from ml4paleo.volume_providers.io import export_zarr_array
 
-BUCKET = "ml4paleo-test"
-
-
-@pytest.fixture(scope="module")
-def s3_endpoint():
-    """
-    Run moto's S3 server in-process, so the S3 path is tested without Docker.
-    """
-    import boto3
-    from moto.server import ThreadedMotoServer
-
-    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
-    server.start()
-    host, port = server.get_host_and_port()
-    endpoint = f"http://{host}:{port}"
-    boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-        region_name="us-east-1",
-    ).create_bucket(Bucket=BUCKET)
-    yield endpoint
-    server.stop()
-
 
 @pytest.fixture(params=["file", "s3"])
 def grant(request, tmp_path):
     if request.param == "file":
         return StorageGrant(url=f"file://{tmp_path}/project", access="rw")
     endpoint = request.getfixturevalue("s3_endpoint")
+    s3_bucket = request.getfixturevalue("s3_bucket")
     return StorageGrant(
-        url=f"s3://{BUCKET}/projects/{tmp_path.name}",
+        url=f"s3://{s3_bucket}/projects/{tmp_path.name}",
         access="rw",
         endpoint=endpoint,
         credentials={"access_key_id": "test", "secret_access_key": "test"},
@@ -175,20 +151,20 @@ def test_credentials_are_hidden_from_repr_but_sent_as_json():
     assert grant.child("a/b").secret("secret_access_key") == "very-secret"
 
 
-def test_refresh_supplies_credentials(s3_endpoint, tmp_path):
+def test_refresh_supplies_credentials(s3_endpoint, s3_bucket, tmp_path):
     calls = []
 
     def refresh():
         calls.append(1)
         return StorageGrant(
-            url=f"s3://{BUCKET}/refresh/{tmp_path.name}",
+            url=f"s3://{s3_bucket}/refresh/{tmp_path.name}",
             access="rw",
             endpoint=s3_endpoint,
             credentials={"access_key_id": "test", "secret_access_key": "test"},
         )
 
     grant = StorageGrant(
-        url=f"s3://{BUCKET}/refresh/{tmp_path.name}",
+        url=f"s3://{s3_bucket}/refresh/{tmp_path.name}",
         access="rw",
         endpoint=s3_endpoint,
     )

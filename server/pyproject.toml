@@ -3,7 +3,15 @@ name = "ml4paleo-server"
 version = "0.2.0.dev0"
 description = "API server for ml4paleo v2"
 requires-python = ">=3.12"
-dependencies = ["ml4paleo"]
+dependencies = [
+    "alembic>=1.17",
+    "fastapi>=0.120",
+    "ml4paleo",
+    "psycopg[binary]>=3.2",
+    "pydantic-settings>=2.11",
+    "sqlalchemy[asyncio]>=2.0.44",
+    "uvicorn[standard]>=0.38",
+]
 
 [project.scripts]
 ml4paleo-server = "ml4paleo_server.cli:main"

@@ -1,0 +1,15 @@
+# Caddy is the only service with published ports, and it serves HTTPS for
+# M4P_DOMAIN: a real domain gets a certificate from Let's Encrypt, and
+# "localhost" gets one from Caddy's own local certificate authority.
+{$M4P_DOMAIN} {
+	encode zstd gzip
+
+	# Large files go straight to object storage with presigned URLs, so API
+	# requests never need big bodies.
+	@api path /api/*
+	request_body @api {
+		max_size 8MB
+	}
+
+	reverse_proxy api:8000
+}

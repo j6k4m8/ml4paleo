@@ -92,10 +92,18 @@ Reused from v1: `_extract_zip_archive`, `_should_ignore_source_file`, `_get_volu
 ### ML plugins
 ```python
 class SegmentationPlugin(Protocol):
-    name: ClassVar[str]; version: ClassVar[str]; caps: ClassVar[PluginCaps]  # devices, min_vram_gb, halo, block, probs, prompt
+    name: ClassVar[str]
+    version: ClassVar[str]
+    # devices, min_vram_gb, halo, block, probs, prompt
+    caps: ClassVar[PluginCaps]
+
     def params_schema(self) -> dict: ...
-    def train(self, ds: SparseTrainingSet, params: dict, out: Path, ctx: JobContext) -> TrainResult: ...
-    def load(self, artifact: Path, device: str) -> Predictor: ...   # Predictor.predict_block(C,Z,Y,X) -> (K+1,Z,Y,X) probs; optional prompt()
+    def train(
+        self, ds: SparseTrainingSet, params: dict, out: Path, ctx: JobContext
+    ) -> TrainResult: ...
+
+    # Predictor.predict_block(C,Z,Y,X) -> (K+1,Z,Y,X) probs; optional prompt()
+    def load(self, artifact: Path, device: str) -> Predictor: ...
 ```
 - Plugin label space: background 0, classes 1..K, IGNORE 255 (from unlabeled voxels outside complete ROIs).
 - RF: labeled voxels only, balanced per-class sampling (replaces the 1/500 negative stride), 3D features, halo = 4·σmax.
