@@ -464,7 +464,14 @@ class JobAttempt(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
-ARTIFACT_STATES = ("staging", "committed", "superseded", "failed", "deleted")
+ARTIFACT_STATES = (
+    "staging",
+    "committed",
+    "superseded",
+    "failed",
+    "deleting",
+    "deleted",
+)
 
 
 class Artifact(Base):
@@ -479,6 +486,7 @@ class Artifact(Base):
       counts against the project owner's storage quota.
     - `superseded`: a newer artifact took its place as a head.
     - `failed`: its job failed or it was abandoned.
+    - `deleting`: garbage collection is removing its files.
     - `deleted`: garbage collection removed its files.
     """
 

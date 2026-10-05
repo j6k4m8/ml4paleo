@@ -9,7 +9,10 @@ route serves one grant of one job (`/jobs/<job>/storage/<n>/<key>`), and the
 bearer token is that job's lease token, so access ends when the lease does.
 
 Requests don't hold a database connection while bytes stream: the lease is
-checked in a short session of its own.
+checked in a short session of its own. A PUT checks the lease again when its
+body has arrived and holds a share lock on the job until the object is
+stored, so an upload can't land after its job has finished (completing a job
+waits for uploads in flight) or after another worker took the job over.
 """
 
 import datetime
@@ -24,6 +27,7 @@ from xml.sax.saxutils import escape
 import obstore
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 
 from ml4paleo.storage import StorageGrant, object_store
 
@@ -44,25 +48,41 @@ MAX_PUT_BYTES = 4 * 1024**3
 _KEY_CHECK = StorageGrant(url="s3://key-check")
 
 
+class LeaseEnded(Exception):
+    """
+    The lease ended while an upload was arriving.
+    """
+
+
+def _token(request: Request) -> str:
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    return token if scheme.lower() == "bearer" else ""
+
+
+def _holds_lease(job: Job | None, token: str) -> bool:
+    return (
+        job is not None
+        and bool(token)
+        and job.status == "leased"
+        and job.lease_token_hash is not None
+        and job.lease_expires_at is not None
+        and job.lease_expires_at > datetime.datetime.now(datetime.UTC)
+        and secrets.compare_digest(
+            job.lease_token_hash, hashlib.sha256(token.encode()).hexdigest()
+        )
+    )
+
+
 async def _store(request: Request, job_id: uuid.UUID, index: int, write: bool):
     """
     Check the lease token and return an obstore store for the grant.
     """
-    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    token = _token(request)
     job = None
-    if scheme.lower() == "bearer" and token:
+    if token:
         async with request.app.state.sessionmaker() as db:
             job = await db.get(Job, job_id)
-    if (
-        job is None
-        or job.status != "leased"
-        or job.lease_token_hash is None
-        or job.lease_expires_at is None
-        or job.lease_expires_at <= datetime.datetime.now(datetime.UTC)
-        or not secrets.compare_digest(
-            job.lease_token_hash, hashlib.sha256(token.encode()).hexdigest()
-        )
-    ):
+    if job is None or not _holds_lease(job, token):
         raise HTTPException(
             status_code=401,
             detail="This job's lease is not held with that token.",
@@ -77,6 +97,11 @@ async def _store(request: Request, job_id: uuid.UUID, index: int, write: bool):
 
 
 def _checked(key: str) -> str:
+    """
+    Check an object key. The grant's root itself is not an object.
+    """
+    if not key.strip("/"):
+        raise HTTPException(status_code=400, detail="Name an object.")
     try:
         _KEY_CHECK.child(key)
     except ValueError as exc:
@@ -162,25 +187,50 @@ async def read(job_id: uuid.UUID, index: int, key: str, request: Request) -> Res
 async def write(job_id: uuid.UUID, index: int, key: str, request: Request) -> Response:
     store = await _store(request, job_id, index, write=True)
     key = _checked(key)
+    token = _token(request)
     received = 0
+    lease_ended = False
+    # Opened lazily: its connection is used only from the end of the body
+    # until the object is stored.
+    async with request.app.state.sessionmaker() as db:
 
-    async def body():
-        nonlocal received
-        async for chunk in request.stream():
-            received += len(chunk)
+        async def body():
+            nonlocal received, lease_ended
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > MAX_PUT_BYTES:
+                    raise ValueError("too large")
+                if chunk:
+                    yield chunk
+            # The object becomes visible when this generator ends, so check
+            # the lease now and keep it locked until the store finishes.
+            job = await db.scalar(
+                select(Job)
+                .where(Job.id == job_id)
+                .with_for_update(read=True)
+                .execution_options(populate_existing=True)
+            )
+            if not _holds_lease(job, token):
+                lease_ended = True
+                # Raising aborts the upload, so nothing becomes visible.
+                raise LeaseEnded
+
+        try:
+            await obstore.put_async(store, key, body())
+        except Exception:
             if received > MAX_PUT_BYTES:
-                raise ValueError("too large")
-            if chunk:
-                yield chunk
-
-    try:
-        await obstore.put_async(store, key, body())
-    except Exception:
-        if received > MAX_PUT_BYTES:
-            raise HTTPException(
-                status_code=413, detail=f"Objects are limited to {MAX_PUT_BYTES} bytes."
-            ) from None
-        raise
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Objects are limited to {MAX_PUT_BYTES} bytes.",
+                ) from None
+            if lease_ended:
+                raise HTTPException(
+                    status_code=401,
+                    detail="The job's lease ended during the upload.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                ) from None
+            raise
+        await db.commit()
     return Response(status_code=201)
 
 

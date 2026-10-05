@@ -30,7 +30,7 @@ what is left), so a job that was busy at that moment can't slip through.
 
 Locks are taken in a fixed order to avoid deadlocks: a transaction locks the
 jobs it reports on or depends on, then that pipeline's root, then (for
-completions) the waiting children. `cancel_pipeline` waits only for the root;
+completions) the waiting children, then artifacts. `cancel_pipeline` waits only for the root;
 it skips other rows that are busy. Worker rows are only touched after job
 rows. Row locks are `FOR NO KEY UPDATE` (no key column ever changes), so they
 don't collide with the `KEY SHARE` locks that foreign-key checks take on the
@@ -57,7 +57,7 @@ from sqlalchemy.orm import aliased
 from ml4paleo.protocol import Tier, WorkerCaps
 from ml4paleo.storage import StorageGrant
 
-from ..db import Job, JobAttempt, JobDep, Worker, uuid7
+from ..db import Artifact, Job, JobAttempt, JobDep, Worker, uuid7
 
 LEASE = datetime.timedelta(seconds=120)
 HEARTBEAT = datetime.timedelta(seconds=30)
@@ -190,6 +190,8 @@ async def enqueue(
         )
         if cancelled:
             raise ValueError("The pipeline was cancelled")
+    checked_grants = [_check_grant(g) for g in grants]
+    await _lock_granted_artifacts(db, [g["path"] for g in checked_grants])
     job = Job(
         id=uuid7(),
         kind=kind,
@@ -210,7 +212,7 @@ async def enqueue(
         scale_trigger=tier != Tier.BACKGROUND,
         cancel_requested=False,
         parent_id=parent.id if parent is not None else None,
-        grants=[_check_grant(g) for g in grants],
+        grants=checked_grants,
     )
     if pipeline is None:
         job.root_id = job.id
@@ -249,6 +251,36 @@ def _check_grant(grant: dict[str, str]) -> dict[str, str]:
     if not path.startswith("projects/"):
         raise ValueError(f"Job grants must be under projects/: {path!r}")
     return {"path": path, "access": access}
+
+
+async def _lock_granted_artifacts(db: AsyncSession, paths: list[str]) -> None:
+    """
+    Refuse grants to artifacts that garbage collection is deleting, and
+    share-lock the others until the caller commits. Collection locks an
+    artifact and then checks for jobs that use it, so the two can't pass
+    each other.
+    """
+    ids = set()
+    for path in paths:
+        parts = path.split("/")
+        if len(parts) >= 4 and parts[2] == "artifacts":
+            try:
+                ids.add(uuid.UUID(parts[3]))
+            except ValueError:
+                continue
+    if not ids:
+        return
+    rows = (
+        await db.execute(
+            select(Artifact.id, Artifact.state)
+            .where(Artifact.id.in_(sorted(ids)))
+            .order_by(Artifact.id)
+            .with_for_update(read=True)
+        )
+    ).all()
+    gone = sorted(str(row.id) for row in rows if row.state in ("deleting", "deleted"))
+    if gone:
+        raise ValueError(f"Artifacts {gone} have been deleted")
 
 
 async def claim(db: AsyncSession, worker: Worker, caps: WorkerCaps) -> Claimed | None:

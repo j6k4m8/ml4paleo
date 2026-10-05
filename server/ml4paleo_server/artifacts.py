@@ -79,7 +79,11 @@ async def create_staging(
     """
     Create an artifact for jobs to fill. Set `produced_by_job` to the job
     whose success should commit it.
+
+    Head artifacts are kept until replaced, so they can't also expire.
     """
+    if head_slot is not None and expires_at is not None:
+        raise ValueError("A head artifact can't have an expiry")
     artifact = Artifact(
         project_id=project_id,
         kind=kind,
@@ -169,7 +173,7 @@ async def set_head(db: AsyncSession, artifact: Artifact) -> None:
     Make `artifact` the current one in its slot; the one it replaces becomes
     superseded.
     """
-    assert artifact.head_slot is not None
+    assert artifact.head_slot is not None and artifact.state == "committed"
     await db.execute(
         insert(ArtifactHead)
         .values(
@@ -240,7 +244,8 @@ async def abandon_staging(db: AsyncSession) -> int:
 
 def _collectable(settings: Settings):
     """
-    SQL: artifacts whose files garbage collection may delete now.
+    SQL: artifacts whose files garbage collection may delete now. A current
+    head is never collected unless its project was deleted.
     """
     current = now()
     storage = settings.storage
@@ -254,22 +259,29 @@ def _collectable(settings: Settings):
     deleted_project = exists().where(
         Project.id == Artifact.project_id, Project.deleted_at.is_not(None)
     )
+    is_head = exists().where(ArtifactHead.artifact_id == Artifact.id)
     return and_(
-        Artifact.state != "deleted",
+        Artifact.state.not_in(("deleting", "deleted")),
         ~in_use,
         or_(
-            and_(
-                Artifact.state == "failed",
-                Artifact.state_changed_at
-                < current - datetime.timedelta(hours=storage.keep_failed_hours),
-            ),
-            and_(
-                Artifact.state == "superseded",
-                Artifact.state_changed_at
-                < current - datetime.timedelta(days=storage.keep_superseded_days),
-            ),
-            and_(Artifact.state == "committed", Artifact.expires_at < current),
             and_(Artifact.state != "staging", deleted_project),
+            and_(
+                ~is_head,
+                or_(
+                    and_(
+                        Artifact.state == "failed",
+                        Artifact.state_changed_at
+                        < current - datetime.timedelta(hours=storage.keep_failed_hours),
+                    ),
+                    and_(
+                        Artifact.state == "superseded",
+                        Artifact.state_changed_at
+                        < current
+                        - datetime.timedelta(days=storage.keep_superseded_days),
+                    ),
+                    and_(Artifact.state == "committed", Artifact.expires_at < current),
+                ),
+            ),
         ),
     )
 
@@ -280,8 +292,12 @@ async def collect_garbage(
     """
     Delete the files of artifacts that are no longer needed, and release the
     storage they counted against. Returns how many artifacts were deleted.
-    Each artifact is handled on its own: its files are deleted first (which
-    is safe to repeat), then its row is updated in one transaction.
+
+    Each artifact is handled on its own. First, under a lock, it is checked
+    again and marked `deleting` (releasing its quota and any head), so no new
+    job can be given it (`jobs.enqueue` refuses); then its files are deleted;
+    then it is marked `deleted`. If deleting the files fails, the next pass
+    tries again. One artifact's failure doesn't stop the others.
     """
     async with sessionmaker() as db:
         await abandon_staging(db)
@@ -289,31 +305,57 @@ async def collect_garbage(
         candidates = (
             await db.scalars(
                 select(Artifact.id)
-                .where(_collectable(settings))
+                .where(or_(Artifact.state == "deleting", _collectable(settings)))
                 .order_by(Artifact.state_changed_at)
                 .limit(COLLECT_BATCH)
             )
         ).all()
     deleted = 0
     for artifact_id in candidates:
-        async with sessionmaker() as db:
-            artifact = await db.get(Artifact, artifact_id)
-            if artifact is None or artifact.state == "deleted":
-                continue
-            await _delete_files(settings, artifact)
-            locked = await db.scalar(
-                select(Artifact)
-                .where(Artifact.id == artifact_id, _collectable(settings))
-                .with_for_update(key_share=True)
-                .execution_options(populate_existing=True)
-            )
-            if locked is None:
-                # It changed meanwhile (for example a job started using it).
-                continue
-            await _mark_deleted(db, locked)
-            await db.commit()
-            deleted += 1
+        try:
+            if await _collect(sessionmaker, settings, artifact_id):
+                deleted += 1
+        except Exception:
+            log.exception("Could not delete artifact %s; will try again", artifact_id)
     return deleted
+
+
+async def _collect(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    artifact_id: uuid.UUID,
+) -> bool:
+    async with sessionmaker() as db:
+        artifact = await db.scalar(
+            select(Artifact)
+            .where(Artifact.id == artifact_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+        if artifact is None or artifact.state == "deleted":
+            return False
+        if artifact.state != "deleting":
+            # Check again in a new statement, which sees jobs committed while
+            # this one waited for the lock.
+            still = await db.scalar(
+                select(Artifact.id).where(
+                    Artifact.id == artifact_id, _collectable(settings)
+                )
+            )
+            if still is None:
+                return False
+            await _start_deleting(db, artifact)
+        await db.commit()
+    await _delete_files(settings, artifact)
+    async with sessionmaker() as db:
+        await db.execute(
+            update(Artifact)
+            .where(Artifact.id == artifact_id, Artifact.state == "deleting")
+            .values(state="deleted", state_changed_at=func.now())
+        )
+        await db.commit()
+    log.info("Deleted artifact %s (%s)", artifact.id, artifact.kind)
+    return True
 
 
 async def _delete_files(settings: Settings, artifact: Artifact) -> None:
@@ -322,7 +364,7 @@ async def _delete_files(settings: Settings, artifact: Artifact) -> None:
         await obstore.delete_async(store, [meta["path"] for meta in batch])
 
 
-async def _mark_deleted(db: AsyncSession, artifact: Artifact) -> None:
+async def _start_deleting(db: AsyncSession, artifact: Artifact) -> None:
     if artifact.state in ("committed", "superseded") and artifact.bytes:
         owner_id = await db.scalar(
             select(Project.owner_id).where(Project.id == artifact.project_id)
@@ -333,6 +375,5 @@ async def _mark_deleted(db: AsyncSession, artifact: Artifact) -> None:
     await db.execute(
         delete(ArtifactHead).where(ArtifactHead.artifact_id == artifact.id)
     )
-    artifact.state = "deleted"
+    artifact.state = "deleting"
     artifact.state_changed_at = now()
-    log.info("Deleted artifact %s (%s)", artifact.id, artifact.kind)

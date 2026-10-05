@@ -84,16 +84,31 @@ async def reap_jobs(sessionmaker: async_sessionmaker[AsyncSession]) -> int:
 async def run_once(
     sessionmaker: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
-    expired = await reap_jobs(sessionmaker)
-    if expired:
-        log.info("Took back %d jobs from workers that stopped responding", expired)
-    collected = await collect_garbage(sessionmaker, settings)
-    if collected:
-        log.info("Deleted %d artifacts that are no longer needed", collected)
-    sent = await send_pending(sessionmaker, settings)
-    if sent:
-        log.info("Sent %d queued emails", sent)
-    await prune(sessionmaker)
+    """
+    One pass of every task. A task that fails is logged and doesn't stop the
+    others.
+    """
+
+    async def reap() -> None:
+        if expired := await reap_jobs(sessionmaker):
+            log.info("Took back %d jobs from workers that stopped responding", expired)
+
+    async def collect() -> None:
+        if collected := await collect_garbage(sessionmaker, settings):
+            log.info("Deleted %d artifacts that are no longer needed", collected)
+
+    async def send() -> None:
+        if sent := await send_pending(sessionmaker, settings):
+            log.info("Sent %d queued emails", sent)
+
+    async def tidy() -> None:
+        await prune(sessionmaker)
+
+    for task in (reap, collect, send, tidy):
+        try:
+            await task()
+        except Exception:
+            log.exception("Housekeeping task %s failed", task.__name__)
 
 
 async def run_forever(settings: Settings | None = None) -> None:

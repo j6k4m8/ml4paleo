@@ -52,7 +52,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "state IN ('staging', 'committed', 'superseded', 'failed', 'deleted')",
+            "state IN ('staging', 'committed', 'superseded', 'failed', 'deleting', 'deleted')",
             name=op.f("ck_artifacts_state"),
         ),
         sa.ForeignKeyConstraint(

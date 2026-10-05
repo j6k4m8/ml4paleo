@@ -108,6 +108,7 @@ jobs:
           --no-reach api:8000 --no-reach postgres:5432
           --no-reach seaweedfs:8333 --no-reach seaweedfs:9333
           --status http://caddy:8080/api/worker/v1/hello=401
+          --status 'http://caddy:8080/api/worker/v1/claim@9437184=413|-1'
           --status http://caddy:8080/api/auth/login=404
 
       - name: Run a job on the local worker

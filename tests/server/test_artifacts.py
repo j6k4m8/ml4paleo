@@ -419,3 +419,186 @@ def test_job_grants_are_checked(migrated_database_url, grant):
             await jobs.enqueue(db, "noop", {}, grants=[grant])
 
     run_db(migrated_database_url, add)
+
+
+def test_an_upload_cannot_land_after_its_job_finished(
+    settings, migrated_database_url, live_server
+):
+    project_id = make_project(migrated_database_url)
+    artifact_id, job_id = stage(migrated_database_url, project_id)
+
+    async def no_commit(db):
+        # Nothing to commit, so the job can finish while the upload runs.
+        await db.execute(update(Artifact).values(produced_by_job=None))
+
+    run_db(migrated_database_url, no_commit)
+    client = ServerClient(add_worker(migrated_database_url), base_url=live_server)
+    lease = client.claim(CAPS, wait_seconds=0)
+    halfway = threading.Event()
+    go_on = threading.Event()
+
+    def slow_body():
+        yield b"x" * 1024
+        halfway.set()
+        go_on.wait(10)
+        yield b"y" * 1024
+
+    outcome = {}
+
+    def upload():
+        with httpx2.Client(base_url=live_server, timeout=30) as raw:
+            outcome["status"] = raw.put(
+                f"/api/worker/v1/jobs/{job_id}/storage/0/late",
+                content=slow_body(),
+                headers=bearer(lease.lease_token),
+            ).status_code
+
+    thread = threading.Thread(target=upload)
+    thread.start()
+    assert halfway.wait(10)
+    client.complete(job_id, lease.lease_token, {})
+    go_on.set()
+    thread.join(timeout=20)
+    client.close()
+    assert outcome["status"] == 401
+    artifact = artifact_row(migrated_database_url, artifact_id)
+    assert get_bytes(files_of(settings, artifact), "late") is None
+
+
+def test_the_grant_root_is_not_an_object(settings, migrated_database_url, live_server):
+    project_id = make_project(migrated_database_url)
+    _, job_id = stage(migrated_database_url, project_id)
+    client = ServerClient(add_worker(migrated_database_url), base_url=live_server)
+    lease = client.claim(CAPS, wait_seconds=0)
+    with httpx2.Client(base_url=live_server) as raw:
+        url = f"/api/worker/v1/jobs/{job_id}/storage/0/"
+        headers = bearer(lease.lease_token)
+        assert raw.put(url, content=b"x", headers=headers).status_code == 400
+        assert raw.get(url, headers=headers).status_code == 400
+        assert raw.delete(url, headers=headers).status_code == 400
+    client.close()
+
+
+def test_collection_waits_for_a_job_being_given_the_artifact(
+    settings, migrated_database_url
+):
+    import asyncio
+
+    from ml4paleo_server.db import create_engine
+
+    project_id = make_project(migrated_database_url)
+    first, first_job = stage(migrated_database_url, project_id)
+    finish(settings, migrated_database_url, first_job)
+    _, second_job = stage(migrated_database_url, project_id)
+    finish(settings, migrated_database_url, second_job)
+    no_wait = settings.model_copy(
+        update={
+            "storage": settings.storage.model_copy(update={"keep_superseded_days": 0})
+        }
+    )
+    old = artifact_row(migrated_database_url, first)
+
+    async def race():
+        engine = create_engine(migrated_database_url)
+        sessionmaker = create_sessionmaker(engine)
+        try:
+            async with sessionmaker() as enqueuing:
+                # A new job is being given the old artifact...
+                await jobs.enqueue(
+                    enqueuing, "noop", {}, grants=[artifacts.grant_for(old, "r")]
+                )
+                # ...while collection starts on it.
+                collecting = asyncio.create_task(
+                    artifacts.collect_garbage(sessionmaker, no_wait)
+                )
+                await asyncio.sleep(0.5)
+                await enqueuing.commit()
+            return await asyncio.wait_for(collecting, 10)
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(race()) == 0
+    artifact = artifact_row(migrated_database_url, first)
+    assert artifact.state == "superseded"
+    assert get_bytes(files_of(settings, artifact), "data/0") is not None
+
+
+def test_deleted_artifacts_cannot_be_granted(settings, migrated_database_url):
+    project_id = make_project(migrated_database_url)
+    artifact_id, job_id = stage(migrated_database_url, project_id, head_slot=None)
+    finish(settings, migrated_database_url, job_id)
+
+    async def expire_and_collect(db):
+        await db.execute(update(Artifact).values(expires_at=PAST))
+        await db.commit()
+        await artifacts.collect_garbage(create_sessionmaker(db.bind), settings)
+
+    run_db(migrated_database_url, expire_and_collect)
+    artifact = artifact_row(migrated_database_url, artifact_id)
+
+    async def grant(db):
+        with pytest.raises(ValueError, match="deleted"):
+            await jobs.enqueue(
+                db, "noop", {}, grants=[artifacts.grant_for(artifact, "r")]
+            )
+
+    run_db(migrated_database_url, grant)
+
+
+def test_one_stuck_artifact_does_not_stop_collection(
+    settings, migrated_database_url, monkeypatch
+):
+    project_id = make_project(migrated_database_url)
+    stuck, stuck_job = stage(migrated_database_url, project_id, head_slot=None)
+    other, other_job = stage(migrated_database_url, project_id, head_slot=None)
+    for job_id in (stuck_job, other_job):
+        finish(settings, migrated_database_url, job_id)
+    real_delete = artifacts._delete_files
+
+    async def flaky_delete(settings, artifact):
+        if artifact.id == stuck:
+            raise OSError("storage is down")
+        await real_delete(settings, artifact)
+
+    monkeypatch.setattr(artifacts, "_delete_files", flaky_delete)
+
+    async def expire_and_collect(db):
+        await db.execute(update(Artifact).values(expires_at=PAST))
+        await db.commit()
+        return await artifacts.collect_garbage(create_sessionmaker(db.bind), settings)
+
+    assert run_db(migrated_database_url, expire_and_collect) == 1
+    assert artifact_row(migrated_database_url, other).state == "deleted"
+    assert artifact_row(migrated_database_url, stuck).state == "deleting"
+    # Its quota was released when deletion started.
+    assert storage_used(migrated_database_url) == 0
+    # The next pass finishes the job.
+    monkeypatch.setattr(artifacts, "_delete_files", real_delete)
+
+    async def collect(db):
+        return await artifacts.collect_garbage(create_sessionmaker(db.bind), settings)
+
+    assert run_db(migrated_database_url, collect) == 1
+    assert artifact_row(migrated_database_url, stuck).state == "deleted"
+
+
+def test_heads_are_never_collected(settings, migrated_database_url):
+    project_id = make_project(migrated_database_url)
+    artifact_id, job_id = stage(migrated_database_url, project_id)
+    finish(settings, migrated_database_url, job_id)
+
+    async def expire_and_collect(db):
+        await db.execute(update(Artifact).values(expires_at=PAST))
+        await db.commit()
+        return await artifacts.collect_garbage(create_sessionmaker(db.bind), settings)
+
+    assert run_db(migrated_database_url, expire_and_collect) == 0
+    assert artifact_row(migrated_database_url, artifact_id).state == "committed"
+
+    async def both(db):
+        with pytest.raises(ValueError):
+            await artifacts.create_staging(
+                db, project_id=project_id, kind="x", head_slot="image", expires_at=PAST
+            )
+
+    run_db(migrated_database_url, both)
