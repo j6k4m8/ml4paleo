@@ -155,18 +155,26 @@ def app(settings):
 
 
 @pytest.fixture
-def new_browser(app):
+def new_browser(settings):
     """
-    Return a function that opens a new browser (its own cookies) on the app.
+    Return a function that opens a new browser (its own cookies).
+
+    Each browser gets its own app instance: a TestClient runs the app on its
+    own event loop thread, and app state (like the database engine) must not
+    be shared across loops.
     """
     clients = []
 
-    def open_browser(custom_settings: Settings | None = None) -> Browser:
+    def open_browser(
+        custom_settings: Settings | None = None, address: str = "testclient"
+    ) -> Browser:
         """
-        Open a browser on the shared app, or on a new app built from
-        `custom_settings`.
+        Open a browser on an app built from `custom_settings` (default: the
+        test settings), connecting from `address`.
         """
-        client = TestClient(create_app(custom_settings) if custom_settings else app)
+        client = TestClient(
+            create_app(custom_settings or settings), client=(address, 50000)
+        )
         client.__enter__()
         clients.append(client)
         return Browser(client)

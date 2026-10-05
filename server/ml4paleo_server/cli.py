@@ -141,7 +141,7 @@ async def _reset_two_factor(username: str) -> None:
 async def _reset_password(username: str) -> str:
     from sqlalchemy import select
 
-    from ml4paleo_server.auth import random_password
+    from ml4paleo_server.auth import expire_reset_tokens, random_password
     from ml4paleo_server.auth.passwords import hash_password
     from ml4paleo_server.auth.sessions import delete_user_sessions
     from ml4paleo_server.db import User, create_engine, create_sessionmaker
@@ -159,6 +159,7 @@ async def _reset_password(username: str) -> str:
             user.password_hash = await hash_password(password)
             user.must_change_password = True
             await delete_user_sessions(db, user.id)
+            await expire_reset_tokens(db, user.id)
             await db.commit()
             return password
     finally:

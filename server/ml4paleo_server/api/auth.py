@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import AfterValidator, BaseModel, Field
 from sqlalchemy import or_, select, update
 
-from ..auth import passwords, ratelimit, totp
+from ..auth import expire_reset_tokens, passwords, ratelimit, totp
 from ..auth.deps import DbSession, EngineDep, OptionalAuth, SettingsDep, SetupAuth
 from ..auth.ratelimit import client_key
 from ..auth.sessions import (
@@ -40,6 +40,14 @@ HOUR = datetime.timedelta(hours=1)
 RESERVED_USERNAMES = frozenset(
     {"admin", "administrator", "root", "system", "support", "ml4paleo", "staff"}
 )
+
+
+def _is_reserved(username: str) -> bool:
+    """
+    True for reserved names and look-alikes such as "admin1" or "root_".
+    """
+    core = re.sub(r"[._-]", "", username).rstrip("0123456789")
+    return core in RESERVED_USERNAMES
 
 
 def _username(value: str) -> str:
@@ -162,22 +170,6 @@ async def _use_token(db: DbSession, kind: str, token: str) -> AuthToken:
     return used
 
 
-async def _expire_reset_tokens(db: DbSession, user: User) -> None:
-    """
-    Use up every outstanding reset link for a user, after their password
-    changes by any route.
-    """
-    await db.execute(
-        update(AuthToken)
-        .where(
-            AuthToken.user_id == user.id,
-            AuthToken.kind == "reset",
-            AuthToken.used_at.is_(None),
-        )
-        .values(used_at=datetime.datetime.now(datetime.UTC))
-    )
-
-
 def _queue_verification(db: DbSession, settings: Settings, user: User, token: str):
     queue_email(
         db,
@@ -223,7 +215,7 @@ async def signup(
     await ratelimit.hit(
         engine, f"signup:ip:{client_key(request)}", limit=5, window=HOUR
     )
-    if body.username in RESERVED_USERNAMES:
+    if _is_reserved(body.username):
         raise HTTPException(status_code=422, detail="That username is reserved.")
     invite = None
     if await get_signup_mode(db, settings) == "invite":
@@ -287,11 +279,13 @@ async def login(
     user = await db.scalar(
         select(User).where(or_(User.username == name, User.email == name))
     )
-    # Limit guesses per account, whichever name it was given by. Counting per
-    # client as well keeps one attacker from locking everyone else out.
+    # Limit guesses per account (whichever name it was given by) and client,
+    # so one attacker can't lock the owner out from elsewhere. A much looser
+    # cap per account slows down guessing from many addresses at once.
     account = f"user:{user.id}" if user else f"name:{name}"
     await ratelimit.hit(engine, f"login:{account}:{client}", limit=5, window=MINUTE)
-    await ratelimit.hit(engine, f"login:{account}", limit=30, window=HOUR)
+    await ratelimit.hit(engine, f"login:{account}:{client}:h", limit=30, window=HOUR)
+    await ratelimit.hit(engine, f"login:{account}", limit=300, window=HOUR)
     valid = await passwords.verify_password(
         body.password, user.password_hash if user else None
     )
@@ -300,9 +294,9 @@ async def login(
     if user.totp_secret_enc is not None:
         if not body.totp_code:
             raise HTTPException(status_code=401, detail="totp_required")
-        await ratelimit.hit(
-            engine, f"totp:user:{user.id}", limit=5, window=QUARTER_HOUR
-        )
+        # Count wrong codes only, so signing in normally never locks anyone out.
+        failures = f"totp-failures:user:{user.id}"
+        await ratelimit.peek(engine, failures, limit=5, window=QUARTER_HOUR)
         try:
             secret = totp.decrypt(
                 settings.secret_key.get_secret_value(), user.totp_secret_enc
@@ -314,9 +308,23 @@ async def login(
                 "Ask an administrator to reset it.",
             ) from None
         step = totp.verify(secret, body.totp_code, after_step=user.totp_last_step)
-        if step is None:
+        # Record the code's step only if no concurrent sign-in used it first.
+        claimed = (
+            step is not None
+            and await db.scalar(
+                update(User)
+                .where(
+                    User.id == user.id,
+                    or_(User.totp_last_step.is_(None), User.totp_last_step < step),
+                )
+                .values(totp_last_step=step)
+                .returning(User.id)
+            )
+            is not None
+        )
+        if not claimed:
+            await ratelimit.hit(engine, failures, limit=5, window=QUARTER_HOUR)
             raise HTTPException(status_code=401, detail="Wrong two-factor code.")
-        user.totp_last_step = step
     session_token = await create_session(db, settings, user, request)
     await db.commit()
     set_session_cookie(response, settings, session_token)
@@ -362,7 +370,7 @@ async def change_password(
     auth.user.password_hash = await passwords.hash_password(body.new_password)
     auth.user.must_change_password = False
     await delete_user_sessions(db, auth.user.id, keep_token=auth.token)
-    await _expire_reset_tokens(db, auth.user)
+    await expire_reset_tokens(db, auth.user.id)
     await db.commit()
 
 
@@ -403,7 +411,15 @@ async def confirm_totp_setup(
     if auth.user.totp_pending_enc is None:
         raise HTTPException(status_code=409, detail="Start two-factor setup first.")
     key = settings.secret_key.get_secret_value()
-    step = totp.verify(totp.decrypt(key, auth.user.totp_pending_enc), body.code)
+    try:
+        pending = totp.decrypt(key, auth.user.totp_pending_enc)
+    except totp.UnreadableSecret:
+        auth.user.totp_pending_enc = None
+        await db.commit()
+        raise HTTPException(
+            status_code=409, detail="Start two-factor setup again."
+        ) from None
+    step = totp.verify(pending, body.code)
     if step is None:
         raise HTTPException(
             status_code=422, detail="That code is wrong. Try the next one."
@@ -490,7 +506,7 @@ async def confirm_password_reset(
     user.password_hash = await passwords.hash_password(body.new_password)
     user.must_change_password = False
     await delete_user_sessions(db, user.id)
-    await _expire_reset_tokens(db, user)
+    await expire_reset_tokens(db, user.id)
     await db.commit()
 
 

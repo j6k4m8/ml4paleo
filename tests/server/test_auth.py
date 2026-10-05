@@ -3,6 +3,7 @@ Accounts and sign-in: signup, login, sessions, CSRF, password changes and
 resets, email verification, admin bootstrap with two-factor, and invites.
 """
 
+import datetime
 import re
 
 import pyotp
@@ -20,6 +21,7 @@ from ml4paleo_server import email as email_module
 from ml4paleo_server.app import create_app
 from ml4paleo_server.auth import ensure_admin
 from ml4paleo_server.db import (
+    EmailOutbox,
     User,
     create_sessionmaker,
 )
@@ -302,6 +304,18 @@ def test_queued_email_is_sent_and_retried(smtp_settings, migrated_database_url):
     assert run_db(migrated_database_url, send) == 0
     [message] = outbox(migrated_database_url)
     assert (message.status, message.attempts) == ("queued", 1)
+    # The retry waits (backoff) instead of hammering a failing mail server...
+    assert run_db(migrated_database_url, send) == 0
+
+    async def make_due(db):
+        await db.execute(
+            update(EmailOutbox).values(
+                next_attempt_at=datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
+            )
+        )
+
+    run_db(migrated_database_url, make_due)
+    # ...and goes out once it is due.
     assert run_db(migrated_database_url, send) == 1
     # Sent mail is deleted, so its single-use links don't linger.
     assert outbox(migrated_database_url) == []

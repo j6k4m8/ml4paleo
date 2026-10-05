@@ -9,6 +9,7 @@ Messages carry single-use links, so each row is deleted as soon as its message
 is sent, and the housekeeper deletes rows that failed for good after a week.
 """
 
+import datetime
 import email.message
 import logging
 import smtplib
@@ -24,7 +25,9 @@ from .settings import SmtpSettings
 
 log = logging.getLogger(__name__)
 
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 6
+# Retry after 1, 2, 4, 8, then 16 minutes (about half an hour in all).
+FIRST_RETRY = datetime.timedelta(minutes=1)
 
 Sender = Callable[[SmtpSettings, email.message.EmailMessage], None]
 
@@ -72,7 +75,10 @@ async def send_pending(
         async with sessionmaker() as db:
             item = await db.scalar(
                 select(EmailOutbox)
-                .where(EmailOutbox.status == "queued")
+                .where(
+                    EmailOutbox.status == "queued",
+                    EmailOutbox.next_attempt_at <= datetime.datetime.now(datetime.UTC),
+                )
                 .order_by(EmailOutbox.created_at)
                 .limit(1)
                 .with_for_update(skip_locked=True)
@@ -90,6 +96,9 @@ async def send_pending(
             except Exception as exc:  # noqa: BLE001 - any send failure is retried
                 log.warning("Sending email %s failed: %s", item.id, exc)
                 item.last_error = str(exc)[:2000]
+                item.next_attempt_at = datetime.datetime.now(datetime.UTC) + (
+                    FIRST_RETRY * 2 ** (item.attempts - 1)
+                )
                 if item.attempts >= MAX_ATTEMPTS:
                     item.status = "failed"
                 await db.commit()

@@ -38,9 +38,36 @@ def client_key(request: Request) -> str:
         address = ipaddress.ip_address(host)
     except ValueError:
         return host
-    if address.version == 6:
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped is not None:
+            return str(address.ipv4_mapped)
         return str(ipaddress.ip_network(f"{address}/64", strict=False))
     return str(address)
+
+
+_CURRENT = text(
+    """
+    SELECT count, window_start FROM rate_limits
+    WHERE key = :key AND window_start > now() - :window
+    """
+)
+
+
+async def peek(
+    engine: AsyncEngine, key: str, *, limit: int, window: datetime.timedelta
+) -> None:
+    """
+    Raise 429 if `key` has already reached `limit` in its current window,
+    without counting this request. Pair with `hit` to count only failures.
+    """
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(_CURRENT, {"key": key, "window": window})
+        ).one_or_none()
+    if row is not None:
+        count, window_start = row
+        if count >= limit:
+            _too_many(window_start, window)
 
 
 async def hit(
@@ -55,9 +82,13 @@ async def hit(
             await connection.execute(_INCREMENT, {"key": key, "window": window})
         ).one()
     if count > limit:
-        retry_after = window_start + window - datetime.datetime.now(datetime.UTC)
-        raise HTTPException(
-            status_code=429,
-            detail="Too many attempts. Try again later.",
-            headers={"Retry-After": str(max(1, int(retry_after.total_seconds())))},
-        )
+        _too_many(window_start, window)
+
+
+def _too_many(window_start: datetime.datetime, window: datetime.timedelta) -> None:
+    retry_after = window_start + window - datetime.datetime.now(datetime.UTC)
+    raise HTTPException(
+        status_code=429,
+        detail="Too many attempts. Try again later.",
+        headers={"Retry-After": str(max(1, int(retry_after.total_seconds())))},
+    )

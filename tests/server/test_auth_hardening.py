@@ -221,3 +221,132 @@ def test_housekeeper_prunes_expired_rows(new_browser, migrated_database_url):
         return counts
 
     assert run_db(migrated_database_url, prune_and_count) == [0, 0, 0]
+
+
+def test_concurrent_sign_ins_cannot_share_a_code(new_browser, migrated_database_url):
+    import threading
+
+    _, secret = make_admin(new_browser, migrated_database_url)
+    code = next_code(secret)
+    browsers = [new_browser(address=f"10.0.0.{i}") for i in range(4)]
+    barrier = threading.Barrier(len(browsers))
+    statuses = []
+
+    def sign_in(browser):
+        barrier.wait()
+        response = browser.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": ADMIN_PASSWORD, "totp_code": code},
+        )
+        statuses.append(response.status_code)
+
+    threads = [threading.Thread(target=sign_in, args=(b,)) for b in browsers]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(statuses) == [200, 401, 401, 401]
+
+
+def test_takeover_also_removes_the_squatters_email_and_links(migrated_database_url):
+    async def squat(db):
+        user = User(
+            username="admin",
+            email="squatter@example.org",
+            email_verified_at=datetime.datetime.now(datetime.UTC),
+        )
+        db.add(user)
+        await db.flush()
+        db.add(
+            AuthToken(
+                token_hash="2" * 64,
+                kind="reset",
+                user_id=user.id,
+                email=user.email,
+                expires_at=datetime.datetime.now(datetime.UTC)
+                + datetime.timedelta(hours=1),
+            )
+        )
+
+    run_db(migrated_database_url, squat)
+
+    async def bootstrap_and_inspect(db):
+        await ensure_admin(db, "operator chosen passphrase")
+        user = await db.scalar(select(User).where(User.username == "admin"))
+        tokens = await db.scalar(select(func.count()).select_from(AuthToken))
+        return user.email, user.email_verified_at, tokens
+
+    assert run_db(migrated_database_url, bootstrap_and_inspect) == (None, None, 0)
+
+
+def test_an_attacker_elsewhere_cannot_lock_the_owner_out(new_browser):
+    signup(new_browser())
+    attacker = new_browser(address="203.0.113.7")
+    for _ in range(6):
+        attacker.post("/api/auth/login", json={"username": "ada", "password": "wrong"})
+    owner = new_browser(address="198.51.100.4")
+    login = owner.post(
+        "/api/auth/login", json={"username": "ada", "password": PASSWORD}
+    )
+    assert login.status_code == 200
+
+
+def test_ipv4_mapped_addresses_are_counted_as_ipv4():
+    from types import SimpleNamespace
+
+    from ml4paleo_server.auth.ratelimit import client_key
+
+    def request(host):
+        return SimpleNamespace(client=SimpleNamespace(host=host))
+
+    assert client_key(request("::ffff:203.0.113.7")) == "203.0.113.7"
+    assert client_key(request("::ffff:198.51.100.4")) == "198.51.100.4"
+    assert client_key(request("2001:db8::1")) == client_key(request("2001:db8::2"))
+
+
+def test_confirming_two_factor_after_a_key_change_asks_to_start_over(
+    new_browser, settings
+):
+    browser = new_browser()
+    signup(browser)
+    browser.post("/api/auth/totp/setup")
+    rotated = settings.model_copy(
+        update={"secret_key": SecretStr("a-completely-different-secret-key-0123456789")}
+    )
+    other = new_browser(rotated)
+    other.post("/api/auth/login", json={"username": "ada", "password": PASSWORD})
+    response = other.post("/api/auth/totp/confirm", json={"code": "123456"})
+    assert response.status_code == 409
+
+
+def test_the_reset_password_command_voids_reset_links(
+    new_browser, smtp_settings, migrated_database_url, monkeypatch
+):
+    browser = new_browser(smtp_settings)
+    signup(browser, email="ada@example.org")
+    browser.post(
+        "/api/auth/verify-email",
+        json={"token": link_token(outbox(migrated_database_url)[0].body)},
+    )
+    new_browser(smtp_settings).post(
+        "/api/auth/password-reset/request", json={"email": "ada@example.org"}
+    )
+    token = link_token(outbox(migrated_database_url)[-1].body)
+
+    from ml4paleo_server import cli
+
+    monkeypatch.setenv("M4P_DATABASE_URL", migrated_database_url)
+    assert cli.main(["reset-password", "ada"]) == 0
+    stale = new_browser(smtp_settings).post(
+        "/api/auth/password-reset/confirm",
+        json={"token": token, "new_password": "attacker chosen phrase"},
+    )
+    assert stale.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("name", "status"),
+    [("admin1", 422), ("root_", 422), ("ml4paleo-2", 422), ("rootbeer", 201)],
+)
+def test_reserved_name_look_alikes_are_refused(new_browser, name, status):
+    assert signup(new_browser(), username=name).status_code == status
