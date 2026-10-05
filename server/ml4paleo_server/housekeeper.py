@@ -63,7 +63,7 @@ async def prune(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
 async def run_once(
     sessionmaker: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
-    sent = await send_pending(sessionmaker, settings.smtp)
+    sent = await send_pending(sessionmaker, settings)
     if sent:
         log.info("Sent %d queued emails", sent)
     await prune(sessionmaker)

@@ -16,6 +16,7 @@ import uuid
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from helpers import SECRET_KEY
 from ml4paleo_server import migrations
 from ml4paleo_server.app import create_app
 from ml4paleo_server.settings import Settings
@@ -102,7 +103,7 @@ def migrated_database_url(database_url):
 def settings(migrated_database_url, tmp_path):
     return Settings(
         database_url=migrated_database_url,
-        secret_key="test-secret-key-that-is-long-enough-0123456789",
+        secret_key=SECRET_KEY,
         storage={"url": f"file://{tmp_path}/data"},
     )
 

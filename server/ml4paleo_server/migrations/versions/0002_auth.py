@@ -23,7 +23,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("to_address", sa.String(length=254), nullable=False),
         sa.Column("subject", sa.String(length=255), nullable=False),
-        sa.Column("body", sa.Text(), nullable=False),
+        sa.Column("body_sealed", sa.Text(), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("attempts", sa.Integer(), nullable=False),
         sa.Column(

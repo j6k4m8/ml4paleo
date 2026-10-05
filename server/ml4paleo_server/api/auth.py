@@ -173,6 +173,7 @@ async def _use_token(db: DbSession, kind: str, token: str) -> AuthToken:
 def _queue_verification(db: DbSession, settings: Settings, user: User, token: str):
     queue_email(
         db,
+        settings,
         user.email or "",
         "Confirm your ml4paleo email address",
         f"Hi {user.username},\n\nConfirm your email address by opening this link:\n\n"
@@ -478,6 +479,7 @@ async def request_password_reset(
     )
     queue_email(
         db,
+        settings,
         body.email,
         "Reset your ml4paleo password",
         f"Hi {user.username},\n\nChoose a new password by opening this link "
