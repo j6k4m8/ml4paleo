@@ -14,10 +14,11 @@ import pytest
 from helpers import CAPS, add_worker, bearer, make_admin, run_db, signup
 from ml4paleo_server import housekeeper, jobs
 from ml4paleo_server.db import Job, JobAttempt, create_sessionmaker
+from ml4paleo_server.db import Worker as WorkerRow
 from ml4paleo_server.jobs.workers import ensure_local_worker, new_worker_token
 from ml4paleo_worker import caps as worker_caps
 from ml4paleo_worker import cli as worker_cli
-from ml4paleo_worker.client import LeaseLost, ServerClient
+from ml4paleo_worker.client import LeaseLost, ServerClient, Unauthorized
 from ml4paleo_worker.context import PermanentError
 from ml4paleo_worker.handlers import HANDLERS
 from ml4paleo_worker.main import Worker
@@ -152,6 +153,7 @@ def test_admins_manage_workers_and_jobs(new_browser, migrated_database_url):
     token = created.json()["token"]
     assert token.startswith("m4pw_")
     assert admin.post("/api/admin/workers", json={"name": "lab-gpu"}).status_code == 409
+    assert admin.post("/api/admin/workers", json={"name": "Local"}).status_code == 422
 
     job = admin.post("/api/admin/jobs/noop", json={"seconds": 0.2}).json()
     assert job["status"] == "queued"
@@ -231,6 +233,47 @@ def test_crashed_handlers_are_retried(
     assert outcomes(migrated_database_url, job_id) == ["failed", "succeeded"]
 
 
+def test_a_result_that_cannot_be_sent_fails_at_once(
+    new_browser, token, migrated_database_url
+):
+    import numpy as np
+
+    def numpy_result(ctx):
+        return {"dice": np.float32(0.9)}
+
+    job_id = enqueue(migrated_database_url)
+    start(make_worker(new_browser, token, {"noop": numpy_result})).join(timeout=20)
+    job = job_row(migrated_database_url, job_id)
+    assert (job.status, job.attempts) == ("failed", 1)
+    assert "can't be sent" in job.error
+
+
+def test_a_revoked_worker_waiting_for_work_gets_none(
+    new_browser, token, migrated_database_url
+):
+    client = ServerClient(token, http=new_browser().client)
+    outcome = {}
+
+    def claim():
+        try:
+            outcome["lease"] = client.claim(CAPS, wait_seconds=10)
+        except Unauthorized:
+            outcome["refused"] = True
+
+    thread = threading.Thread(target=claim)
+    thread.start()
+    time.sleep(0.5)
+
+    async def revoke(db):
+        await db.execute(update(WorkerRow).values(status="revoked"))
+
+    run_db(migrated_database_url, revoke)
+    job_id = enqueue(migrated_database_url)
+    thread.join(timeout=15)
+    assert outcome == {"refused": True}
+    assert job_row(migrated_database_url, job_id).status == "queued"
+
+
 def test_permanent_errors_are_not_retried(new_browser, token, migrated_database_url):
     def broken(ctx):
         raise PermanentError("this file is not an image")
@@ -274,31 +317,28 @@ def test_check_workers_command(new_browser, token, migrated_database_url, monkey
 def test_the_local_worker_token_can_be_rotated(new_browser, migrated_database_url):
     old, new = new_worker_token(), new_worker_token()
     hello = {"caps": CAPS.model_dump()}
+    browser = new_browser()
+
+    def status(token):
+        return browser.post(
+            "/api/worker/v1/hello", json=hello, headers=bearer(token)
+        ).status_code
 
     async def register(db, token):
         await ensure_local_worker(db, token)
 
+    async def revoke(db):
+        await db.execute(update(WorkerRow).values(status="revoked"))
+
     run_db(migrated_database_url, lambda db: register(db, old))
-    browser = new_browser()
-    assert (
-        browser.post("/api/worker/v1/hello", json=hello, headers=bearer(old)).json()[
-            "name"
-        ]
-        == "local"
-    )
+    assert status(old) == 200
+    # Restarting with the same token leaves a revoked local worker revoked.
+    run_db(migrated_database_url, revoke)
+    run_db(migrated_database_url, lambda db: register(db, old))
+    assert status(old) == 401
+    # A new token replaces the old one and turns the worker back on.
     run_db(migrated_database_url, lambda db: register(db, new))
-    assert (
-        browser.post(
-            "/api/worker/v1/hello", json=hello, headers=bearer(old)
-        ).status_code
-        == 401
-    )
-    assert (
-        browser.post(
-            "/api/worker/v1/hello", json=hello, headers=bearer(new)
-        ).status_code
-        == 200
-    )
+    assert (status(old), status(new)) == (401, 200)
 
 
 def test_the_worker_cli_refuses_to_send_its_token_in_the_clear(tmp_path):

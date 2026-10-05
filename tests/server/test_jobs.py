@@ -358,3 +358,164 @@ def test_the_admin_status_filter_matches_the_job_statuses():
     from ml4paleo_server.db import JOB_STATUSES
 
     assert get_args(JobStatus) == JOB_STATUSES
+
+
+async def _two_sessions(database_url, scenario):
+    """
+    Run `scenario(sessionmaker)` with its own engine, for tests that interleave
+    transactions by hand.
+    """
+    engine = create_engine(database_url)
+    try:
+        return await scenario(create_sessionmaker(engine))
+    finally:
+        await engine.dispose()
+
+
+def test_cancelling_catches_a_job_being_requeued(migrated_database_url):
+    async def scenario(sessionmaker):
+        async with sessionmaker() as db:
+            worker = await make_worker(db)
+            root = await jobs.enqueue(db, "noop", {"name": "root"})
+            job = await jobs.enqueue(db, "noop", {"name": "job"}, pipeline=root)
+            root_lease = await jobs.claim(db, worker, CPU)
+            job_lease = await jobs.claim(db, worker, CPU)
+            await db.commit()
+        async with sessionmaker() as failing, sessionmaker() as cancelling:
+            # The worker's retryable failure holds the job's row...
+            await jobs.fail(failing, job.id, worker, job_lease.lease_token, "flaky")
+            # ...while the pipeline is cancelled, which must not wait for it.
+            await asyncio.wait_for(jobs.cancel_pipeline(cancelling, root.id), 5)
+            await cancelling.commit()
+            await failing.commit()
+        async with sessionmaker() as db:
+            await db.execute(update(Job).values(not_before=PAST))
+            requeued = await db.scalar(select(Job.status).where(Job.id == job.id))
+            claimed = await jobs.claim(db, worker, CPU)
+            await jobs.sweep(db)
+            beat = await jobs.heartbeat(db, root.id, worker, root_lease.lease_token)
+            final = await db.scalar(select(Job.status).where(Job.id == job.id))
+            return requeued, claimed, final, beat.cancel_requested
+
+    result = asyncio.run(_two_sessions(migrated_database_url, scenario))
+    assert result == ("queued", None, "cancelled", True)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"), [("fails", "error"), ("succeeds", "queued")]
+)
+def test_enqueue_rechecks_dependencies(migrated_database_url, outcome, expected):
+    async def scenario(sessionmaker):
+        async with sessionmaker() as db:
+            worker = await make_worker(db)
+            root = await jobs.enqueue(db, "noop", {})
+            lease = await jobs.claim(db, worker, CPU)
+            await db.commit()
+        async with sessionmaker() as stale:
+            # Loaded while the dependency is still running...
+            dependency = await stale.get(Job, root.id)
+            async with sessionmaker() as db:
+                if outcome == "fails":
+                    await jobs.fail(
+                        db, root.id, worker, lease.lease_token, "bad", retryable=False
+                    )
+                else:
+                    await jobs.complete(db, root.id, worker, lease.lease_token, {})
+                await db.commit()
+            # ...but it finished before the new job was added.
+            try:
+                job = await jobs.enqueue(
+                    stale, "noop", {}, pipeline=dependency, depends_on=[dependency]
+                )
+            except ValueError:
+                return "error"
+            return job.status
+
+    assert asyncio.run(_two_sessions(migrated_database_url, scenario)) == expected
+
+
+def test_concurrent_enqueues_with_one_key_make_one_job(migrated_database_url):
+    async def scenario(sessionmaker):
+        async def add(delay):
+            async with sessionmaker() as db:
+                job = await jobs.enqueue(db, "noop", {}, idempotency_key="export:1")
+                await asyncio.sleep(delay)
+                await db.commit()
+                return job.id
+
+        first, second = await asyncio.gather(add(0.3), add(0))
+        async with sessionmaker() as db:
+            count = len((await db.scalars(select(Job.id))).all())
+        return first == second, count
+
+    assert asyncio.run(_two_sessions(migrated_database_url, scenario)) == (True, 1)
+
+
+def test_cancelling_does_not_deadlock_with_a_completion(migrated_database_url):
+    async def scenario(sessionmaker):
+        async with sessionmaker() as db:
+            worker = await make_worker(db)
+            root = await jobs.enqueue(db, "noop", {})
+            lease = await jobs.claim(db, worker, CPU)
+            await jobs.complete(db, root.id, worker, lease.lease_token, {})
+            middle = await jobs.enqueue(
+                db, "noop", {}, pipeline=root, depends_on=[root]
+            )
+            last = await jobs.enqueue(
+                db, "noop", {}, pipeline=root, depends_on=[middle]
+            )
+            lease = await jobs.claim(db, worker, CPU)
+            await db.commit()
+        async with sessionmaker() as completing, sessionmaker() as cancelling:
+            # The completion holds the job and its waiting child...
+            await jobs.complete(completing, middle.id, worker, lease.lease_token, {})
+            # ...and cancelling the pipeline must not wait for either.
+            await asyncio.wait_for(jobs.cancel_pipeline(cancelling, root.id), 5)
+            await cancelling.commit()
+            await completing.commit()
+        async with sessionmaker() as db:
+            claimed = await jobs.claim(db, worker, CPU)
+            await jobs.sweep(db)
+            status = await db.scalar(select(Job.status).where(Job.id == last.id))
+            return claimed, status
+
+    result = asyncio.run(_two_sessions(migrated_database_url, scenario))
+    assert result == (None, "cancelled")
+
+
+def test_sibling_failures_at_once_do_not_deadlock(migrated_database_url):
+    async def scenario(sessionmaker):
+        async with sessionmaker() as db:
+            worker = await make_worker(db)
+            root = await jobs.enqueue(db, "noop", {})
+            lease = await jobs.claim(db, worker, CPU)
+            await jobs.complete(db, root.id, worker, lease.lease_token, {})
+            siblings = [
+                await jobs.enqueue(db, "noop", {}, pipeline=root, depends_on=[root])
+                for _ in range(2)
+            ]
+            leases = [await jobs.claim(db, worker, CPU) for _ in siblings]
+            await db.commit()
+
+        async def fail(claimed):
+            async with sessionmaker() as db:
+                await jobs.fail(
+                    db, claimed.job.id, worker, claimed.lease_token, "bad input", False
+                )
+                await asyncio.sleep(0.2)
+                await db.commit()
+
+        await asyncio.wait_for(asyncio.gather(*(fail(lease) for lease in leases)), 10)
+        async with sessionmaker() as db:
+            return sorted(
+                (
+                    await db.scalars(
+                        select(Job.status).where(Job.id.in_([s.id for s in siblings]))
+                    )
+                ).all()
+            )
+
+    # Whichever failure commits first cancels the pipeline, so the other one
+    # may end up cancelled rather than failed; neither waits on the other.
+    result = asyncio.run(_two_sessions(migrated_database_url, scenario))
+    assert "failed" in result and set(result) <= {"failed", "cancelled"}

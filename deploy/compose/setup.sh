@@ -69,10 +69,16 @@ profiles=
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
     if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q nvidia; then
         profiles=gpu
-        echo "Found an NVIDIA GPU; the GPU worker will run too."
     else
         echo "Found an NVIDIA GPU, but Docker can't use it. Install the NVIDIA" \
             "Container Toolkit, then set COMPOSE_PROFILES=gpu in .env." >&2
+    fi
+fi
+if [ -n "$profiles" ]; then
+    if [ ! -f .env ]; then
+        echo "Found an NVIDIA GPU; the GPU worker will run too."
+    elif ! grep -q '^COMPOSE_PROFILES=.*gpu' .env; then
+        echo "Found an NVIDIA GPU. To run the GPU worker, set COMPOSE_PROFILES=gpu in .env."
     fi
 fi
 

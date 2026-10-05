@@ -65,6 +65,16 @@ async def claim(
     await jobs.touch_worker(db, worker, body.caps)
     await db.commit()
     while True:
+        # Don't hand a job to a worker that went away or was revoked while
+        # it waited; the job would sit unclaimed until its lease ran out.
+        if await request.is_disconnected():
+            return ClaimOut(job=None)
+        if not await jobs.worker_is_active(db, worker.id):
+            raise HTTPException(
+                status_code=401,
+                detail="A valid worker token is required.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         claimed = await jobs.claim(db, worker, body.caps)
         # Commit either way, so no connection is held while waiting.
         await db.commit()
@@ -82,7 +92,7 @@ async def claim(
                 )
             )
         remaining = deadline - loop.time()
-        if remaining <= 0 or await request.is_disconnected():
+        if remaining <= 0:
             return ClaimOut(job=None)
         await signal.wait(min(remaining, CLAIM_POLL_SECONDS))
 

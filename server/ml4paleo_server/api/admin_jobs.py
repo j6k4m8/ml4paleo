@@ -8,7 +8,7 @@ import uuid
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
@@ -18,7 +18,7 @@ from .. import audit, jobs
 from ..auth.deps import AdminAuth, DbSession
 from ..auth.tokens import token_hash
 from ..db import Job, Worker
-from ..jobs.workers import new_worker_token
+from ..jobs.workers import LOCAL_WORKER_NAME, new_worker_token
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -44,6 +44,13 @@ class WorkerOut(BaseModel):
 class WorkerIn(BaseModel):
     name: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
     pool: Literal["remote", "burst"] = "remote"
+
+    @field_validator("name")
+    @classmethod
+    def _not_local(cls, name: str) -> str:
+        if name.lower() == LOCAL_WORKER_NAME:
+            raise ValueError(f"{LOCAL_WORKER_NAME!r} is the local workers' name")
+        return name
 
 
 class NewWorkerOut(BaseModel):
@@ -126,8 +133,9 @@ async def revoke_worker(
     worker = await db.get(Worker, worker_id)
     if worker is None:
         raise HTTPException(status_code=404, detail="No such worker.")
-    worker.status = "revoked"
+    # Jobs before the worker row: the queue's lock order.
     await jobs.requeue_worker_jobs(db, worker.id)
+    worker.status = "revoked"
     audit.record(
         db,
         actor_id=auth.user.id,

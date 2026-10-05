@@ -31,17 +31,25 @@ def new_worker_token() -> str:
 
 async def ensure_local_worker(db: AsyncSession, token: str) -> None:
     """
-    Register (or update) the local workers' shared token.
+    Register the local workers' shared token. A new token replaces the old
+    one and re-activates the worker; the same token leaves it alone, so a
+    revoked local worker stays revoked across restarts.
     """
     if not token.startswith(WORKER_TOKEN_PREFIX):
         raise ValueError(f"Worker tokens start with {WORKER_TOKEN_PREFIX}")
     worker = await db.scalar(select(Worker).where(Worker.name == LOCAL_WORKER_NAME))
     if worker is None:
         db.add(
-            Worker(name=LOCAL_WORKER_NAME, pool="local", token_hash=token_hash(token))
+            Worker(
+                name=LOCAL_WORKER_NAME,
+                pool="local",
+                token_hash=token_hash(token),
+                caps={},
+            )
         )
-    else:
+    elif worker.token_hash != token_hash(token):
         worker.token_hash = token_hash(token)
+        worker.pool = "local"
         worker.status = "active"
     await db.commit()
 

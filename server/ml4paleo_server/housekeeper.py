@@ -24,7 +24,7 @@ from .db import (
     create_sessionmaker,
 )
 from .email import send_pending
-from .jobs import reap
+from .jobs import reap_one, sweep
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -63,8 +63,19 @@ async def prune(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
 
 
 async def reap_jobs(sessionmaker: async_sessionmaker[AsyncSession]) -> int:
+    """
+    Take back expired leases, one job per transaction, then run the queue's
+    safety nets. Returns how many leases expired.
+    """
+    expired = 0
+    while True:
+        async with sessionmaker() as db:
+            if not await reap_one(db):
+                break
+            await db.commit()
+        expired += 1
     async with sessionmaker() as db:
-        expired = await reap(db)
+        await sweep(db)
         await db.commit()
     return expired
 

@@ -27,6 +27,7 @@ import httpx2
 from ml4paleo.protocol import (
     MAX_CLAIM_WAIT_SECONDS,
     MAX_ERROR_CHARS,
+    CompleteIn,
     JobLease,
     WorkerCaps,
 )
@@ -170,6 +171,14 @@ class Worker:
                 raise PermanentError(f"This worker has no handler for {lease.kind!r}.")
             ctx.check()
             result = handler(ctx)
+            try:
+                # Check the result here, so a bad one fails the job at once
+                # instead of leaving it to time out.
+                CompleteIn(
+                    lease_token=lease.lease_token, result=result
+                ).model_dump_json()
+            except Exception as exc:  # noqa: BLE001 - any invalid result
+                raise PermanentError(f"The job's result can't be sent: {exc}") from exc
         except Cancelled:
             if ctx.stop_reason == SHUTDOWN:
                 self._report(
@@ -198,24 +207,45 @@ class Worker:
                 ),
             )
             return
-        self._report(
+        rejected = self._report(
             ctx,
             "completion",
             lambda: self.client.complete(lease.job_id, lease.lease_token, result),
         )
+        if rejected is not None:
+            # The server refused the result itself; retrying won't help.
+            self._report(
+                ctx,
+                "failure",
+                lambda: self.client.fail(
+                    lease.job_id,
+                    lease.lease_token,
+                    f"The server rejected the job's result: {rejected}",
+                    retryable=False,
+                ),
+            )
 
-    def _report(self, ctx: JobContext, what: str, call) -> None:
+    def _report(self, ctx: JobContext, what: str, call) -> str | None:
+        """
+        Send a report, retrying network and server errors. Returns the
+        server's answer if it refused the request (HTTP 4xx), else None.
+        """
         if ctx.stop_reason == LEASE_LOST:
             log.warning("Lost the lease on job %s; discarding its output", ctx.job_id)
-            return
+            return None
         try:
             with_retries(call, give_up_after=self.lease_seconds)
         except LeaseLost:
             log.warning("Job %s is no longer ours; discarded its %s", ctx.job_id, what)
+        except httpx2.HTTPStatusError as exc:
+            log.error("The server refused the %s of job %s: %s", what, ctx.job_id, exc)
+            if exc.response.status_code < 500:
+                return f"{exc.response.status_code} {exc.response.text[:500]}"
         except Exception as exc:  # noqa: BLE001 - the server will reassign it
             log.error("Could not report the %s of job %s: %s", what, ctx.job_id, exc)
         else:
             log.info("Reported the %s of job %s", what, ctx.job_id)
+        return None
 
     def _heartbeats(self, ctx: JobContext, finished: threading.Event) -> None:
         lease = ctx.lease

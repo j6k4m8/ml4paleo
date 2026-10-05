@@ -20,9 +20,21 @@ Each claim gets a fresh random lease token, and every report about the job
 must carry it. A worker that lost its lease (it was too slow, or the job was
 given to someone else) gets `LeaseLost` and must throw its output away.
 
-When a job fails for good, the rest of its pipeline is cancelled. Cancelling
-a pipeline cancels its waiting jobs at once and asks the workers running the
-others to stop (they see `cancel` in their next heartbeat).
+When a job fails for good, the rest of its pipeline is cancelled. A pipeline
+is cancelled when its root job's `cancel_requested` flag is set; that flag is
+the authority. `cancel_pipeline` locks only the root, then cancels waiting
+jobs and flags running ones without waiting for rows that other transactions
+hold. Every other path checks the root's flag too (claims skip cancelled
+pipelines, reports and heartbeats pick the flag up, and the reaper cancels
+what is left), so a job that was busy at that moment can't slip through.
+
+Locks are taken in a fixed order to avoid deadlocks: a transaction locks the
+jobs it reports on or depends on, then that pipeline's root, then (for
+completions) the waiting children. `cancel_pipeline` waits only for the root;
+it skips other rows that are busy. Worker rows are only touched after job
+rows. Row locks are `FOR NO KEY UPDATE` (no key column ever changes), so they
+don't collide with the `KEY SHARE` locks that foreign-key checks take on the
+root and worker rows.
 
 These functions work inside the caller's transaction; the caller commits.
 `enqueue` and the functions that make jobs claimable send a Postgres
@@ -37,8 +49,10 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, not_, select, text, update
+from sqlalchemy import exists, func, not_, or_, select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from ml4paleo.protocol import Tier, WorkerCaps
 
@@ -52,6 +66,17 @@ NOTIFY_CHANNEL = "m4p_jobs"
 
 WAITING = ("blocked", "queued")
 FINISHED = ("succeeded", "failed", "cancelled")
+# Heartbeats refresh a worker's last_seen_at at most this often.
+SEEN_EVERY = datetime.timedelta(seconds=10)
+
+_root = aliased(Job)
+
+
+def _root_cancelled():
+    """
+    SQL: the job's pipeline has been cancelled.
+    """
+    return exists().where(_root.id == Job.root_id, _root.cancel_requested)
 
 
 class LeaseLost(Exception):
@@ -114,6 +139,10 @@ async def enqueue(
     job too.
 
     If a job with the same `idempotency_key` exists, return it instead.
+
+    The pipeline's root and the dependencies are re-read under a share lock,
+    so their state can't change underneath: a dependency that is finishing
+    either sees this job (and releases it) or has finished before this check.
     """
     if idempotency_key is not None:
         existing = await db.scalar(
@@ -122,10 +151,31 @@ async def enqueue(
         if existing is not None:
             return existing
     root_id = pipeline.root_id if pipeline is not None else None
-    if any(d.root_id != root_id for d in depends_on):
+    # Dependencies first, then the root: the same order as the paths that
+    # report on a job and then cancel its pipeline.
+    dependency_ids = sorted({d.id for d in depends_on})
+    dependencies = (
+        await db.execute(
+            select(Job.id, Job.root_id, Job.status)
+            .where(Job.id.in_(dependency_ids))
+            .order_by(Job.id)
+            .with_for_update(read=True)
+        )
+    ).all()
+    if len(dependencies) != len(dependency_ids):
+        raise ValueError("A dependency does not exist")
+    if any(d.root_id != root_id for d in dependencies):
         raise ValueError("Jobs can only depend on jobs in the same pipeline")
-    if any(d.status in ("failed", "cancelled") for d in depends_on):
+    if any(d.status in ("failed", "cancelled") for d in dependencies):
         raise ValueError("A dependency has already failed or been cancelled")
+    if root_id is not None:
+        cancelled = await db.scalar(
+            select(Job.cancel_requested)
+            .where(Job.id == root_id)
+            .with_for_update(read=True)
+        )
+        if cancelled:
+            raise ValueError("The pipeline was cancelled")
     job = Job(
         id=uuid7(),
         kind=kind,
@@ -136,7 +186,7 @@ async def enqueue(
         created_by=created_by,
         tier=int(tier),
         status="queued"
-        if all(d.status == "succeeded" for d in depends_on)
+        if all(d.status == "succeeded" for d in dependencies)
         else "blocked",
         required_labels=sorted(set(required_labels)),
         min_vram_gb=min_vram_gb,
@@ -153,10 +203,22 @@ async def enqueue(
     else:
         job.root_id = pipeline.root_id
         job.submitted_at = pipeline.submitted_at
-    db.add(job)
-    await db.flush()
-    for dependency in depends_on:
-        db.add(JobDep(job_id=job.id, depends_on=dependency.id))
+    try:
+        async with db.begin_nested():
+            db.add(job)
+            await db.flush()
+    except IntegrityError:
+        # Another transaction added a job with this key first.
+        if idempotency_key is None:
+            raise
+        existing = await db.scalar(
+            select(Job).where(Job.idempotency_key == idempotency_key)
+        )
+        if existing is None:
+            raise
+        return existing
+    for dependency_id in dependency_ids:
+        db.add(JobDep(job_id=job.id, depends_on=dependency_id))
     await db.flush()
     if job.status == "queued":
         await notify(db)
@@ -173,13 +235,15 @@ async def claim(db: AsyncSession, worker: Worker, caps: WorkerCaps) -> Claimed |
         .where(
             Job.status == "queued",
             Job.not_before <= current,
+            not_(Job.cancel_requested),
+            not_(_root_cancelled()),
             Job.kind.in_(caps.kinds),
             Job.required_labels.contained_by(sorted(set(caps.labels))),
             Job.min_vram_gb <= caps.vram_gb,
         )
         .order_by(Job.tier, Job.submitted_at, Job.id)
         .limit(1)
-        .with_for_update(skip_locked=True)
+        .with_for_update(skip_locked=True, key_share=True)
         .execution_options(populate_existing=True)
     )
     if job is None:
@@ -206,7 +270,7 @@ async def _leased_job(
     job = await db.scalar(
         select(Job)
         .where(Job.id == job_id)
-        .with_for_update()
+        .with_for_update(key_share=True)
         # Bulk updates (like cancel_pipeline) don't refresh loaded jobs.
         .execution_options(populate_existing=True)
     )
@@ -218,7 +282,18 @@ async def _leased_job(
         or not secrets.compare_digest(job.lease_token_hash, _hash(lease_token))
     ):
         raise LeaseLost
+    await _pick_up_cancellation(db, job)
     return job
+
+
+async def _pick_up_cancellation(db: AsyncSession, job: Job) -> None:
+    """
+    Flag a job whose pipeline was cancelled while the job's row was busy.
+    """
+    if job.cancel_requested or job.root_id == job.id:
+        return
+    if await db.scalar(select(Job.cancel_requested).where(Job.id == job.root_id)):
+        job.cancel_requested = True
 
 
 def _holds_finished(job: Job | None, worker: Worker, lease_token: str) -> bool:
@@ -248,7 +323,18 @@ async def heartbeat(
     job = await _leased_job(db, job_id, worker, lease_token)
     job.lease_expires_at = now() + LEASE
     # A worker busy with a long job doesn't claim, so it is seen here instead.
-    worker.last_seen_at = now()
+    await db.execute(
+        update(Worker)
+        .where(
+            Worker.id == worker.id,
+            or_(
+                Worker.last_seen_at.is_(None),
+                Worker.last_seen_at < now() - SEEN_EVERY,
+            ),
+        )
+        .values(last_seen_at=func.now())
+        .execution_options(synchronize_session=False)
+    )
     if progress is not None:
         job.progress = progress
     if message is not None:
@@ -409,7 +495,7 @@ async def _unblock_children(db: AsyncSession, job_id: uuid.UUID) -> None:
             select(Job.id)
             .where(Job.id.in_(children), Job.status == "blocked")
             .order_by(Job.id)
-            .with_for_update()
+            .with_for_update(key_share=True)
         )
     ).all()
     if not locked:
@@ -425,7 +511,12 @@ async def _queue_ready(db: AsyncSession, *conditions) -> int:
     )
     queued = await db.execute(
         update(Job)
-        .where(Job.status == "blocked", not_(Job.id.in_(unfinished)), *conditions)
+        .where(
+            Job.status == "blocked",
+            not_(Job.id.in_(unfinished)),
+            not_(_root_cancelled()),
+            *conditions,
+        )
         .values(status="queued", not_before=func.now())
         .returning(Job.id)
         .execution_options(synchronize_session=False)
@@ -440,45 +531,96 @@ async def cancel_pipeline(db: AsyncSession, root_id: uuid.UUID) -> None:
     """
     Cancel a pipeline: waiting jobs stop at once, and workers running the
     others are asked to stop.
+
+    Only the root is locked and waited for. Jobs whose rows other transactions
+    hold right now are skipped here and caught by the root's flag instead.
     """
-    await db.execute(
-        update(Job)
-        .where(Job.root_id == root_id, Job.status.in_(WAITING))
-        .values(status="cancelled", finished_at=func.now(), cancel_requested=True)
-        .execution_options(synchronize_session=False)
+    root = await db.scalar(
+        select(Job)
+        .where(Job.id == root_id)
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
+    if root is None:
+        return
+    root.cancel_requested = True
+    if root.status in WAITING:
+        root.status = "cancelled"
+        root.finished_at = now()
+    await db.flush()
+    await _cancel_waiting(db, Job.root_id == root_id)
+    running = (
+        select(Job.id)
+        .where(Job.root_id == root_id, Job.status == "leased")
+        .with_for_update(skip_locked=True, key_share=True)
     )
     await db.execute(
         update(Job)
-        .where(Job.root_id == root_id, Job.status == "leased")
+        .where(Job.id.in_(running))
         .values(cancel_requested=True)
         .execution_options(synchronize_session=False)
     )
 
 
+async def _cancel_waiting(db: AsyncSession, *conditions) -> None:
+    waiting = (
+        select(Job.id)
+        .where(Job.status.in_(WAITING), *conditions)
+        .with_for_update(skip_locked=True, key_share=True)
+    )
+    await db.execute(
+        update(Job)
+        .where(Job.id.in_(waiting))
+        .values(status="cancelled", finished_at=func.now(), cancel_requested=True)
+        .execution_options(synchronize_session=False)
+    )
+
+
+async def reap_one(db: AsyncSession) -> bool:
+    """
+    Take one job back from a worker that went silent. Returns False when
+    there are none. The housekeeper commits after each, so it never holds
+    locks on several jobs at once.
+    """
+    job = await db.scalar(
+        select(Job)
+        .where(Job.status == "leased", Job.lease_expires_at < now())
+        .limit(1)
+        .with_for_update(skip_locked=True, key_share=True)
+        .execution_options(populate_existing=True)
+    )
+    if job is None:
+        return False
+    await _pick_up_cancellation(db, job)
+    await _end_attempt(
+        db,
+        job,
+        error=f"The worker stopped responding (attempt {job.attempts}).",
+        retryable=True,
+        outcome="expired",
+    )
+    return True
+
+
+async def sweep(db: AsyncSession) -> None:
+    """
+    Safety nets: cancel waiting jobs left in cancelled pipelines, and queue
+    blocked jobs whose dependencies have all succeeded.
+    """
+    await _cancel_waiting(db, _root_cancelled())
+    await _queue_ready(db)
+
+
 async def reap(db: AsyncSession) -> int:
     """
-    Take jobs back from workers that went silent, and queue blocked jobs whose
-    dependencies have all succeeded (a safety net). Returns how many leases
+    Take back every expired lease, then `sweep`. Returns how many leases
     expired.
     """
-    expired = (
-        await db.scalars(
-            select(Job)
-            .where(Job.status == "leased", Job.lease_expires_at < now())
-            .with_for_update(skip_locked=True)
-            .execution_options(populate_existing=True)
-        )
-    ).all()
-    for job in expired:
-        await _end_attempt(
-            db,
-            job,
-            error=f"The worker stopped responding (attempt {job.attempts}).",
-            retryable=True,
-            outcome="expired",
-        )
-    await _queue_ready(db)
-    return len(expired)
+    expired = 0
+    while await reap_one(db):
+        expired += 1
+    await sweep(db)
+    return expired
 
 
 async def requeue_worker_jobs(db: AsyncSession, worker_id: uuid.UUID) -> None:
@@ -489,14 +631,28 @@ async def requeue_worker_jobs(db: AsyncSession, worker_id: uuid.UUID) -> None:
         await db.scalars(
             select(Job)
             .where(Job.status == "leased", Job.lease_worker_id == worker_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
     ).all()
     for job in held:
+        await _pick_up_cancellation(db, job)
         await _end_attempt(
             db, job, error="The worker was revoked.", retryable=True, outcome="expired"
         )
+
+
+async def worker_is_active(db: AsyncSession, worker_id: uuid.UUID) -> bool:
+    row = (
+        await db.execute(
+            select(Worker.status, Worker.expires_at).where(Worker.id == worker_id)
+        )
+    ).first()
+    return (
+        row is not None
+        and row.status == "active"
+        and (row.expires_at is None or row.expires_at > now())
+    )
 
 
 @dataclass(frozen=True)
@@ -518,6 +674,7 @@ async def pipeline_status(db: AsyncSession, root_id: uuid.UUID) -> PipelineStatu
             select(Job.status, Job.weight, Job.progress).where(Job.root_id == root_id)
         )
     ).all()
+    cancelled = await db.scalar(select(Job.cancel_requested).where(Job.id == root_id))
     statuses = {row.status for row in rows}
     total_weight = sum(row.weight for row in rows) or 1
     done = sum(
@@ -527,7 +684,7 @@ async def pipeline_status(db: AsyncSession, root_id: uuid.UUID) -> PipelineStatu
         status = "failed"
     elif statuses and statuses <= {"succeeded"}:
         status = "succeeded"
-    elif "cancelled" in statuses and not statuses & {"leased", "queued", "blocked"}:
+    elif cancelled and "leased" not in statuses:
         status = "cancelled"
     elif "leased" in statuses or "succeeded" in statuses:
         status = "running"
@@ -565,7 +722,10 @@ __all__ = [
     "notify",
     "pipeline_status",
     "reap",
+    "reap_one",
     "release",
     "requeue_worker_jobs",
+    "sweep",
     "touch_worker",
+    "worker_is_active",
 ]

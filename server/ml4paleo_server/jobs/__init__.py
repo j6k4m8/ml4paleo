@@ -19,9 +19,12 @@ from .queue import (
     heartbeat,
     pipeline_status,
     reap,
+    reap_one,
     release,
     requeue_worker_jobs,
+    sweep,
     touch_worker,
+    worker_is_active,
 )
 from .signal import JobSignal
 
@@ -41,7 +44,10 @@ __all__ = [
     "heartbeat",
     "pipeline_status",
     "reap",
+    "reap_one",
     "release",
     "requeue_worker_jobs",
+    "sweep",
     "touch_worker",
+    "worker_is_active",
 ]
