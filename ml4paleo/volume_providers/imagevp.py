@@ -6,8 +6,26 @@ from PIL import Image
 from .sources import open_binary
 from .volume_provider import VolumeProvider, normalize_key
 
-# The most memory one decoded slice may take (estimated generously).
-MAX_DECODED_SLICE_BYTES = 8 * 1024**3
+# The most memory one decoded slice may take, unless a provider is given its
+# own limit (ingest derives one from the worker's memory).
+MAX_DECODED_SLICE_BYTES = 1024**3
+# Bytes per pixel of Pillow's modes; anything else counts as 4 per band.
+_MODE_BYTES = {
+    "1": 1,
+    "L": 1,
+    "P": 1,
+    "LA": 2,
+    "PA": 2,
+    "RGB": 3,
+    "YCbCr": 3,
+    "LAB": 3,
+    "HSV": 3,
+    "RGBA": 4,
+    "RGBX": 4,
+    "CMYK": 4,
+    "I": 4,
+    "F": 4,
+}
 
 
 class ImageStackVolumeProvider(VolumeProvider):
@@ -24,6 +42,7 @@ class ImageStackVolumeProvider(VolumeProvider):
         path_or_list_of_images: pathlib.Path | list[pathlib.Path],
         image_glob: str = "*",
         cache_size: int | str = 0,
+        max_decoded_bytes: int = MAX_DECODED_SLICE_BYTES,
     ):
         """
         Create a new ImageStackVolumeProvider.
@@ -59,7 +78,8 @@ class ImageStackVolumeProvider(VolumeProvider):
 
         # Read the first slice once, so shape and dtype never need to reopen
         # files (and a bad first file fails here, not deep inside a job).
-        first, self._mode = _read_slice(self.paths[0])
+        self._max_decoded_bytes = max_decoded_bytes
+        first, self._mode = _read_slice(self.paths[0], max_decoded_bytes)
         self._shape_xy: tuple[int, int] = (int(first.shape[0]), int(first.shape[1]))
         self._dtype = first.dtype
 
@@ -70,7 +90,7 @@ class ImageStackVolumeProvider(VolumeProvider):
         v1 silently replaced unreadable or mismatched slices with zeros, which
         corrupted volumes without any error.
         """
-        res, mode = _read_slice(path)
+        res, mode = _read_slice(path, self._max_decoded_bytes)
         if res.shape != self._shape_xy:
             raise ValueError(
                 f"Image slice {path} has size {res.shape} (x, y), but the first "
@@ -117,7 +137,9 @@ class ImageStackVolumeProvider(VolumeProvider):
         return self._dtype
 
 
-def _read_slice(path: pathlib.Path) -> tuple[np.ndarray, str]:
+def _read_slice(
+    path: pathlib.Path, max_decoded_bytes: int = MAX_DECODED_SLICE_BYTES
+) -> tuple[np.ndarray, str]:
     """
     Read one image file as an (x, y) array and its PIL mode, keeping the
     first channel of
@@ -131,10 +153,13 @@ def _read_slice(path: pathlib.Path) -> tuple[np.ndarray, str]:
         with open_binary(path) as source, Image.open(source) as image:
             mode = image.mode
             width, height = image.size
-            # Image files can compress hugely: check the decoded size (at
-            # most four bytes per band) before decoding.
-            decoded = width * height * len(image.getbands()) * 4
-            if decoded > MAX_DECODED_SLICE_BYTES:
+            # Image files can compress hugely: check the decoded size before
+            # decoding.
+            per_pixel = _MODE_BYTES.get(mode)
+            if per_pixel is None:
+                per_pixel = 2 if mode.startswith("I;16") else 4 * len(image.getbands())
+            decoded = width * height * per_pixel
+            if decoded > max_decoded_bytes:
                 raise ValueError(
                     f"it is {width} x {height} pixels in mode {mode}, too large "
                     "for one slice"

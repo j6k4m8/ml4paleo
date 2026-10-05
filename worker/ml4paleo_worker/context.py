@@ -30,8 +30,11 @@ class JobContext:
     cancelled, its lease is lost, or the worker is shutting down.
     """
 
-    def __init__(self, lease: JobLease):
+    def __init__(self, lease: JobLease, memory_budget_bytes: int = 4 * 1024**3):
         self.lease = lease
+        # How much memory this job may use: the worker's memory shared among
+        # its slots. Handlers size what they hold at once from it.
+        self.memory_budget_bytes = memory_budget_bytes
         self._progress: float | None = None
         self._message: str | None = None
         self._lock = threading.Lock()

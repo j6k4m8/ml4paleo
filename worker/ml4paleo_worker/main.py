@@ -139,8 +139,16 @@ class Worker:
                 with self._lock:
                     self.jobs_done += 1
 
+    def memory_budget_bytes(self) -> int:
+        """
+        A job's share of the worker's memory (leaving a quarter for the
+        worker itself and for decoding overhead).
+        """
+        memory = self.caps.memory_gb * 1024**3 or 4 * 1024**3
+        return int(memory * 0.75 / self.caps.slots)
+
     def run_job(self, lease: JobLease) -> None:
-        ctx = JobContext(lease)
+        ctx = JobContext(lease, self.memory_budget_bytes())
         with self._lock:
             self._running[lease.job_id] = ctx
         if self._stopping.is_set():

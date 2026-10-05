@@ -372,3 +372,20 @@ def test_gpus_are_detected_from_nvidia_smi(monkeypatch):
     monkeypatch.setattr(worker_caps.subprocess, "run", missing)
     assert worker_caps.detect().labels == []
     assert isinstance(worker_caps.detect(), WorkerCaps)
+
+
+def test_memory_comes_from_the_container_limit(monkeypatch, tmp_path):
+    limit = tmp_path / "memory.max"
+    limit.write_text(f"{2 * 1024**3}\n")
+    unlimited = tmp_path / "unlimited"
+    unlimited.write_text("max\n")
+    monkeypatch.setattr(
+        worker_caps, "CGROUP_MEMORY_LIMITS", (str(unlimited), str(limit))
+    )
+    assert worker_caps.detect().memory_gb == 2.0
+
+
+def test_each_slot_gets_a_share_of_memory():
+    caps = CAPS.model_copy(update={"memory_gb": 8.0, "slots": 2})
+    worker = Worker(ServerClient("m4pw_x", http=object()), caps)  # type: ignore[arg-type]
+    assert worker.memory_budget_bytes() == 3 * 1024**3
