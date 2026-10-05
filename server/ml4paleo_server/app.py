@@ -10,13 +10,18 @@ import contextlib
 import pathlib
 from collections.abc import AsyncIterator
 
+import obstore
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from sqlalchemy import text
+from starlette.concurrency import run_in_threadpool
+
+from ml4paleo.storage import object_store
 
 from . import __version__
 from .db import create_engine, create_sessionmaker
 from .settings import Settings
+from .storage import project_storage
 
 CONTENT_SECURITY_POLICY = "; ".join(
     [
@@ -40,6 +45,12 @@ PLACEHOLDER_PAGE = """<!doctype html>
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
+    if not (settings.is_https or settings.is_local or settings.allow_insecure_http):
+        raise RuntimeError(
+            f"M4P_PUBLIC_URL is {settings.public_url}, which is plain HTTP on a "
+            "public address. Serve the app over HTTPS, or set "
+            "M4P_ALLOW_INSECURE_HTTP=true if you really mean it."
+        )
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -76,8 +87,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health(request: Request) -> dict[str, str]:
+        """
+        Check that the database and project storage both answer.
+        """
         async with request.app.state.engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
+        await run_in_threadpool(_check_storage, settings)
         return {"status": "ok", "version": __version__}
 
     @app.get("/{path:path}", include_in_schema=False)
@@ -87,6 +102,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _serve_web_app(settings.web_dir, path)
 
     return app
+
+
+def _check_storage(settings: Settings) -> None:
+    """
+    List at most one object from project storage, which fails if the bucket
+    is missing or the credentials are wrong.
+    """
+    store = object_store(project_storage(settings))
+    for _ in obstore.list(store, chunk_size=1):
+        break
 
 
 def _serve_web_app(web_dir: pathlib.Path | None, path: str) -> Response:

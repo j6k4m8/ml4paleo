@@ -91,3 +91,33 @@ def test_uuid7_sorts_by_time_and_sets_version_bits():
     ids = [uuid7() for _ in range(5)]
     assert all(i.version == 7 and i.variant == uuid.RFC_4122 for i in ids)
     assert [i.int >> 80 for i in ids] == sorted(i.int >> 80 for i in ids)
+
+
+def test_plain_http_on_a_public_address_is_refused(settings):
+    public_http = settings.model_copy(
+        update={"public_url": "http://ml4paleo.example.org"}
+    )
+    with pytest.raises(RuntimeError, match="HTTPS"):
+        create_app(public_http)
+    create_app(public_http.model_copy(update={"allow_insecure_http": True}))
+    create_app(
+        settings.model_copy(update={"public_url": "https://ml4paleo.example.org"})
+    )
+
+
+def test_health_fails_when_storage_is_unreachable(settings, tmp_path):
+    broken = settings.model_copy(
+        update={
+            "storage": settings.storage.model_copy(
+                update={"url": "s3://missing-bucket", "endpoint": "http://127.0.0.1:9"}
+            )
+        }
+    )
+    with TestClient(create_app(broken), raise_server_exceptions=False) as client:
+        assert client.get("/api/health").status_code == 500
+
+
+def test_empty_secret_files_are_ignored(monkeypatch, tmp_path):
+    (tmp_path / "empty").write_text("\n")
+    monkeypatch.setenv("M4P_STORAGE__SECRET_ACCESS_KEY_FILE", str(tmp_path / "empty"))
+    assert Settings().storage.secret_access_key is None

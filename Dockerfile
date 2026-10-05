@@ -31,12 +31,12 @@ COPY pyproject.toml uv.lock /ml4paleo/
 COPY server/pyproject.toml /ml4paleo/server/
 COPY worker/pyproject.toml /ml4paleo/worker/
 RUN --mount=from=uv,source=/uv,target=/bin/uv \
-    uv sync --locked --group dicom --no-install-workspace
+    uv sync --locked --extra v1 --no-install-workspace
 
 # Copy the application source and install the project itself.
 COPY . /ml4paleo
 RUN --mount=from=uv,source=/uv,target=/bin/uv \
-    uv sync --locked --group dicom \
+    uv sync --locked --extra v1 \
     && uv pip install --python .venv/bin/python gunicorn
 
 # Expose the synced environment to the runtime entrypoints used in compose.

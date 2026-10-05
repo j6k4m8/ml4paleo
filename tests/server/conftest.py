@@ -35,7 +35,10 @@ def postgres_server_url(tmp_path_factory):
         return
     initdb, pg_ctl = shutil.which("initdb"), shutil.which("pg_ctl")
     if not (initdb and pg_ctl):
-        pytest.skip("Postgres is not installed; set M4P_TEST_DATABASE_URL")
+        message = "Postgres is not installed; set M4P_TEST_DATABASE_URL"
+        if os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
     data_dir = tmp_path_factory.mktemp("postgres")
     port = _free_port()
     # Postgres refuses to start on macOS without a valid locale in LC_ALL.
