@@ -11,7 +11,10 @@ LABEL description="ml4paleo: A web application for paleontological image segment
 # Keep the system packages needed by scientific Python wheels that may need
 # local compilation. uv is mounted from the official image only for the
 # install steps below, so it never ships in the runtime image.
+# Upgrade first so the image picks up Debian security fixes released after the
+# base image was built.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends gcc g++ zlib1g-dev libjpeg-dev \
     && rm -rf /var/lib/apt/lists/*
 
