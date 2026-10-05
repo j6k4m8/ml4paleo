@@ -37,7 +37,7 @@ def test_mismatched_slice_sizes_raise(tmp_path):
         provider[:, :, 0:2]
 
 
-def test_palette_and_rgb_slices_become_grayscale(tmp_path):
+def test_rgb_slices_keep_the_first_channel(tmp_path):
     pixels = np.arange(15, dtype=np.uint8).reshape(3, 5) * 10
     rgb = _save(tmp_path / "rgb.png", np.stack([pixels] * 3, axis=-1))
     provider = ImageStackVolumeProvider([rgb])
@@ -46,3 +46,20 @@ def test_palette_and_rgb_slices_become_grayscale(tmp_path):
     assert provider.dtype == np.uint8
     palette = _save(tmp_path / "p.png", pixels, mode="P")
     assert ImageStackVolumeProvider([palette])[:, :, 0:1].shape == (5, 3, 1)
+
+
+def test_palette_indices_are_kept(tmp_path):
+    indices = np.array([[0, 1, 2, 3]], dtype=np.uint8)
+    image = Image.fromarray(indices, mode="P")
+    image.putpalette([0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255] + [0] * (256 * 3 - 12))
+    image.save(tmp_path / "labels.png")
+    provider = ImageStackVolumeProvider([tmp_path / "labels.png"])
+    assert provider[:, :, 0:1][:, 0, 0].tolist() == [0, 1, 2, 3]
+
+
+def test_mixed_pixel_types_raise(tmp_path):
+    first = _save(tmp_path / "0.tif", np.zeros((3, 5), dtype=np.uint8))
+    second = _save(tmp_path / "1.tif", np.zeros((3, 5), dtype=np.uint16))
+    provider = ImageStackVolumeProvider([first, second])
+    with pytest.raises(ValueError, match="pixel type"):
+        provider[:, :, 0:2]

@@ -194,3 +194,98 @@ def test_images_work_on_s3(tmp_path, s3_endpoint):
         np.asarray(reopened.array(0)[0]), data.transpose(2, 1, 0)
     )
     assert reopened.num_levels == image.num_levels
+
+
+def _reference_pyramid(volume_zyx, levels, method):
+    """
+    Build the expected pyramid with plain numpy, one level at a time.
+    """
+    expected = [volume_zyx]
+    for previous, level in zip(levels, levels[1:], strict=False):
+        step = [
+            b // a for a, b in zip(previous.factor_zyx, level.factor_zyx, strict=True)
+        ]
+        data = expected[-1]
+        out_shape = level.shape_zyx
+        pad = [
+            (0, o * s - n) for o, s, n in zip(out_shape, step, data.shape, strict=True)
+        ]
+        if method == "mean":
+            padded = np.pad(data, pad, mode="edge").astype(np.float64)
+        else:
+            padded = np.pad(data, pad, mode="constant")
+        result = np.zeros(out_shape, dtype=data.dtype)
+        for z, y, x in np.ndindex(*out_shape):
+            window = padded[
+                z * step[0] : (z + 1) * step[0],
+                y * step[1] : (y + 1) * step[1],
+                x * step[2] : (x + 1) * step[2],
+            ].ravel()
+            if method == "mean":
+                result[z, y, x] = np.rint(window.mean())
+            else:
+                values, counts = np.unique(window[window != 0], return_counts=True)
+                result[z, y, x] = values[counts.argmax()] if len(values) else 0
+        expected.append(result)
+    return expected
+
+
+@pytest.mark.parametrize("method", ["mean", "mode"])
+def test_pyramids_match_a_reference_on_awkward_shapes(tmp_path, monkeypatch, method):
+    import ml4paleo.ome as ome
+
+    # Read tiny source slabs so the bounded-memory path is exercised.
+    monkeypatch.setattr(ome, "DOWNSAMPLE_READ_VOXELS", 50)
+    rng = np.random.default_rng(3)
+    shape_xyz = (13, 9, 7)  # odd, non-square, spans several shards
+    if method == "mean":
+        data = rng.integers(0, 60000, size=shape_xyz, dtype=np.uint16)
+    else:
+        data = rng.choice(np.array([0, 0, 2, 3, 9], dtype=np.uint8), size=shape_xyz)
+    provider = NumpyVolumeProvider(data)
+    image = OmeImage.create(
+        _grant(tmp_path),
+        shape_czyx=(1, 7, 9, 13),
+        dtype=data.dtype,
+        voxel_size_zyx=(2.0, 1.0, 1.0),
+        chunk_zyx=(2, 2, 2),
+        shard_zyx=(2, 4, 4),
+    )
+    write_from_provider(provider, image)
+    build_pyramid(image, method)
+
+    levels = plan_levels((7, 9, 13), (2.0, 1.0, 1.0), (2, 2, 2))
+    assert image.num_levels == len(levels) > 2
+    expected = _reference_pyramid(data.transpose(2, 1, 0), levels, method)
+    for index, level in enumerate(expected):
+        np.testing.assert_array_equal(
+            np.asarray(image.array(index)[0]), level, err_msg=f"level {index}"
+        )
+
+
+@pytest.mark.parametrize(
+    "voxel_size", [(0.0, 1.0, 1.0), (-1.0, 1.0, 1.0), (float("nan"), 1.0, 1.0)]
+)
+def test_level_planning_rejects_bad_voxel_sizes(voxel_size):
+    with pytest.raises(ValueError):
+        plan_levels((100, 100, 100), voxel_size, (8, 8, 8))
+
+
+def test_create_refuses_to_overwrite_unless_asked(tmp_path):
+    grant = _grant(tmp_path)
+    OmeImage.create(grant, shape_czyx=(1, 4, 4, 4), dtype="uint8", **SMALL_CHUNKS)
+    with pytest.raises(Exception):  # noqa: B017 - zarr's "already exists" error
+        OmeImage.create(grant, shape_czyx=(1, 4, 4, 4), dtype="uint8", **SMALL_CHUNKS)
+    again = OmeImage.create(
+        grant, shape_czyx=(1, 6, 4, 4), dtype="uint8", overwrite=True, **SMALL_CHUNKS
+    )
+    assert again.shape_czyx == (1, 6, 4, 4)
+
+
+def test_lossy_dtype_conversions_are_refused(tmp_path):
+    provider = NumpyVolumeProvider(np.full((4, 4, 4), 300, dtype=np.uint16))
+    image = OmeImage.create(
+        _grant(tmp_path), shape_czyx=(1, 4, 4, 4), dtype="uint8", **SMALL_CHUNKS
+    )
+    with pytest.raises(ValueError, match="losing values"):
+        write_from_provider(provider, image)

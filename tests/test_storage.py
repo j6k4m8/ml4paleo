@@ -154,14 +154,14 @@ def test_refresh_supplies_credentials(s3_endpoint, tmp_path):
     def refresh():
         calls.append(1)
         return StorageGrant(
-            url=f"s3://{BUCKET}/refresh/{tmp_path.name}",
+            url=f"s3://{S3_TEST_BUCKET}/refresh/{tmp_path.name}",
             access="rw",
             endpoint=s3_endpoint,
             credentials={"access_key_id": "test", "secret_access_key": "test"},
         )
 
     grant = StorageGrant(
-        url=f"s3://{BUCKET}/refresh/{tmp_path.name}",
+        url=f"s3://{S3_TEST_BUCKET}/refresh/{tmp_path.name}",
         access="rw",
         endpoint=s3_endpoint,
     )

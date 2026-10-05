@@ -17,7 +17,7 @@ helpers here always work in shard-aligned blocks.
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, cast
 
 import numpy as np
 import zarr
@@ -30,6 +30,9 @@ OME_VERSION = "0.5"
 DEFAULT_CHUNK_ZYX = (64, 64, 64)
 DEFAULT_SHARD_ZYX = (512, 512, 512)
 SPATIAL_AXES = ("z", "y", "x")
+MAX_LEVELS = 32
+# Downsampling reads at most about this many source voxels at once.
+DOWNSAMPLE_READ_VOXELS = 1 << 24
 
 DownsampleMethod = Literal["mean", "mode"]
 
@@ -61,9 +64,17 @@ def plan_levels(
     """
     shape = [int(s) for s in shape_zyx]
     size = [float(s) for s in (voxel_size_zyx or (1.0, 1.0, 1.0))]
+    if len(shape) != 3 or len(size) != 3 or len(chunk_zyx) != 3:
+        raise ValueError("Shapes, voxel sizes, and chunks must have 3 dimensions")
+    if any(s < 1 for s in shape) or any(c < 1 for c in chunk_zyx):
+        raise ValueError(f"Shape {shape} and chunks {chunk_zyx} must be positive")
+    if not all(math.isfinite(v) and v > 0 for v in size):
+        raise ValueError(f"Voxel sizes must be positive numbers, got {size}")
     factor = [1, 1, 1]
     levels = [LevelSpec("0", _as_zyx(shape), _as_zyx(factor))]
     while any(s > c for s, c in zip(shape, chunk_zyx, strict=True)):
+        if len(levels) >= MAX_LEVELS:
+            raise ValueError(f"Volume {shape_zyx} needs more than {MAX_LEVELS} levels")
         finest = min(sz for sz, s in zip(size, shape, strict=True) if s > 1)
         step = [
             2 if s > 1 and sz < 2 * finest else 1
@@ -83,9 +94,17 @@ class OmeImage:
 
     def __init__(self, group: zarr.Group):
         self.group = group
-        multiscales = group.attrs["ome"]["multiscales"][0]
-        self._datasets = multiscales["datasets"]
-        self.unit: str | None = multiscales["axes"][1].get("unit")
+        try:
+            ome = cast(dict[str, Any], group.attrs["ome"])
+            multiscale = ome["multiscales"][0]
+            self.unit: str | None = multiscale["axes"][1].get("unit")
+            self._paths: list[str] = [str(d["path"]) for d in multiscale["datasets"]]
+            self._scales: list[tuple[float, float, float]] = []
+            for dataset in multiscale["datasets"]:
+                scale = dataset["coordinateTransformations"][0]["scale"]
+                self._scales.append((float(scale[1]), float(scale[2]), float(scale[3])))
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ValueError("Not an ml4paleo OME-Zarr image") from exc
 
     @classmethod
     def create(
@@ -100,12 +119,14 @@ class OmeImage:
         shard_zyx: Sequence[int] = DEFAULT_SHARD_ZYX,
         channel_names: Sequence[str] | None = None,
         name: str = "image",
+        overwrite: bool = False,
     ) -> "OmeImage":
         """
         Create an empty image with every pyramid level allocated.
 
         If the voxel size is unknown, pass `voxel_size_zyx=None`: scales are
-        then in voxels and no unit is recorded.
+        then in voxels and no unit is recorded. Pass `overwrite=True` to
+        replace an image left at the same location by an earlier attempt.
         """
         if len(shape_czyx) != 4:
             raise ValueError(f"shape_czyx must have 4 dimensions, got {shape_czyx}")
@@ -119,7 +140,9 @@ class OmeImage:
 
         axes: list[dict[str, str]] = [{"name": "c", "type": "channel"}]
         for axis in SPATIAL_AXES:
-            axes.append({"name": axis, "type": "space", **({"unit": unit} if unit else {})})
+            axes.append(
+                {"name": axis, "type": "space", **({"unit": unit} if unit else {})}
+            )
         datasets = [
             {
                 "path": level.path,
@@ -127,7 +150,10 @@ class OmeImage:
                     {
                         "type": "scale",
                         "scale": [1.0]
-                        + [b * f for b, f in zip(base_size, level.factor_zyx, strict=True)],
+                        + [
+                            b * f
+                            for b, f in zip(base_size, level.factor_zyx, strict=True)
+                        ],
                     }
                 ],
             }
@@ -141,20 +167,26 @@ class OmeImage:
                     "channels": [
                         {"label": label}
                         for label in (
-                            channel_names or [f"channel {i}" for i in range(num_channels)]
+                            channel_names
+                            or [f"channel {i}" for i in range(num_channels)]
                         )
                     ]
                 },
             }
         }
         group = zarr.create_group(
-            store=zarr_store(grant), zarr_format=3, attributes=attributes
+            store=zarr_store(grant),
+            zarr_format=3,
+            attributes=attributes,
+            overwrite=overwrite,
         )
         for level in levels:
             chunks = _fit_to_shape(chunk_zyx, level.shape_zyx)
             shards = tuple(
                 min(shard, math.ceil(size / chunk) * chunk)
-                for shard, size, chunk in zip(shard_zyx, level.shape_zyx, chunks, strict=True)
+                for shard, size, chunk in zip(
+                    shard_zyx, level.shape_zyx, chunks, strict=True
+                )
             )
             group.create_array(
                 level.path,
@@ -174,16 +206,18 @@ class OmeImage:
 
     @property
     def num_levels(self) -> int:
-        return len(self._datasets)
+        return len(self._paths)
 
     def array(self, level: int = 0) -> zarr.Array:
-        array = self.group[self._datasets[level]["path"]]
-        assert isinstance(array, zarr.Array)
+        array = self.group[self._paths[level]]
+        if not isinstance(array, zarr.Array):
+            raise ValueError(f"Level {level} of the image is not an array")
         return array
 
     @property
     def shape_czyx(self) -> tuple[int, int, int, int]:
-        return tuple(self.array(0).shape)  # type: ignore[return-value]
+        c, z, y, x = self.array(0).shape
+        return (c, z, y, x)
 
     @property
     def dtype(self) -> np.dtype:
@@ -194,8 +228,7 @@ class OmeImage:
         Return the voxel size of a level, in `unit` (or in level-0 voxels when
         `unit` is None).
         """
-        scale = self._datasets[level]["coordinateTransformations"][0]["scale"]
-        return (float(scale[1]), float(scale[2]), float(scale[3]))
+        return self._scales[level]
 
     @property
     def voxel_size_zyx(self) -> tuple[float, float, float] | None:
@@ -209,7 +242,7 @@ class OmeImage:
         Return the shard-aligned blocks of a level, in z, y, x index space.
         """
         array = self.array(level)
-        return list(iter_blocks(array.shape[1:], array.shards[1:]))  # type: ignore[index]
+        return list(iter_blocks(array.shape[1:], _shards(array)[1:]))
 
 
 def write_from_provider(
@@ -221,13 +254,13 @@ def write_from_provider(
     progress: Callable[[int, int], None] | None = None,
 ) -> None:
     """
-    Copy a volume provider into level 0 of `image`, one z-slab of shards at a
-    time.
+    Copy a volume provider into level 0 of `image`.
 
     This is the single place where ml4paleo converts (x, y, z) volumes into
     (c, z, y, x) storage. `z_range` lets parallel jobs each write their own
     slabs; its bounds must sit on shard boundaries so that no two jobs write
-    the same shard.
+    the same shard. Data is read one chunk-deep slab at a time, so memory use
+    is about (chunk depth x width x height) voxels.
     """
     array = image.array(0)
     _, depth, height, width = array.shape
@@ -237,17 +270,20 @@ def write_from_provider(
             f"Provider shape (x, y, z) {provider_shape} does not match image "
             f"shape (z, y, x) {(depth, height, width)}"
         )
-    shard_depth = array.shards[1]  # type: ignore[index]
+    _check_castable(provider.dtype, array.dtype)
+    shard_depth = _shards(array)[1]
+    slab_depth = array.chunks[1]
     z0, z1 = z_range or (0, depth)
     for bound in (z0, z1):
         if bound % shard_depth and bound != depth:
             raise ValueError(f"z_range bound {bound} is not on a shard boundary")
-    slabs = list(range(z0, z1, shard_depth))
+    slabs = list(range(z0, z1, slab_depth))
     for index, slab_start in enumerate(slabs):
-        slab_stop = min(slab_start + shard_depth, z1)
+        slab_stop = min(slab_start + slab_depth, z1)
         data_xyz = np.asarray(provider[:, :, slab_start:slab_stop])
         if data_xyz.ndim == 2:
             data_xyz = data_xyz[:, :, np.newaxis]
+        _check_castable(data_xyz.dtype, array.dtype)
         array[channel, slab_start:slab_stop, :, :] = data_xyz.transpose(2, 1, 0)
         if progress is not None:
             progress(index + 1, len(slabs))
@@ -266,6 +302,9 @@ def downsample_level(
     pyramid jobs pass a subset so they can run in parallel. "mean" suits
     intensity images; "mode" suits label images and prefers non-zero labels,
     so thin labeled structures survive downsampling.
+
+    Each output shard is assembled in memory and written once. Its source is
+    read in z-slabs of at most about `DOWNSAMPLE_READ_VOXELS` voxels.
     """
     source = image.array(level)
     target = image.array(level + 1)
@@ -273,17 +312,25 @@ def downsample_level(
         round(c / f)
         for c, f in zip(image.scale_zyx(level + 1), image.scale_zyx(level), strict=True)
     )
+    num_channels = target.shape[0]
     for block in blocks if blocks is not None else image.shard_blocks(level + 1):
-        source_start = [lo * s for lo, s in zip(block.start, step, strict=True)]
-        source_stop = [
-            min(hi * s, size)
-            for hi, s, size in zip(block.stop, step, source.shape[1:], strict=True)
-        ]
-        data = np.asarray(
-            source[(slice(None), *(slice(a, b) for a, b in zip(source_start, source_stop, strict=True)))]
-        )
-        reduced = _reduce(data, step, block.shape, method).astype(target.dtype)
-        target[(slice(None), *block.slices)] = reduced
+        out = np.zeros((num_channels, *block.shape), dtype=target.dtype)
+        voxels_per_plane = math.prod(step) * block.shape[1] * block.shape[2]
+        planes = max(1, DOWNSAMPLE_READ_VOXELS // max(1, voxels_per_plane))
+        for z in range(0, block.shape[0], planes):
+            part = Block(
+                start=(block.start[0] + z, block.start[1], block.start[2]),
+                stop=(min(block.start[0] + z + planes, block.stop[0]), *block.stop[1:]),
+            )
+            source_slices = tuple(
+                slice(lo * s, min(hi * s, size))
+                for lo, hi, s, size in zip(
+                    part.start, part.stop, step, source.shape[1:], strict=True
+                )
+            )
+            data = np.asarray(source[(slice(None), *source_slices)])
+            out[:, z : z + part.shape[0]] = _reduce(data, step, part.shape, method)
+        target[(slice(None), *block.slices)] = out
 
 
 def build_pyramid(image: OmeImage, method: DownsampleMethod = "mean") -> None:
@@ -312,33 +359,58 @@ def _reduce(
         padded = np.pad(data, pad, mode="constant", constant_values=0)
     c = padded.shape[0]
     (oz, oy, ox), (sz, sy, sx) = out_shape_zyx, step
-    windows = (
-        padded.reshape(c, oz, sz, oy, sy, ox, sx)
-        .transpose(0, 1, 3, 5, 2, 4, 6)
-        .reshape(c, oz, oy, ox, sz * sy * sx)
-    )
+    # A reshape of the contiguous padded array is a view, so the mean needs
+    # no copy of the source.
+    blocks = padded.reshape(c, oz, sz, oy, sy, ox, sx)
     if method == "mean":
-        mean = windows.mean(axis=-1, dtype=np.float64)
-        return np.rint(mean) if np.issubdtype(data.dtype, np.integer) else mean
-    return _mode_of_nonzero(windows)
+        mean = blocks.mean(axis=(2, 4, 6), dtype=np.float64)
+        if np.issubdtype(data.dtype, np.integer):
+            return np.rint(mean).astype(data.dtype)
+        return mean.astype(data.dtype)
+    windows = blocks.transpose(0, 1, 3, 5, 2, 4, 6).reshape(-1, sz * sy * sx)
+    return _mode_of_nonzero(windows).reshape(c, oz, oy, ox)
 
 
 def _mode_of_nonzero(windows: np.ndarray) -> np.ndarray:
     """
-    Return the most common non-zero value in each window (0 if all are zero).
+    Return the most common non-zero value in each row (0 if all are zero).
     Ties go to the smaller value.
+
+    Counts each candidate against its row in turn, so extra memory stays at
+    about the size of `windows` however many distinct labels there are.
     """
-    values = np.unique(windows)
-    values = values[values != 0]
-    if values.size == 0:
-        return np.zeros(windows.shape[:-1], dtype=windows.dtype)
-    counts = np.stack([(windows == v).sum(axis=-1) for v in values], axis=-1)
-    best = values[counts.argmax(axis=-1)]
-    return np.where(counts.max(axis=-1) > 0, best, 0).astype(windows.dtype)
+    best = np.zeros(len(windows), dtype=windows.dtype)
+    best_count = np.zeros(len(windows), dtype=np.int32)
+    for i in range(windows.shape[1]):
+        candidate = windows[:, i]
+        count = (windows == candidate[:, np.newaxis]).sum(axis=1, dtype=np.int32)
+        better = (candidate != 0) & (
+            (count > best_count) | ((count == best_count) & (candidate < best))
+        )
+        best = np.where(better, candidate, best)
+        best_count = np.where(better, count, best_count)
+    return best
 
 
-def _fit_to_shape(chunk_zyx: Sequence[int], shape_zyx: Sequence[int]) -> tuple[int, ...]:
+def _fit_to_shape(
+    chunk_zyx: Sequence[int], shape_zyx: Sequence[int]
+) -> tuple[int, ...]:
     return tuple(min(c, s) for c, s in zip(chunk_zyx, shape_zyx, strict=True))
+
+
+def _shards(array: zarr.Array) -> tuple[int, ...]:
+    shards = array.shards
+    if shards is None:
+        raise ValueError("ml4paleo images must be sharded")
+    return shards
+
+
+def _check_castable(source: np.dtype, target: np.dtype) -> None:
+    if not np.can_cast(source, target, casting="safe"):
+        raise ValueError(
+            f"Cannot store {np.dtype(source)} data in a {np.dtype(target)} image "
+            "without losing values"
+        )
 
 
 def _as_zyx(values: Sequence[int]) -> tuple[int, int, int]:
