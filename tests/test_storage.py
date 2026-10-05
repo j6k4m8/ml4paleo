@@ -4,10 +4,18 @@ S3-compatible object stores, and grants can never reach outside their prefix.
 """
 
 import numpy as np
+import obstore
 import pytest
 import zarr
 
-from ml4paleo.storage import StorageGrant, object_store, zarr_store
+from ml4paleo.storage import (
+    StorageGrant,
+    delete_object,
+    get_bytes,
+    object_store,
+    put_bytes,
+    zarr_store,
+)
 from ml4paleo.volume_providers import NumpyVolumeProvider, ZarrVolumeProvider
 from ml4paleo.volume_providers.io import export_zarr_array
 
@@ -101,7 +109,19 @@ def test_unsafe_urls_are_rejected(url):
         StorageGrant(url=url)
 
 
-@pytest.mark.parametrize("relative_path", ["../escape", "a/../../b", "a/./b", "a\\b"])
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "../escape",
+        "a/../../b",
+        "a/./b",
+        "a\\b",
+        "%2e%2e/p2",
+        "a%2F..%2F..%2Fp2",
+        "a?b/c",
+        "a#b",
+    ],
+)
 def test_child_paths_cannot_escape(relative_path):
     with pytest.raises(ValueError):
         StorageGrant(url="s3://bucket/projects/p1").child(relative_path)
@@ -122,3 +142,54 @@ def test_v1_zarr_v2_arrays_are_still_readable(tmp_path):
     np.testing.assert_array_equal(
         ZarrVolumeProvider(tmp_path / "v1.zarr")[:, :, :], data
     )
+
+
+def test_object_helpers_round_trip_and_respect_read_only(grant):
+    put_bytes(grant, "notes/a.txt", b"hello")
+    assert get_bytes(grant, "notes/a.txt") == b"hello"
+    assert get_bytes(grant, "notes/missing.txt") is None
+    read_only = grant.model_copy(update={"access": "r"})
+    assert get_bytes(read_only, "notes/a.txt") == b"hello"
+    with pytest.raises(PermissionError):
+        put_bytes(read_only, "notes/b.txt", b"nope")
+    with pytest.raises(PermissionError):
+        delete_object(read_only, "notes/a.txt")
+    delete_object(grant, "notes/a.txt")
+    assert get_bytes(grant, "notes/a.txt") is None
+    with pytest.raises(ValueError):
+        put_bytes(grant, "../escape.txt", b"nope")
+
+
+def test_credentials_are_hidden_from_repr_but_sent_as_json():
+    grant = StorageGrant(
+        url="s3://bucket/p",
+        credentials={"access_key_id": "AKIA", "secret_access_key": "very-secret"},
+    )
+    assert "very-secret" not in repr(grant)
+    assert "very-secret" not in str(grant)
+    round_tripped = StorageGrant.model_validate_json(grant.model_dump_json())
+    assert round_tripped.secret("secret_access_key") == "very-secret"
+    assert grant.child("a/b").secret("secret_access_key") == "very-secret"
+
+
+def test_refresh_supplies_credentials(s3_endpoint, tmp_path):
+    calls = []
+
+    def refresh():
+        calls.append(1)
+        return StorageGrant(
+            url=f"s3://{BUCKET}/refresh/{tmp_path.name}",
+            access="rw",
+            endpoint=s3_endpoint,
+            credentials={"access_key_id": "test", "secret_access_key": "test"},
+        )
+
+    grant = StorageGrant(
+        url=f"s3://{BUCKET}/refresh/{tmp_path.name}",
+        access="rw",
+        endpoint=s3_endpoint,
+    )
+    store = object_store(grant, refresh=refresh)
+    obstore.put(store, "x.txt", b"x")
+    assert obstore.get(store, "x.txt").bytes().to_bytes() == b"x"
+    assert calls
