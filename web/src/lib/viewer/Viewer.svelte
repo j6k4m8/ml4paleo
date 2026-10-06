@@ -66,9 +66,11 @@
 			});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
-			api<{ zarr_url: string; model_name: string | null }>(`/api/projects/${project}/prediction`).then(
+			api<{ zarr_url: string; model_name: string | null; shape_zyx: number[] }>(`/api/projects/${project}/prediction`).then(
 				(found) => {
 					if (!pool || controller.signal.aborted) return;
+					// A prediction of another image (one that replaced this since) wouldn't line up.
+					if (found.shape_zyx.join() !== viewer.shape.join()) return;
 					// Predictions never change once made, so their chunks cache like the image's.
 					prediction = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
 					predictionModel = found.model_name ?? "a model";

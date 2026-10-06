@@ -337,6 +337,41 @@ def test_others_cant_reach_models(new_browser, settings, migrated_database_url):
     assert bob.get("/api/plugins").json()[0]["name"] == "rf"
 
 
+def add_prediction(database_url, project: str) -> str:
+    """A prediction of the project's current image, made its head."""
+
+    async def create(db):
+        image = await artifacts.head(db, uuid.UUID(project), "image")
+        assert image is not None
+        artifact = await artifacts.create_staging(
+            db,
+            project_id=uuid.UUID(project),
+            kind="prediction",
+            head_slot="prediction",
+            inputs={"image_artifact_id": str(image.id)},
+        )
+        artifact.state = "committed"
+        artifact.manifest = {"class_values": [BONE], "shape_zyx": list(SHAPE)}
+        await artifacts.set_head(db, artifact)
+        return str(artifact.id)
+
+    return run_db(database_url, create)
+
+
+def test_a_prediction_of_a_replaced_image_is_hidden(
+    ada, settings, migrated_database_url
+):
+    project = make_project(ada)
+    add_image(settings, migrated_database_url, project)
+    artifact = add_prediction(migrated_database_url, project)
+    prediction = ada.get(f"/api/projects/{project}/prediction").json()
+    assert prediction["artifact_id"] == artifact
+    assert prediction["shape_zyx"] == list(SHAPE)
+    # A new image leaves the prediction in place, but it no longer fits.
+    add_image(settings, migrated_database_url, project)
+    assert ada.get(f"/api/projects/{project}/prediction").status_code == 404
+
+
 def test_missing_label_blobs_fail_training_for_good(tmp_path):
     from ml4paleo_worker.context import JobContext, PermanentError
     from ml4paleo_worker.handlers import train as train_handler
@@ -464,6 +499,7 @@ def test_a_worker_trains_a_random_forest(
     prediction = ada.get(f"/api/projects/{project}/prediction").json()
     assert prediction["model_id"] == model["id"]
     assert prediction["class_values"] == [BONE]
+    assert prediction["shape_zyx"] == list(SHAPE)
     metadata = ada.get(prediction["zarr_url"] + "class/zarr.json").json()
     assert metadata["shape"] == list(SHAPE)
     import zarr

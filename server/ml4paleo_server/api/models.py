@@ -7,7 +7,7 @@ Segmentation models.
     GET    /api/projects/{id}/models/{model}
     DELETE /api/projects/{id}/models/{model}
     POST   /api/projects/{id}/models/{model}/predict
-    GET    /api/projects/{id}/prediction           the current prediction
+    GET    /api/projects/{id}/prediction           the prediction of the current image
 
 Training pins the project's labels and ROIs as a training set and starts a
 `model.train` pipeline (follow it under /pipelines). A model is "training"
@@ -292,6 +292,8 @@ class PredictionOut(BaseModel):
     model_id: uuid.UUID | None
     model_name: str | None
     class_values: list[int]
+    # The image's (z, y, x) shape when it was predicted.
+    shape_zyx: list[int]
     # The prediction's zarr group (arrays `class` and `uncertainty`), through
     # the data gateway.
     zarr_url: str
@@ -300,10 +302,19 @@ class PredictionOut(BaseModel):
 
 @router.get("/projects/{project_id}/prediction")
 async def current_prediction(project: MemberProject, db: DbSession) -> PredictionOut:
+    """
+    The project's prediction, if it is of the current image (a prediction of
+    an image that has since been replaced doesn't fit the new one).
+    """
     head = await artifacts.head(db, project.id, "prediction")
     if head is None or not head.manifest:
         raise HTTPException(
             status_code=404, detail="This project has no prediction yet."
+        )
+    image = await artifacts.head(db, project.id, "image")
+    if image is None or head.inputs.get("image_artifact_id") != str(image.id):
+        raise HTTPException(
+            status_code=404, detail="This project has no prediction of its image."
         )
     model_id = head.inputs.get("model_id")
     model = (
@@ -316,6 +327,7 @@ async def current_prediction(project: MemberProject, db: DbSession) -> Predictio
         model_id=model.id if model else None,
         model_name=model.name if model else None,
         class_values=list(head.manifest.get("class_values", [])),
+        shape_zyx=list(head.manifest.get("shape_zyx", [])),
         zarr_url=zarr_path(project.id, head.id),
         committed_at=head.state_changed_at,
     )
