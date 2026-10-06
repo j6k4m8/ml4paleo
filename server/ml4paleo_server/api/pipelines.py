@@ -161,7 +161,6 @@ async def pipeline_events(
     root = await _root(db, project, pipeline_id)
     if (await _pipeline_out(db, root)).status in FINISHED:
         return Response(status_code=204)
-    streams.check(auth.user.id)
     # Read what the stream needs before ending the transaction, which
     # expires loaded objects (the job is detached, so it keeps its values).
     user_id, session_hash, project_id = (
@@ -211,11 +210,7 @@ async def pipeline_events(
                 return
             await asyncio.sleep(EVENT_INTERVAL_SECONDS)
 
-    return StreamingResponse(
-        streams.counted(user_id, events()),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-    )
+    return streams.response(streams.reserve(user_id), events())
 
 
 @router.post("/pipelines/{pipeline_id}/cancel", status_code=204)

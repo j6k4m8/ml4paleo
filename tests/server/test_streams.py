@@ -4,6 +4,7 @@ stream queries the database every second.
 """
 
 import asyncio
+import gc
 import uuid
 
 import pytest
@@ -12,7 +13,7 @@ from helpers import signup
 from ml4paleo_server import streams
 
 
-def test_streams_count_only_while_they_run(monkeypatch):
+def test_places_are_taken_at_once_and_given_back_on_every_ending(monkeypatch):
     monkeypatch.setattr(streams, "PER_USER", 2)
     user = uuid.uuid4()
 
@@ -21,19 +22,25 @@ def test_streams_count_only_while_they_run(monkeypatch):
         yield "b"
 
     async def run():
-        first = streams.counted(user, events())
-        second = streams.counted(user, events())
-        # Made but not started: nothing counted yet.
-        streams.check(user)
-        assert await anext(first) == "a"
-        assert await anext(second) == "a"
+        first = streams.response(streams.reserve(user), events())
+        second = streams.response(streams.reserve(user), events())
+        # Both places are taken before either stream starts, so a third
+        # request arriving meanwhile is refused.
         with pytest.raises(HTTPException) as refused:
-            streams.check(user)
+            streams.reserve(user)
         assert refused.value.status_code == 429
-        # Finishing (or a client leaving) gives the place back.
-        assert [e async for e in first] == ["b"]
-        streams.check(user)
-        await second.aclose()
+        # A stream that runs to its end gives its place back...
+        assert [e async for e in first.body_iterator] == ["a", "b"]
+        streams.reserve(user).release()
+        # ...as does one dropped before it ever started (a client gone
+        # before the response began).
+        del second
+        gc.collect()
+        assert user not in streams._open
+        # And giving a place back twice counts once.
+        slot = streams.reserve(user)
+        slot.release()
+        slot.release()
         assert user not in streams._open
 
     asyncio.run(run())

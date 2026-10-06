@@ -590,7 +590,6 @@ async def events(
     `after`, as they happen, while the viewer stays signed in and a member.
     A reconnecting browser resumes after the last event it got.
     """
-    streams.check(auth.user.id)
     last_event_id = request.headers.get("last-event-id", "")
     if last_event_id.isdigit() and len(last_event_id) < 20:
         after = max(after, min(int(last_event_id), MAX_SEQ))
@@ -636,11 +635,7 @@ async def events(
             if not batch:
                 await asyncio.sleep(EVENT_INTERVAL_SECONDS)
 
-    return StreamingResponse(
-        streams.counted(user_id, stream()),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-    )
+    return streams.response(streams.reserve(user_id), stream())
 
 
 # --- the labels as zarr ----------------------------------------------------
