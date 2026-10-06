@@ -4,9 +4,9 @@ Final segmentation jobs (see the server's `pipelines/compose.py`).
 Grants, in order: the prediction artifact (read), the project's labels
 (read; their blobs), and the segmentation artifact (write), which holds the
 pinned labels (`inputs.json`) and, while the pipeline runs, each shard's
-pieces under `scratch/`: `<n>.npz`, its seam pieces for `cc.merge`;
-`<n>.local.npz`, which of its pieces `cc.block` found are specks; and
-`<n>.joined.npz`, which of its seam pieces `cc.merge` found are.
+pieces under `scratch/`: `<n>.npz`, its seam pieces, for `cc.merge`;
+`<n>.local.npz`, which of its pieces `cc.block` found to be specks; and
+`<n>.joined.npz`, which of its seam pieces `cc.merge` found to be specks.
 """
 
 import io
