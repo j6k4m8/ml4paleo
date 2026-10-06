@@ -5,6 +5,7 @@
 
 import { ApiError, api, message } from "#lib/api.ts";
 import type { Vec3 } from "./viewer/tiles";
+import { whileVisible } from "./refresh";
 
 export type RoiStatus = "open" | "complete" | "skipped";
 export type Box = [number, number, number, number, number, number];
@@ -20,9 +21,6 @@ export interface Roi {
 	score: number | null;
 	created_at: string;
 }
-
-// How often to pick up ROIs collaborators added, changed, or deleted.
-const REFRESH_MS = 30_000;
 
 export class RoiList {
 	items = $state<Roi[]>([]);
@@ -48,17 +46,7 @@ export class RoiList {
 
 	/** Reload while the page is visible, and when it comes back into view. */
 	keepFresh(): () => void {
-		const reload = () => {
-			if (document.visibilityState === "visible") void this.load();
-		};
-		const timer = setInterval(reload, REFRESH_MS);
-		document.addEventListener("visibilitychange", reload);
-		window.addEventListener("focus", reload);
-		return () => {
-			clearInterval(timer);
-			document.removeEventListener("visibilitychange", reload);
-			window.removeEventListener("focus", reload);
-		};
+		return whileVisible(() => void this.load());
 	}
 
 	/** Note a failure; an ROI someone else deleted leaves the list. */
@@ -112,6 +100,32 @@ export function describe(roi: Pick<Roi, "kind" | "bbox">): string {
 /** Set a status or split select back to what the server has, after a refused change. */
 export function revert(select: HTMLSelectElement, value: string): void {
 	select.value = value;
+}
+
+/**
+ * A box cut to an image's (z, y, x) shape, or null if nothing is left (an
+ * ROI drawn on a bigger image that this one replaced may reach outside it).
+ */
+export function clipBox(box: Box, shape: readonly number[]): Box | null {
+	const lo = [0, 1, 2].map((a) => Math.min(Math.max(box[a]!, 0), shape[a]!));
+	const hi = [0, 1, 2].map((a) => Math.min(Math.max(box[a + 3]!, 0), shape[a]!));
+	if (lo.some((l, a) => hi[a]! <= l)) return null;
+	return [lo[0]!, lo[1]!, lo[2]!, hi[0]!, hi[1]!, hi[2]!];
+}
+
+/** The number of voxels in a box. */
+export function voxels(box: Box): number {
+	return (box[3] - box[0]) * (box[4] - box[1]) * (box[5] - box[2]);
+}
+
+/** Whether two boxes share any voxel. */
+export function overlaps(a: Box, b: readonly number[]): boolean {
+	return [0, 1, 2].every((i) => a[i]! < b[i + 3]! && b[i]! < a[i + 3]!);
+}
+
+/** Whether box `inner` lies inside box `outer`. */
+export function within(inner: Box, outer: readonly number[]): boolean {
+	return [0, 1, 2].every((a) => outer[a]! <= inner[a]! && inner[a + 3]! <= outer[a + 3]!);
 }
 
 /** The thin axis of a slice ROI (or z for a cube). */

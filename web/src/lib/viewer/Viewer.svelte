@@ -16,6 +16,7 @@
 	import PanelRight from "@lucide/svelte/icons/panel-right";
 	import Pentagon from "@lucide/svelte/icons/pentagon";
 	import Redo2 from "@lucide/svelte/icons/redo-2";
+	import Sparkles from "@lucide/svelte/icons/sparkles";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
 	import Undo2 from "@lucide/svelte/icons/undo-2";
 	import X from "@lucide/svelte/icons/x";
@@ -23,14 +24,28 @@
 	import Histogram from "#lib/ui/Histogram.svelte";
 	import Panel from "#lib/ui/Panel.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
-	import { ApiError, api } from "#lib/api.ts";
+	import { ApiError, api, message } from "#lib/api.ts";
+	import { unfinished } from "#lib/pipelines.ts";
+	import { whileVisible } from "#lib/refresh.ts";
 	import { session } from "#lib/session.svelte.ts";
-	import type { ProjectImage } from "#lib/types.ts";
+	import type { Pipeline, ProjectImage } from "#lib/types.ts";
 	import { acceptParts, MAX_ACCEPT_VOXELS, readBox } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
 	import { PlaneMask } from "../labels/raster";
-	import { describe, revert, type Roi, RoiList, roiBox, thinAxis } from "../rois.svelte";
+	import {
+		type Box,
+		clipBox,
+		describe,
+		overlaps,
+		revert,
+		type Roi,
+		RoiList,
+		roiBox,
+		thinAxis,
+		voxels,
+		within,
+	} from "../rois.svelte";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
 	import { actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
@@ -48,9 +63,11 @@
 	}: { image: ProjectImage; projectId: string; title?: string; roi?: string | null } = $props();
 
 	const CACHE_BYTES = 512 * 1024 * 1024;
+	// The most one proposal predicts (the server's limit).
+	const MAX_PROPOSAL_VOXELS = 256 ** 3;
 
 	// The page makes a new viewer for each image.
-	const { manifest, zarr_url: zarrUrl } = untrack(() => image);
+	const { manifest, zarr_url: zarrUrl, artifact_id: imageId } = untrack(() => image);
 	const project = untrack(() => projectId);
 	const [, nz, ny, nx] = manifest.shape_czyx;
 	const viewer = new ViewerState([nz, ny, nx], aspectOf(manifest.voxel_size_zyx));
@@ -60,19 +77,35 @@
 	let levels: Level[] = $state([]);
 	let images: ChunkStore | null = $state(null);
 	let labels: LabelLayer | null = $state(null);
-	let prediction: ChunkStore | null = $state(null);
-	let predictionModel = $state("");
-	let predictionArtifact = "";
+	let prediction: Prediction | null = $state.raw(null);
+	// Your proposal (one ROI predicted on demand), if asked for after the
+	// prediction, shown in its box in place of the prediction there.
+	let proposal: Prediction | null = $state.raw(null);
+	// The model "Propose here" uses: the newest ready one.
+	let proposer: { id: string; name: string } | null = $state(null);
+	let proposing = $state(false);
+	// How far the proposal being made has got (0 to 1), once a worker has it.
+	let proposalProgress: number | null = $state(null);
+	// The proposal's pipeline, once known, so it can be cancelled.
+	let proposalPipeline: string | null = $state(null);
+	let cancelling = $state(false);
 	let segmentation: ChunkStore | null = $state(null);
 	let classes: LabelClass[] = $state([]);
 	let error = $state("");
+	// Why the prediction layer couldn't load when the page opened; cleared
+	// when a later load works.
+	let predictionError = $state("");
+	// The project's image was replaced since this page opened, so its
+	// predictions don't fit the image here.
+	let imageReplaced = $state(false);
 	let pool: WorkerPool | undefined;
 	let hovered: Plane = PLANES.xy;
 	let notice = $state("");
 	let classesOpen = $state(true);
 	// On narrow screens the dock floats over the views until closed.
 	let dockOpen = $state(false);
-	const queue = new OpQueue(project, indexedDbStorage(session.current?.user.id ?? "", project));
+	const me = session.current?.user.id ?? "";
+	const queue = new OpQueue(project, indexedDbStorage(me, project));
 	// Strict edits compare against the chunk versions current when they're
 	// sent, after this page's earlier edits have landed; if any version is
 	// unknown, the edit applies like a brush stroke instead.
@@ -100,21 +133,16 @@
 			});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
-			api<{ artifact_id: string; zarr_url: string; model_name: string | null; shape_zyx: number[] }>(
-				`/api/projects/${project}/prediction`,
-			).then(
-				(found) => {
-					if (!pool || controller.signal.aborted) return;
-					// A prediction of another image (one that replaced this since) wouldn't line up.
-					if (found.shape_zyx.join() !== viewer.shape.join()) return;
-					// Predictions never change once made, so their chunks cache like the image's.
-					prediction = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
-					predictionModel = found.model_name ?? "a model";
-					predictionArtifact = found.artifact_id;
+			loadPrediction(controller.signal).catch((e: unknown) => {
+				if (!controller.signal.aborted) predictionError = message(e);
+			});
+			// Your proposal still being made (asked for before a reload, say) shows when it's done.
+			api<Pipeline[]>(`/api/projects/${project}/pipelines`, { signal: controller.signal }).then(
+				(pipelines) => {
+					const latest = pipelines.find((p) => p.kind === "proposal" && p.created_by === me);
+					if (latest && unfinished(latest) && !proposing) void follow(latest.id);
 				},
-				(e: unknown) => {
-					if (!(e instanceof ApiError && e.status === 404)) error = e instanceof Error ? e.message : String(e);
-				},
+				() => {},
 			);
 			api<{ zarr_url: string }>(`/api/projects/${project}/segmentation`).then(
 				(found) => {
@@ -158,10 +186,14 @@
 	});
 
 	const stopRefreshing = rois.keepFresh();
+	// Models trained or deleted, and predictions and proposals made, since.
+	// A reload that fails keeps what's shown, quietly, and the next one tries again.
+	const stopReloading = whileVisible(() => void loadPrediction(controller.signal).catch(() => {}));
 
 	onDestroy(() => {
 		controller.abort();
 		stopRefreshing();
+		stopReloading();
 		queue.stop();
 		labels?.stop();
 		images?.keepOnly(new Set());
@@ -285,36 +317,279 @@
 		if (zooms.length > 0) viewer.zoom = Math.min(64, Math.max(1 / 512, 0.85 * Math.min(...zooms)));
 	}
 
+	/** A prediction, as the server describes it; a proposal's also has its box. */
+	interface Predicted {
+		artifact_id: string;
+		zarr_url: string;
+		model_id: string | null;
+		model_name: string | null;
+		image_artifact_id: string;
+		shape_zyx: number[];
+		// When it was asked for, and when it was done.
+		started_at: string;
+		committed_at: string;
+		box?: Box;
+	}
+
+	/**
+	 * A prediction the prediction layer shows: of the whole image, or a
+	 * proposal, which holds values only inside its box.
+	 */
+	interface Prediction extends Predicted {
+		kind: "prediction" | "proposal";
+		box: Box;
+		store: ChunkStore;
+	}
+
+	// Each load of the prediction layer, so only the latest one's answers count.
+	let loads = 0;
+
+	/**
+	 * Load the prediction, and your proposal if it was asked for after it, for
+	 * the prediction layer; and find the model "Propose here" uses. Throws if
+	 * the server couldn't say, leaving the layer as it was.
+	 */
+	async function loadPrediction(signal: AbortSignal) {
+		if (imageReplaced) return;
+		const load = ++loads;
+		const get = (slot: string) =>
+			api<Predicted>(`/api/projects/${project}/${slot}`, { signal }).catch((e: unknown) => {
+				if (e instanceof ApiError && e.status === 404) return null;
+				throw e;
+			});
+		const [whole, proposed, models] = await Promise.all([
+			get("prediction"),
+			get("proposal"),
+			// Without them, "Propose here" keeps the model it had.
+			api<{ id: string; name: string; status: string }[]>(`/api/projects/${project}/models`, { signal }).catch(
+				() => null,
+			),
+		]);
+		if (signal.aborted || load !== loads || imageReplaced) return;
+		// The server gives only predictions of the project's current image, so
+		// one of another image means that image replaced the one shown here.
+		if ([whole, proposed].some((found) => found && found.image_artifact_id !== imageId)) {
+			imageReplaced = true;
+			prediction = proposal = null;
+			predictionError = "This project's image was replaced; reload the page to see the new one.";
+			return;
+		}
+		predictionError = "";
+		// Newest first.
+		if (models) proposer = models.find((m) => m.status === "ready") ?? null;
+		const image: Box = [0, 0, 0, ...viewer.shape];
+		prediction = show(prediction, whole && { ...whole, box: image }, "prediction");
+		// A proposal asked for before the prediction is out of date; one asked
+		// for after it shows, even if the prediction was done later.
+		proposal = show(
+			proposal,
+			proposed?.box && (!whole || Date.parse(proposed.started_at) > Date.parse(whole.started_at)) ? proposed : null,
+			"proposal",
+		);
+	}
+
+	/** `found` as the layer shows it, with `before`'s chunks if it's the same one. */
+	function show(before: Prediction | null, found: Predicted | null, kind: Prediction["kind"]): Prediction | null {
+		if (!found?.box || !pool) return null;
+		if (before?.artifact_id === found.artifact_id) return before;
+		// Predictions never change once made, so their chunks cache like the image's.
+		const store = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
+		return { ...found, box: found.box, kind, store };
+	}
+
+	/** The part of an ROI inside the image, or null if none is. */
+	function inImage(roi: Roi): Box | null {
+		return clipBox(roi.bbox, viewer.shape);
+	}
+
+	/**
+	 * The layer an ROI shows, which accepting there reads: the proposal if the
+	 * ROI is inside its box, else the prediction.
+	 */
+	function covering(roi: Roi): Prediction | null {
+		const box = inImage(roi);
+		return box ? ([proposal, prediction].find((layer) => layer && within(box, layer.box)) ?? null) : null;
+	}
+
+	/**
+	 * Why accepting in an ROI can't go ahead, if it can't: where it reaches
+	 * past the proposal's box, part of it shows the proposal and part the
+	 * prediction, and accepting reads only one of them (unless the same
+	 * model made both, so they agree).
+	 */
+	function acceptBlockedIn(roi: Roi): string {
+		const box = inImage(roi);
+		if (!box || !proposal || !overlaps(box, proposal.box) || within(box, proposal.box)) return "";
+		if (prediction && prediction.model_id === proposal.model_id) return "";
+		return "Part of this ROI shows your proposal and part doesn't; propose the whole ROI to accept it";
+	}
+
+	/**
+	 * Follow a pipeline, passing on its updates, until it ends or its stream
+	 * closes for good (the server refused it, say), and give its state then:
+	 * in the second case it may still be unfinished. Stops following, and
+	 * rejects, when `signal` aborts.
+	 */
+	function finished(id: string, signal: AbortSignal, onupdate: (pipeline: Pipeline) => void): Promise<Pipeline> {
+		return new Promise((resolve, reject) => {
+			if (signal.aborted) return reject(signal.reason);
+			const source = new EventSource(`/api/projects/${project}/pipelines/${id}/events`);
+			let ended = false;
+			/** Stop following; false if that already happened. */
+			const stop = () => {
+				if (ended) return false;
+				ended = true;
+				source.close();
+				signal.removeEventListener("abort", aborted);
+				return true;
+			};
+			const aborted = () => {
+				if (stop()) reject(signal.reason);
+			};
+			signal.addEventListener("abort", aborted);
+			source.addEventListener("status", (event) => {
+				const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
+				if (unfinished(update)) onupdate(update);
+				else if (stop()) resolve(update);
+			});
+			// The server answers 204 for a pipeline that has ended, which closes the stream.
+			source.addEventListener("error", () => {
+				if (source.readyState !== EventSource.CLOSED || !stop()) return;
+				api<Pipeline>(`/api/projects/${project}/pipelines/${id}`, { signal }).then(resolve, reject);
+			});
+		});
+	}
+
+	/** Why a proposal wasn't made, in a sentence. */
+	async function whyNot(final: Pipeline): Promise<string> {
+		if (unfinished(final)) return "Lost track of the proposal; it shows here once it's made.";
+		if (final.status === "failed") return final.error ?? "The proposal failed.";
+		// Each of your proposals stops your others still running.
+		const pipelines = await api<Pipeline[]>(`/api/projects/${project}/pipelines`, { signal: controller.signal }).catch(
+			() => [],
+		);
+		const newest = pipelines.find((p) => p.kind === "proposal" && p.created_by === me);
+		return newest && newest.id !== final.id ? "Your newer proposal replaced this one." : "The proposal was cancelled.";
+	}
+
+	/**
+	 * Show how far a proposal (its pipeline, or a request that gives it) has
+	 * got, and then the proposal.
+	 */
+	async function follow(pipeline: string | Promise<string>) {
+		proposing = true;
+		proposalProgress = null;
+		try {
+			proposalPipeline = await pipeline;
+			const final = await finished(proposalPipeline, controller.signal, (update) => {
+				proposalProgress = update.status === "running" ? update.progress : null;
+			});
+			if (final.status !== "succeeded") {
+				// Cancelling it was what was asked for, so it needs no notice.
+				if (!(cancelling && final.status === "cancelled")) notice = await whyNot(final);
+				return;
+			}
+			await loadPrediction(controller.signal);
+			viewer.showPrediction = true;
+		} catch (e) {
+			if (!controller.signal.aborted) notice = message(e);
+		} finally {
+			proposing = false;
+			proposalPipeline = null;
+			cancelling = false;
+		}
+	}
+
+	/** Stop the proposal being made; it ends as cancelled once its worker stops. */
+	async function cancelProposal() {
+		if (!proposalPipeline || cancelling) return;
+		cancelling = true;
+		try {
+			await api(`/api/projects/${project}/pipelines/${proposalPipeline}/cancel`, { method: "POST" });
+		} catch (e) {
+			cancelling = false;
+			notice = message(e);
+		}
+	}
+
+	/** Predict just this ROI with the proposer, and show the result to accept. */
+	function propose(roi: Roi) {
+		if (!proposer || proposing) return;
+		notice = "";
+		const started = api<{ pipeline_id: string }>(`/api/projects/${project}/models/${proposer.id}/propose`, {
+			body: { roi_id: roi.id },
+			signal: controller.signal,
+		});
+		void follow(started.then((s) => s.pipeline_id));
+	}
+
 	const openRois = $derived(rois.items.filter((r) => r.status === "open"));
 	const selectedRoi = $derived(rois.items.find((r) => r.id === viewer.selectedRoi) ?? null);
+	// What the selected ROI shows, and accepting there reads.
+	const shownHere = $derived(selectedRoi ? covering(selectedRoi) : null);
+	const acceptBlocked = $derived(selectedRoi ? acceptBlockedIn(selectedRoi) : "");
+	// Why proposing for the selected ROI can't help, if it can't.
+	const proposeBlocked = $derived.by(() => {
+		if (!selectedRoi || !proposer) return "";
+		if (imageReplaced) return "This project's image was replaced; reload the page first";
+		const box = inImage(selectedRoi);
+		if (!box) return "That ROI is outside the image";
+		if (voxels(box) > MAX_PROPOSAL_VOXELS) {
+			return "Proposals are for ROIs up to 256³ voxels; predict the whole image on the Models page instead";
+		}
+		if (shownHere?.model_id === proposer.id) return `The ${shownHere.kind} here is already from ${proposer.name}, the newest model`;
+		return "";
+	});
+	const proposeLabel = $derived(
+		!proposing ? "Propose here" : proposalProgress === null ? "Proposing…" : `Proposing… ${Math.round(proposalProgress * 100)}%`,
+	);
 	let accepting = $state(false);
 
 	/**
 	 * Copy the model's prediction inside an ROI into the labels, as accepted
-	 * (model-verified) labels, without touching voxels anyone labeled.
+	 * (model-verified) labels, without touching voxels anyone labeled. It
+	 * reads what the ROI shows: the proposal, if the ROI is inside its box,
+	 * else the prediction.
 	 */
 	async function acceptPrediction(roi: Roi) {
-		if (!prediction || !labels || accepting) return;
-		const [z0, y0, x0, z1, y1, x1] = roi.bbox;
-		if ((z1 - z0) * (y1 - y0) * (x1 - x0) > MAX_ACCEPT_VOXELS) {
+		if (!labels || accepting) return;
+		// Only the part of the ROI inside the image has anything to accept.
+		const box = inImage(roi);
+		if (!box) {
+			notice = "That ROI is outside the image.";
+			return;
+		}
+		const blocked = acceptBlockedIn(roi);
+		if (blocked) {
+			notice = `${blocked}.`;
+			return;
+		}
+		// Kept whole, so a newer prediction or proposal arriving while this
+		// reads doesn't change what it accepts from.
+		const layer = covering(roi);
+		if (!layer) {
+			if (proposal) notice = "Nothing is predicted in that ROI yet; propose it first.";
+			return;
+		}
+		if (voxels(box) > MAX_ACCEPT_VOXELS) {
 			notice = "That ROI is too big to accept at once; draw a smaller one.";
 			return;
 		}
 		accepting = true;
 		notice = "";
-		const store = prediction;
+		const { store, artifact_id: artifact, kind } = layer;
 		try {
 			const values = await readBox((id) => {
 				// Keep these loads from being cancelled by the views' own requests.
 				store.want(`accept:${id}`, new Set([id]));
 				return store.request(id).finally(() => store.want(`accept:${id}`, new Set()));
-			}, roi.bbox as [number, number, number, number, number, number]);
-			const parts = acceptParts(values, roi.bbox as [number, number, number, number, number, number]);
-			const ops = queue.editMany(parts, { accept: { prediction: predictionArtifact, roi: roi.id } });
+			}, box);
+			const parts = acceptParts(values, box);
+			const ops = queue.editMany(parts, { accept: { prediction: artifact, roi: roi.id } });
 			for (const op of ops) labels.applyLocal(op.local, op.deltas);
-			if (ops.length === 0) notice = "The prediction has nothing in that ROI.";
+			if (ops.length === 0) notice = `The ${kind} has nothing in that ROI.`;
 		} catch (e) {
-			notice = `Couldn't read the prediction: ${e instanceof Error ? e.message : String(e)}`;
+			notice = `Couldn't read the ${kind}: ${e instanceof Error ? e.message : String(e)}`;
 		} finally {
 			accepting = false;
 		}
@@ -626,9 +901,10 @@
 				</div>
 			</div>
 			<!-- What went wrong, over the views, where it shows even with the dock closed. -->
-			{#if error || notice || rois.error}
+			{#if error || predictionError || notice || rois.error}
 				<div class="pointer-events-none absolute inset-x-0 top-8 z-30 flex flex-col items-center gap-1 px-2">
 					{#if error}{@render problem(error, () => (error = ""))}{/if}
+					{#if predictionError}{@render problem(predictionError, () => (predictionError = ""))}{/if}
 					{#if notice}{@render problem(notice, () => (notice = ""))}{/if}
 					{#if rois.error}{@render problem(rois.error, () => (rois.error = ""))}{/if}
 				</div>
@@ -645,7 +921,8 @@
 							{levels}
 							{images}
 							{labels}
-							{prediction}
+							prediction={prediction?.store}
+							{proposal}
 							{segmentation}
 							onhover={(p) => (hovered = p)}
 							onresize={resized}
@@ -706,15 +983,22 @@
 						</div>
 						<input type="range" min="0" max="1" step="0.05" bind:value={viewer.opacity} aria-label="Label opacity" />
 					</li>
-					{#if prediction}
+					{#if prediction || proposal}
 						<li class="flex flex-col gap-1.5 px-2.5 py-2">
 							<div class="flex items-center gap-2">
 								<button class="text-ink-dim hover:text-ink" aria-label="{viewer.showPrediction ? 'Hide' : 'Show'} prediction" title="Show or hide (M)" onclick={() => (viewer.showPrediction = !viewer.showPrediction)}>
 									{#if viewer.showPrediction}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
 								</button>
-								<span class="flex-1 truncate">Prediction <span class="text-ink-faint">· {predictionModel}</span></span>
+								<span class="flex-1 truncate">
+									{prediction ? "Prediction" : "Proposal"} <span class="text-ink-faint">· {(prediction ?? proposal)?.model_name ?? "a model"}</span>
+								</span>
 								<span class="font-mono text-2xs text-ink-dim">{Math.round(viewer.predictionOpacity * 100)}%</span>
 							</div>
+							{#if prediction && proposal}
+								<span class="truncate pl-5.5 text-2xs text-ink-dim">
+									Proposal in one ROI <span class="text-ink-faint">· {proposal.model_name ?? "a model"}</span>
+								</span>
+							{/if}
 							<input type="range" min="0" max="1" step="0.05" bind:value={viewer.predictionOpacity} aria-label="Prediction opacity" />
 						</li>
 					{/if}
@@ -786,15 +1070,39 @@
 						<li class="px-2.5 text-ink-dim">Draw one with the ROI tool (R).</li>
 					{/each}
 				</ul>
-				{#if prediction && selectedRoi}
+				{#if (proposer && selectedRoi) || proposing}
+					<div class="flex gap-1.5">
+						<button
+							class="btn flex-1"
+							disabled={proposing || !!proposeBlocked}
+							title={proposeBlocked || `Predict just this ROI with ${proposer?.name ?? "the newest model"}, ahead of other work`}
+							onclick={() => selectedRoi && propose(selectedRoi)}
+						>
+							<Sparkles size={13} />
+							{proposeLabel}
+						</button>
+						{#if proposing && proposalPipeline}
+							<button
+								class="btn"
+								disabled={cancelling}
+								aria-label="Cancel the proposal"
+								title={cancelling ? "Stopping…" : "Stop making this proposal"}
+								onclick={cancelProposal}
+							>
+								<X size={13} />
+							</button>
+						{/if}
+					</div>
+				{/if}
+				{#if shownHere && selectedRoi}
 					<button
 						class="btn"
-						disabled={accepting}
-						title="Fill the selected ROI's unlabeled voxels with the prediction (A)"
+						disabled={accepting || !!acceptBlocked}
+						title={acceptBlocked || `Fill the selected ROI's unlabeled voxels with the ${shownHere.kind} (A)`}
 						onclick={() => selectedRoi && acceptPrediction(selectedRoi)}
 					>
 						<CheckCheck size={13} />
-						{accepting ? "Accepting…" : "Accept prediction here"}
+						{accepting ? "Accepting…" : `Accept ${shownHere.kind} here`}
 					</button>
 				{/if}
 				<a href="/p/{project}/rois" class="self-start text-2xs">Open the ROI gallery</a>

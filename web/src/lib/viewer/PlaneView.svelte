@@ -1,19 +1,22 @@
 <script lang="ts">
 	import { onDestroy, onMount } from "svelte";
 	import { PlaneMask } from "../labels/raster";
-	import type { Roi } from "../rois.svelte";
+	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
 	import type { ChunkStore } from "./chunks";
 	import type { LabelLayer } from "./labels";
 	import { type LabelTile, type Overlay, PlaneRenderer } from "./plane";
 	import type { ViewerState } from "./state.svelte";
 	import {
+		boxOnPlane,
 		chooseLevel,
 		type Level,
 		type Plane,
 		pixelsPerVoxel,
+		type Rect,
 		sliceIndex,
 		type TileKey,
+		tileCrosses,
 		tileId,
 		type Vec3,
 		type View,
@@ -28,6 +31,7 @@
 		images,
 		labels,
 		prediction = null,
+		proposal = null,
 		segmentation = null,
 		onhover,
 		onresize,
@@ -43,6 +47,11 @@
 		labels: LabelLayer | null;
 		/** A model's prediction (label values), drawn under the labels. */
 		prediction?: ChunkStore | null;
+		/**
+		 * A proposal: one box predicted on demand (empty elsewhere), drawn in
+		 * place of the prediction there, with the prediction's visibility.
+		 */
+		proposal?: { store: ChunkStore; box: Box } | null;
 		/** The final segmentation (label values), drawn over the prediction. */
 		segmentation?: ChunkStore | null;
 		onhover: (plane: Plane) => void;
@@ -138,6 +147,7 @@
 		images.want(plane.name, new Set());
 		labels?.store.want(plane.name, new Set());
 		prediction?.want(plane.name, new Set());
+		proposal?.store.want(plane.name, new Set());
 		segmentation?.want(plane.name, new Set());
 		renderer?.destroy();
 		renderer = undefined;
@@ -146,6 +156,21 @@
 	// Switching tools (Esc, a key) drops an ROI being drawn.
 	$effect(() => {
 		if (viewer.tool !== "roi") rectangle = null;
+	});
+
+	// A layer that now shows another store (a newer prediction or proposal,
+	// say) has other contents: forget the old one's textures.
+	let shownStores: Record<string, ChunkStore | null | undefined> = {};
+	$effect(() => {
+		const stores = { "prediction/": prediction, "proposal/": proposal?.store, "segmentation/": segmentation };
+		for (const [prefix, store] of Object.entries(stores)) {
+			if (prefix in shownStores && shownStores[prefix] !== store) {
+				shownStores[prefix]?.want(plane.name, new Set());
+				renderer?.dropOverlay(prefix);
+				schedule();
+			}
+		}
+		shownStores = stores;
 	});
 
 	// New label colors, and chunks someone else just edited.
@@ -176,6 +201,7 @@
 			height,
 			labels,
 			prediction,
+			proposal,
 			segmentation,
 		];
 		schedule();
@@ -211,31 +237,43 @@
 			layers.flatMap(({ level }) => visibleTiles(level, current, 0).map(tileId)),
 		);
 		images.want(plane.name, imageIds, shownIds);
-		renderer.reserve(imageIds.size, 3 * MAX_LABEL_TILES);
+		renderer.reserve(imageIds.size, 4 * MAX_LABEL_TILES);
 		for (const { slice, tiles } of layers) {
 			for (const key of tiles) loadImage(key, slice);
 		}
 
 		const full = levels[0]!;
 		const fullTiles = visibleTiles(full, current, 0);
+		const at = sliceIndex(full, current);
 		// Only layers that exist and are shown get hidden when zoomed out.
 		const overlaid = !!(
 			(viewer.showLabels && labels) ||
-			(viewer.showPrediction && prediction) ||
+			(viewer.showPrediction && (prediction || proposal)) ||
 			(viewer.showSegmentation && segmentation)
 		);
 		labelsHidden = overlaid && fullTiles.length > MAX_LABEL_TILES;
 		const overlays: Overlay[] = [];
-		const add = (store: ChunkStore | null | undefined, prefix: string, shown: boolean, opacity: number) => {
+		/** Draw a layer's chunks in view (or just `keys`), leaving out `hole`. */
+		const add = (
+			store: ChunkStore | null | undefined,
+			prefix: string,
+			shown: boolean,
+			opacity: number,
+			{ keys = fullTiles, hole }: { keys?: TileKey[]; hole?: Rect } = {},
+		) => {
 			if (!store) return;
 			if (!shown || labelsHidden) return store.want(plane.name, new Set());
-			const slice = sliceIndex(full, current);
-			const tiles = fullTiles.map((key) => ({ id: `${key.cz}/${key.cy}/${key.cx}`, key }));
+			const tiles = keys.map((key) => ({ id: `${key.cz}/${key.cy}/${key.cx}`, key }));
 			store.want(plane.name, new Set(tiles.map((t) => t.id)));
-			for (const tile of tiles) loadOverlay(store, prefix, tile, slice);
-			overlays.push({ slice, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity });
+			for (const tile of tiles) loadOverlay(store, prefix, tile, at);
+			overlays.push({ slice: at, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity, hole });
 		};
-		add(prediction, "prediction/", viewer.showPrediction, viewer.predictionOpacity);
+		// A proposal shows in its box, in place of the prediction there.
+		const inlay = proposal ? boxOnPlane(proposal.box, plane, at) : null;
+		add(prediction, "prediction/", viewer.showPrediction, viewer.predictionOpacity, { hole: inlay ?? undefined });
+		add(proposal?.store, "proposal/", viewer.showPrediction, viewer.predictionOpacity, {
+			keys: inlay ? fullTiles.filter((key) => tileCrosses(key, plane, inlay)) : [],
+		});
 		add(segmentation, "segmentation/", viewer.showSegmentation, viewer.segmentationOpacity);
 		add(labels?.store, "", viewer.showLabels, viewer.opacity);
 		renderer.draw(current, viewer.window, layers, overlays);
@@ -270,6 +308,8 @@
 		store
 			.request(tile.id)
 			.then((chunk) => {
+				// The layer may show another store by now, under the same names.
+				if (![prediction, proposal?.store, segmentation, labels?.store].includes(store)) return schedule();
 				if (!renderer || renderer.hasLabels(named.id, at)) return;
 				if (sliceIndex(levels[0]!, view()) !== at) return schedule();
 				renderer.uploadLabels(named, at, chunk);
