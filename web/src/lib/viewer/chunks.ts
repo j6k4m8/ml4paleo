@@ -77,6 +77,11 @@ export class ChunkStore {
 		this.keepOnly(union);
 	}
 
+	#isWanted(id: string): boolean {
+		for (const set of this.#wanted.values()) if (set.has(id)) return true;
+		return false;
+	}
+
 	/** Cancel queued and running loads of chunks not in `wanted`. */
 	keepOnly(wanted: Set<string>): void {
 		for (const [id, { entry }] of this.#pending) {
@@ -98,12 +103,22 @@ export class ChunkStore {
 		this.#evict();
 	}
 
-	/** Forget a chunk, for example after an edit changed it. */
+	/**
+	 * Forget a chunk, for example after an edit changed it. A load already
+	 * running might return the old contents, so it is cancelled too.
+	 */
 	invalidate(id: string): void {
 		const chunk = this.#cache.get(id);
 		if (chunk) {
 			this.#cache.delete(id);
 			this.#bytes -= chunk.data.byteLength;
+		}
+		const pending = this.#pending.get(id);
+		if (pending) {
+			pending.entry.controller.abort();
+			this.#pending.delete(id);
+			this.#queue = this.#queue.filter((entry) => entry !== pending.entry);
+			pending.entry.reject(new DOMException("Changed while loading", "AbortError"));
 		}
 	}
 
@@ -114,7 +129,14 @@ export class ChunkStore {
 			if (entry.controller.signal.aborted) continue;
 			entry.started = true;
 			this.#running += 1;
-			this.load(entry.id, entry.controller.signal)
+			let loading: Promise<Chunk>;
+			try {
+				loading = this.load(entry.id, entry.controller.signal);
+			} catch (error) {
+				// A loader that throws counts as a failed load.
+				loading = Promise.reject(error);
+			}
+			loading
 				.then((chunk) => {
 					if (this.#pending.get(entry.id)?.entry !== entry) return;
 					this.#pending.delete(entry.id);
@@ -134,10 +156,14 @@ export class ChunkStore {
 		}
 	}
 
+	/**
+	 * Drop least recently used chunks until under budget, but never pinned
+	 * chunks or chunks a view needs now (the budget stretches instead).
+	 */
 	#evict(): void {
 		for (const [id, chunk] of this.#cache) {
 			if (this.#bytes <= this.maxBytes) return;
-			if (this.#pinned.has(id)) continue;
+			if (this.#pinned.has(id) || this.#isWanted(id)) continue;
 			this.#cache.delete(id);
 			this.#bytes -= chunk.data.byteLength;
 		}
