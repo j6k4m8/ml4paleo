@@ -55,6 +55,12 @@ class LabelSource(Protocol):
         ...
 
 
+class MissingLabels(Exception):
+    """
+    A label blob that a training set pins is gone, so it can never be read.
+    """
+
+
 class BlobLabels:
     """
     Label chunks read from their content-addressed blobs.
@@ -70,7 +76,7 @@ class BlobLabels:
             return None
         data = get_bytes(self.grant, blob_key(sha))
         if data is None:
-            raise RuntimeError(f"Label blob {sha} is missing")
+            raise MissingLabels(f"Label blob {sha} is missing")
         return decode_chunk(data)
 
 

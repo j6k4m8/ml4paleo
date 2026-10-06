@@ -173,6 +173,17 @@ def test_labels_assemble_across_chunks_and_edges():
     assert np.array_equal(data.read_labels(box), labels[58:72, 58:70, 58:90])
 
 
+def test_missing_label_blobs_say_so(tmp_path):
+    from ml4paleo.segmentation.dataset import BlobLabels, MissingLabels
+    from ml4paleo.storage import StorageGrant
+
+    grant = StorageGrant(url=f"file://{tmp_path}", access="r")
+    labels = BlobLabels(grant, {(0, 0, 0): "ab" * 32})
+    assert labels.chunk((0, 0, 1)) is None
+    with pytest.raises(MissingLabels):
+        labels.chunk((0, 0, 0))
+
+
 def test_tiles_cover_a_box_without_overlap():
     box = (0, 5, 10, 70, 37, 11)
     seen = np.zeros((70, 32, 1), dtype=int)
