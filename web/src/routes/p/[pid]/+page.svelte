@@ -29,16 +29,27 @@
 	);
 
 	let dragging = $state(false);
+	let rejected = $state("");
 
 	$effect(() => {
 		crumbs.set([{ label: "Projects", href: "/projects" }, { label: project?.name ?? "…" }]);
 	});
 
+	/** Take a picked or dropped file, if it's a zip. */
+	function choose(chosen: File | undefined) {
+		if (!chosen || uploading) return;
+		if (!chosen.name.toLowerCase().endsWith(".zip")) {
+			rejected = `${chosen.name} isn't a .zip. Choose a .zip of image slices or DICOM files.`;
+			return;
+		}
+		rejected = "";
+		file = chosen;
+	}
+
 	function dropped(event: DragEvent) {
 		event.preventDefault();
 		dragging = false;
-		const chosen = event.dataTransfer?.files?.[0];
-		if (chosen && !uploading) file = chosen;
+		choose(event.dataTransfer?.files?.[0]);
 	}
 
 	async function refresh() {
@@ -105,6 +116,16 @@
 	}
 </script>
 
+<!-- A file dropped just outside the drop zone shouldn't open in the tab. -->
+<svelte:window
+	ondragover={(e) => {
+		if (e.defaultPrevented || !e.dataTransfer) return;
+		e.preventDefault();
+		e.dataTransfer.dropEffect = "none";
+	}}
+	ondrop={(e) => e.preventDefault()}
+/>
+
 <ProjectTabs {pid} />
 
 {#if project}
@@ -147,8 +168,9 @@
 					{/if}
 
 					<form onsubmit={upload} class="flex flex-col gap-2">
+						<!-- Its children ignore the pointer, so dragging over them doesn't count as leaving. -->
 						<label
-							class="flex cursor-pointer flex-col items-center gap-1.5 rounded-sm border border-dashed p-6 text-center transition-colors
+							class="flex cursor-pointer flex-col items-center gap-1.5 rounded-sm border border-dashed p-6 text-center transition-colors *:pointer-events-none
 								has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-1 has-[:focus-visible]:outline-accent
 								{dragging ? 'border-accent bg-accent-soft/40' : 'border-line bg-field hover:border-ink-faint'}"
 							ondragover={(e) => {
@@ -165,10 +187,11 @@
 								class="sr-only"
 								type="file"
 								accept=".zip"
-								onchange={(e) => (file = e.currentTarget.files?.[0] ?? null)}
+								onchange={(e) => choose(e.currentTarget.files?.[0])}
 								disabled={uploading}
 							/>
 						</label>
+						{#if rejected}<p class="error" role="alert">{rejected}</p>{/if}
 						{#if uploading}
 							<div class="flex items-center gap-2">
 								<progress class="h-1.5 flex-1" max="1" value={uploaded}></progress>
