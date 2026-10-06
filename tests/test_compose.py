@@ -61,6 +61,22 @@ def compose(volume, labeled, shard, min_voxels, slab=2):
     return final
 
 
+def reference(volume, labeled, min_voxels):
+    """Specks removed from the whole volume at once, with scipy alone."""
+    final = volume.copy()
+    for value in np.unique(volume):
+        if value < FIRST_CLASS:
+            continue
+        # scipy's default structure in 3D is 6-connected.
+        ids, count = ndimage.label(volume == value)  # type: ignore[misc]
+        sizes = np.bincount(ids.ravel(), minlength=count + 1)
+        held = np.bincount(ids[labeled], minlength=count + 1) > 0
+        speck = (sizes < min_voxels) & ~held
+        speck[0] = False
+        final[speck[ids]] = BACKGROUND
+    return final
+
+
 def test_specks_are_counted_across_shards():
     volume = np.full((40, 40, 40), BACKGROUND, dtype=np.uint8)
     labeled = np.zeros(volume.shape, dtype=bool)
@@ -128,22 +144,6 @@ def test_pieces_are_joined_once_per_pair_however_much_they_touch():
         for x in (0, 8)
     ]
     assert find_specks([p.summary for p in pieces], (1, 1, 2), 10).pairs == 1
-
-
-def reference(volume, labeled, min_voxels):
-    """Specks removed from the whole volume at once, with scipy alone."""
-    final = volume.copy()
-    for value in np.unique(volume):
-        if value < FIRST_CLASS:
-            continue
-        # scipy's default structure in 3D is 6-connected.
-        ids, count = ndimage.label(volume == value)  # type: ignore[misc]
-        sizes = np.bincount(ids.ravel(), minlength=count + 1)
-        held = np.bincount(ids[labeled], minlength=count + 1) > 0
-        speck = (sizes < min_voxels) & ~held
-        speck[0] = False
-        final[speck[ids]] = BACKGROUND
-    return final
 
 
 def _within(budget, held, step, *args, **kwargs):
@@ -229,16 +229,32 @@ def test_noisy_volumes_stay_within_the_budget_or_refuse(budget_mib):
         )
 
 
-def test_composing_in_shards_matches_composing_whole():
+def test_composing_in_shards_matches_scipy_on_the_whole_volume():
     rng = np.random.default_rng(0)
     volume = np.where(rng.random((24, 20, 28)) < 0.3, BONE, BACKGROUND).astype(np.uint8)
     volume[rng.random(volume.shape) < 0.05] = TOOTH
     labeled = rng.random(volume.shape) < 0.01
-    whole = compose(volume, labeled, (24, 20, 28), min_voxels=6)
-    for shard in [(8, 8, 8), (7, 5, 9), (24, 4, 28)]:
-        assert np.array_equal(compose(volume, labeled, shard, min_voxels=6), whole), (
-            shard
+    want = reference(volume, labeled, 6)
+    assert not np.array_equal(want, volume)  # there are specks to remove
+    for shard in [(24, 20, 28), (8, 8, 8), (7, 5, 9), (24, 4, 28), (1, 20, 28)]:
+        assert np.array_equal(compose(volume, labeled, shard, 6), want), shard
+    # Random volumes, labels, minimums, and shards, partial and one voxel thin.
+    for trial in range(60):
+        shape = tuple(int(n) for n in rng.integers(1, 12, size=3))
+        volume = rng.choice(
+            np.array([BACKGROUND, BONE, TOOTH], dtype=np.uint8),
+            size=shape,
+            p=[0.4, 0.3, 0.3],
         )
+        labeled = rng.random(shape) < 0.03
+        min_voxels = int(rng.integers(0, 10))
+        want = reference(volume, labeled, min_voxels)
+        for _ in range(3):
+            shard = tuple(int(rng.integers(1, n + 1)) for n in shape)
+            got = compose(
+                volume, labeled, shard, min_voxels, slab=int(rng.integers(1, 4))
+            )
+            assert np.array_equal(got, want), (trial, shape, shard, min_voxels)
 
 
 def test_shard_grid_counts_partial_shards():
