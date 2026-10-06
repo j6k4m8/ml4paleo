@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from .. import audit
 from ..auth.deps import CurrentAuth, DbSession
 from ..db import Project, ProjectMember, User
+from ..pipelines import train
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -166,12 +167,14 @@ async def delete_project(
     project: MemberProject, request: Request, auth: CurrentAuth, db: DbSession
 ) -> None:
     """
-    Only the owner can delete a project. Deletion hides it at once; its data
-    is removed later by storage garbage collection.
+    Only the owner can delete a project. Deletion hides it at once, stops its
+    trainings, and gives back its models' slots; its data is removed later by
+    storage garbage collection.
     """
     if project.owner_id != auth.user.id:
         raise HTTPException(status_code=403, detail="Only the owner can delete it.")
     project.deleted_at = datetime.datetime.now(datetime.UTC)
+    await train.stop_project(db, project)
     audit.record(
         db,
         actor_id=auth.user.id,

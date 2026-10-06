@@ -26,11 +26,10 @@ from sqlalchemy import select
 
 from ml4paleo.segmentation.plugin import get_plugin, plugins
 
-from .. import artifacts, audit, jobs, training
+from .. import artifacts, audit, jobs, quotas, training
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
-from ..db import Artifact, Job, Project, TrainedModel, TrainingSet
+from ..db import Artifact, Job, Project, TrainedModel, TrainingSet, User
 from ..pipelines import predict, train
-from ..quotas import release_trained_model
 from .gateway import zarr_path
 from .projects import MemberProject
 
@@ -123,7 +122,7 @@ async def _model(db, project: Project, model_id: uuid.UUID) -> TrainedModel:
 
 @router.get("/projects/{project_id}/models")
 async def list_models(project: MemberProject, db: DbSession) -> list[ModelOut]:
-    await train.release_failed_slots(db, project.id)
+    await train.release_failed_slots(db, project.owner_id, project.id)
     await db.commit()
     models = (
         await db.scalars(
@@ -156,6 +155,15 @@ async def train_model(
         raise HTTPException(
             status_code=422, detail=exc.errors(include_url=False)
         ) from None
+    # Look for a free model slot before pinning a training set, so a refused
+    # training stores nothing; `train.start` reserves the slot. Commit the
+    # slots of failed trainings at once, so the owner's usage row isn't
+    # locked while the snapshot is taken.
+    owner = await db.get(User, project.owner_id)
+    assert owner is not None
+    await train.release_failed_slots(db, owner.id)
+    await db.commit()
+    await quotas.check_trained_model(db, settings, owner)
     try:
         training_set = await training.snapshot(
             db, request.app.state.sessionmaker, settings, project.id
@@ -220,15 +228,13 @@ async def delete_model(
     model.deleted_at = datetime.datetime.now(datetime.UTC)
     if model.job_id:
         job = await db.get(Job, model.job_id)
-        if job is not None and job.status in ("blocked", "queued", "leased"):
+        if job is not None and job.status in train.RUNNING_JOB:
             await jobs.cancel_pipeline(db, job.root_id)
     if model.artifact_id:
         artifact = await db.get(Artifact, model.artifact_id)
         if artifact is not None and artifact.state == "committed":
             artifact.expires_at = datetime.datetime.now(datetime.UTC)
-    if model.holds_slot:
-        model.holds_slot = False
-        await release_trained_model(db, project.owner_id)
+    await train.release_slots(db, project.owner_id, TrainedModel.id == model.id)
     audit.record(
         db,
         actor_id=auth.user.id,
