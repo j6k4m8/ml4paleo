@@ -87,14 +87,16 @@ async def release_failed_slots(
 
 async def stop_project(db: AsyncSession, project: Project) -> None:
     """
-    For a project being deleted: cancel its trainings that are still running
-    and give back the trained-model slots its models hold.
+    For a project being deleted: cancel everything of it still running
+    (trainings, predictions, and the rest, which would otherwise run to the
+    end only to be refused) and give back the trained-model slots its models
+    hold.
     """
     roots = (
         await db.scalars(
-            select(Job.root_id)
-            .join(TrainedModel, TrainedModel.job_id == Job.id)
-            .where(TrainedModel.project_id == project.id, Job.status.in_(RUNNING_JOB))
+            select(Job.root_id).where(
+                Job.project_id == project.id, Job.status.in_(RUNNING_JOB)
+            )
         )
     ).all()
     for root_id in sorted(set(roots)):

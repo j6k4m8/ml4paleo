@@ -14,7 +14,7 @@ import numpy as np
 import obstore
 import pytest
 from helpers import SECRET_KEY, add_worker, run_db, signup
-from ml4paleo_server import artifacts, labels
+from ml4paleo_server import artifacts, jobs, labels
 from ml4paleo_server.db import (
     Artifact,
     Job,
@@ -277,13 +277,23 @@ def test_deleting_a_project_gives_back_its_model_slots(
     model = ada.post(f"/api/projects/{first}/models", json={}).json()
     assert ada.post(f"/api/projects/{second}/models", json={}).status_code == 403
 
+    # Other work of the project, which would run to the end only to be refused.
+    async def other_work(db):
+        job = await jobs.enqueue(
+            db, "noop", {"seconds": 0}, project_id=uuid.UUID(first)
+        )
+        return job.id
+
+    other = run_db(migrated_database_url, other_work)
     assert ada.request("DELETE", f"/api/projects/{first}").status_code == 204
 
-    async def job_status(db):
-        job = await db.get(Job, uuid.UUID(model["pipeline_id"]))
-        return job.status
+    async def statuses(db):
+        return [
+            (await db.get(Job, job_id)).status
+            for job_id in (uuid.UUID(model["pipeline_id"]), other)
+        ]
 
-    assert run_db(migrated_database_url, job_status) == "cancelled"
+    assert run_db(migrated_database_url, statuses) == ["cancelled", "cancelled"]
     assert ada.get("/api/me/quota").json()["trained_models_used"] == 0
     assert ada.post(f"/api/projects/{second}/models", json={}).status_code == 202
 

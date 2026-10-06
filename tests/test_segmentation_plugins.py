@@ -222,8 +222,13 @@ def test_random_forest_counts_its_features(channels, sigma_max):
     image = np.zeros((channels, 8, 8, 8), dtype=np.float32)
     assert features(image, sigma_max).shape[-1] == feature_count(channels, sigma_max)
     plugin = get_plugin("rf")()
+    count = feature_count(channels, sigma_max)
     cost = plugin.crop_cost(plugin.Params(sigma_max=sigma_max), channels)
-    assert cost.bytes_per_voxel == 16 * feature_count(channels, sigma_max)
+    # Each scale scikit-image is working on holds about 160 bytes a voxel.
+    assert cost.bytes_per_voxel == max(16 * count, 4 * count + 160)
+    # Threads compute scales at once, each with its own working memory.
+    many = plugin.crop_cost(plugin.Params(sigma_max=sigma_max), channels, threads=16)
+    assert many.bytes_per_voxel >= cost.bytes_per_voxel
 
 
 def test_random_forest_learns_from_sparse_labels(tmp_path):
@@ -269,9 +274,17 @@ def test_random_forest_learns_from_sparse_labels(tmp_path):
     assert set(result.samples) == {0, 1}
     assert result.metrics["validation_crops"] >= 1
     assert result.metrics["classes"][str(BONE)]["dice"] > 0.8
+    # Models from before model.json kept their feature count still load.
+    features = meta.pop("features")
+    (tmp_path / "model.json").write_text(json.dumps(meta))
     predictor = plugin.load(tmp_path)
-    # What predicting holds per voxel grows with the features, as training does.
-    assert predictor.bytes_per_voxel == 16 * meta["features"] + 32 * 2
+    # Predicting holds the features several times over, and more with each
+    # scale computed at once (one per thread, up to this model's two).
+    held = {}
+    for threads in (1, 2, 8):
+        predictor.threads = threads
+        held[threads] = predictor.bytes_per_voxel
+    assert 16 * features <= held[1] < held[2] == held[8]
     h = predictor.halo
     block = np.pad(
         image[:, 10:42, 10:42, 10:42].astype(np.float32),
@@ -402,7 +415,10 @@ def train_forest(path, image, sigma_max=1.0):
         n_estimators=20, max_depth=8, samples_per_class=2000, sigma_max=sigma_max
     )
     plugin.train(data, params, path, Ctx())
-    return plugin.load(path)
+    predictor = plugin.load(path)
+    # As a job with one CPU would, so blocks come out the same anywhere.
+    predictor.threads = 1
+    return predictor
 
 
 def new_prediction(path):
@@ -467,23 +483,42 @@ def test_predictions_cover_shards(tmp_path):
     assert np.asarray(group["uncertainty"][:]).max() <= 255
 
 
-# 1 byte: blocks of MIN_BLOCK, each written as it's done. 32 MiB: blocks of
-# 20 into outputs for the whole box, written once. 1 GB: the box in one block.
-@pytest.mark.parametrize("budget", [1, 2**25, 10**9])
-def test_predicting_block_by_block_matches_the_box_at_once(tmp_path, forest, budget):
-    from ml4paleo.segmentation.predict import predict_box
+# 1 byte and 1.5 MB: the box's outputs would take more than a quarter of
+# the budget, so they're written a layer of MIN_BLOCK blocks at a time.
+# 32 MiB: they're kept whole and written once, with several blocks. 1 GB:
+# the box is one block.
+@pytest.mark.parametrize(
+    ("budget", "whole"), [(1, False), (1_500_000, False), (2**25, True), (10**9, True)]
+)
+def test_predicting_block_by_block_matches_the_box_at_once(
+    tmp_path, monkeypatch, forest, budget, whole
+):
+    from ml4paleo.segmentation import predict
 
     image, _ = synthetic()
     # At the image's edges on some sides only.
     box = (8, 0, 30, 80, 70, 90)
+    reads = Reads(image)
+    written = []
+    write_box = predict.write_box
+
+    def counted(group, at, *arrays):
+        written.append(at)
+        write_box(group, at, *arrays)
+
+    monkeypatch.setattr(predict, "write_box", counted)
     group = new_prediction(tmp_path / "prediction")
-    predict_box(forest, image, box, WINDOW, [BONE], group, budget)
+    predict.predict_box(forest, reads, box, WINDOW, [BONE], group, budget)
     classes, uncertainty = predict_at_once(forest, image, box)
     region = tuple(slice(box[a], box[a + 3]) for a in range(3))
     np.testing.assert_array_equal(group["class"][region], classes)
     np.testing.assert_array_equal(group["uncertainty"][region], uncertainty)
     assert not np.asarray(group["class"][:8]).any()
     assert not np.asarray(group["class"][:, :, :30]).any()
+    side = predict.MIN_BLOCK
+    layers = [(z, 0, 30, min(z + side, 80), 70, 90) for z in range(8, 80, side)]
+    assert written == ([box] if whole else layers)
+    assert (len(reads.shapes) == 1) == (budget == 10**9)
 
 
 def test_prediction_blocks_fit_the_memory_budget():

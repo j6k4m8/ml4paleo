@@ -47,7 +47,7 @@ def run(ctx: JobContext) -> dict[str, Any]:
     )
     plugin = plugin_class()
     image = OmeImage.open(image_grant).array(0)
-    cost = plugin.crop_cost(params, int(image.shape[0]))
+    cost = plugin.crop_cost(params, int(image.shape[0]), ctx.threads)
     data = TrainingSet(
         image=image,
         labels=labels,
