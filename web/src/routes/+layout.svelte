@@ -31,8 +31,9 @@
 		}
 	});
 
-	// Each page names itself; until it does, show nothing stale.
-	$effect(() => {
+	// Each page names itself; until it does, show nothing stale. This runs
+	// before the new page's effects, so it doesn't wipe what they set.
+	$effect.pre(() => {
 		void page.url.pathname;
 		crumbs.set([]);
 	});
