@@ -35,6 +35,8 @@ export class ViewerState {
 	showLabels = $state(true);
 	layout = $state<Layout>("four");
 	help = $state(false);
+	/** Refit the image as views resize, until the user pans or zooms. */
+	autoFit = true;
 
 	constructor(
 		public shape: Vec3,

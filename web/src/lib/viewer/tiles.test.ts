@@ -13,9 +13,9 @@ import {
 } from "./tiles";
 
 const levels: Level[] = [
-	{ index: 0, shape: [256, 1000, 700], scale: [1, 1, 1] },
-	{ index: 1, shape: [128, 500, 350], scale: [2, 2, 2] },
-	{ index: 2, shape: [64, 250, 175], scale: [4, 4, 4] },
+	{ index: 0, path: "0", shape: [256, 1000, 700], scale: [1, 1, 1] },
+	{ index: 1, path: "1", shape: [128, 500, 350], scale: [2, 2, 2] },
+	{ index: 2, path: "2", shape: [64, 250, 175], scale: [4, 4, 4] },
 ];
 
 function view(over: Partial<View> = {}): View {

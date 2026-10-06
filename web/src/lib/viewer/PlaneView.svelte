@@ -51,8 +51,24 @@
 
 	const slice = $derived(Math.floor(viewer.position[plane.normal]));
 
+	// Loads this view is waiting for, so each gets one handler.
+	const waiting = new Set<string>();
+
 	function view(): View {
-		return { plane, position: viewer.position, zoom: viewer.zoom, aspect: viewer.aspect, width, height };
+		return {
+			plane,
+			position: viewer.position,
+			zoom: viewer.zoom,
+			aspect: viewer.aspect,
+			width,
+			height,
+			pixelRatio: window.devicePixelRatio || 1,
+		};
+	}
+
+	function start() {
+		renderer = new PlaneRenderer(canvas, plane, viewer.shape);
+		if (labels) renderer.setPalette(labels.colors);
 	}
 
 	onMount(() => {
@@ -66,12 +82,29 @@
 			onresize(plane, width, height);
 		});
 		observer.observe(canvas);
+		// The browser may drop the GPU context (driver reset, too many
+		// contexts); start over with a fresh renderer when it comes back.
+		const lost = (event: Event) => {
+			event.preventDefault();
+			renderer = undefined;
+			waiting.clear();
+		};
+		const restored = () => {
+			start();
+			schedule();
+		};
+		canvas.addEventListener("webglcontextlost", lost);
+		canvas.addEventListener("webglcontextrestored", restored);
 		try {
-			renderer = new PlaneRenderer(canvas, plane);
+			start();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
-		return () => observer.disconnect();
+		return () => {
+			observer.disconnect();
+			canvas.removeEventListener("webglcontextlost", lost);
+			canvas.removeEventListener("webglcontextrestored", restored);
+		};
 	});
 
 	onDestroy(() => {
@@ -118,7 +151,9 @@
 			slice: sliceIndex(level, current),
 			tiles: visibleTiles(level, current),
 		}));
-		images.want(plane.name, new Set(layers.flatMap(({ tiles }) => tiles.map(tileId))));
+		const imageIds = new Set(layers.flatMap(({ tiles }) => tiles.map(tileId)));
+		images.want(plane.name, imageIds);
+		renderer.reserve(imageIds.size, MAX_LABEL_TILES);
 		for (const { slice, tiles } of layers) {
 			for (const key of tiles) loadImage(key, slice);
 		}
@@ -144,24 +179,34 @@
 		const id = tileId(key);
 		const cached = images.get(id);
 		if (cached) return renderer.uploadImage(key, at, cached);
-		images.request(id).then((chunk) => {
-			if (!renderer || renderer.hasImage(key, at)) return;
-			if (sliceIndex(levels[key.level]!, view()) !== at) return;
-			renderer.uploadImage(key, at, chunk);
-			schedule();
-		}, failed);
+		if (waiting.has(`image:${id}`)) return;
+		waiting.add(`image:${id}`);
+		images
+			.request(id)
+			.then((chunk) => {
+				if (!renderer || renderer.hasImage(key, at)) return;
+				if (sliceIndex(levels[key.level]!, view()) !== at) return schedule();
+				renderer.uploadImage(key, at, chunk);
+				schedule();
+			}, failed)
+			.finally(() => waiting.delete(`image:${id}`));
 	}
 
 	function loadLabels(layer: LabelLayer, tile: LabelTile, at: number) {
 		if (!renderer || renderer.hasLabels(tile.id, at)) return;
 		const cached = layer.store.get(tile.id);
 		if (cached) return renderer.uploadLabels(tile, at, cached);
-		layer.store.request(tile.id).then((chunk) => {
-			if (!renderer || renderer.hasLabels(tile.id, at)) return;
-			if (sliceIndex(levels[0]!, view()) !== at) return;
-			renderer.uploadLabels(tile, at, chunk);
-			schedule();
-		}, failed);
+		if (waiting.has(`labels:${tile.id}`)) return;
+		waiting.add(`labels:${tile.id}`);
+		layer.store
+			.request(tile.id)
+			.then((chunk) => {
+				if (!renderer || renderer.hasLabels(tile.id, at)) return;
+				if (sliceIndex(levels[0]!, view()) !== at) return schedule();
+				renderer.uploadLabels(tile, at, chunk);
+				schedule();
+			}, failed)
+			.finally(() => waiting.delete(`labels:${tile.id}`));
 	}
 
 	// --- pointer and wheel ---------------------------------------------------
@@ -188,6 +233,7 @@
 		const dy = event.clientY - press.y;
 		if (!press.moved && Math.hypot(dx, dy) < 3) return;
 		press.moved = true;
+		viewer.autoFit = false;
 		const ratio = window.devicePixelRatio || 1;
 		const px = pixelsPerVoxel(view());
 		const point = [...viewer.position] as Vec3;
@@ -199,7 +245,10 @@
 	}
 
 	function pointerUp(event: PointerEvent) {
-		if (press && !press.moved) viewer.moveTo(voxelAt(view(), ...offset(event)));
+		if (press && !press.moved) {
+			viewer.autoFit = false;
+			viewer.moveTo(voxelAt(view(), ...offset(event)));
+		}
 		press = null;
 	}
 
@@ -207,6 +256,7 @@
 		event.preventDefault();
 		const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? height : 1);
 		if (event.ctrlKey || event.metaKey) {
+			viewer.autoFit = false;
 			// Keep the voxel under the cursor in place.
 			const [dx, dy] = offset(event);
 			const under = voxelAt(view(), dx, dy);

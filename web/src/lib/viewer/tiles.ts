@@ -29,6 +29,8 @@ export const PLANES: Record<Plane["name"], Plane> = {
 
 export interface Level {
 	index: number;
+	/** The level's array, within the image. */
+	path: string;
 	/** Shape of the level, (z, y, x). */
 	shape: Vec3;
 	/** Level-0 voxels per voxel of this level, (z, y, x). */
@@ -42,6 +44,8 @@ export interface View {
 	aspect: Vec3;
 	width: number;
 	height: number;
+	/** Device pixels per CSS pixel; levels are chosen per CSS pixel. */
+	pixelRatio?: number;
 }
 
 export interface TileKey {
@@ -69,16 +73,17 @@ export function pixelsPerVoxel(view: View): Vec3 {
 
 /**
  * The coarsest level whose voxels still cover at most about one and a half
- * screen pixels in the view's plane.
+ * CSS pixels in the view's plane.
  */
 export function chooseLevel(levels: Level[], view: View): Level {
 	let best = levels[0];
 	if (!best) throw new Error("An image has at least one level");
 	const { u, v } = view.plane;
 	const px = pixelsPerVoxel(view);
+	const limit = 1.5 * (view.pixelRatio ?? 1);
 	const size = (level: Level) => Math.min(level.scale[u] * px[u], level.scale[v] * px[v]);
 	for (const level of levels) {
-		if (size(level) <= 1.5 && size(level) > size(best)) best = level;
+		if (size(level) <= limit && size(level) > size(best)) best = level;
 	}
 	return best;
 }
