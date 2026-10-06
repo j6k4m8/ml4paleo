@@ -33,7 +33,19 @@
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
 	import { PlaneMask } from "../labels/raster";
-	import { type Box, clipBox, describe, revert, type Roi, RoiList, roiBox, thinAxis, voxels, within } from "../rois.svelte";
+	import {
+		type Box,
+		clipBox,
+		describe,
+		overlaps,
+		revert,
+		type Roi,
+		RoiList,
+		roiBox,
+		thinAxis,
+		voxels,
+		within,
+	} from "../rois.svelte";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
 	import { actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
@@ -384,6 +396,19 @@
 	}
 
 	/**
+	 * Why accepting in an ROI can't go ahead, if it can't: where it reaches
+	 * past the proposal's box, part of it shows the proposal and part the
+	 * prediction, and accepting reads only one of them (unless the same
+	 * model made both, so they agree).
+	 */
+	function acceptBlockedIn(roi: Roi): string {
+		const box = inImage(roi);
+		if (!box || !proposal || !overlaps(box, proposal.box) || within(box, proposal.box)) return "";
+		if (prediction && prediction.model_id === proposal.model_id) return "";
+		return "Part of this ROI shows your proposal and part doesn't; propose the whole ROI to accept it";
+	}
+
+	/**
 	 * Follow a pipeline, passing on its updates, until it ends or its stream
 	 * closes for good (the server refused it, say), and give its state then:
 	 * in the second case it may still be unfinished. Stops following, and
@@ -486,6 +511,7 @@
 	const selectedRoi = $derived(rois.items.find((r) => r.id === viewer.selectedRoi) ?? null);
 	// What the selected ROI shows, and accepting there reads.
 	const shownHere = $derived(selectedRoi ? covering(selectedRoi) : null);
+	const acceptBlocked = $derived(selectedRoi ? acceptBlockedIn(selectedRoi) : "");
 	// Why proposing for the selected ROI can't help, if it can't.
 	const proposeBlocked = $derived.by(() => {
 		if (!selectedRoi || !proposer) return "";
@@ -514,6 +540,11 @@
 		const box = inImage(roi);
 		if (!box) {
 			notice = "That ROI is outside the image.";
+			return;
+		}
+		const blocked = acceptBlockedIn(roi);
+		if (blocked) {
+			notice = `${blocked}.`;
 			return;
 		}
 		// Kept whole, so a newer prediction or proposal arriving while this
@@ -1048,8 +1079,8 @@
 				{#if shownHere && selectedRoi}
 					<button
 						class="btn"
-						disabled={accepting}
-						title="Fill the selected ROI's unlabeled voxels with the {shownHere.kind} (A)"
+						disabled={accepting || !!acceptBlocked}
+						title={acceptBlocked || `Fill the selected ROI's unlabeled voxels with the ${shownHere.kind} (A)`}
 						onclick={() => selectedRoi && acceptPrediction(selectedRoi)}
 					>
 						<CheckCheck size={13} />

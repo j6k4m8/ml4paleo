@@ -118,6 +118,11 @@ export function voxels(box: Box): number {
 	return (box[3] - box[0]) * (box[4] - box[1]) * (box[5] - box[2]);
 }
 
+/** Whether two boxes share any voxel. */
+export function overlaps(a: Box, b: readonly number[]): boolean {
+	return [0, 1, 2].every((i) => a[i]! < b[i + 3]! && b[i]! < a[i + 3]!);
+}
+
 /** Whether box `inner` lies inside box `outer`. */
 export function within(inner: Box, outer: readonly number[]): boolean {
 	return [0, 1, 2].every((a) => outer[a]! <= inner[a]! && inner[a + 3]! <= outer[a + 3]!);

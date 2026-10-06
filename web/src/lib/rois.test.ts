@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clipBox, roiBox, thinAxis, voxels, within } from "./rois.svelte";
+import { clipBox, overlaps, roiBox, thinAxis, voxels, within } from "./rois.svelte";
 import { PLANES } from "./viewer/tiles";
 
 describe("roiBox", () => {
@@ -55,5 +55,15 @@ describe("clipBox", () => {
 	it("is null for a box outside the image", () => {
 		expect(clipBox([10, 0, 0, 12, 5, 5], shape)).toBeNull();
 		expect(clipBox([0, 0, -9, 5, 5, 0], shape)).toBeNull();
+	});
+});
+
+describe("overlaps", () => {
+	it("is true only for boxes sharing a voxel", () => {
+		const box = [0, 10, 20, 30, 40, 50];
+		expect(overlaps([29, 39, 49, 31, 41, 51], box)).toBe(true);
+		expect(overlaps([5, 15, 25, 6, 16, 26], box)).toBe(true);
+		expect(overlaps([30, 10, 20, 31, 40, 50], box)).toBe(false);
+		expect(overlaps([0, 0, 20, 30, 10, 50], box)).toBe(false);
 	});
 });
