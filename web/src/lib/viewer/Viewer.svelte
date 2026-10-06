@@ -29,7 +29,6 @@
 	let error = $state("");
 	let pool: WorkerPool | undefined;
 	let hovered: Plane = PLANES.xy;
-	let fitted = false;
 	const sizes = new Map<string, [number, number]>();
 	const controller = new AbortController();
 
@@ -68,6 +67,7 @@
 	);
 
 	function fit() {
+		viewer.autoFit = true;
 		const plane = viewer.layout === "four" ? PLANES.xy : PLANES[viewer.layout];
 		const size = sizes.get(plane.name);
 		if (!size) return;
@@ -81,10 +81,8 @@
 
 	function resized(plane: Plane, width: number, height: number) {
 		sizes.set(plane.name, [width, height]);
-		if (!fitted && (plane.name === "xy" || viewer.layout === plane.name)) {
-			fitted = true;
-			fit();
-		}
+		const main = viewer.layout === "four" ? "xy" : viewer.layout;
+		if (viewer.autoFit && plane.name === main) fit();
 	}
 
 	function key(event: KeyboardEvent) {
@@ -98,8 +96,10 @@
 			case "slice-previous":
 				return viewer.step(hovered.normal, -step);
 			case "zoom-in":
+				viewer.autoFit = false;
 				return viewer.zoomBy(1.25);
 			case "zoom-out":
+				viewer.autoFit = false;
 				return viewer.zoomBy(0.8);
 			case "fit":
 				return fit();

@@ -56,10 +56,11 @@ _INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.DO
 def content_security_policy(web_dir: pathlib.Path | None) -> str:
     """
     The policy for everything but Neuroglancer. SvelteKit starts the web app
-    with an inline script in `index.html`, allowed by its hash, and the zarr
-    codecs the viewer decodes chunks with are WebAssembly.
+    with an inline script in `index.html`, allowed by its hash; nothing else
+    runs inline, and nothing evaluates code (the viewer decodes zstd in plain
+    JavaScript).
     """
-    scripts = ["'self'", "'wasm-unsafe-eval'"]
+    scripts = ["'self'"]
     index = web_dir / "index.html" if web_dir is not None else None
     if index is not None and index.is_file():
         for body in _INLINE_SCRIPT.findall(index.read_text(encoding="utf-8")):

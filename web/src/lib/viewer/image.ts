@@ -43,6 +43,7 @@ export async function loadLevels(url: string, signal?: AbortSignal): Promise<Lev
 			const [, z, y, x] = array.shape;
 			return {
 				index,
+				path: dataset.path,
 				shape: [z ?? 1, y ?? 1, x ?? 1],
 				scale: factors[index] ?? [1, 1, 1],
 			} satisfies Level;

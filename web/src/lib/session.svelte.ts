@@ -24,9 +24,9 @@ class SessionState {
 		return this.current;
 	}
 
-	async signup(username: string, password: string, email?: string): Promise<Session> {
+	async signup(username: string, password: string, email?: string, invite?: string): Promise<Session> {
 		this.current = await api<Session>("/api/auth/signup", {
-			body: { username, password, email: email || undefined },
+			body: { username, password, email: email || undefined, invite },
 		});
 		return this.current;
 	}

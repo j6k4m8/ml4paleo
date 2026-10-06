@@ -187,7 +187,7 @@ def main(origin: str) -> int:
     with opener.open(origin + "/p/" + project + "/annotate") as response:
         page = response.read()
         policy = response.headers.get("Content-Security-Policy", "")
-    if b"/_app/immutable/" not in page or "'sha256-" not in policy:
+    if b"/_app/immutable/" not in page or "'sha256-" not in policy or "eval" in policy:
         problems.append("the web app isn't served, or its start script isn't allowed")
     # Neuroglancer itself, with its own content security policy.
     with opener.open(origin + "/neuroglancer/") as response:

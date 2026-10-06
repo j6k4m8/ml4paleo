@@ -2,5 +2,5 @@
 	import { goto } from "$app/navigation";
 	import { onMount } from "svelte";
 
-	onMount(() => goto("/projects", { replaceState: true }));
+	onMount(() => goto("/projects", { replace: true }));
 </script>

@@ -71,10 +71,10 @@ function parse(id: string): number[] {
 export function imageLoader(pool: WorkerPool, url: string, levels: Level[]): Loader {
 	return (id, signal) => {
 		const [level = 0, cz = 0, cy = 0, cx = 0] = parse(id);
-		const shape = levels[level]?.shape;
-		if (!shape) return Promise.reject(new Error(`No level ${level}`));
-		const region = chunkRegion([cz, cy, cx], shape);
-		return pool.load({ url, path: String(level), region, channel: 0 }, signal);
+		const found = levels[level];
+		if (!found) return Promise.reject(new Error(`No level ${level}`));
+		const region = chunkRegion([cz, cy, cx], found.shape);
+		return pool.load({ url, path: found.path, region, channel: 0 }, signal);
 	};
 }
 

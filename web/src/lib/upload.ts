@@ -38,7 +38,8 @@ export async function uploadFile(
 			const part = file.slice(start, Math.min(start + upload.part_size, file.size));
 			const url = urls[String(number)];
 			if (!url) throw new Error(`No URL for part ${number}`);
-			const response = await fetch(url, { method: "PUT", body: part, signal });
+			// Storage needs only the signed URL, not this site's cookies.
+			const response = await fetch(url, { method: "PUT", body: part, signal, credentials: "omit" });
 			if (!response.ok) throw new Error(`Part ${number} failed (HTTP ${response.status})`);
 			sent += 1;
 			onProgress(sent / upload.part_count);

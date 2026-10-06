@@ -5,11 +5,12 @@
  */
 
 import type { Chunk } from "./chunks";
-import { CHUNK, type Level, type Plane, type TileKey, type View, pixelsPerVoxel, tileId } from "./tiles";
+import { CHUNK, type Level, type Plane, type TileKey, type Vec3, type View, pixelsPerVoxel, tileId } from "./tiles";
 
 const VERTEX = `#version 300 es
 in vec2 corner;
 uniform vec4 rect;      // tile u, v, width, height in level-0 voxels
+uniform vec2 uvMax;     // the part of the texture inside the image
 uniform vec2 center;    // view center (u, v) in level-0 voxels
 uniform vec2 toClip;    // clip-space units per level-0 voxel along u and v
 out vec2 uv;
@@ -17,7 +18,7 @@ void main() {
 	vec2 voxel = rect.xy + corner * rect.zw;
 	vec2 clip = (voxel - center) * toClip;
 	gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
-	uv = corner;
+	uv = corner * uvMax;
 }`;
 
 const IMAGE = `#version 300 es
@@ -106,7 +107,7 @@ class TextureCache {
 
 	constructor(
 		private gl: WebGL2RenderingContext,
-		private limit: number,
+		public limit: number,
 	) {}
 
 	get(id: string): Texture | undefined {
@@ -164,19 +165,24 @@ export class PlaneRenderer {
 	#labelTextures: TextureCache;
 	#palette: WebGLTexture;
 
+	/**
+	 * `extent` is the image's level-0 shape: coarse levels round their shape
+	 * up, so their edge tiles are cut back to it.
+	 */
 	constructor(
 		canvas: HTMLCanvasElement,
 		private plane: Plane,
+		private extent: Vec3,
 	) {
 		const gl = canvas.getContext("webgl2", { antialias: false, premultipliedAlpha: false });
 		if (!gl) throw new Error("This browser doesn't support WebGL2");
 		this.#gl = gl;
 		this.#image = this.#link(IMAGE);
 		this.#labels = this.#link(LABELS);
-		for (const name of ["rect", "center", "toClip", "tile", "window"]) {
+		for (const name of ["rect", "uvMax", "center", "toClip", "tile", "window"]) {
 			this.#imageUniforms[name] = gl.getUniformLocation(this.#image, name);
 		}
-		for (const name of ["rect", "center", "toClip", "tile", "palette", "opacity"]) {
+		for (const name of ["rect", "uvMax", "center", "toClip", "tile", "palette", "opacity"]) {
 			this.#labelUniforms[name] = gl.getUniformLocation(this.#labels, name);
 		}
 		const buffer = gl.createBuffer();
@@ -227,6 +233,15 @@ export class PlaneRenderer {
 		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
 		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 		return texture;
+	}
+
+	/**
+	 * Make room for at least `count` textures of each kind, so one frame's
+	 * tiles never push each other out.
+	 */
+	reserve(images: number, labels: number): void {
+		this.#imageTextures.limit = Math.max(1024, 2 * images);
+		this.#labelTextures.limit = Math.max(1024, 2 * labels);
 	}
 
 	setPalette(colors: Map<number, string>): void {
@@ -290,13 +305,14 @@ export class PlaneRenderer {
 		};
 		const rect = (uniforms: Record<string, WebGLUniformLocation | null>, key: TileKey, scale: number[], entry: Texture) => {
 			const c = [key.cz, key.cy, key.cx];
-			gl.uniform4f(
-				uniforms.rect ?? null,
-				c[u]! * CHUNK * scale[u]!,
-				c[v]! * CHUNK * scale[v]!,
-				entry.width * scale[u]!,
-				entry.height * scale[v]!,
-			);
+			const left = c[u]! * CHUNK * scale[u]!;
+			const top = c[v]! * CHUNK * scale[v]!;
+			const width = entry.width * scale[u]!;
+			const height = entry.height * scale[v]!;
+			const shownWidth = Math.max(0, Math.min(width, this.extent[u] - left));
+			const shownHeight = Math.max(0, Math.min(height, this.extent[v] - top));
+			gl.uniform4f(uniforms.rect ?? null, left, top, shownWidth, shownHeight);
+			gl.uniform2f(uniforms.uvMax ?? null, shownWidth / width, shownHeight / height);
 		};
 
 		gl.disable(gl.BLEND);
