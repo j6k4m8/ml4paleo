@@ -41,6 +41,8 @@ export interface Pipeline {
 	error: string | null;
 	/** The model a training or prediction is for. */
 	model_id: string | null;
+	/** Who started it. */
+	created_by: string | null;
 }
 
 export interface ImageManifest {

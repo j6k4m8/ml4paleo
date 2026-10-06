@@ -480,11 +480,14 @@ def test_a_running_prediction_isnt_started_again(ada, settings, migrated_databas
     assert again.json()["detail"] == "A prediction with this model is already running."
     started = first.json()["pipeline_id"]
     assert pipeline_status(ada, project, started) == "waiting"
-    # The pipelines say which model they're for.
+    # The pipelines say which model they're for, and who started them.
+    me = ada.get("/api/auth/session").json()["user"]["id"]
     listed = ada.get(f"/api/projects/{project}/pipelines").json()
-    assert [(p["id"], p["model_id"]) for p in listed if p["kind"] == "prediction"] == [
-        (started, model["id"])
-    ]
+    assert [
+        (p["id"], p["model_id"], p["created_by"])
+        for p in listed
+        if p["kind"] == "prediction"
+    ] == [(started, model["id"], me)]
     # A new image is a new prediction, and the old one stops.
     add_image(settings, migrated_database_url, project)
     assert predict(ada, project, model).status_code == 202
