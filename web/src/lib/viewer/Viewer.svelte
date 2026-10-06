@@ -25,6 +25,7 @@
 	import Panel from "#lib/ui/Panel.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
 	import { ApiError, api, message } from "#lib/api.ts";
+	import { whileVisible } from "#lib/refresh.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
 	import { acceptParts, MAX_ACCEPT_VOXELS, readBox } from "../labels/accept";
@@ -150,10 +151,13 @@
 	});
 
 	const stopRefreshing = rois.keepFresh();
+	// Models trained or deleted, and predictions and proposals made, since.
+	const stopReloading = whileVisible(() => void loadPrediction(controller.signal));
 
 	onDestroy(() => {
 		controller.abort();
 		stopRefreshing();
+		stopReloading();
 		queue.stop();
 		labels?.stop();
 		images?.keepOnly(new Set());
