@@ -138,9 +138,10 @@
 						<span class="font-medium capitalize">{roi.kind}</span>
 						<span class="font-mono text-2xs text-ink-dim">{describe(roi).slice(roi.kind.length + 1)}</span>
 					</div>
-					<div class="grid grid-cols-2 gap-1">
+					<!-- Side by side when both fit, else one under the other. -->
+					<div class="flex flex-wrap gap-1">
 						<select
-							class="field"
+							class="field w-auto flex-1"
 							aria-label="Status of the {describe(roi)} ROI"
 							value={roi.status}
 							onchange={async (e) => {
@@ -153,7 +154,7 @@
 							<option value="skipped">skipped</option>
 						</select>
 						<select
-							class="field"
+							class="field w-auto flex-1"
 							aria-label="Split of the {describe(roi)} ROI"
 							value={roi.split}
 							onchange={async (e) => {
