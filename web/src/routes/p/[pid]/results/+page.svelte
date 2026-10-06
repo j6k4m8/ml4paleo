@@ -14,6 +14,7 @@
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 
 	interface Prediction {
+		artifact_id: string;
 		model_name: string | null;
 		committed_at: string;
 	}
@@ -29,6 +30,7 @@
 	type Format = "stl" | "obj" | "glb";
 
 	interface Meshes {
+		artifact_id: string;
 		segmentation_artifact_id: string | null;
 		info: {
 			units: string;
@@ -45,6 +47,7 @@
 	interface Export {
 		id: string;
 		source: Source;
+		source_artifact_id: string | null;
 		format: string;
 		filename: string;
 		status: "making" | "ready" | "failed";
@@ -52,6 +55,7 @@
 		progress: number;
 		error: string | null;
 		bytes: number;
+		created_at: string;
 		expires_at: string;
 		download_url: string | null;
 	}
@@ -80,6 +84,7 @@
 	let meshes: Meshes | null = $state(null);
 	// The image's dtype (numpy's notation, such as "<u2"), once there is one.
 	let imageDtype: string | null = $state(null);
+	let imageId: string | null = $state(null);
 	let exports: Export[] = $state([]);
 	let pipelines: Pipeline[] = $state([]);
 	let loaded = $state(false);
@@ -112,16 +117,17 @@
 	async function refresh() {
 		try {
 			projectName = (await api<{ name: string }>(`/api/projects/${pid}`)).name;
-			let image: { manifest: { dtype: string } } | null;
+			let image: { artifact_id: string; manifest: { dtype: string } } | null;
 			[prediction, segmentation, meshes, pipelines, image, exports] = await Promise.all([
 				api<Prediction>(`/api/projects/${pid}/prediction`).catch(missing),
 				api<Segmentation>(`/api/projects/${pid}/segmentation`).catch(missing),
 				api<Meshes>(`/api/projects/${pid}/meshes`).catch(missing),
 				api<Pipeline[]>(`/api/projects/${pid}/pipelines`),
-				api<{ manifest: { dtype: string } }>(`/api/projects/${pid}/image`).catch(missing),
+				api<{ artifact_id: string; manifest: { dtype: string } }>(`/api/projects/${pid}/image`).catch(missing),
 				api<Export[]>(`/api/projects/${pid}/exports`),
 			]);
 			imageDtype = image?.manifest.dtype ?? null;
+			imageId = image?.artifact_id ?? null;
 		} catch (e) {
 			error = message(e);
 		} finally {
@@ -195,7 +201,20 @@
 		start(`/api/projects/${pid}/exports`, { source, format }, (text) => (exportError = text));
 	}
 
+	// What each source is now, to flag exports made from an older one.
+	const current = $derived.by(
+		(): Record<Source, string | null> => ({
+			image: imageId,
+			prediction: prediction?.artifact_id ?? null,
+			segmentation: segmentation?.artifact_id ?? null,
+			meshes: meshes?.artifact_id ?? null,
+		}),
+	);
+	let forgetting = $state(new Set<string>());
+
 	async function forget(item: Export) {
+		if (forgetting.has(item.id)) return;
+		forgetting = new Set([...forgetting, item.id]);
 		exportError = "";
 		try {
 			await api(`/api/projects/${pid}/exports/${item.id}`, { method: "DELETE" });
@@ -203,6 +222,7 @@
 			exportError = message(e);
 		}
 		await refresh();
+		forgetting = new Set([...forgetting].filter((id) => id !== item.id));
 	}
 
 	function size(bytes: number): string {
@@ -386,13 +406,21 @@
 				<ul class="flex flex-col divide-y divide-edge rounded-sm border border-edge bg-field">
 					{#each exports as item (item.id)}
 						<li class="flex flex-wrap items-center gap-2 px-2 py-1.5">
-							<span class="min-w-0 flex-1 truncate font-mono text-2xs">{item.filename}</span>
+							<span class="flex min-w-0 flex-1 flex-col">
+								<span class="truncate font-mono text-2xs">{item.filename}</span>
+								<span class="text-2xs text-ink-dim">
+									{new Date(item.created_at).toLocaleString()}
+									{#if item.source_artifact_id && current[item.source] && item.source_artifact_id !== current[item.source]}
+										· <span class="text-warn">from an older {item.source}</span>
+									{/if}
+								</span>
+							</span>
 							{#if item.status === "making"}
 								<progress class="h-1 w-32 accent-accent" max="1" value={item.progress}></progress>
 								<span class="font-mono text-2xs text-ink-dim">{Math.round(item.progress * 100)}%</span>
 							{:else if item.status === "ready" && item.download_url}
 								<span class="text-2xs text-ink-dim">
-									{size(item.bytes)} · kept until {new Date(item.expires_at).toLocaleDateString()}
+									{size(item.bytes)} · kept until {new Date(item.expires_at).toLocaleString()}
 								</span>
 								<a class="btn btn-primary hover:no-underline" href={item.download_url} download={item.filename}>
 									<Download size={13} />
@@ -403,6 +431,7 @@
 							{/if}
 							<button
 								class="btn btn-ghost"
+								disabled={forgetting.has(item.id)}
 								title={item.status === "making" ? "Stop" : "Delete"}
 								aria-label="{item.status === 'making' ? 'Stop' : 'Delete'} {item.filename}"
 								onclick={() => forget(item)}

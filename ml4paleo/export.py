@@ -45,7 +45,11 @@ class Parts(io.RawIOBase):
     ):
         self._put = put
         self._part_bytes = part_bytes or PART_BYTES
-        self._buffer = bytearray()
+        # One part's worth, filled and handed over again and again, so memory
+        # stays at a part however large the writes are.
+        self._buffer = bytearray(self._part_bytes)
+        self._filled = 0
+        self._aborted = False
         self.sizes: list[int] = []
 
     def writable(self) -> bool:
@@ -53,21 +57,29 @@ class Parts(io.RawIOBase):
 
     def write(self, data: Any) -> int:
         view = memoryview(data).cast("B")
-        self._buffer += view
-        while len(self._buffer) >= self._part_bytes:
-            self._emit(bytes(self._buffer[: self._part_bytes]))
-            del self._buffer[: self._part_bytes]
-        return view.nbytes
+        written = view.nbytes
+        while view.nbytes and not self._aborted:
+            take = min(self._part_bytes - self._filled, view.nbytes)
+            self._buffer[self._filled : self._filled + take] = view[:take]
+            self._filled += take
+            view = view[take:]
+            if self._filled == self._part_bytes:
+                self._emit()
+        return written
+
+    def abort(self) -> None:
+        """Drop everything written from now on (the job is stopping)."""
+        self._aborted = True
 
     def finish(self) -> list[int]:
-        if self._buffer or not self.sizes:
-            self._emit(bytes(self._buffer))
-            self._buffer.clear()
+        if self._filled or not self.sizes:
+            self._emit()
         return self.sizes
 
-    def _emit(self, data: bytes) -> None:
-        self._put(len(self.sizes), data)
-        self.sizes.append(len(data))
+    def _emit(self) -> None:
+        self._put(len(self.sizes), bytes(memoryview(self._buffer)[: self._filled]))
+        self.sizes.append(self._filled)
+        self._filled = 0
 
 
 def open_archive(out: Parts) -> zipfile.ZipFile:
@@ -142,22 +154,29 @@ def slab_depth(
 ) -> int:
     """
     How many z to read at once: a whole chunk's depth (so no chunk is read
-    twice) when that fits in half the budget, else fewer.
+    twice) when that fits in half the budget, else fewer, and 0 when not
+    even one z of every channel fits (then read a channel at a time).
     """
     channels, _, y, x = shape_czyx
     per_z = max(1, channels * y * x * itemsize)
-    return int(max(1, min(chunk_z, budget_bytes // 2 // per_z)))
+    return int(min(chunk_z, budget_bytes // 2 // per_z))
 
 
 def slices(array: Any, depth: int) -> Iterator[tuple[int, int, np.ndarray]]:
     """
     Every (channel, z, plane) of a (c, z, y, x) or (z, y, x) array, read
-    `depth` z at a time, in z order and then channel order.
+    `depth` z at a time (with depth 0, one plane at a time), in z order and
+    then channel order.
     """
     planar = len(array.shape) == 3
     total = array.shape[-3]
-    for z0 in range(0, total, depth):
-        z1 = min(total, z0 + depth)
+    channels = 1 if planar else array.shape[0]
+    for z0 in range(0, total, max(1, depth)):
+        z1 = min(total, z0 + max(1, depth))
+        if depth == 0 and not planar:
+            for c in range(channels):
+                yield c, z0, np.asarray(array[c, z0])
+            continue
         slab = np.asarray(array[z0:z1] if planar else array[:, z0:z1])
         if planar:
             slab = slab[np.newaxis]

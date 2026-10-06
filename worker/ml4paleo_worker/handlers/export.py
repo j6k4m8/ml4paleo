@@ -6,8 +6,10 @@ Grants, in order: the source artifact (read) and the export artifact
 sizes, which the API uses to serve them as one file.
 """
 
+import contextlib
 import json
 import re
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -29,6 +31,7 @@ from ml4paleo.segmentation.predict import open_prediction
 from ml4paleo.storage import (
     MANIFEST_KEY,
     StorageGrant,
+    delete_object,
     get_bytes,
     object_store,
     put_bytes,
@@ -51,10 +54,14 @@ def files(ctx: JobContext) -> dict[str, Any]:
     source, export = ctx.grants
     store = object_store(source)
     listed = sorted(
-        (meta["path"], int(meta["size"]))
-        for batch in obstore.list(store, chunk_size=1000)
-        for meta in batch
-        if meta["path"] not in SKIP and not meta["path"].startswith("scratch/")
+        (
+            (meta["path"], int(meta["size"]))
+            for batch in obstore.list(store, chunk_size=1000)
+            for meta in batch
+            if meta["path"] not in SKIP and not meta["path"].startswith("scratch/")
+        ),
+        # A zarr group's own metadata first, as zipped OME-Zarr expects.
+        key=lambda item: (item[0] != "zarr.json", item[0]),
     )
     meshes = ctx.payload["source"] == "meshes"
     names, info = _mesh_names(source) if meshes else ({}, None)
@@ -62,7 +69,7 @@ def files(ctx: JobContext) -> dict[str, Any]:
     total = sum(size for _, size in listed) or 1
     done = 0
     out = Parts(lambda index, data: put_bytes(export, part_key(index), data))
-    with open_archive(out) as archive:
+    with _archive(out) as archive:
         for key, size in listed:
             name = folder + names.get(key, key)
             if key == MESH_INFO and info is not None:
@@ -89,9 +96,13 @@ def _mesh_names(source: StorageGrant) -> tuple[dict[str, str], bytes]:
     names: dict[str, str] = {}
     taken: set[str] = set()
     for entry in info.get("classes", []):
-        stem = re.sub(r"[^a-z0-9]+", "-", str(entry["name"]).lower()).strip("-")
-        if not stem or stem in taken:
-            stem = f"{stem or 'class'}-{entry['value']}"
+        base = re.sub(r"[^a-z0-9]+", "-", str(entry["name"]).lower()).strip("-")
+        stem = base or "class"
+        if stem in taken:
+            stem = f"{stem}-{entry['value']}"
+        # Even "bone-3" might be some other class's name already.
+        while stem in taken:
+            stem += "-"
         taken.add(stem)
         files = {}
         for extension, key in entry["files"].items():
@@ -119,18 +130,25 @@ def images(ctx: JobContext) -> dict[str, Any]:
             f"PNG holds 8- or 16-bit unsigned values, and this image is "
             f"{np.dtype(array.dtype)}: export TIFF instead"
         )
+    itemsize = np.dtype(array.dtype).itemsize
+    plane = shape[2] * shape[3] * itemsize
+    if plane > ctx.memory_budget_bytes // 2:
+        raise PermanentError(
+            f"One slice is {plane / 1024**3:.1f} GB, more than this worker can "
+            "hold; export zarr instead"
+        )
     depth = slab_depth(
         shape,  # type: ignore[arg-type]
-        np.dtype(array.dtype).itemsize,
+        itemsize,
         int(array.chunks[-3]),
         ctx.memory_budget_bytes,
     )
     name = slice_names(shape, fmt, ctx.payload["folder"].rstrip("/"))  # type: ignore[arg-type]
     count = shape[0] * shape[1]
     out = Parts(lambda index, data: put_bytes(export, part_key(index), data))
-    with open_archive(out) as archive:
-        for done, (c, z, plane) in enumerate(slices(array, depth), start=1):
-            data = encode_slice(plane, fmt)
+    with _archive(out) as archive:
+        for done, (c, z, values) in enumerate(slices(array, depth), start=1):
+            data = encode_slice(values, fmt)
             add_entry(archive, name(c, z), [data], len(data))
             if done % 8 == 0 or done == count:
                 ctx.progress(0.99 * done / count)
@@ -138,9 +156,27 @@ def images(ctx: JobContext) -> dict[str, Any]:
     return _finish(ctx, out, count)
 
 
+@contextlib.contextmanager
+def _archive(out: Parts) -> Iterator[Any]:
+    """The archive, which writes nothing more if the job stops part-way."""
+    with open_archive(out) as archive:
+        try:
+            yield archive
+        except BaseException:
+            out.abort()
+            raise
+
+
 def _finish(ctx: JobContext, out: Parts, entries: int) -> dict[str, Any]:
     sizes = out.finish()
     _, export = ctx.grants
+    # A retry that came out shorter (say, on another worker's library
+    # versions) leaves parts past the end; they'd count against the quota.
+    for batch in obstore.list(object_store(export), prefix="parts/", chunk_size=1000):
+        for meta in batch:
+            index = meta["path"].rsplit("/", 1)[-1]
+            if index.isdigit() and int(index) >= len(sizes):
+                delete_object(export, meta["path"])
     write_manifest(
         export,
         {

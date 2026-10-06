@@ -5,6 +5,7 @@ its parts with byte ranges, hands out the same one when asked again, and
 lets it go when deleted.
 """
 
+import datetime
 import io
 import json
 import pathlib
@@ -17,20 +18,24 @@ import zipfile
 import numpy as np
 import pytest
 import zarr
-from helpers import SECRET_KEY, add_worker, run_db, signup
+from helpers import SECRET_KEY, add_worker, bearer, run_db, signup
 from ml4paleo_server import artifacts
+from ml4paleo_server.db import Artifact, create_sessionmaker
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
+from ml4paleo_worker.context import JobContext
 from ml4paleo_worker.handlers import HANDLERS
+from ml4paleo_worker.handlers.export import _finish, _mesh_names
 from ml4paleo_worker.main import Worker
 from PIL import Image
+from sqlalchemy import select, update
 
 import ml4paleo.export
 from ml4paleo.ome import OmeImage
-from ml4paleo.protocol import WorkerCaps
+from ml4paleo.protocol import JobLease, WorkerCaps
 from ml4paleo.segmentation.predict import create_prediction
-from ml4paleo.storage import put_bytes, write_manifest
+from ml4paleo.storage import StorageGrant, get_bytes, put_bytes, write_manifest
 
 SHAPE = (6, 10, 14)
 BONE = 2
@@ -77,7 +82,12 @@ def add_heads(settings, database_url, project: str):
             0
         ] = image()
         head.state = "committed"
-        head.manifest = {"shape_czyx": [1, *SHAPE], "window": [0, 4000]}
+        head.bytes = 5000
+        head.manifest = {
+            "shape_czyx": [1, *SHAPE],
+            "dtype": "<u2",
+            "window": [0, 4000],
+        }
         await artifacts.set_head(db, head)
 
         head = await artifacts.create_staging(
@@ -268,3 +278,167 @@ def test_others_cant_reach_exports(new_browser, settings, migrated_database_url)
     assert bob.post(base, json={"source": "image", "format": "tiff"}).status_code == 404
     assert bob.request("DELETE", f"{base}/{export['id']}").status_code == 404
     assert bob.get(f"{base}/{export['id']}/download").status_code == 404
+
+
+def project_with_heads(
+    new_browser, settings, database_url, browser_settings=None, username="ada"
+):
+    ada = new_browser(browser_settings) if browser_settings else new_browser()
+    signup(ada, username=username)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    add_heads(settings, database_url, project)
+    return ada, project
+
+
+def test_stopping_an_export_then_asking_again_starts_over(
+    new_browser, settings, migrated_database_url
+):
+    ada, project = project_with_heads(new_browser, settings, migrated_database_url)
+    base = f"/api/projects/{project}/exports"
+    first = ada.post(base, json={"source": "image", "format": "tiff"}).json()
+    # A worker has it when it's stopped, so it's still running for a moment.
+    token = add_worker(migrated_database_url)
+    worker = new_browser()
+    caps = {"version": "test", "kinds": ["export.images"]}
+    worker.post("/api/worker/v1/hello", json={"caps": caps}, headers=bearer(token))
+    lease = worker.post(
+        "/api/worker/v1/claim",
+        json={"caps": caps, "wait_seconds": 0},
+        headers=bearer(token),
+    ).json()["job"]
+    assert lease["job_id"] == first["pipeline_id"]
+    assert ada.request("DELETE", f"{base}/{first['id']}").status_code == 204
+    again = ada.post(base, json={"source": "image", "format": "tiff"})
+    assert again.status_code == 202
+    assert again.json()["id"] != first["id"]
+
+
+def test_exports_that_cant_work_are_refused_up_front(
+    new_browser, settings, migrated_database_url
+):
+    ada, project = project_with_heads(new_browser, settings, migrated_database_url)
+    base = f"/api/projects/{project}/exports"
+
+    async def float_image(db):
+        image = await artifacts.head(db, uuid.UUID(project), "image")
+        assert image is not None
+        image.manifest = {**(image.manifest or {}), "dtype": "<f4"}
+
+    run_db(migrated_database_url, float_image)
+    refused = ada.post(base, json={"source": "image", "format": "png"})
+    assert refused.status_code == 422
+    assert "TIFF" in refused.json()["detail"]
+
+    full = settings.model_copy(
+        update={"quota": settings.quota.model_copy(update={"storage_gb": 0})}
+    )
+    bob, other = project_with_heads(
+        new_browser,
+        settings,
+        migrated_database_url,
+        browser_settings=full,
+        username="bob",
+    )
+    too_big = bob.post(
+        f"/api/projects/{other}/exports", json={"source": "image", "format": "zarr"}
+    )
+    assert too_big.status_code == 403
+    assert "storage left" in too_big.json()["detail"]
+
+
+def test_downloads_keep_their_export_and_deletes_wait_a_little(
+    new_browser, settings, migrated_database_url, live_server
+):
+    ada, project = project_with_heads(new_browser, settings, migrated_database_url)
+    base = f"/api/projects/{project}/exports"
+    export = ada.post(base, json={"source": "segmentation", "format": "zarr"}).json()
+    run_worker(
+        migrated_database_url, live_server, ada, project, [export["pipeline_id"]]
+    )
+    export_id = uuid.UUID(export["id"])
+
+    async def expire_soon(db):
+        await db.execute(
+            update(Artifact)
+            .where(Artifact.id == export_id)
+            .values(expires_at=artifacts.now() + datetime.timedelta(minutes=1))
+        )
+
+    async def expiry(db):
+        return await db.scalar(
+            select(Artifact.expires_at).where(Artifact.id == export_id)
+        )
+
+    run_db(migrated_database_url, expire_soon)
+    ready = next(e for e in ada.get(base).json() if e["id"] == export["id"])
+    assert ada.get(ready["download_url"]).status_code == 200
+    kept = run_db(migrated_database_url, expiry)
+    assert kept > artifacts.now() + datetime.timedelta(hours=5)
+
+    # Deleted, it's gone from the list at once, but its files stay a while.
+    assert ada.request("DELETE", f"{base}/{export['id']}").status_code == 204
+
+    async def collect(db):
+        return await artifacts.collect_garbage(create_sessionmaker(db.bind), settings)
+
+    async def state(db):
+        return await db.scalar(select(Artifact.state).where(Artifact.id == export_id))
+
+    run_db(migrated_database_url, collect)
+    assert run_db(migrated_database_url, state) == "committed"
+
+    async def long_ago(db):
+        await db.execute(
+            update(Artifact)
+            .where(Artifact.id == export_id)
+            .values(expires_at=artifacts.now() - datetime.timedelta(hours=1))
+        )
+
+    run_db(migrated_database_url, long_ago)
+    run_db(migrated_database_url, collect)
+    assert run_db(migrated_database_url, state) == "deleted"
+
+
+def test_mesh_names_never_collide(tmp_path):
+    grant = StorageGrant(url=tmp_path.as_uri(), access="rw")
+    classes = [
+        ("bone-3", 1),
+        ("Bone", 2),
+        ("bone", 3),
+        ("Class 7", 4),
+        ("???", 7),
+        ("", 8),
+    ]
+    info = {
+        "classes": [
+            {"value": v, "name": n, "files": {"stl": f"{v}.stl"}} for n, v in classes
+        ]
+    }
+    put_bytes(grant, "mesh_info.json", json.dumps(info).encode())
+    names, rewritten = _mesh_names(grant)
+    assert len(set(names.values())) == len(classes)
+    files = [c["files"]["stl"] for c in json.loads(rewritten)["classes"]]
+    assert files == [names[f"{v}.stl"] for _, v in classes]
+
+
+def test_a_shorter_retry_removes_the_parts_past_its_end(tmp_path):
+    export = StorageGrant(url=(tmp_path / "export").as_uri(), access="rw")
+    for index in range(5):
+        put_bytes(export, ml4paleo.export.part_key(index), b"old")
+    lease = JobLease(
+        job_id=uuid.uuid4(),
+        kind="export.files",
+        payload={"format": "zarr", "source": "segmentation"},
+        lease_token="t",
+        lease_expires_at=artifacts.now(),
+        attempt=2,
+        grants=[StorageGrant(url=(tmp_path / "source").as_uri(), access="r"), export],
+    )
+    out = ml4paleo.export.Parts(
+        lambda index, data: put_bytes(export, ml4paleo.export.part_key(index), data),
+        part_bytes=4,
+    )
+    out.write(b"0123456789")
+    _finish(JobContext(lease), out, entries=1)
+    kept = [get_bytes(export, ml4paleo.export.part_key(i)) for i in range(5)]
+    assert kept == [b"0123", b"4567", b"89", None, None]
