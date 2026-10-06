@@ -285,6 +285,8 @@
 		store
 			.request(tile.id)
 			.then((chunk) => {
+				// The layer may show another store by now, under the same names.
+				if (![prediction, segmentation, labels?.store].includes(store)) return schedule();
 				if (!renderer || renderer.hasLabels(named.id, at)) return;
 				if (sliceIndex(levels[0]!, view()) !== at) return schedule();
 				renderer.uploadLabels(named, at, chunk);
