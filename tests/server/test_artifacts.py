@@ -30,12 +30,14 @@ from ml4paleo_worker.client import ServerClient
 from ml4paleo_worker.main import Worker as WorkerLoop
 from sqlalchemy import select, update
 
+from ml4paleo import storage
 from ml4paleo.ome import OmeImage, build_pyramid, write_from_provider
 from ml4paleo.storage import (
     StorageGrant,
     get_bytes,
     object_store,
     put_bytes,
+    put_file,
     write_manifest,
 )
 from ml4paleo.volume_providers import NumpyVolumeProvider
@@ -539,6 +541,28 @@ def test_an_upload_cannot_land_after_its_job_finished(
         meta["path"] for batch in obstore.list(object_store(files)) for meta in batch
     ]
     assert listed == ["kept"]
+
+
+def test_files_stream_through_the_storage_proxy(
+    settings, migrated_database_url, live_server, tmp_path, monkeypatch
+):
+    project_id = make_project(migrated_database_url)
+    _, job_id = stage(migrated_database_url, project_id)
+    client = ServerClient(add_worker(migrated_database_url), base_url=live_server)
+    lease = client.claim(CAPS, wait_seconds=0)
+    grant = lease.grants[0]
+    assert grant.scheme == "http"
+    data = np.random.default_rng(0).bytes(6 * 1024 * 1024)
+    path = tmp_path / "mesh.stl"
+    path.write_bytes(data)
+    put_file(grant, "meshes/2.stl", path)
+    assert get_bytes(grant, "meshes/2.stl") == data
+    # Files the proxy wouldn't take are refused before any of them is sent.
+    monkeypatch.setattr(storage, "PROXY_MAX_OBJECT_BYTES", len(data) - 1)
+    with pytest.raises(ValueError, match="storage proxy"):
+        put_file(grant, "meshes/3.stl", path)
+    assert get_bytes(grant, "meshes/3.stl") is None
+    client.close()
 
 
 def test_the_grant_root_is_not_an_object(settings, migrated_database_url, live_server):

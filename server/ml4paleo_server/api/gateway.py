@@ -4,6 +4,7 @@ read a project's artifacts through the API, on the same origin, signed in as
 themselves.
 
     GET|HEAD /api/projects/{id}/artifacts/{artifact}/zarr/{key}
+    GET|HEAD /api/projects/{id}/artifacts/{artifact}/files/{key}   (the same, for downloads)
 
 Only members of the project can read, and only committed artifacts (or ones
 since replaced but not yet deleted). Committed artifacts never change, so
@@ -27,6 +28,11 @@ router = APIRouter(
     prefix="/api/projects/{project_id}/artifacts/{artifact_id}/zarr",
     tags=["data"],
 )
+# Meshes and exports read better as files than as zarr keys.
+files_router = APIRouter(
+    prefix="/api/projects/{project_id}/artifacts/{artifact_id}/files",
+    tags=["data"],
+)
 
 READABLE = ("committed", "superseded")
 IMMUTABLE = {"Cache-Control": "private, max-age=31536000, immutable"}
@@ -37,6 +43,12 @@ def zarr_path(project_id: uuid.UUID, artifact_id: uuid.UUID) -> str:
     return f"/api/projects/{project_id}/artifacts/{artifact_id}/zarr/"
 
 
+def files_path(project_id: uuid.UUID, artifact_id: uuid.UUID) -> str:
+    return f"/api/projects/{project_id}/artifacts/{artifact_id}/files/"
+
+
+@files_router.head("/{key:path}", summary="Head an artifact file to download")
+@files_router.get("/{key:path}", summary="Download an artifact file")
 @router.head("/{key:path}", summary="Head an artifact file")
 @router.get("/{key:path}", summary="Read an artifact file")
 async def read(

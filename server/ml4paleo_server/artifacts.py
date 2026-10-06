@@ -57,6 +57,9 @@ KEEP_SUPERSEDED_PROPOSALS = ABANDONED_AFTER
 # Each person's newest proposal in a project is a head of its own, in a slot
 # named for them (see `proposal_slot`).
 PROPOSAL_SLOTS = "proposal:"
+# Expired artifacts (exports) are deleted this long after they expire, so
+# downloads already running can finish.
+EXPIRED_GRACE = datetime.timedelta(minutes=30)
 
 
 def now() -> datetime.datetime:
@@ -330,7 +333,10 @@ def _collectable(settings: Settings):
                         Artifact.head_slot.startswith(PROPOSAL_SLOTS, autoescape=True),
                         Artifact.state_changed_at < current - KEEP_SUPERSEDED_PROPOSALS,
                     ),
-                    and_(Artifact.state == "committed", Artifact.expires_at < current),
+                    and_(
+                        Artifact.state == "committed",
+                        Artifact.expires_at < current - EXPIRED_GRACE,
+                    ),
                 ),
             ),
         ),

@@ -1890,6 +1890,9 @@ dependencies = [
 dicom = [
     { name = "pydicom" },
 ]
+export = [
+    { name = "tifffile" },
+]
 mesh = [
     { name = "numpy-stl" },
     { name = "scikit-image" },
@@ -1948,12 +1951,13 @@ requires-dist = [
     { name = "scikit-image", marker = "extra == 'rf'", specifier = ">=0.24.0" },
     { name = "scikit-learn", marker = "extra == 'rf'", specifier = ">=1.6.1" },
     { name = "scipy", marker = "extra == 'rf'", specifier = ">=1.13" },
+    { name = "tifffile", marker = "extra == 'export'", specifier = ">=2024.8.10" },
     { name = "tqdm", specifier = ">=4.65.0" },
     { name = "zarr", specifier = ">=3.4" },
     { name = "zmesh", marker = "extra == 'mesh'", specifier = ">=1.11.0" },
     { name = "zstandard", specifier = ">=0.23" },
 ]
-provides-extras = ["dicom", "rf", "mesh", "v1"]
+provides-extras = ["dicom", "rf", "mesh", "export", "v1"]
 
 [package.metadata.requires-dev]
 bossdb = [
@@ -2008,13 +2012,13 @@ version = "0.2.0.dev0"
 source = { editable = "worker" }
 dependencies = [
     { name = "httpx2" },
-    { name = "ml4paleo", extra = ["dicom", "rf"] },
+    { name = "ml4paleo", extra = ["dicom", "export", "mesh", "rf"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx2", specifier = ">=2.13" },
-    { name = "ml4paleo", extras = ["dicom", "rf"], editable = "." },
+    { name = "ml4paleo", extras = ["dicom", "export", "mesh", "rf"], editable = "." },
 ]
 
 [[package]]
