@@ -253,6 +253,45 @@ def test_failures_back_off_then_fail_the_pipeline(migrated_database_url):
     )
 
 
+@pytest.mark.parametrize(
+    ("retryable", "expected"), [(False, "failed"), (True, "queued")]
+)
+def test_a_pipeline_can_refuse_a_success(migrated_database_url, retryable, expected):
+    async def scenario(db):
+        worker = await make_worker(db)
+        job = await jobs.enqueue(db, "noop", {})
+        claimed = await jobs.claim(db, worker, CPU)
+
+        async def next_steps(done):
+            await jobs.enqueue(db, "noop", {}, pipeline=done, depends_on=[done])
+            raise jobs.Rejected("It won't fit.", retryable=retryable)
+
+        with pytest.raises(jobs.Rejected):
+            await jobs.complete(
+                db, job.id, worker, claimed.lease_token, {"ok": 1}, after=next_steps
+            )
+        added = await db.scalars(select(Job.id).where(Job.id != job.id))
+        outcomes = await db.scalars(
+            select(JobAttempt.outcome).where(JobAttempt.job_id == job.id)
+        )
+        return (
+            await status_of(db, job),
+            job.result,
+            job.error,
+            added.all(),
+            outcomes.all(),
+        )
+
+    # The success and the jobs it added are undone; the attempt failed.
+    assert run_db(migrated_database_url, scenario) == (
+        expected,
+        None,
+        "It won't fit.",
+        [],
+        ["failed"],
+    )
+
+
 def test_permanent_failures_are_not_retried(migrated_database_url):
     async def scenario(db):
         worker = await make_worker(db)
