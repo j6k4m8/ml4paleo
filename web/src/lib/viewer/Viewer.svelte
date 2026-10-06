@@ -454,52 +454,55 @@
 {/snippet}
 
 <div class="flex h-full flex-col bg-chrome text-ink">
-	<!-- Options bar: the active tool's settings. -->
-	<div class="flex h-9 shrink-0 items-center gap-3 overflow-x-auto border-b border-edge bg-panel px-3 whitespace-nowrap">
-		<span class="flex items-center gap-1.5 font-medium">
-			{#each TOOLS as entry (entry.tool)}
-				{#if entry.tool === viewer.tool}<entry.icon size={14} class="text-ink-dim" />{entry.label}{/if}
-			{/each}
-		</span>
-		<span class="h-4 w-px bg-line"></span>
-		{#if viewer.tool === "brush" || viewer.tool === "eraser"}
-			<label class="flex items-center gap-2 text-ink-dim">
-				Size
-				<input class="w-28" type="range" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} />
-				<input class="field w-14 font-mono" type="number" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} aria-label="Brush radius" />
-			</label>
-		{/if}
-		{#if viewer.tool === "brush" || viewer.tool === "polygon"}
-			<label class="flex items-center gap-1.5 text-ink-dim">
-				<input type="checkbox" bind:checked={viewer.protectLabels} /> Only unlabeled voxels
-			</label>
-		{/if}
-		{#if viewer.tool === "roi"}
-			<label class="flex items-center gap-2 text-ink-dim">
-				Depth
-				<input class="w-28" type="range" min="1" max="256" step="1" bind:value={viewer.roiDepth} />
-				<span class="w-24 font-mono text-ink">{viewer.roiDepth === 1 ? "slice" : `${viewer.roiDepth} voxels`}</span>
-			</label>
-		{/if}
-		{#if viewer.tool === "navigate"}
-			<div class="flex overflow-hidden rounded-sm border border-edge" role="radiogroup" aria-label="Layout">
-				{#each LAYOUTS as layout (layout)}
-					<button
-						role="radio"
-						aria-checked={viewer.layout === layout}
-						class="flex h-6 items-center gap-1 px-2 {viewer.layout === layout ? 'bg-accent text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
-						onclick={() => (viewer.layout = layout)}
-					>
-						{#if layout === "four"}<LayoutGrid size={12} />{/if}
-						{LAYOUT_NAMES[layout]}
-					</button>
+	<!-- Options bar: the active tool's settings, scrolling sideways when they don't fit. -->
+	<div class="flex h-9 shrink-0 items-center border-b border-edge bg-panel">
+		<div class="flex min-w-0 flex-1 items-center gap-3 self-stretch overflow-x-auto px-3 whitespace-nowrap">
+			<span class="flex shrink-0 items-center gap-1.5 font-medium">
+				{#each TOOLS as entry (entry.tool)}
+					{#if entry.tool === viewer.tool}<entry.icon size={14} class="text-ink-dim" />{entry.label}{/if}
 				{/each}
-			</div>
-			<button class="btn" onclick={fit} title="Fit the image (0)"><Maximize2 size={12} /> Fit</button>
-		{/if}
-		<span class="ml-auto hidden truncate text-2xs text-ink-faint lg:inline">{hint}</span>
+			</span>
+			<span class="h-4 w-px shrink-0 bg-line"></span>
+			{#if viewer.tool === "brush" || viewer.tool === "eraser"}
+				<label class="flex shrink-0 items-center gap-2 text-ink-dim">
+					Size
+					<input class="w-28" type="range" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} />
+					<input class="field w-14 font-mono" type="number" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} aria-label="Brush radius" />
+				</label>
+			{/if}
+			{#if viewer.tool === "brush" || viewer.tool === "polygon"}
+				<label class="flex shrink-0 items-center gap-1.5 text-ink-dim">
+					<input type="checkbox" bind:checked={viewer.protectLabels} /> Only unlabeled voxels
+				</label>
+			{/if}
+			{#if viewer.tool === "roi"}
+				<label class="flex shrink-0 items-center gap-2 text-ink-dim">
+					Depth
+					<input class="w-28" type="range" min="1" max="256" step="1" bind:value={viewer.roiDepth} />
+					<span class="w-24 font-mono text-ink">{viewer.roiDepth === 1 ? "slice" : `${viewer.roiDepth} voxels`}</span>
+				</label>
+			{/if}
+			{#if viewer.tool === "navigate"}
+				<div class="flex shrink-0 overflow-hidden rounded-sm border border-edge" role="radiogroup" aria-label="Layout">
+					{#each LAYOUTS as layout (layout)}
+						<button
+							role="radio"
+							aria-checked={viewer.layout === layout}
+							class="flex h-6 items-center gap-1 px-2 {viewer.layout === layout ? 'bg-accent text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
+							onclick={() => (viewer.layout = layout)}
+						>
+							{#if layout === "four"}<LayoutGrid size={12} />{/if}
+							{LAYOUT_NAMES[layout]}
+						</button>
+					{/each}
+				</div>
+				<button class="btn shrink-0" onclick={fit} title="Fit the image (0)"><Maximize2 size={12} /> Fit</button>
+			{/if}
+			<span class="ml-auto hidden truncate text-2xs text-ink-faint lg:inline">{hint}</span>
+		</div>
+		<!-- Outside the scrolling part, so it's always in reach. -->
 		<button
-			class="btn btn-ghost ml-auto md:hidden"
+			class="btn btn-ghost mx-1.5 shrink-0 md:hidden"
 			aria-label="Panels"
 			aria-expanded={dockOpen}
 			onclick={() => (dockOpen = !dockOpen)}
