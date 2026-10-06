@@ -220,8 +220,10 @@
 						<span>
 							Ask for an email address
 							<span class="block text-2xs text-ink-dim">
-								Until it's confirmed, an account has starter limits: {limitOf(starter.storage_gb, (n) => `${n} GB`)} of storage
-								and {limitOf(starter.trained_models, String)}
+								While this is on, an account whose address isn't confirmed has starter limits: {limitOf(
+									starter.storage_gb,
+									(n) => `${n} GB`,
+								)} of storage and {limitOf(starter.trained_models, String)}
 								{starter.trained_models === 1 ? "trained model" : "trained models"}, unless you set its limits.
 							</span>
 						</span>
