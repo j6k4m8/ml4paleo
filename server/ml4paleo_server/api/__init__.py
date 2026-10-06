@@ -9,6 +9,7 @@ from . import (
     gateway,
     labels,
     me,
+    models,
     pipelines,
     projects,
     rois,
@@ -28,6 +29,7 @@ ROUTERS = [
     gateway.router,
     labels.router,
     rois.router,
+    models.router,
     worker.router,
     storage_proxy.router,
 ]

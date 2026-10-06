@@ -791,3 +791,67 @@ class Roi(TimestampMixin, Base):
         CheckConstraint("kind IN ('cube', 'slice')", name="kind"),
         CheckConstraint("split IN ('train', 'val')", name="split"),
     )
+
+
+class TrainingSet(Base):
+    """
+    What a model trained on, pinned: the image, the label chunks (by content
+    hash) at one moment, the ROIs, and the classes. Its id is the SHA-256 of
+    its manifest, which lives in project storage (`training/<id>/`); the same
+    labels and ROIs give the same training set.
+    """
+
+    __tablename__ = "training_sets"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    # Counts and ids from the manifest, for showing without reading it.
+    summary: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class TrainedModel(Base):
+    """
+    A segmentation model of a project. Its state follows its job and
+    artifact: training while the job runs, ready once the artifact commits,
+    failed if the job fails, and gone once deleted (which frees the owner's
+    trained-model slot).
+    """
+
+    __tablename__ = "models"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(100))
+    plugin: Mapped[str] = mapped_column(String(32))
+    plugin_version: Mapped[str | None] = mapped_column(String(32))
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    training_set_id: Mapped[str] = mapped_column(
+        ForeignKey("training_sets.id", ondelete="CASCADE"), index=True
+    )
+    # The project's class values, in the model's order (1..K).
+    class_values: Mapped[list[int]] = mapped_column(ARRAY(SmallInteger))
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL")
+    )
+    artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL")
+    )
+    metrics: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # Whether it counts against the project owner's trained-model quota.
+    holds_slot: Mapped[bool] = mapped_column(default=False, server_default=false())
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    deleted_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )

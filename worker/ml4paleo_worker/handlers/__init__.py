@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..context import JobContext
-from . import ingest, noop
+from . import ingest, noop, train
 
 Handler = Callable[[JobContext], dict[str, Any]]
 
@@ -20,4 +20,5 @@ HANDLERS: dict[str, Handler] = {
     "ingest.slab": ingest.slab,
     "pyramid.level": ingest.pyramid,
     "artifact.finalize": ingest.finalize,
+    "model.train": train.run,
 }
