@@ -246,6 +246,7 @@ def test_random_forest_learns_from_sparse_labels(tmp_path):
 
     class Ctx:
         threads = 2
+        memory_budget_bytes = 4 * 1024**3
 
         def __init__(self):
             self.fractions = []
@@ -280,6 +281,46 @@ def test_random_forest_learns_from_sparse_labels(tmp_path):
     assert agreement > 0.9
 
 
+def test_random_forest_samples_fit_the_memory_budget(tmp_path):
+    from ml4paleo.segmentation.plugins.rf import samples_that_fit
+
+    plugin = get_plugin("rf")()
+    params = plugin.Params(
+        n_estimators=10, max_depth=4, samples_per_class=2000, sigma_max=1.0
+    )
+    assert samples_that_fit(10**9, 2, 5, 1, params) == 2000
+    tight = samples_that_fit(100_000, 2, 5, 1, params)
+    assert 100 <= tight < 2000
+    assert tight < samples_that_fit(200_000, 2, 5, 1, params)
+    assert samples_that_fit(100_000, 2, 5, 4, params) < tight
+    # Without max_depth to stop them, trees grow with the samples.
+    deep = plugin.Params(n_estimators=10, max_depth=30, samples_per_class=2000)
+    assert samples_that_fit(100_000, 2, 5, 1, deep) < tight
+
+    image, truth = synthetic()
+    labels = np.where(truth, BONE, 1).astype(np.uint8)
+    source = DictLabels(labels)
+    data = TrainingSet(image, source, source.chunks, [], [BONE], (200.0, 800.0))
+
+    class Ctx:
+        threads = 1
+        memory_budget_bytes = 200_000
+
+        def progress(self, fraction, message=None):
+            pass
+
+        def check(self):
+            pass
+
+    result = plugin.train(data, params, tmp_path, Ctx())
+    assert result.metrics["samples_per_class_used"] == tight
+    assert result.samples == {0: tight, 1: tight}
+    # With too little memory for even a small forest, training refuses.
+    Ctx.memory_budget_bytes = 50_000
+    with pytest.raises(ValueError, match="memory"):
+        plugin.train(data, params, tmp_path, Ctx())
+
+
 def test_training_needs_two_classes(tmp_path):
     image, _ = synthetic()
     labels = np.zeros(SHAPE, dtype=np.uint8)
@@ -290,6 +331,7 @@ def test_training_needs_two_classes(tmp_path):
 
     class Ctx:
         threads = 1
+        memory_budget_bytes = 4 * 1024**3
 
         def progress(self, fraction, message=None):
             pass
