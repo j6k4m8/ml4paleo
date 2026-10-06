@@ -80,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         raise RuntimeError(
             f"M4P_SECRET_KEY must be at least {MIN_SECRET_KEY_LENGTH} random characters."
         )
+    has_neuroglancer = neuroglancer_available(settings)
     parts = urlsplit(settings.public_url)
     public_origin = f"{parts.scheme}://{parts.netloc}"
     session_cookie = cookie_name(settings)
@@ -140,7 +141,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response = await call_next(request)
         policy = (
             NEUROGLANCER_CONTENT_SECURITY_POLICY
-            if request.url.path.startswith(NEUROGLANCER_PATH + "/")
+            if has_neuroglancer and request.url.path.startswith(NEUROGLANCER_PATH + "/")
             else CONTENT_SECURITY_POLICY
         )
         response.headers.setdefault("Content-Security-Policy", policy)
@@ -166,7 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     for router in ROUTERS:
         app.include_router(router)
 
-    if neuroglancer_available(settings):
+    if has_neuroglancer:
         assert settings.neuroglancer_dir is not None
         app.mount(
             NEUROGLANCER_PATH,

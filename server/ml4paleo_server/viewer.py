@@ -11,13 +11,17 @@ from urllib.parse import quote
 from .settings import Settings
 
 NEUROGLANCER_PATH = "/neuroglancer"
-# Neuroglancer compiles WebAssembly decoders and injects its own styles. It
-# still loads data only from this origin (connect-src), so a shared view link
-# can't make it send anything elsewhere.
+# Neuroglancer compiles WebAssembly decoders, builds some functions at run
+# time (its chunk decoding worker does so as it starts, so it can't draw
+# anything without 'unsafe-eval'), and injects its own styles. It still runs
+# only scripts from this origin (no inline scripts) and connects only to this
+# origin, so a shared view link can't load data from elsewhere or send any
+# there. This applies to /neuroglancer/ only; the rest of the site keeps the
+# strict policy.
 NEUROGLANCER_CONTENT_SECURITY_POLICY = "; ".join(
     [
         "default-src 'self'",
-        "script-src 'self' 'wasm-unsafe-eval'",
+        "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'",
         "style-src 'self' 'unsafe-inline'",
         "img-src 'self' blob: data:",
         "worker-src 'self' blob:",

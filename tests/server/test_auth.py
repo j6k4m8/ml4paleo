@@ -351,3 +351,10 @@ def test_every_other_api_route_requires_sign_in(app, new_browser):
 def test_short_secret_keys_are_refused(settings):
     with pytest.raises(RuntimeError):
         create_app(settings.model_copy(update={"secret_key": SecretStr("too-short")}))
+
+
+def test_signing_out_clears_the_browser_cache(new_browser):
+    browser = new_browser()
+    signup(browser)
+    response = browser.post("/api/auth/logout")
+    assert response.headers["clear-site-data"] == '"cache"'

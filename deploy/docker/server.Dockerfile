@@ -9,6 +9,8 @@ FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
 # Only the built static files reach the final image.
 FROM node:22-bookworm-slim AS neuroglancer
 ARG NEUROGLANCER_COMMIT=e13f1f4c62918f2ea07b12f2116bdcb6767b1499
+# Its test tooling would otherwise download browsers the build doesn't need.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
