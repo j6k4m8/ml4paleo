@@ -5,13 +5,14 @@
 		icon: Icon,
 		label,
 		shortcut = "",
-		active = false,
+		active,
 		disabled = false,
 		onclick,
 	}: {
 		icon: Component<{ size?: number; strokeWidth?: number }>;
 		label: string;
 		shortcut?: string;
+		/** Whether a toggle is on; plain buttons leave it out. */
 		active?: boolean;
 		disabled?: boolean;
 		onclick: () => void;

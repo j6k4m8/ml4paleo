@@ -92,7 +92,7 @@ const NON_TEXT_INPUTS = new Set(["checkbox", "radio", "range", "button", "submit
 /**
  * Whether a key press belongs to the focused element rather than the
  * viewer: typing in a field, Space or Enter on a button or checkbox, arrows
- * on a slider or radio button.
+ * on a slider, radio button, or button.
  */
 export function forFocused(event: KeyboardEvent): boolean {
 	const target = event.target as (HTMLElement & { type?: string }) | null;
@@ -102,7 +102,8 @@ export function forFocused(event: KeyboardEvent): boolean {
 	if (tag === "INPUT" && !NON_TEXT_INPUTS.has(target.type ?? "text")) return true;
 	const control = tag === "BUTTON" || tag === "A" || tag === "INPUT" || tag === "SUMMARY";
 	if (control && (event.key === " " || event.key === "Enter")) return true;
-	return tag === "INPUT" && (target.type === "range" || target.type === "radio") && event.key.startsWith("Arrow");
+	if (!event.key.startsWith("Arrow")) return false;
+	return tag === "BUTTON" || (tag === "INPUT" && (target.type === "range" || target.type === "radio"));
 }
 
 /** The action for a key press, or undefined if it isn't the viewer's. */

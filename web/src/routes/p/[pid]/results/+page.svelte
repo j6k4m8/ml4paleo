@@ -20,7 +20,8 @@
 		artifact_id: string;
 		model_name: string | null;
 		min_voxels: number;
-		label_seq: number;
+		// When the newest label edit it includes was made.
+		labels_as_of: string | null;
 		committed_at: string;
 	}
 
@@ -206,8 +207,12 @@
 					<div class="flex flex-col gap-0.5">
 						<span>Made {new Date(segmentation.committed_at).toLocaleString()}</span>
 						<span class="text-2xs text-ink-dim">
-							from {segmentation.model_name ?? "a deleted model"} · specks under {segmentation.min_voxels} voxels removed · labels up
-							to edit {segmentation.label_seq}
+							from {segmentation.model_name ?? "a deleted model"} · specks under {segmentation.min_voxels} voxels removed ·
+							{#if segmentation.labels_as_of}
+								labels as of {new Date(segmentation.labels_as_of).toLocaleString()}
+							{:else}
+								no labels
+							{/if}
 						</span>
 					</div>
 				</div>

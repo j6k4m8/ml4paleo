@@ -154,6 +154,15 @@ def test_files_are_written_from_disk(grant, tmp_path):
         put_file(grant.model_copy(update={"access": "r"}), "meshes/3.stl", path)
 
 
+def test_deleting_a_missing_object_succeeds(grant):
+    # As a retried job does, after its last attempt deleted the object.
+    put_bytes(grant, "scratch/0.npz", b"summary")
+    delete_object(grant, "scratch/0.npz")
+    delete_object(grant, "scratch/0.npz")
+    delete_object(grant, "scratch/never.npz")
+    assert get_bytes(grant, "scratch/0.npz") is None
+
+
 def test_credentials_are_hidden_from_repr_but_sent_as_json():
     grant = StorageGrant(
         url="s3://bucket/p",
