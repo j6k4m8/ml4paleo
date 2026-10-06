@@ -34,10 +34,12 @@ import json
 import os
 import pathlib
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal
-from urllib.parse import SplitResult, quote, urlsplit
+from urllib.parse import quote, urlsplit
 
 import obstore
 import zarr.storage
@@ -323,8 +325,8 @@ def _put_to_proxy(grant: StorageGrant, key: str, path: pathlib.Path) -> None:
             f"{key} is {size} bytes; the storage proxy takes objects of up to "
             f"{PROXY_MAX_OBJECT_BYTES}"
         )
-    url = urlsplit(f"{grant.url}/{quote(key)}")
-    headers = {"Content-Length": str(size)}
+    url = f"{grant.url}/{quote(key)}"
+    headers = {"Content-Length": str(size), "Content-Type": "application/octet-stream"}
     if token := grant.secret("token"):
         headers["Authorization"] = f"Bearer {token}"
     for attempt in range(1, PROXY_PUT_ATTEMPTS + 1):
@@ -343,20 +345,17 @@ def _put_to_proxy(grant: StorageGrant, key: str, path: pathlib.Path) -> None:
 
 
 def _stream_put(
-    url: SplitResult, headers: dict[str, str], path: pathlib.Path
+    url: str, headers: dict[str, str], path: pathlib.Path
 ) -> tuple[int, str]:
-    connection = (
-        http.client.HTTPSConnection
-        if url.scheme == "https"
-        else http.client.HTTPConnection
-    )(url.netloc, timeout=600, blocksize=1024 * 1024)
-    try:
-        with path.open("rb") as body:
-            connection.request("PUT", url.path, body=body, headers=headers)
-            response = connection.getresponse()
-            return response.status, response.read(500).decode(errors="replace")
-    finally:
-        connection.close()
+    # urllib sends a file body as it reads it, and goes through whatever
+    # proxy the environment names, as obstore's own client does.
+    with path.open("rb") as body:
+        request = urllib.request.Request(url, data=body, headers=headers, method="PUT")
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                return response.status, ""
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read(500).decode(errors="replace")
 
 
 def write_manifest(grant: StorageGrant, manifest: dict[str, Any]) -> None:
