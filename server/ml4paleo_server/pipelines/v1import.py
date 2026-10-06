@@ -197,16 +197,9 @@ async def _check_room(
 async def _foreground(db: AsyncSession, project_id: uuid.UUID) -> int:
     """
     The value of the class v1's foreground becomes: "Foreground", added
-    unless an earlier try at the import added it.
+    unless the probe or an earlier try at the import added it.
     """
-    # As adding a class does: lock the project (FOR NO KEY UPDATE) so values
-    # stay unique.
-    await db.scalar(
-        select(Project.id)
-        .where(Project.id == project_id)
-        .with_for_update(key_share=True)
-    )
-    added = await db.scalar(
+    added = (
         select(LabelClass.value)
         .where(
             LabelClass.project_id == project_id,
@@ -216,8 +209,20 @@ async def _foreground(db: AsyncSession, project_id: uuid.UUID) -> int:
         .order_by(LabelClass.value)
         .limit(1)
     )
-    if added is not None:
-        return added
+    # Found, it needs no lock. The image's finalize gets here holding its
+    # owner's usage (it just counted the image), which deleting the project
+    # can wait for while holding the project.
+    if (value := await db.scalar(added)) is not None:
+        return value
+    # As adding a class does: lock the project (FOR NO KEY UPDATE) so values
+    # stay unique, and look again.
+    await db.scalar(
+        select(Project.id)
+        .where(Project.id == project_id)
+        .with_for_update(key_share=True)
+    )
+    if (value := await db.scalar(added)) is not None:
+        return value
     highest = await db.scalar(
         select(func.max(LabelClass.value)).where(LabelClass.project_id == project_id)
     )

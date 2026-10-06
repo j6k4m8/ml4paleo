@@ -24,6 +24,7 @@ from ml4paleo_server import artifacts, jobs, pipelines
 from ml4paleo_server.db import (
     AuditEvent,
     Job,
+    Project,
     TrainedModel,
     TrainingSet,
     User,
@@ -920,6 +921,39 @@ def test_the_probe_refuses_jobs_that_never_converted(volume, tmp_path):
         ctx = context(volume, "v1.probe", {"job_id": job_id}, [image])
         with pytest.raises(PermanentError, match="never finished converting"):
             v1import.probe(ctx)
+
+
+def test_finding_the_import_class_doesnt_wait_for_the_project(
+    new_browser, settings, migrated_database_url
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    url = f"/api/projects/{project}/labels/classes"
+    value = ada.post(url, json={"name": "Foreground", "color": "#f2c14e"}).json()
+
+    async def scenario():
+        engine = create_engine(migrated_database_url)
+        try:
+            sessions = create_sessionmaker(engine)
+            async with sessions() as deleting, sessions() as finishing:
+                # As deleting the project does, while it waits for jobs.
+                await deleting.execute(
+                    select(Project.id)
+                    .where(Project.id == uuid.UUID(project))
+                    .with_for_update(key_share=True)
+                )
+                await finishing.execute(text("SET LOCAL lock_timeout = '200ms'"))
+                found = await pipelines.v1import._foreground(
+                    finishing, uuid.UUID(project)
+                )
+                await deleting.rollback()
+                await finishing.rollback()
+                return found
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(scenario()) == value["value"]
 
 
 def test_the_import_class_and_new_classes_take_turns(
