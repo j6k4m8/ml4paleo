@@ -7,9 +7,8 @@ success commits.
 A model holds one of the project owner's trained-model slots from the
 moment training starts; a failed or cancelled training gives it back (see
 `release_failed_slots`), as does deleting the model or its project. Slots
-are only ever
-given back through `release_slots`, which clears `holds_slot` and counts
-what it cleared in one UPDATE, so no slot is given back twice.
+are only ever given back through `release_slots`, which clears `holds_slot`
+and counts what it cleared in one UPDATE, so no slot is given back twice.
 """
 
 import uuid
