@@ -16,8 +16,8 @@ ROIs. Crops come from two places:
   Voxels inside open or complete ROIs are left to the ROI crops, so
   validation labels never leak into training.
 
-Workers choose `tile` from their memory budget and the plugin's crop cost
-(see `tile_for`).
+Workers choose `tile` so a crop fits in half the job's memory budget at
+the plugin's crop cost (see `tile_for`); the plugin keeps the other half.
 
 Images are normalized with the image's display window, the same for every
 crop and at prediction time. Every crop has the full halo of context the
@@ -163,6 +163,10 @@ class TrainingSet:
     @property
     def num_classes(self) -> int:
         return len(self.class_values) + 1
+
+    @property
+    def channels(self) -> int:
+        return int(self.image.shape[0])
 
     def read_labels(self, box: Box) -> np.ndarray:
         """Stored label values for a box, assembled from its chunks."""

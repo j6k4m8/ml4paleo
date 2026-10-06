@@ -79,6 +79,11 @@ class TrainingData(Protocol):
     window: tuple[float, float]
 
     @property
+    def channels(self) -> int:
+        """How many channels the image has."""
+        ...
+
+    @property
     def num_classes(self) -> int:
         """K + 1: background and the classes."""
         ...
@@ -90,6 +95,15 @@ class TrainContext(Protocol):
     @property
     def threads(self) -> int:
         """How many CPU threads the plugin may use at once."""
+        ...
+
+    @property
+    def memory_budget_bytes(self) -> int:
+        """
+        How much memory training may use in all. Workers size crops to half
+        of it (see `SegmentationPlugin.crop_cost`); what the plugin keeps
+        from crop to crop (samples, the model) has to fit in the other half.
+        """
         ...
 
     def progress(self, fraction: float, message: str | None = None) -> None: ...

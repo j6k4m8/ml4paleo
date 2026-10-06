@@ -9,7 +9,9 @@ needs `ceil(4 * sigma_max) + 2` voxels of context on every side. Training
 samples are balanced: up to `samples_per_class` voxels of each class,
 drawn uniformly from every crop (reservoir sampling), so sparse brush
 strokes count as much as large painted regions. Training computes features
-and fits trees on the context's `threads`.
+and fits trees on the context's `threads`, and keeps fewer samples per class
+when they and the forest grown on them wouldn't fit in half the context's
+memory budget (see `samples_that_fit`).
 """
 
 import json
@@ -34,12 +36,14 @@ from ..plugin import (
 
 MODEL_FILE = "forest.joblib"
 META_FILE = "model.json"
+# Fewer samples than this per class make no useful forest.
+MIN_SAMPLES_PER_CLASS = 100
 
 
 class RandomForestParams(BaseModel):
     n_estimators: int = Field(100, ge=1, le=500)
     max_depth: int = Field(16, ge=1, le=64)
-    samples_per_class: int = Field(50_000, ge=100, le=1_000_000)
+    samples_per_class: int = Field(50_000, ge=MIN_SAMPLES_PER_CLASS, le=1_000_000)
     sigma_max: float = Field(8.0, ge=1.0, le=8.0)
     # scikit-learn takes seeds from 0 to 2³² - 1.
     seed: int = Field(0, ge=0, le=2**32 - 1)
@@ -55,6 +59,36 @@ def feature_count(channels: int, sigma_max: float) -> int:
     # intensity, edges, and the three eigenvalues of the Hessian.
     scales = int(math.log2(sigma_max) + 1)
     return channels * 5 * scales
+
+
+def samples_that_fit(
+    memory_bytes: int,
+    classes: int,
+    features: int,
+    threads: int,
+    params: RandomForestParams,
+) -> int:
+    """
+    The most samples per class, up to `params.samples_per_class`, whose
+    feature rows and the forest grown on them fit in `memory_bytes`.
+    """
+    # Each sample is a row of float32 features, kept in the reservoir and
+    # copied into the array the forest fits on (2.5 times over, with slack),
+    # plus scikit-learn's per-sample arrays: the labels as float64, twice,
+    # and weights and indices for each tree being grown at once.
+    row = 10 * features + 16 + 32 * threads
+    # A tree node takes about 64 bytes and a float64 per class. Each tree
+    # grows on a bootstrap draw holding about 63% of the samples, so it has
+    # under 1.3 nodes per sample (two per distinct one), and at most
+    # 2^(max_depth + 1) in all.
+    node = 64 + 8 * classes
+    full_tree = 2 ** (params.max_depth + 1)
+    total = int(memory_bytes // (row + 1.3 * params.n_estimators * node))
+    if 1.3 * total > full_tree:
+        # The trees stop at max_depth, so beyond that only the rows grow.
+        rest = memory_bytes - params.n_estimators * full_tree * node
+        total = max(total, rest // row)
+    return min(params.samples_per_class, total // classes)
 
 
 def features(
@@ -161,8 +195,21 @@ class RandomForestPlugin:
         assert isinstance(params, RandomForestParams)
         halo = halo_for(params.sigma_max)
         threads = max(1, ctx.threads)
+        # Samples and the forest get half the memory; crops get the rest.
+        per_class = samples_that_fit(
+            ctx.memory_budget_bytes // 2,
+            data.num_classes,
+            feature_count(data.channels, params.sigma_max),
+            threads,
+            params,
+        )
+        if per_class < MIN_SAMPLES_PER_CLASS:
+            raise ValueError(
+                "This forest doesn't fit in the worker's memory: use fewer or "
+                "shallower trees, or a smaller sigma_max"
+            )
         rng = np.random.default_rng(params.seed)
-        reservoir = Reservoir(params.samples_per_class, rng)
+        reservoir = Reservoir(per_class, rng)
         crops = 0
         ctx.progress(0.0, "Reading labels and computing features")
         for crop in data.crops("train", halo):
@@ -179,13 +226,18 @@ class RandomForestPlugin:
             raise ValueError(
                 "Training needs labels of at least two classes (background counts)"
             )
-        x = np.concatenate([reservoir.rows[k] for k in sorted(reservoir.rows)])
-        y = np.concatenate(
-            [
-                np.full(len(reservoir.rows[k]), k, dtype=np.uint8)
-                for k in sorted(reservoir.rows)
-            ]
-        )
+        samples = {k: len(v) for k, v in reservoir.rows.items()}
+        width = next(iter(reservoir.rows.values())).shape[1]
+        # Fill one array to fit on, letting go of each class's samples once
+        # copied, so they're never held twice over.
+        x = np.empty((sum(samples.values()), width), dtype=np.float32)
+        y = np.empty(len(x), dtype=np.uint8)
+        start = 0
+        for k in sorted(samples):
+            rows = reservoir.rows.pop(k)
+            x[start : start + len(rows)] = rows
+            y[start : start + len(rows)] = k
+            start += len(rows)
         ctx.progress(0.55, f"Fitting {params.n_estimators} trees on {len(y)} voxels")
         ctx.check()
         forest = RandomForestClassifier(
@@ -195,6 +247,7 @@ class RandomForestPlugin:
             random_state=params.seed,
         )
         forest.fit(x, y)
+        del x, y
         out.mkdir(parents=True, exist_ok=True)
         joblib.dump(forest, out / MODEL_FILE, compress=3)
         meta = {
@@ -206,7 +259,7 @@ class RandomForestPlugin:
             "num_classes": data.num_classes,
             "class_values": data.class_values,
             "window": [float(v) for v in data.window],
-            "features": int(x.shape[1]),
+            "features": int(width),
         }
         (out / META_FILE).write_text(json.dumps(meta, indent=2))
         ctx.progress(0.8, "Scoring on validation ROIs")
@@ -221,10 +274,12 @@ class RandomForestPlugin:
         metrics = sheet.summary(data.class_values) if validation_crops else {}
         metrics["validation_crops"] = validation_crops
         metrics["training_crops"] = crops
+        # Less than asked for when the memory budget is tight.
+        metrics["samples_per_class_used"] = per_class
         ctx.progress(1.0)
         return TrainResult(
             metrics=metrics,
-            samples={k: len(v) for k, v in reservoir.rows.items()},
+            samples=samples,
             files=[MODEL_FILE, META_FILE],
         )
 
