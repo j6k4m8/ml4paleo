@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from helpers import SECRET_KEY, add_worker, run_db, signup
 from ml4paleo_server import artifacts
-from ml4paleo_server.db import User
+from ml4paleo_server.db import Project, User
 from ml4paleo_server.pipelines import mesh as mesh_pipeline
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
@@ -65,13 +65,13 @@ def segmented() -> np.ndarray:
     return classes
 
 
-async def add_image(db, project: str, voxel_size_zyx, unit):
+async def add_image(db, project: str, voxel_size_zyx, unit, shape_zyx=SHAPE):
     image = await artifacts.create_staging(
         db, project_id=uuid.UUID(project), kind="image", head_slot="image"
     )
     image.state = "committed"
     image.manifest = {
-        "shape_czyx": [1, *SHAPE],
+        "shape_czyx": [1, *shape_zyx],
         "window": [0, 1],
         "voxel_size_zyx": list(voxel_size_zyx),
         "unit": unit,
@@ -261,6 +261,30 @@ def test_a_worker_meshes_each_class(
     assert get_bytes(grant, "mesh_info.json") is not None
     assert json.loads(get_bytes(grant, f"{CLAW}.json") or b"")["triangles"] == 0
     assert ada.get(meshes["files_url"] + "4.stl").status_code == 404
+
+
+def test_meshes_borrow_the_current_images_scale_only_on_its_grid(
+    migrated_database_url,
+):
+    async def check(db):
+        user = User(username="ada")
+        db.add(user)
+        await db.flush()
+        project = Project(name="Skull", owner_id=user.id)
+        db.add(project)
+        await db.flush()
+        # A segmentation that doesn't say what it was predicted from.
+        segmentation = await artifacts.create_staging(
+            db, project_id=project.id, kind="segmentation"
+        )
+        segmentation.manifest = {"kind": "segmentation", "shape_zyx": list(SHAPE)}
+        await add_image(db, str(project.id), (1.0, 1.0, 1.0), "meter", (5, 6, 7))
+        assert await mesh_pipeline.source_image(db, segmentation) is None
+        image = await add_image(db, str(project.id), VOXEL_SIZE_ZYX, "millimeter")
+        found = await mesh_pipeline.source_image(db, segmentation)
+        assert found is not None and found.id == image.id
+
+    run_db(migrated_database_url, check)
 
 
 def test_meshes_wait_for_storage(new_browser, settings, migrated_database_url):

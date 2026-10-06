@@ -30,8 +30,9 @@ WEIGHTS = {"blocks": 80.0, "joins": 18.0, "finalize": 2.0}
 
 async def source_image(db: AsyncSession, segmentation: Artifact) -> Artifact | None:
     """
-    The image the segmentation's prediction was made from, or the project's
-    current image if that one is gone.
+    The image the segmentation's prediction was made from, or, if that one
+    is gone, the project's current image when it has the segmentation's
+    grid (another scan's voxel size would scale the meshes wrong).
     """
     image = None
     prediction_id = (segmentation.inputs or {}).get("prediction_artifact_id")
@@ -41,9 +42,13 @@ async def source_image(db: AsyncSession, segmentation: Artifact) -> Artifact | N
     if prediction is not None:
         image_id = (prediction.inputs or {}).get("image_artifact_id")
         image = await db.get(Artifact, uuid.UUID(image_id)) if image_id else None
-    if image is None or not image.manifest:
-        image = await artifacts.head(db, segmentation.project_id, "image")
-    return image
+    if image is not None and image.manifest:
+        return image
+    image = await artifacts.head(db, segmentation.project_id, "image")
+    if image is None or not image.manifest or segmentation.manifest is None:
+        return None
+    grid = list(image.manifest.get("shape_czyx", [])[1:])
+    return image if grid == list(segmentation.manifest["shape_zyx"]) else None
 
 
 async def start(
