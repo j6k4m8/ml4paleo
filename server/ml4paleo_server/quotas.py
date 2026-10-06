@@ -82,8 +82,10 @@ async def reserve_trained_model(
         raise HTTPException(status_code=403, detail="trained_model_quota_exceeded")
 
 
-async def release_trained_model(db: AsyncSession, owner_id: uuid.UUID) -> None:
-    await _release(db, owner_id, UserUsage.trained_models, 1)
+async def release_trained_model(
+    db: AsyncSession, owner_id: uuid.UUID, count: int = 1
+) -> None:
+    await _release(db, owner_id, UserUsage.trained_models, count)
 
 
 async def _reserve(

@@ -28,7 +28,6 @@ from .. import audit, jobs, training
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import Artifact, Job, Project, TrainedModel, TrainingSet
 from ..pipelines import train
-from ..quotas import release_trained_model
 from .projects import MemberProject
 
 router = APIRouter(prefix="/api", tags=["models"])
@@ -120,7 +119,7 @@ async def _model(db, project: Project, model_id: uuid.UUID) -> TrainedModel:
 
 @router.get("/projects/{project_id}/models")
 async def list_models(project: MemberProject, db: DbSession) -> list[ModelOut]:
-    await train.release_failed_slots(db, project.id)
+    await train.release_failed_slots(db, project)
     await db.commit()
     models = (
         await db.scalars(
@@ -223,9 +222,7 @@ async def delete_model(
         artifact = await db.get(Artifact, model.artifact_id)
         if artifact is not None and artifact.state == "committed":
             artifact.expires_at = datetime.datetime.now(datetime.UTC)
-    if model.holds_slot:
-        model.holds_slot = False
-        await release_trained_model(db, project.owner_id)
+    await train.release_slots(db, project.owner_id, TrainedModel.id == model.id)
     audit.record(
         db,
         actor_id=auth.user.id,

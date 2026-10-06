@@ -3,6 +3,7 @@ Models: training sets pinned from labels and ROIs, the models API and its
 quota, and a random forest trained end to end by a worker.
 """
 
+import asyncio
 import json
 import threading
 import time
@@ -12,7 +13,15 @@ import numpy as np
 import pytest
 from helpers import SECRET_KEY, add_worker, run_db, signup
 from ml4paleo_server import artifacts, labels
-from ml4paleo_server.db import Artifact, Job, TrainedModel
+from ml4paleo_server.db import (
+    Artifact,
+    Job,
+    Project,
+    TrainedModel,
+    create_engine,
+    create_sessionmaker,
+)
+from ml4paleo_server.pipelines import train
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_server.training import training_path
@@ -172,6 +181,44 @@ def test_model_slots_follow_training_and_deletion(
     assert ada.request("DELETE", f"{base}/{third.json()['id']}").status_code == 204
     assert ada.get(f"{base}/{third.json()['id']}").status_code == 404
     assert ada.post(base, json={}).status_code == 202
+
+
+def test_a_model_slot_is_given_back_once(ada, settings, migrated_database_url):
+    project = make_project(ada)
+    add_image(settings, migrated_database_url, project)
+    add_class(ada, project)
+    paint(settings, migrated_database_url, project, (5, 5, 5), np.ones((1, 3, 3)), BONE)
+    base = f"/api/projects/{project}/models"
+    first = ada.post(base, json={}).json()
+    ada.post(base, json={})
+    assert ada.get("/api/me/quota").json()["trained_models_used"] == 2
+
+    async def race():
+        engine = create_engine(migrated_database_url)
+        sessions = create_sessionmaker(engine)
+        try:
+            async with sessions() as one, sessions() as two:
+                model = await one.get(TrainedModel, uuid.UUID(first["id"]))
+                assert model is not None
+                project_row = await one.get(Project, model.project_id)
+                assert project_row is not None
+                owner, this = project_row.owner_id, TrainedModel.id == model.id
+                assert await train.release_slots(one, owner, this) == 1
+                # The other waits for the first to finish, then finds the
+                # slot already given back.
+                other = asyncio.create_task(train.release_slots(two, owner, this))
+                await asyncio.sleep(0.3)
+                assert not other.done()
+                await one.commit()
+                assert await other == 0
+                await two.commit()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(race())
+    assert ada.get("/api/me/quota").json()["trained_models_used"] == 1
+    assert ada.request("DELETE", f"{base}/{first['id']}").status_code == 204
+    assert ada.get("/api/me/quota").json()["trained_models_used"] == 1
 
 
 def test_others_cant_reach_models(new_browser, settings, migrated_database_url):
