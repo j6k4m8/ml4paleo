@@ -46,9 +46,9 @@ PREDICTION_READ_DEPTH = 64
 
 def _root(ctx: JobContext) -> Path:
     if ctx.v1_volume is None:
-        raise PermanentError(
-            "This worker has no v1 volume (start it with --v1-volume)."
-        )
+        # The worker is set up wrong, not the job: another try may get a
+        # worker with the volume.
+        raise RuntimeError("This worker has no v1 volume (start it with --v1-volume).")
     return ctx.v1_volume
 
 

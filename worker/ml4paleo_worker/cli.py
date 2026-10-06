@@ -89,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     from ml4paleo_worker.handlers import HANDLERS, V1_HANDLERS
     from ml4paleo_worker.main import Worker
 
+    if "v1-volume" in args.label and not args.v1_volume:
+        parser.error("the v1-volume label needs --v1-volume")
     labels = [*args.label, *(["v1-volume"] if args.v1_volume else [])]
     if args.v1_volume and not (args.v1_volume / "jobs.json").is_file():
         parser.error(f"{args.v1_volume} has no jobs.json")

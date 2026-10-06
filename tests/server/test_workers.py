@@ -386,6 +386,10 @@ def test_a_worker_with_the_v1_volume_runs_only_the_import(monkeypatch, tmp_path)
     assert v1_caps.kinds == ["v1.labels", "v1.prediction", "v1.probe", "v1.slab"]
     assert sorted(v1_handlers) == v1_caps.kinds
     assert v1_volume == volume and "v1-volume" in v1_caps.labels
+    # The label alone would take import jobs it can't run.
+    with pytest.raises(SystemExit) as exit_info:
+        worker_cli.main([*argv, "--label", "v1-volume"])
+    assert exit_info.value.code == 2
 
 
 def test_gpus_are_detected_from_nvidia_smi(monkeypatch):

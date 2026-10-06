@@ -567,3 +567,11 @@ def test_the_import_class_and_new_classes_take_turns(
 
     # ...and then takes the next value.
     assert asyncio.run(scenario()) == (2, True, 3)
+
+
+def test_a_worker_without_the_volume_leaves_the_import_to_another(tmp_path):
+    image = StorageGrant(url=(tmp_path / "image").as_uri(), access="rw")
+    ctx = context(None, "v1.probe", {"job_id": "ABC123"}, [image])
+    # Not a PermanentError: the job can still run on a worker with the volume.
+    with pytest.raises(RuntimeError, match="no v1 volume"):
+        v1import.probe(ctx)
