@@ -5,6 +5,10 @@ Grants, in order: the image artifact (read), the project's labels (read;
 their blobs), the training set (read; its manifest), and the model artifact
 (write). The plugin writes its files into a scratch directory; they are
 copied into the model artifact, and the artifact's manifest goes last.
+
+Training crops are sized so one, with its halo, fits the job's memory
+budget at the plugin's cost per voxel, and the plugin trains on the job's
+share of the worker's CPUs (`ctx.threads`).
 """
 
 import json
@@ -13,7 +17,7 @@ import tempfile
 from typing import Any
 
 from ml4paleo.ome import OmeImage
-from ml4paleo.segmentation.dataset import BlobLabels, RoiSpec, TrainingSet
+from ml4paleo.segmentation.dataset import BlobLabels, RoiSpec, TrainingSet, tile_for
 from ml4paleo.segmentation.plugin import get_plugin
 from ml4paleo.storage import get_bytes, put_bytes, write_manifest
 
@@ -34,8 +38,11 @@ def run(ctx: JobContext) -> dict[str, Any]:
     labels = BlobLabels(
         labels_grant, {(cz, cy, cx): sha for cz, cy, cx, sha in manifest["chunks"]}
     )
+    plugin = plugin_class()
+    image = OmeImage.open(image_grant).array(0)
+    cost = plugin.crop_cost(params, int(image.shape[0]))
     data = TrainingSet(
-        image=OmeImage.open(image_grant).array(0),
+        image=image,
         labels=labels,
         labeled_chunks=labels.shas.keys(),
         rois=[
@@ -44,8 +51,8 @@ def run(ctx: JobContext) -> dict[str, Any]:
         ],
         class_values=list(manifest["class_values"]),
         window=tuple(manifest["image"]["window"]),  # type: ignore[arg-type]
+        tile=tile_for(ctx.memory_budget_bytes, cost),
     )
-    plugin = plugin_class()
     with tempfile.TemporaryDirectory(prefix="m4p-train-") as scratch:
         out = pathlib.Path(scratch)
         try:
