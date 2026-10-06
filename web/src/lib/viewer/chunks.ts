@@ -28,6 +28,7 @@ export class ChunkStore {
 	#queue: Pending[] = [];
 	#running = 0;
 	#pinned = new Set<string>();
+	#wanted = new Map<string, Set<string>>();
 
 	constructor(
 		private load: Loader,
@@ -63,6 +64,17 @@ export class ChunkStore {
 		this.#queue.push(entry);
 		this.#pump();
 		return promise;
+	}
+
+	/**
+	 * Say which chunks `owner` (for example one of several views sharing
+	 * this store) needs now; loads no owner needs are cancelled.
+	 */
+	want(owner: string, ids: Set<string>): void {
+		this.#wanted.set(owner, ids);
+		const union = new Set<string>();
+		for (const set of this.#wanted.values()) for (const id of set) union.add(id);
+		this.keepOnly(union);
 	}
 
 	/** Cancel queued and running loads of chunks not in `wanted`. */

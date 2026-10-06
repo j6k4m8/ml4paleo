@@ -1,221 +1,298 @@
 <script lang="ts">
-	import { onDestroy, onMount } from "svelte";
+	import { onDestroy, onMount, untrack } from "svelte";
 	import type { ProjectImage } from "#lib/types.ts";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
-	import { WorkerPool } from "./loader";
-	import { PlaneRenderer } from "./plane";
-	import { chooseLevel, type Level, tileId, type View, visibleTiles } from "./tiles";
+	import { actionFor, KEYMAP, MOUSE } from "./keymap";
+	import { type LabelClass, LabelLayer } from "./labels";
+	import { imageLoader, WorkerPool } from "./loader";
+	import PlaneView from "./PlaneView.svelte";
+	import { ViewerState } from "./state.svelte";
+	import { aspectOf, type Level, type Plane, PLANES, type Vec3 } from "./tiles";
 
-	let { image }: { image: ProjectImage } = $props();
+	let { image, projectId }: { image: ProjectImage; projectId: string } = $props();
 
 	const CACHE_BYTES = 512 * 1024 * 1024;
 
-	let canvas: HTMLCanvasElement;
-	let levels: Level[] = $state([]);
-	let error = $state("");
-	let z = $state(0);
-	let centerX = $state(0);
-	let centerY = $state(0);
-	let zoom = $state(1);
-	let width = $state(0);
-	let height = $state(0);
-	let low = $state(0);
-	let high = $state(1);
+	// The page makes a new viewer for each image.
+	const { manifest, zarr_url: zarrUrl } = untrack(() => image);
+	const project = untrack(() => projectId);
+	const [, nz, ny, nx] = manifest.shape_czyx;
+	const viewer = new ViewerState([nz, ny, nx], aspectOf(manifest.voxel_size_zyx));
+	viewer.window = [...manifest.window];
+	viewer.position = [nz / 2, ny / 2, nx / 2];
 
-	let renderer: PlaneRenderer | undefined;
+	let levels: Level[] = $state([]);
+	let images: ChunkStore | null = $state(null);
+	let labels: LabelLayer | null = $state(null);
+	let classes: LabelClass[] = $state([]);
+	let error = $state("");
 	let pool: WorkerPool | undefined;
-	let store: ChunkStore | undefined;
-	let frame = 0;
+	let hovered: Plane = PLANES.xy;
+	let fitted = false;
+	const sizes = new Map<string, [number, number]>();
 	const controller = new AbortController();
 
-	const depth = $derived(image.manifest.shape_czyx[1]);
+	const voxelSize = manifest.voxel_size_zyx;
+	const unit = manifest.unit ?? "";
 
-	onMount(() => {
-		[low, high] = image.manifest.window;
-		const observer = new ResizeObserver(([entry]) => {
-			if (!entry) return;
-			const ratio = window.devicePixelRatio || 1;
-			width = Math.round(entry.contentRect.width * ratio);
-			height = Math.round(entry.contentRect.height * ratio);
-			canvas.width = width;
-			canvas.height = height;
-		});
-		observer.observe(canvas);
-		(async () => {
-			try {
-				renderer = new PlaneRenderer(canvas);
-				levels = await loadLevels(image.zarr_url, controller.signal);
-				pool = new WorkerPool();
-				store = new ChunkStore(pool.loader(absolute(image.zarr_url), levels), CACHE_BYTES);
-				const [, nz, ny, nx] = image.manifest.shape_czyx;
-				z = Math.floor(nz / 2);
-				centerY = ny / 2;
-				centerX = nx / 2;
-				zoom = Math.min(width / nx, height / ny) || 1;
-			} catch (e) {
-				if (!controller.signal.aborted) error = e instanceof Error ? e.message : String(e);
-			}
-		})();
-		return () => observer.disconnect();
+	onMount(async () => {
+		try {
+			levels = await loadLevels(zarrUrl, controller.signal);
+			pool = new WorkerPool();
+			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
+			const layer = new LabelLayer(project, pool, viewer.shape);
+			await layer.start();
+			if (controller.signal.aborted) return layer.stop();
+			labels = layer;
+			classes = layer.classes;
+		} catch (e) {
+			if (!controller.signal.aborted) error = e instanceof Error ? e.message : String(e);
+		}
 	});
 
 	onDestroy(() => {
 		controller.abort();
-		cancelAnimationFrame(frame);
-		store?.keepOnly(new Set());
+		labels?.stop();
+		images?.keepOnly(new Set());
 		pool?.close();
-		renderer?.destroy();
 	});
-
-	function view(): View {
-		return { z, centerX, centerY, zoom, width, height };
-	}
-
-	function layers(current: View) {
-		const coarsest = levels[levels.length - 1];
-		const chosen = chooseLevel(levels, current.zoom);
-		const order = coarsest && coarsest !== chosen ? [coarsest, chosen] : [chosen];
-		return order.map((level) => ({ level, tiles: visibleTiles(level, current) }));
-	}
-
-	function schedule() {
-		cancelAnimationFrame(frame);
-		frame = requestAnimationFrame(render);
-	}
-
-	function render() {
-		if (!renderer || !store || levels.length === 0 || width === 0) return;
-		const current = view();
-		const wanted = layers(current);
-		store.keepOnly(new Set(wanted.flatMap(({ tiles }) => tiles.map(tileId))));
-		for (const { level, tiles } of wanted) {
-			for (const key of tiles) {
-				if (renderer.has(key, current.z, level)) continue;
-				const id = tileId(key);
-				const cached = store.get(id);
-				if (cached) {
-					renderer.upload(key, current.z, level, cached);
-					continue;
-				}
-				store.request(id).then(
-					(chunk) => {
-						if (z !== current.z) return;
-						renderer?.upload(key, z, level, chunk);
-						schedule();
-					},
-					(e: unknown) => {
-						if (e instanceof DOMException && e.name === "AbortError") return;
-						error = e instanceof Error ? e.message : String(e);
-					},
-				);
-			}
-		}
-		renderer.draw(current, [low, high], wanted);
-	}
 
 	$effect(() => {
-		// Redraw whenever the view, the window, or the levels change.
-		void [z, centerX, centerY, zoom, width, height, low, high, levels.length];
-		schedule();
+		void [viewer.opacity, viewer.showLabels, viewer.layout];
+		viewer.savePreferences();
 	});
 
-	let dragging: { x: number; y: number } | null = null;
+	const shown = $derived(
+		viewer.layout === "four" ? [PLANES.xy, PLANES.yz, PLANES.xz] : [PLANES[viewer.layout]],
+	);
 
-	function pointerDown(event: PointerEvent) {
-		dragging = { x: event.clientX, y: event.clientY };
-		canvas.setPointerCapture(event.pointerId);
+	function fit() {
+		const plane = viewer.layout === "four" ? PLANES.xy : PLANES[viewer.layout];
+		const size = sizes.get(plane.name);
+		if (!size) return;
+		const { shape, aspect } = viewer;
+		viewer.zoom = Math.min(size[0] / (shape[plane.u] * aspect[plane.u]), size[1] / (shape[plane.v] * aspect[plane.v]));
+		const point = [...viewer.position] as Vec3;
+		point[plane.u] = shape[plane.u] / 2;
+		point[plane.v] = shape[plane.v] / 2;
+		viewer.moveTo(point);
 	}
 
-	function pointerMove(event: PointerEvent) {
-		if (!dragging) return;
-		const ratio = window.devicePixelRatio || 1;
-		centerX -= ((event.clientX - dragging.x) * ratio) / zoom;
-		centerY -= ((event.clientY - dragging.y) * ratio) / zoom;
-		dragging = { x: event.clientX, y: event.clientY };
-	}
-
-	function pointerUp() {
-		dragging = null;
-	}
-
-	function wheel(event: WheelEvent) {
-		event.preventDefault();
-		const ratio = window.devicePixelRatio || 1;
-		const rect = canvas.getBoundingClientRect();
-		// Keep the voxel under the cursor in place.
-		const px = (event.clientX - rect.left) * ratio - width / 2;
-		const py = (event.clientY - rect.top) * ratio - height / 2;
-		const next = Math.min(64, Math.max(1 / 256, zoom * Math.exp(-event.deltaY * 0.002)));
-		centerX += px / zoom - px / next;
-		centerY += py / zoom - py / next;
-		zoom = next;
+	function resized(plane: Plane, width: number, height: number) {
+		sizes.set(plane.name, [width, height]);
+		if (!fitted && (plane.name === "xy" || viewer.layout === plane.name)) {
+			fitted = true;
+			fit();
+		}
 	}
 
 	function key(event: KeyboardEvent) {
-		const step = event.shiftKey ? 10 : 1;
-		if (event.key === "ArrowUp" || event.key === ".") z = Math.min(depth - 1, z + step);
-		else if (event.key === "ArrowDown" || event.key === ",") z = Math.max(0, z - step);
-		else return;
+		const action = actionFor(event);
+		if (!action) return;
 		event.preventDefault();
+		const step = event.shiftKey ? 10 : 1;
+		switch (action) {
+			case "slice-next":
+				return viewer.step(hovered.normal, step);
+			case "slice-previous":
+				return viewer.step(hovered.normal, -step);
+			case "zoom-in":
+				return viewer.zoomBy(1.25);
+			case "zoom-out":
+				return viewer.zoomBy(0.8);
+			case "fit":
+				return fit();
+			case "layout":
+				viewer.nextLayout();
+				return;
+			case "labels":
+				viewer.showLabels = !viewer.showLabels;
+				return;
+			case "help":
+				viewer.help = !viewer.help;
+				return;
+		}
+	}
+
+	function voxel(axis: number): string {
+		const index = Math.floor(viewer.position[axis]!);
+		if (!voxelSize || !unit) return String(index);
+		return `${index} (${(index * voxelSize[axis]!).toFixed(1)} ${unit})`;
 	}
 </script>
 
-<div class="viewer">
-	<canvas
-		bind:this={canvas}
-		tabindex="0"
-		aria-label="Image plane {z + 1} of {depth}"
-		onpointerdown={pointerDown}
-		onpointermove={pointerMove}
-		onpointerup={pointerUp}
-		onpointercancel={pointerUp}
-		onwheel={wheel}
-		onkeydown={key}
-	></canvas>
-	<div class="controls">
-		<label>
-			Slice {z + 1} / {depth}
-			<input type="range" min="0" max={depth - 1} bind:value={z} />
-		</label>
-		<label>
-			Window
-			<input type="number" step="any" bind:value={low} aria-label="Window low" />
-			<input type="number" step="any" bind:value={high} aria-label="Window high" />
-		</label>
-		{#if error}<p class="error" role="alert">{error}</p>{/if}
+<svelte:window onkeydown={key} />
+
+<div class="viewer layout-{viewer.layout}">
+	<div class="views">
+		{#if images && levels.length > 0}
+			{#each shown as plane (plane.name)}
+				<PlaneView
+					{plane}
+					{viewer}
+					{levels}
+					{images}
+					{labels}
+					onhover={(p) => (hovered = p)}
+					onresize={resized}
+				/>
+			{/each}
+		{/if}
+		<aside class="panel">
+			<p class="position">
+				<span class="axis-x">x {voxel(2)}</span>
+				<span class="axis-y">y {voxel(1)}</span>
+				<span class="axis-z">z {voxel(0)}</span>
+			</p>
+			<label>
+				Window
+				<span class="pair">
+					<input type="number" step="any" bind:value={viewer.window[0]} aria-label="Window low" />
+					<input type="number" step="any" bind:value={viewer.window[1]} aria-label="Window high" />
+				</span>
+			</label>
+			<label class="row"><input type="checkbox" bind:checked={viewer.showLabels} /> Labels</label>
+			<label>
+				Label opacity
+				<input type="range" min="0" max="1" step="0.05" bind:value={viewer.opacity} />
+			</label>
+			{#if classes.length > 0}
+				<ul class="classes">
+					{#each classes as label (label.value)}
+						<li><span class="swatch" style:background={label.color}></span>{label.name}</li>
+					{/each}
+				</ul>
+			{/if}
+			<p class="muted">Press <kbd>?</kbd> for keys.</p>
+			{#if error}<p class="error" role="alert">{error}</p>{/if}
+		</aside>
 	</div>
 </div>
 
+{#if viewer.help}
+	<div class="help" role="dialog" aria-label="Keys">
+		<table>
+			<tbody>
+				{#each KEYMAP as binding (binding.action)}
+					<tr><td>{#each binding.keys as k, i (k)}{#if i > 0}, {/if}<kbd>{k}</kbd>{/each}</td><td>{binding.label}</td></tr>
+				{/each}
+				{#each MOUSE as [what, does] (what)}
+					<tr><td>{what}</td><td>{does}</td></tr>
+				{/each}
+			</tbody>
+		</table>
+		<button class="secondary" onclick={() => (viewer.help = false)}>Close</button>
+	</div>
+{/if}
+
 <style>
 	.viewer {
-		display: flex;
-		flex-direction: column;
 		height: 100%;
 		min-height: 0;
 	}
-	canvas {
-		flex: 1;
-		width: 100%;
-		min-height: 0;
-		background: #000;
-		touch-action: none;
-		cursor: grab;
+	.views {
+		display: grid;
+		gap: 4px;
+		height: 100%;
+		grid-template-columns: 1fr 1fr;
+		grid-template-rows: 1fr 1fr;
 	}
-	canvas:focus-visible {
-		outline: 2px solid var(--accent);
+	.layout-xy .views,
+	.layout-xz .views,
+	.layout-yz .views {
+		grid-template-columns: 1fr 16rem;
+		grid-template-rows: 1fr;
 	}
-	.controls {
+	.panel {
+		display: flex;
+		flex-direction: column;
+		gap: 0.6rem;
+		padding: 0.5rem;
+		overflow: auto;
+		border: 1px solid var(--line);
+		font-size: 0.9rem;
+	}
+	.panel label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+	}
+	.panel label.row {
+		flex-direction: row;
+		align-items: center;
+		gap: 0.4rem;
+	}
+	.pair {
+		display: flex;
+		gap: 0.3rem;
+	}
+	.pair input {
+		width: 50%;
+		min-width: 0;
+	}
+	.position {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 1rem;
+		gap: 0.75rem;
+		margin: 0;
+		font-variant-numeric: tabular-nums;
+	}
+	.axis-x {
+		color: #e5534b;
+	}
+	.axis-y {
+		color: #57ab5a;
+	}
+	.axis-z {
+		color: #539bf5;
+	}
+	.classes {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+	}
+	.classes li {
+		display: flex;
 		align-items: center;
-		padding: 0.5rem 0;
+		gap: 0.4rem;
 	}
-	.controls input[type="number"] {
-		width: 7rem;
+	.swatch {
+		width: 0.8rem;
+		height: 0.8rem;
+		border-radius: 2px;
 	}
-	.error {
-		color: var(--danger);
+	.help {
+		position: fixed;
+		top: 50%;
+		left: 50%;
+		transform: translate(-50%, -50%);
+		background: var(--panel);
+		border: 1px solid var(--line);
+		border-radius: 6px;
+		padding: 1rem;
+		max-width: calc(100vw - 2rem);
+		z-index: 10;
+	}
+	.help td {
+		padding: 0.2rem 0.75rem 0.2rem 0;
+	}
+	kbd {
+		font-family: ui-monospace, monospace;
+		border: 1px solid var(--line);
+		border-radius: 3px;
+		padding: 0 0.3rem;
+	}
+	.muted {
+		margin: 0;
+	}
+	@media (max-width: 700px) {
+		.views,
+		.layout-xy .views,
+		.layout-xz .views,
+		.layout-yz .views {
+			grid-template-columns: 1fr;
+			grid-template-rows: repeat(auto-fill, minmax(16rem, 1fr));
+		}
 	}
 </style>

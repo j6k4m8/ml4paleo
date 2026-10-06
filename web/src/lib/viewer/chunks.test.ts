@@ -57,6 +57,20 @@ describe("ChunkStore", () => {
 		expect(calls.map((c) => c.id)).toEqual(["a", "c"]);
 	});
 
+	it("keeps loads that any owner still wants", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		store.want("xy", new Set(["a"]));
+		const a = store.request("a");
+		store.want("xz", new Set(["b"]));
+		const b = store.request("b");
+		store.want("xy", new Set());
+		await expect(a).rejects.toThrow("No longer needed");
+		expect(calls[1]?.signal.aborted).toBe(false);
+		calls[1]?.finish();
+		await expect(b).resolves.toBeDefined();
+	});
+
 	it("can ask again for a chunk after cancelling it", async () => {
 		const { calls, load } = controlled();
 		const store = new ChunkStore(load, 1000);
