@@ -26,8 +26,9 @@ services:
     networks: [v1-jobs]
 
   # worker-v1 can read every v1 job's files, so it runs only the import's own
-  # jobs (worker-cpu runs the pyramid and finalize jobs), and it reaches
-  # nothing but Caddy's worker port: no internet, and no other workers.
+  # jobs (worker-cpu runs the pyramid and finalize jobs), and its network has
+  # nothing on it but Caddy: no internet, and no other workers. (Caddy's
+  # public site answers there too, as it does on the jobs network.)
   worker-v1:
     image: ml4paleo-worker:local
     restart: unless-stopped
