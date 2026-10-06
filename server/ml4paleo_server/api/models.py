@@ -7,7 +7,9 @@ Segmentation models.
     GET    /api/projects/{id}/models/{model}
     DELETE /api/projects/{id}/models/{model}
     POST   /api/projects/{id}/models/{model}/predict
+    POST   /api/projects/{id}/models/{model}/propose  {roi_id}
     GET    /api/projects/{id}/prediction           the prediction of the current image
+    GET    /api/projects/{id}/proposal             the newest proposal (one ROI predicted)
 
 Training pins the project's labels and ROIs as a training set and starts a
 `model.train` pipeline (follow it under /pipelines). A model is "training"
