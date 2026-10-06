@@ -55,8 +55,30 @@ export interface TileKey {
 	cx: number;
 }
 
+/** A rectangle of a plane: (u0, v0, u1, v1) in level-0 voxels, half-open. */
+export type Rect = [number, number, number, number];
+
 export function tileId(key: TileKey): string {
 	return `${key.level}/${key.cz}/${key.cy}/${key.cx}`;
+}
+
+/**
+ * Where a (z0, y0, x0, z1, y1, x1) box crosses the plane at level-0 index
+ * `slice`, or null if it doesn't.
+ */
+export function boxOnPlane(box: readonly number[], plane: Plane, slice: number): Rect | null {
+	const { normal, u, v } = plane;
+	if (slice < box[normal]! || slice >= box[normal + 3]!) return null;
+	return [box[u]!, box[v]!, box[u + 3]!, box[v + 3]!];
+}
+
+/** Whether a level-0 chunk's part of a plane overlaps `rect`. */
+export function tileCrosses(key: TileKey, plane: Plane, rect: Rect): boolean {
+	const corner = [key.cz, key.cy, key.cx].map((c) => c * CHUNK);
+	const [u0, v0, u1, v1] = rect;
+	const u = corner[plane.u]!;
+	const v = corner[plane.v]!;
+	return u < u1 && u + CHUNK > u0 && v < v1 && v + CHUNK > v0;
 }
 
 /** Physical voxel size per axis relative to the finest axis. */

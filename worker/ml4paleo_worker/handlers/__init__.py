@@ -24,6 +24,7 @@ HANDLERS: dict[str, Handler] = {
     "predict.prepare": predict.prepare,
     "predict.shard": predict.shard,
     "prediction.finalize": predict.finalize,
+    "predict.region": predict.region,
     "compose.prepare": compose.prepare,
     "cc.block": compose.block,
     "cc.merge": compose.merge,
