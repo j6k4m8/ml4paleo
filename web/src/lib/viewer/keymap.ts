@@ -11,6 +11,7 @@ export type Action =
 	| "fit"
 	| "layout"
 	| "labels"
+	| "prediction"
 	| "navigate"
 	| "brush"
 	| "eraser"
@@ -43,6 +44,7 @@ export const KEYMAP: Binding[] = [
 	{ action: "fit", keys: ["0"], label: "Fit the image" },
 	{ action: "layout", keys: ["l"], label: "Next layout (four views, XY, XZ, YZ)" },
 	{ action: "labels", keys: ["v"], label: "Show or hide labels" },
+	{ action: "prediction", keys: ["m"], label: "Show or hide the model's prediction" },
 	{ action: "navigate", keys: ["n"], label: "Navigate" },
 	{ action: "brush", keys: ["b"], label: "Brush" },
 	{ action: "eraser", keys: ["e"], label: "Eraser" },

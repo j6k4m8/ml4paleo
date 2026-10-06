@@ -65,5 +65,5 @@ select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
 testpaths = ["tests"]
 
 [tool.pyright]
-include = ["server", "worker", "ml4paleo/storage", "ml4paleo/blocks.py", "ml4paleo/ome.py", "ml4paleo/labels", "ml4paleo/protocol.py", "ml4paleo/ingest.py", "ml4paleo/segmentation/plugin.py", "ml4paleo/segmentation/dataset.py", "ml4paleo/segmentation/metrics.py", "ml4paleo/segmentation/plugins"]
+include = ["server", "worker", "ml4paleo/storage", "ml4paleo/blocks.py", "ml4paleo/ome.py", "ml4paleo/labels", "ml4paleo/protocol.py", "ml4paleo/ingest.py", "ml4paleo/segmentation/plugin.py", "ml4paleo/segmentation/dataset.py", "ml4paleo/segmentation/metrics.py", "ml4paleo/segmentation/predict.py", "ml4paleo/segmentation/plugins"]
 pythonVersion = "3.12"

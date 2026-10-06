@@ -95,6 +95,22 @@ def normalize(block: np.ndarray, window: tuple[float, float]) -> np.ndarray:
     )
 
 
+def read_box(image: ImageArray, box: Box, halo: int) -> np.ndarray:
+    """
+    A box of a (c, z, y, x) image with `halo` voxels of context on every
+    side. Only the box and its halo are read; where the image ends, its edge
+    voxels are repeated.
+    """
+    shape = [int(n) for n in image.shape[1:4]]
+    lo = [max(0, box[a] - halo) for a in range(3)]
+    hi = [min(shape[a], box[a + 3] + halo) for a in range(3)]
+    block = np.asarray(image[(slice(None), *(slice(lo[a], hi[a]) for a in range(3)))])
+    padding = [(0, 0)] + [
+        (halo - (box[a] - lo[a]), halo - (hi[a] - box[a + 3])) for a in range(3)
+    ]
+    return np.pad(block, padding, mode="edge")
+
+
 def clip_box(box: Sequence[int], shape: Sequence[int]) -> Box | None:
     """A box cut to an image's (z, y, x) shape, or None if nothing is left."""
     lo = [min(max(int(box[a]), 0), int(shape[a])) for a in range(3)]
@@ -195,15 +211,7 @@ class TrainingSet:
         where the box sits in it. Where the image ends, its edge voxels are
         repeated.
         """
-        lo = [max(0, box[a] - halo) for a in range(3)]
-        hi = [min(self.shape[a], box[a + 3] + halo) for a in range(3)]
-        block = np.asarray(
-            self.image[(slice(None), *(slice(lo[a], hi[a]) for a in range(3)))]
-        )
-        padding = [(0, 0)] + [
-            (halo - (box[a] - lo[a]), halo - (hi[a] - box[a + 3])) for a in range(3)
-        ]
-        block = np.pad(block, padding, mode="edge")
+        block = read_box(self.image, box, halo)
         interior = tuple(slice(halo, halo + box[a + 3] - box[a]) for a in range(3))
         return normalize(block, self.window), interior  # type: ignore[return-value]
 

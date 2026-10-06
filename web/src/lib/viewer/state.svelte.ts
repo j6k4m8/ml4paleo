@@ -39,6 +39,8 @@ interface Preferences {
 	brushRadius: number;
 	protectLabels: boolean;
 	roiDepth: number;
+	showPrediction: boolean;
+	predictionOpacity: number;
 }
 
 function loadPreferences(): Partial<Preferences> {
@@ -58,6 +60,8 @@ export class ViewerState {
 	window = $state<[number, number]>([0, 1]);
 	opacity = $state(0.5);
 	showLabels = $state(true);
+	showPrediction = $state(true);
+	predictionOpacity = $state(0.35);
 	layout = $state<Layout>("four");
 	help = $state(false);
 	/** Refit the image as views resize, until the user pans or zooms. */
@@ -87,6 +91,8 @@ export class ViewerState {
 		if (typeof saved.brushRadius === "number") this.brushRadius = Math.min(64, Math.max(0.5, saved.brushRadius));
 		if (typeof saved.protectLabels === "boolean") this.protectLabels = saved.protectLabels;
 		if (typeof saved.roiDepth === "number") this.roiDepth = Math.min(512, Math.max(1, Math.round(saved.roiDepth)));
+		if (typeof saved.showPrediction === "boolean") this.showPrediction = saved.showPrediction;
+		if (typeof saved.predictionOpacity === "number") this.predictionOpacity = Math.min(1, Math.max(0, saved.predictionOpacity));
 	}
 
 	savePreferences(): void {
@@ -98,6 +104,8 @@ export class ViewerState {
 				brushRadius: this.brushRadius,
 				protectLabels: this.protectLabels,
 				roiDepth: this.roiDepth,
+				showPrediction: this.showPrediction,
+				predictionOpacity: this.predictionOpacity,
 			};
 			localStorage.setItem(PREFERENCES, JSON.stringify(preferences));
 		} catch {

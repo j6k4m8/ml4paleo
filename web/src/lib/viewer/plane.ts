@@ -149,6 +149,13 @@ class TextureCache {
 	}
 }
 
+/** Label-valued tiles drawn over the image with the palette. */
+export interface Overlay {
+	slice: number;
+	tiles: LabelTile[];
+	opacity: number;
+}
+
 export interface LabelTile {
 	/** The label chunk id (`cz/cy/cx`) and its level-0 chunk key. */
 	id: string;
@@ -286,13 +293,14 @@ export class PlaneRenderer {
 
 	/**
 	 * Draw the view: for each image layer (coarsest first), the tiles on the
-	 * GPU, so finer tiles cover coarser ones as they arrive; then the labels.
+	 * GPU, so finer tiles cover coarser ones as they arrive; then each overlay
+	 * (a model's prediction, the labels) in order.
 	 */
 	draw(
 		view: View,
 		window: [number, number],
 		layers: { level: Level; slice: number; tiles: TileKey[] }[],
-		labels: { slice: number; tiles: LabelTile[]; opacity: number } | null,
+		overlays: Overlay[],
 	): void {
 		const gl = this.#gl;
 		const { u, v } = this.plane;
@@ -332,23 +340,25 @@ export class PlaneRenderer {
 			}
 		}
 
-		if (!labels || labels.opacity <= 0) return;
 		gl.enable(gl.BLEND);
 		gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 		gl.useProgram(this.#labels);
 		place(this.#labelUniforms);
-		gl.uniform1f(this.#labelUniforms.opacity ?? null, labels.opacity);
 		gl.uniform1i(this.#labelUniforms.tile ?? null, 0);
 		gl.uniform1i(this.#labelUniforms.palette ?? null, 1);
 		gl.activeTexture(gl.TEXTURE1);
 		gl.bindTexture(gl.TEXTURE_2D, this.#palette);
 		gl.activeTexture(gl.TEXTURE0);
-		for (const tile of labels.tiles) {
-			const entry = this.#labelTextures.get(`${tile.id}@${labels.slice}`);
-			if (!entry) continue;
-			gl.bindTexture(gl.TEXTURE_2D, entry.texture);
-			rect(this.#labelUniforms, tile.key, [1, 1, 1], entry);
-			gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+		for (const overlay of overlays) {
+			if (overlay.opacity <= 0) continue;
+			gl.uniform1f(this.#labelUniforms.opacity ?? null, overlay.opacity);
+			for (const tile of overlay.tiles) {
+				const entry = this.#labelTextures.get(`${tile.id}@${overlay.slice}`);
+				if (!entry) continue;
+				gl.bindTexture(gl.TEXTURE_2D, entry.texture);
+				rect(this.#labelUniforms, tile.key, [1, 1, 1], entry);
+				gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+			}
 		}
 	}
 

@@ -51,6 +51,8 @@ class PipelineOut(BaseModel):
     created_at: datetime.datetime
     # Why it failed, in a sentence.
     error: str | None = None
+    # The model a training or prediction is for.
+    model_id: uuid.UUID | None = None
 
 
 async def _pipeline_out(db, root: Job) -> PipelineOut:
@@ -72,6 +74,7 @@ async def _pipeline_out(db, root: Job) -> PipelineOut:
         jobs=status.jobs,
         created_at=root.created_at,
         error=error,
+        model_id=root.payload.get("model_id"),
     )
 
 

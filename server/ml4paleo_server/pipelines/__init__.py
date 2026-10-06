@@ -9,10 +9,15 @@ success, so they are never lost). Each pipeline kind lives in its own module.
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import Job
-from . import ingest, train
+from . import ingest, predict, train
 
 # What people call a pipeline, by the kind of its first job.
-NAMES = {"ingest.probe": "ingest", "model.train": "training", "noop": "check"}
+NAMES = {
+    "ingest.probe": "ingest",
+    "model.train": "training",
+    "predict.prepare": "prediction",
+    "noop": "check",
+}
 
 _CONTINUATIONS = {"ingest.probe": ingest.after_probe, "model.train": train.after_train}
 _RESULT_CHECKS = {
@@ -35,4 +40,4 @@ async def after_success(db: AsyncSession, job: Job) -> None:
         await continuation(db, job)
 
 
-__all__ = ["NAMES", "after_success", "check_result", "ingest", "train"]
+__all__ = ["NAMES", "after_success", "check_result", "ingest", "predict", "train"]

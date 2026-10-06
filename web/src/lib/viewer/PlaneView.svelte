@@ -5,7 +5,7 @@
 	import type { Stroke } from "./state.svelte";
 	import type { ChunkStore } from "./chunks";
 	import type { LabelLayer } from "./labels";
-	import { type LabelTile, PlaneRenderer } from "./plane";
+	import { type LabelTile, type Overlay, PlaneRenderer } from "./plane";
 	import type { ViewerState } from "./state.svelte";
 	import {
 		chooseLevel,
@@ -27,6 +27,7 @@
 		levels,
 		images,
 		labels,
+		prediction = null,
 		onhover,
 		onresize,
 		onstroke,
@@ -39,6 +40,8 @@
 		levels: Level[];
 		images: ChunkStore;
 		labels: LabelLayer | null;
+		/** A model's prediction (label values), drawn under the labels. */
+		prediction?: ChunkStore | null;
 		onhover: (plane: Plane) => void;
 		onresize: (plane: Plane, width: number, height: number) => void;
 		/** A finished brush or eraser stroke, with the settings it began with. */
@@ -131,6 +134,7 @@
 		cancelAnimationFrame(frame);
 		images.want(plane.name, new Set());
 		labels?.store.want(plane.name, new Set());
+		prediction?.want(plane.name, new Set());
 		renderer?.destroy();
 		renderer = undefined;
 	});
@@ -153,7 +157,20 @@
 
 	$effect(() => {
 		// Redraw whenever anything the view shows changes.
-		void [viewer.position, viewer.zoom, viewer.window[0], viewer.window[1], viewer.opacity, viewer.showLabels, width, height, labels];
+		void [
+			viewer.position,
+			viewer.zoom,
+			viewer.window[0],
+			viewer.window[1],
+			viewer.opacity,
+			viewer.showLabels,
+			viewer.showPrediction,
+			viewer.predictionOpacity,
+			width,
+			height,
+			labels,
+			prediction,
+		];
 		schedule();
 	});
 
@@ -187,25 +204,29 @@
 			layers.flatMap(({ level }) => visibleTiles(level, current, 0).map(tileId)),
 		);
 		images.want(plane.name, imageIds, shownIds);
-		renderer.reserve(imageIds.size, MAX_LABEL_TILES);
+		renderer.reserve(imageIds.size, 2 * MAX_LABEL_TILES);
 		for (const { slice, tiles } of layers) {
 			for (const key of tiles) loadImage(key, slice);
 		}
 
-		let labelLayer: { slice: number; tiles: LabelTile[]; opacity: number } | null = null;
 		const full = levels[0]!;
-		const fullTiles = viewer.showLabels && labels ? visibleTiles(full, current, 0) : [];
-		labelsHidden = fullTiles.length > MAX_LABEL_TILES;
-		if (labels && fullTiles.length > 0 && !labelsHidden) {
+		const fullTiles = visibleTiles(full, current, 0);
+		// Only layers that exist and are shown get hidden when zoomed out.
+		const overlaid = !!((viewer.showLabels && labels) || (viewer.showPrediction && prediction));
+		labelsHidden = overlaid && fullTiles.length > MAX_LABEL_TILES;
+		const overlays: Overlay[] = [];
+		const add = (store: ChunkStore | null | undefined, prefix: string, shown: boolean, opacity: number) => {
+			if (!store) return;
+			if (!shown || labelsHidden) return store.want(plane.name, new Set());
+			const slice = sliceIndex(full, current);
 			const tiles = fullTiles.map((key) => ({ id: `${key.cz}/${key.cy}/${key.cx}`, key }));
-			const labelSlice = sliceIndex(full, current);
-			labels.store.want(plane.name, new Set(tiles.map((t) => t.id)));
-			for (const tile of tiles) loadLabels(labels, tile, labelSlice);
-			labelLayer = { slice: labelSlice, tiles, opacity: viewer.opacity };
-		} else {
-			labels?.store.want(plane.name, new Set());
-		}
-		renderer.draw(current, viewer.window, layers, labelLayer);
+			store.want(plane.name, new Set(tiles.map((t) => t.id)));
+			for (const tile of tiles) loadOverlay(store, prefix, tile, slice);
+			overlays.push({ slice, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity });
+		};
+		add(prediction, "prediction/", viewer.showPrediction, viewer.predictionOpacity);
+		add(labels?.store, "", viewer.showLabels, viewer.opacity);
+		renderer.draw(current, viewer.window, layers, overlays);
 	}
 
 	function loadImage(key: TileKey, at: number) {
@@ -226,21 +247,23 @@
 			.finally(() => waiting.delete(`image:${id}`));
 	}
 
-	function loadLabels(layer: LabelLayer, tile: LabelTile, at: number) {
-		if (!renderer || renderer.hasLabels(tile.id, at)) return;
-		const cached = layer.store.get(tile.id);
-		if (cached) return renderer.uploadLabels(tile, at, cached);
-		if (waiting.has(`labels:${tile.id}`)) return;
-		waiting.add(`labels:${tile.id}`);
-		layer.store
+	/** Load an overlay chunk; its textures are named `prefix` + its id. */
+	function loadOverlay(store: ChunkStore, prefix: string, tile: LabelTile, at: number) {
+		const named = { ...tile, id: prefix + tile.id };
+		if (!renderer || renderer.hasLabels(named.id, at)) return;
+		const cached = store.get(tile.id);
+		if (cached) return renderer.uploadLabels(named, at, cached);
+		if (waiting.has(`overlay:${named.id}`)) return;
+		waiting.add(`overlay:${named.id}`);
+		store
 			.request(tile.id)
 			.then((chunk) => {
-				if (!renderer || renderer.hasLabels(tile.id, at)) return;
+				if (!renderer || renderer.hasLabels(named.id, at)) return;
 				if (sliceIndex(levels[0]!, view()) !== at) return schedule();
-				renderer.uploadLabels(tile, at, chunk);
+				renderer.uploadLabels(named, at, chunk);
 				schedule();
 			}, failed)
-			.finally(() => waiting.delete(`labels:${tile.id}`));
+			.finally(() => waiting.delete(`overlay:${named.id}`));
 	}
 
 	// --- pointer and wheel ---------------------------------------------------
