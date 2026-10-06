@@ -3,7 +3,7 @@ name = "ml4paleo-worker"
 version = "0.2.0.dev0"
 description = "Job worker for ml4paleo v2"
 requires-python = ">=3.12"
-dependencies = ["httpx2>=2.13", "ml4paleo[dicom,mesh,rf]"]
+dependencies = ["httpx2>=2.13", "ml4paleo[dicom,export,mesh,rf]"]
 
 [project.scripts]
 ml4paleo-worker = "ml4paleo_worker.cli:main"
