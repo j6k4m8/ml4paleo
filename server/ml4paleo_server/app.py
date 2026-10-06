@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import pathlib
 import re
+import time
 from collections.abc import AsyncIterator
 from urllib.parse import urlsplit
 
@@ -38,6 +39,7 @@ from .viewer import (
 )
 
 MIN_SECRET_KEY_LENGTH = 32
+STORAGE_CHECK_SECONDS = 30.0
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # Requests that may carry a stale session cookie, so they are only checked
 # by origin. Logging in with a forged request is still blocked by the
@@ -178,6 +180,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return response
 
+    # When storage last answered; health checks ask it at most this often,
+    # since anyone may call them.
+    storage_checked = {"at": -STORAGE_CHECK_SECONDS}
+
     @app.get("/api/health")
     async def health(request: Request) -> dict[str, str]:
         """
@@ -185,7 +191,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         async with request.app.state.engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
-        await run_in_threadpool(_check_storage, settings)
+        if time.monotonic() - storage_checked["at"] >= STORAGE_CHECK_SECONDS:
+            await run_in_threadpool(_check_storage, settings)
+            storage_checked["at"] = time.monotonic()
         return {"status": "ok", "version": __version__}
 
     for router in ROUTERS:
