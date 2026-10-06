@@ -10,7 +10,8 @@
 	} = $props();
 
 	// Levels-style: the image's histogram (log scale), with the display
-	// window's ends as handles to drag.
+	// window's ends as handles to drag. It's for the pointer only; the Black
+	// and White fields next to it set the same values.
 	const WIDTH = 220;
 	const HEIGHT = 56;
 	let svg: SVGSVGElement;
@@ -54,13 +55,7 @@
 	bind:this={svg}
 	viewBox="0 0 {WIDTH} {HEIGHT + 8}"
 	class="w-full cursor-ew-resize touch-none select-none"
-	role="slider"
-	aria-label="Display window"
-	aria-valuemin={lo}
-	aria-valuemax={hi}
-	aria-valuenow={window[0]}
-	aria-valuetext="{window[0]} to {window[1]}"
-	tabindex="-1"
+	aria-hidden="true"
 	onpointerdown={down}
 	onpointermove={move}
 	onpointerup={() => (dragging = null)}
