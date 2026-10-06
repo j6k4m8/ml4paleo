@@ -194,6 +194,24 @@ def test_a_worker_composes_the_final_segmentation(
     assert get_bytes(grant, "inputs.json") is not None
 
 
+def test_one_final_segmentation_at_a_time(new_browser, settings, migrated_database_url):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    add_prediction(settings, migrated_database_url, project)
+    base = f"/api/projects/{project}/segmentation"
+    first = ada.post(base, json={})
+    assert first.status_code == 202, first.text
+    pipeline = first.json()["pipeline_id"]
+    again = ada.post(base, json={"min_voxels": 5})
+    assert again.status_code == 409
+    assert again.json()["detail"]["pipeline_id"] == pipeline
+    # Once it has stopped, another can start.
+    cancel = ada.post(f"/api/projects/{project}/pipelines/{pipeline}/cancel")
+    assert cancel.status_code == 204
+    assert ada.post(base, json={}).status_code == 202
+
+
 def test_a_start_that_fails_leaves_no_files(
     new_browser, settings, migrated_database_url
 ):

@@ -6,7 +6,9 @@ The final segmentation.
 
 The final segmentation is the project's prediction, overruled by its labels
 (complete ROIs count as background where unlabeled), with pieces of a class
-smaller than `min_voxels` removed unless someone labeled part of them.
+smaller than `min_voxels` removed unless someone labeled part of them. A
+project makes one at a time: while one is waiting or running, POST answers
+409 with its `pipeline_id`.
 """
 
 import datetime
@@ -14,10 +16,11 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from .. import artifacts, audit
 from ..auth.deps import CurrentAuth, DbSession
-from ..db import TrainedModel
+from ..db import Project, TrainedModel
 from ..pipelines import compose
 from .gateway import zarr_path
 from .projects import MemberProject
@@ -45,6 +48,20 @@ async def make_segmentation(
     auth: CurrentAuth,
     db: DbSession,
 ) -> ComposeStarted:
+    # Lock the project so two requests can't both start one.
+    await db.scalar(
+        select(Project.id)
+        .where(Project.id == project.id)
+        .with_for_update(key_share=True)
+    )
+    if (running := await compose.running(db, project.id)) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "A final segmentation is already being made.",
+                "pipeline_id": str(running),
+            },
+        )
     prediction = await artifacts.head(db, project.id, "prediction")
     if prediction is None or not prediction.manifest:
         raise HTTPException(status_code=409, detail="Predict with a model first.")

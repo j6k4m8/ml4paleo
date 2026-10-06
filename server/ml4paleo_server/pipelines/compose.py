@@ -9,20 +9,45 @@ The labels and complete ROIs are pinned when the pipeline starts: their
 chunk hashes go to `compose.prepare` in its payload, and it writes them into
 the artifact as `inputs.json`, so edits made while the pipeline runs don't
 change the result, and a start that never commits leaves no files behind.
+
+A project makes one final segmentation at a time (`running`).
 """
 
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from ml4paleo.segmentation.predict import SHARD_ZYX, shard_boxes
 
 from .. import artifacts, jobs
 from ..db import Artifact, Job, LabelChunk, LabelOp, Roi
+from ..jobs.queue import FINISHED
 
 WEIGHTS = {"prepare": 1.0, "blocks": 45.0, "merge": 4.0, "apply": 45.0, "finalize": 1.0}
+
+_step = aliased(Job)
+
+
+async def running(db: AsyncSession, project_id: uuid.UUID) -> uuid.UUID | None:
+    """The project's final segmentation pipeline still waiting or running, if any."""
+    roots = await db.scalars(
+        select(Job.id)
+        .where(
+            Job.project_id == project_id,
+            Job.id == Job.root_id,
+            Job.kind == "compose.prepare",
+            exists().where(_step.root_id == Job.id, _step.status.not_in(FINISHED)),
+        )
+        .order_by(Job.created_at.desc())
+    )
+    for root_id in roots.all():
+        status = await jobs.pipeline_status(db, root_id)
+        if status.status in ("waiting", "running"):
+            return root_id
+    return None
 
 
 async def pinned_labels(
