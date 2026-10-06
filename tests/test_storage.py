@@ -14,6 +14,7 @@ from ml4paleo.storage import (
     get_bytes,
     object_store,
     put_bytes,
+    put_file,
     zarr_store,
 )
 from ml4paleo.volume_providers import NumpyVolumeProvider, ZarrVolumeProvider
@@ -140,6 +141,17 @@ def test_object_helpers_round_trip_and_respect_read_only(grant):
     assert get_bytes(grant, "notes/a.txt") is None
     with pytest.raises(ValueError):
         put_bytes(grant, "../escape.txt", b"nope")
+
+
+def test_files_are_written_from_disk(grant, tmp_path):
+    # Larger than one part, so it goes up in several.
+    data = np.random.default_rng(0).bytes(12 * 1024 * 1024)
+    path = tmp_path / "mesh.stl"
+    path.write_bytes(data)
+    put_file(grant, "meshes/2.stl", path)
+    assert get_bytes(grant, "meshes/2.stl") == data
+    with pytest.raises(PermissionError):
+        put_file(grant.model_copy(update={"access": "r"}), "meshes/3.stl", path)
 
 
 def test_deleting_a_missing_object_succeeds(grant):

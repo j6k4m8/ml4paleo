@@ -16,8 +16,9 @@ the backend:
   lease token, so access ends when the lease does.
 
 `zarr_store` gives zarr-python a store rooted at the grant's location, and
-`get_bytes`, `put_bytes`, and `delete_object` cover plain objects. Code that
-reads or writes data therefore has one path for every backend.
+`get_bytes`, `put_bytes`, `put_file`, and `delete_object` cover plain
+objects. Code that reads or writes data therefore has one path for every
+backend.
 
 A job that produces an artifact writes `MANIFEST_KEY` last (`write_manifest`);
 the server commits the artifact only if it finds one.
@@ -27,12 +28,18 @@ obstore handle from `object_store` cannot refuse writes, so read-only grants
 should also carry read-only credentials (the credential broker issues those).
 """
 
+import http.client
 import io
 import json
+import os
+import pathlib
+import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import obstore
 import zarr.storage
@@ -48,6 +55,9 @@ from pydantic import (
 Scheme = Literal["file", "s3", "gs", "http", "https"]
 SUPPORTED_SCHEMES: tuple[Scheme, ...] = ("file", "s3", "gs", "http", "https")
 PROXY_SCHEMES = ("http", "https")
+# The storage proxy takes each object in one request, of at most this size.
+PROXY_MAX_OBJECT_BYTES = 4 * 1024**3
+PROXY_PUT_ATTEMPTS = 3
 MANIFEST_KEY = "_MANIFEST.json"
 
 # Credential keys a grant may carry, per backend.
@@ -168,7 +178,8 @@ def object_store(
     it whenever its credentials are about to expire.
 
     The storage proxy's store can't do multipart uploads: write through
-    `put_bytes` or `zarr_store`, which send each object in one request.
+    `put_bytes`, `put_file`, or `zarr_store`, which send each object in one
+    request.
     """
     if grant.scheme == "file":
         return LocalStore(grant.path, mkdir=grant.access == "rw")
@@ -287,6 +298,64 @@ def put_bytes(grant: StorageGrant, key: str, data: bytes) -> None:
         data,
         use_multipart=False if grant.scheme in PROXY_SCHEMES else None,
     )
+
+
+def put_file(grant: StorageGrant, key: str, path: str | os.PathLike[str]) -> None:
+    """
+    Write one object under the grant from a local file, without reading the
+    file into memory: obstore sends it in parts, and the storage proxy
+    (which takes each object in one request, of at most
+    `PROXY_MAX_OBJECT_BYTES`) gets it as a stream. Refuses read-only grants.
+    """
+    _check_writable(grant)
+    _check_path_segments(key)
+    path = pathlib.Path(path)
+    if grant.scheme in PROXY_SCHEMES:
+        _put_to_proxy(grant, key, path)
+    else:
+        obstore.put(object_store(grant), key, path)
+
+
+def _put_to_proxy(grant: StorageGrant, key: str, path: pathlib.Path) -> None:
+    # obstore's HTTP store would hold the whole file in memory (twice) to
+    # send it in one request.
+    size = path.stat().st_size
+    if size > PROXY_MAX_OBJECT_BYTES:
+        raise ValueError(
+            f"{key} is {size} bytes; the storage proxy takes objects of up to "
+            f"{PROXY_MAX_OBJECT_BYTES}"
+        )
+    url = f"{grant.url}/{quote(key)}"
+    headers = {"Content-Length": str(size), "Content-Type": "application/octet-stream"}
+    if token := grant.secret("token"):
+        headers["Authorization"] = f"Bearer {token}"
+    for attempt in range(1, PROXY_PUT_ATTEMPTS + 1):
+        try:
+            status, detail = _stream_put(url, headers, path)
+        except (OSError, http.client.HTTPException):
+            # The connection failed; try again, as obstore would.
+            if attempt == PROXY_PUT_ATTEMPTS:
+                raise
+        else:
+            if status < 300:
+                return
+            if status < 500 or attempt == PROXY_PUT_ATTEMPTS:
+                raise OSError(f"The storage proxy refused {key}: {status} {detail}")
+        time.sleep(2**attempt)
+
+
+def _stream_put(
+    url: str, headers: dict[str, str], path: pathlib.Path
+) -> tuple[int, str]:
+    # urllib sends a file body as it reads it, and goes through whatever
+    # proxy the environment names, as obstore's own client does.
+    with path.open("rb") as body:
+        request = urllib.request.Request(url, data=body, headers=headers, method="PUT")
+        try:
+            with urllib.request.urlopen(request, timeout=600) as response:
+                return response.status, ""
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read(500).decode(errors="replace")
 
 
 def write_manifest(grant: StorageGrant, manifest: dict[str, Any]) -> None:
@@ -415,6 +484,7 @@ def _check_path_segments(path: str) -> None:
 
 __all__ = [
     "MANIFEST_KEY",
+    "PROXY_MAX_OBJECT_BYTES",
     "SUPPORTED_SCHEMES",
     "StorageGrant",
     "delete_object",
@@ -422,6 +492,7 @@ __all__ = [
     "object_store",
     "open_object",
     "put_bytes",
+    "put_file",
     "write_manifest",
     "zarr_store",
 ]

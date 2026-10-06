@@ -28,7 +28,7 @@ import obstore
 from fastapi import APIRouter, HTTPException, Request, Response
 from sqlalchemy import select
 
-from ml4paleo.storage import StorageGrant, object_store
+from ml4paleo.storage import PROXY_MAX_OBJECT_BYTES, StorageGrant, object_store
 
 from .. import objects
 from ..db import Job
@@ -44,7 +44,7 @@ router = APIRouter(
 )
 
 # One object per PUT; the largest shard is well under this.
-MAX_PUT_BYTES = 4 * 1024**3
+MAX_PUT_BYTES = PROXY_MAX_OBJECT_BYTES
 _KEY_CHECK = StorageGrant(url="s3://key-check")
 
 

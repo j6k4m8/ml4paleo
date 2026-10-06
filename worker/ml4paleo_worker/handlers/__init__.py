@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..context import JobContext
-from . import compose, ingest, noop, predict, train
+from . import compose, ingest, mesh, noop, predict, train
 
 Handler = Callable[[JobContext], dict[str, Any]]
 
@@ -29,4 +29,7 @@ HANDLERS: dict[str, Handler] = {
     "cc.merge": compose.merge,
     "cc.apply": compose.apply,
     "compose.finalize": compose.finalize,
+    "mesh.block": mesh.block,
+    "mesh.join": mesh.join_class,
+    "mesh.finalize": mesh.finalize,
 }
