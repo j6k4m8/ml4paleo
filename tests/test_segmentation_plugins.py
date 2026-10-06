@@ -269,9 +269,17 @@ def test_random_forest_learns_from_sparse_labels(tmp_path):
     assert set(result.samples) == {0, 1}
     assert result.metrics["validation_crops"] >= 1
     assert result.metrics["classes"][str(BONE)]["dice"] > 0.8
+    # Models from before model.json kept their feature count still load.
+    features = meta.pop("features")
+    (tmp_path / "model.json").write_text(json.dumps(meta))
     predictor = plugin.load(tmp_path)
-    # What predicting holds per voxel grows with the features, as training does.
-    assert predictor.bytes_per_voxel == 16 * meta["features"] + 32 * 2
+    # Predicting holds the features several times over, and more with each
+    # scale computed at once (one per thread, up to this model's two).
+    held = {}
+    for threads in (1, 2, 8):
+        predictor.threads = threads
+        held[threads] = predictor.bytes_per_voxel
+    assert 16 * features <= held[1] < held[2] == held[8]
     h = predictor.halo
     block = np.pad(
         image[:, 10:42, 10:42, 10:42].astype(np.float32),
@@ -402,7 +410,10 @@ def train_forest(path, image, sigma_max=1.0):
         n_estimators=20, max_depth=8, samples_per_class=2000, sigma_max=sigma_max
     )
     plugin.train(data, params, path, Ctx())
-    return plugin.load(path)
+    predictor = plugin.load(path)
+    # As a job with one CPU would, so blocks come out the same anywhere.
+    predictor.threads = 1
+    return predictor
 
 
 def new_prediction(path):
@@ -468,7 +479,7 @@ def test_predictions_cover_shards(tmp_path):
 
 
 # 1 byte: blocks of MIN_BLOCK, each written as it's done. 32 MiB: blocks of
-# 20 into outputs for the whole box, written once. 1 GB: the box in one block.
+# 18 into outputs for the whole box, written once. 1 GB: the box in one block.
 @pytest.mark.parametrize("budget", [1, 2**25, 10**9])
 def test_predicting_block_by_block_matches_the_box_at_once(tmp_path, forest, budget):
     from ml4paleo.segmentation.predict import predict_box

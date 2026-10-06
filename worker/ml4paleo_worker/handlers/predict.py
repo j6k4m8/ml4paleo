@@ -2,8 +2,9 @@
 Prediction jobs (see the server's `pipelines/predict.py`).
 
 Grants, in order: the image artifact (read), the model artifact (read), and
-the prediction artifact (write). A shard job predicts its shard in blocks
-sized to the job's memory budget (see `predict_box`).
+the prediction artifact (write). A shard job predicts its shard on the
+job's share of the worker's CPUs, in blocks sized to its memory budget (see
+`predict_box`).
 """
 
 import json
@@ -65,6 +66,9 @@ def shard(ctx: JobContext) -> dict[str, Any]:
     image_grant, model_grant, prediction_grant = ctx.grants
     box = tuple(int(n) for n in ctx.payload["box"])
     predictor = _predictor(ctx, model_grant)
+    # The job's share of the worker's CPUs, as for training; the blocks are
+    # sized for it.
+    predictor.threads = ctx.threads
 
     def progress(fraction: float) -> None:
         ctx.progress(fraction)

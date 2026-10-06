@@ -17,6 +17,7 @@ memory budget (see `samples_that_fit`).
 
 import json
 import math
+import os
 import pathlib
 from typing import Any, ClassVar, cast
 
@@ -54,12 +55,16 @@ def halo_for(sigma_max: float) -> int:
     return int(4 * sigma_max + 0.5) + 2
 
 
+def scale_count(sigma_max: float) -> int:
+    """How many Gaussian scales `features` uses: 1, 2, 4, ... up to sigma_max."""
+    return int(math.log2(sigma_max) + 1)
+
+
 def feature_count(channels: int, sigma_max: float) -> int:
     """How many features `features` gives each voxel."""
-    # scikit-image's scales are 1, 2, 4, ... up to sigma_max, and each gives
-    # intensity, edges, and the three eigenvalues of the Hessian.
-    scales = int(math.log2(sigma_max) + 1)
-    return channels * 5 * scales
+    # Each scale gives intensity, edges, and the three eigenvalues of the
+    # Hessian.
+    return channels * 5 * scale_count(sigma_max)
 
 
 def samples_that_fit(
@@ -157,15 +162,22 @@ class RandomForestPredictor:
         self.sigma_max = float(meta["sigma_max"])
         self.halo = int(meta["halo"])
         self.num_classes = int(meta["num_classes"])
-        # float32 features, about four times over as for training crops (see
-        # `crop_cost`), then the class probabilities as float64, a few times
-        # over while scikit-learn adds up its trees. (The forest knows how
-        # many features it takes, also for models from before `meta` did.)
-        features = int(forest.n_features_in_)
-        self.bytes_per_voxel = 4 * 4 * features + 32 * self.num_classes
         # Threads for features (None: every core); the trees predict on one.
         self.threads = threads
         self.forest.n_jobs = 1
+
+    @property
+    def bytes_per_voxel(self) -> int:
+        # float32 features (the forest knows how many it takes, also for
+        # models from before `meta` said), about four times over as for
+        # training crops (see `crop_cost`). With several threads,
+        # scikit-image computes that many scales at once, each holding about
+        # 160 bytes a voxel besides the features. Then the class
+        # probabilities as float64, a few times over while scikit-learn adds
+        # up its trees.
+        features = int(self.forest.n_features_in_)
+        at_once = min(self.threads or os.cpu_count() or 1, scale_count(self.sigma_max))
+        return max(16 * features, 4 * features + 160 * at_once) + 32 * self.num_classes
 
     def predict_block(self, block: np.ndarray) -> np.ndarray:
         # Callers pad blocks at the image's edges by repeating its edge

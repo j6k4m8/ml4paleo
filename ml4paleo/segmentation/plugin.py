@@ -127,9 +127,17 @@ class Predictor(Protocol):
     # Voxels of context `predict_block` needs on every side.
     halo: int
     num_classes: int
-    # Bytes `predict_block` holds per voxel of the block it's given (halo
-    # included), so callers can size blocks to their memory.
-    bytes_per_voxel: int
+    # CPU threads `predict_block` may use (None: every core).
+    threads: int | None
+
+    @property
+    def bytes_per_voxel(self) -> int:
+        """
+        Bytes `predict_block` holds per voxel of the block it's given (halo
+        included) on its `threads`, so callers can size blocks to their
+        memory.
+        """
+        ...
 
     def predict_block(self, block: np.ndarray) -> np.ndarray:
         """
