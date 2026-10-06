@@ -6,6 +6,7 @@ the random forest plugin trained and scored on a synthetic volume.
 import subprocess
 import sys
 
+import joblib
 import numpy as np
 import pytest
 
@@ -212,6 +213,8 @@ def test_random_forest_learns_from_sparse_labels(tmp_path):
     )
 
     class Ctx:
+        threads = 2
+
         def __init__(self):
             self.fractions = []
 
@@ -224,6 +227,8 @@ def test_random_forest_learns_from_sparse_labels(tmp_path):
     ctx = Ctx()
     result = plugin.train(data, params, tmp_path, ctx)
     assert ctx.fractions[-1] == 1.0
+    # The forest fits on the context's threads, not every core.
+    assert joblib.load(tmp_path / "forest.joblib").n_jobs == 2
     assert set(result.samples) == {0, 1}
     assert result.metrics["validation_crops"] >= 1
     assert result.metrics["classes"][str(BONE)]["dice"] > 0.8
@@ -250,6 +255,8 @@ def test_training_needs_two_classes(tmp_path):
     plugin = get_plugin("rf")()
 
     class Ctx:
+        threads = 1
+
         def progress(self, fraction, message=None):
             pass
 

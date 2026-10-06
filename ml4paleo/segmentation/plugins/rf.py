@@ -8,7 +8,8 @@ Gaussian reaches `4 * sigma_max` voxels, and the edge (Sobel) and texture
 needs `ceil(4 * sigma_max) + 2` voxels of context on every side. Training
 samples are balanced: up to `samples_per_class` voxels of each class,
 drawn uniformly from every crop (reservoir sampling), so sparse brush
-strokes count as much as large painted regions.
+strokes count as much as large painted regions. Training computes features
+and fits trees on the context's `threads`.
 """
 
 import json
@@ -40,9 +41,12 @@ def halo_for(sigma_max: float) -> int:
     return math.ceil(4 * sigma_max) + 2
 
 
-def features(image: np.ndarray, sigma_max: float) -> np.ndarray:
+def features(
+    image: np.ndarray, sigma_max: float, threads: int | None = None
+) -> np.ndarray:
     """
-    (C, Z, Y, X) float32 -> (Z, Y, X, F) float32 features.
+    (C, Z, Y, X) float32 -> (Z, Y, X, F) float32 features, computed on up to
+    `threads` threads (None: every core).
     """
     from skimage.feature import multiscale_basic_features
 
@@ -55,6 +59,7 @@ def features(image: np.ndarray, sigma_max: float) -> np.ndarray:
             sigma_min=1.0,
             # Typed as int, but any positive number works.
             sigma_max=cast(Any, sigma_max),
+            workers=threads,
         ).astype(np.float32)
         for channel in image
     ]
@@ -96,18 +101,20 @@ class Reservoir:
 
 
 class RandomForestPredictor:
-    def __init__(self, forest: Any, meta: dict[str, Any]):
+    def __init__(self, forest: Any, meta: dict[str, Any], threads: int | None = None):
         self.forest = forest
         self.sigma_max = float(meta["sigma_max"])
         self.halo = int(meta["halo"])
         self.num_classes = int(meta["num_classes"])
+        # Threads for features (None: every core); the trees predict on one.
+        self.threads = threads
         self.forest.n_jobs = 1
 
     def predict_block(self, block: np.ndarray) -> np.ndarray:
         # Callers pad blocks at the image's edges by repeating its edge
         # voxels, as training crops are, so every block has the full halo.
         h = self.halo
-        feats = features(block, self.sigma_max)
+        feats = features(block, self.sigma_max, self.threads)
         interior = feats[
             h : feats.shape[0] - h, h : feats.shape[1] - h, h : feats.shape[2] - h
         ]
@@ -137,6 +144,7 @@ class RandomForestPlugin:
 
         assert isinstance(params, RandomForestParams)
         halo = halo_for(params.sigma_max)
+        threads = max(1, ctx.threads)
         rng = np.random.default_rng(params.seed)
         reservoir = Reservoir(params.samples_per_class, rng)
         crops = 0
@@ -144,7 +152,7 @@ class RandomForestPlugin:
         for crop in data.crops("train", halo):
             ctx.check()
             crops += 1
-            rows, labels = self._samples(crop, params.sigma_max)
+            rows, labels = self._samples(crop, params.sigma_max, threads)
             for label in np.unique(labels):
                 reservoir.add(int(label), rows[labels == label])
             # Reading crops takes most of the time before fitting.
@@ -167,7 +175,7 @@ class RandomForestPlugin:
         forest = RandomForestClassifier(
             n_estimators=params.n_estimators,
             max_depth=params.max_depth,
-            n_jobs=-1,
+            n_jobs=threads,
             random_state=params.seed,
         )
         forest.fit(x, y)
@@ -185,7 +193,7 @@ class RandomForestPlugin:
         }
         (out / META_FILE).write_text(json.dumps(meta, indent=2))
         ctx.progress(0.8, "Scoring on validation ROIs")
-        predictor = RandomForestPredictor(forest, meta)
+        predictor = RandomForestPredictor(forest, meta, threads)
         sheet = ScoreSheet(data.num_classes)
         validation_crops = 0
         for crop in data.crops("val", halo):
@@ -203,8 +211,10 @@ class RandomForestPlugin:
             files=[MODEL_FILE, META_FILE],
         )
 
-    def _samples(self, crop: Crop, sigma_max: float) -> tuple[np.ndarray, np.ndarray]:
-        feats = features(crop.image, sigma_max)[crop.interior]
+    def _samples(
+        self, crop: Crop, sigma_max: float, threads: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        feats = features(crop.image, sigma_max, threads)[crop.interior]
         known = crop.targets != PLUGIN_IGNORE
         return feats[known], crop.targets[known]
 

@@ -71,6 +71,11 @@ class TrainingData(Protocol):
 
 
 class TrainContext(Protocol):
+    @property
+    def threads(self) -> int:
+        """How many CPU threads the plugin may use at once."""
+        ...
+
     def progress(self, fraction: float, message: str | None = None) -> None: ...
 
     def check(self) -> None:
