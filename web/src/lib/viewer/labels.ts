@@ -1,9 +1,11 @@
 /**
  * A project's labels as a viewer layer: the classes and their colors, a
- * cache of label chunks, and live updates when anyone edits them.
+ * cache of label chunks, live updates when anyone edits them, and this
+ * page's own edits shown before the server confirms them.
  */
 
 import { api } from "#lib/api.ts";
+import { applyLocally, type DeltaIn, decodeDelta } from "../labels/deltas";
 import { ChunkStore } from "./chunks";
 import { absolute } from "./image";
 import { labelLoader, type WorkerPool } from "./loader";
@@ -15,6 +17,13 @@ export interface LabelClass {
 	color: string;
 }
 
+interface LocalDelta {
+	box: DeltaIn["box"];
+	mask: Uint8Array;
+	written: Uint8Array | number;
+	onlyIf: string;
+}
+
 const CACHE_BYTES = 128 * 1024 * 1024;
 
 export class LabelLayer {
@@ -22,6 +31,11 @@ export class LabelLayer {
 	classes: LabelClass[] = [];
 	#listeners = new Set<(ids: string[]) => void>();
 	#events: EventSource | null = null;
+	// Edits sent but not yet confirmed, in order, by op: chunk id → delta.
+	#local = new Map<string, Map<string, LocalDelta>>();
+	// Chunks that reloaded while an op was unconfirmed, by op: its delta was
+	// put back over whatever the server had, which may be newer.
+	#reapplied = new Map<string, Set<string>>();
 	/** Called if live updates stop for good (signed out, or removed from the project). */
 	onStopped: (() => void) | null = null;
 
@@ -32,6 +46,15 @@ export class LabelLayer {
 	) {
 		const url = absolute(`/api/projects/${projectId}/labels/zarr/`);
 		this.store = new ChunkStore(labelLoader(pool, url, shape), CACHE_BYTES, 4);
+		// Whatever the server sends, unconfirmed edits stay on screen.
+		this.store.onLoad = (id, chunk) => {
+			for (const [op, deltas] of this.#local) {
+				const delta = deltas.get(id);
+				if (!delta) continue;
+				applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, delta.mask, delta.written, delta.onlyIf);
+				this.#reapplied.get(op)?.add(id);
+			}
+		};
 	}
 
 	/** Colors by label value (background, 1, has none). */
@@ -49,13 +72,94 @@ export class LabelLayer {
 			if (this.#events?.readyState === EventSource.CLOSED) this.onStopped?.();
 		};
 		this.#events.addEventListener("change", (event) => {
-			const change = JSON.parse((event as MessageEvent<string>).data) as {
-				chunks: { key: Vec3 }[];
-			};
-			const ids = change.chunks.map(({ key }) => key.join("/"));
-			for (const id of ids) this.store.invalidate(id);
-			for (const listener of this.#listeners) listener(ids);
+			const change = JSON.parse((event as MessageEvent<string>).data) as { chunks: { key: Vec3 }[] };
+			this.reload(change.chunks.map(({ key }) => key.join("/")));
 		});
+	}
+
+	/**
+	 * Fetch chunks again. Ones a view shows reload in the background (what's
+	 * on screen stays until the new copy arrives); others are dropped, along
+	 * with any load in flight, so the next look fetches them afresh.
+	 */
+	reload(ids: string[]): void {
+		const dropped: string[] = [];
+		for (const id of ids) {
+			if (this.store.get(id) && this.store.isWanted(id)) {
+				this.store.refresh(id).then(
+					() => this.#emit([id]),
+					() => {},
+				);
+			} else {
+				this.store.invalidate(id);
+				dropped.push(id);
+			}
+		}
+		this.#emit(dropped);
+	}
+
+	/** The chunk version this page last read, if it has the chunk. */
+	versionOf(id: string): number | undefined {
+		return this.store.get(id)?.version;
+	}
+
+	/** Show an op's deltas at once, until `settle` is called for it. */
+	applyLocal(op: string, deltas: DeltaIn[]): void {
+		const local = new Map<string, LocalDelta>();
+		const changed: string[] = [];
+		for (const delta of deltas) {
+			const id = delta.key.join("/");
+			const { mask, written } = decodeDelta(delta);
+			local.set(id, { box: delta.box, mask, written, onlyIf: delta.only_if });
+			this.store.pin(id);
+			const chunk = this.store.get(id);
+			if (chunk && applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, mask, written, delta.only_if) > 0) {
+				changed.push(id);
+			}
+		}
+		this.#local.set(op, local);
+		this.#reapplied.set(op, new Set());
+		this.#emit(changed);
+	}
+
+	/**
+	 * The server answered for an op: keep its result (taking the versions it
+	 * made) or, if it was refused, fetch its chunks again to undo the preview.
+	 */
+	settle(op: string, versions: { key: Vec3; version: number }[] | null): void {
+		const local = this.#local.get(op);
+		const reapplied = this.#reapplied.get(op) ?? new Set<string>();
+		this.#local.delete(op);
+		this.#reapplied.delete(op);
+		for (const id of local?.keys() ?? []) this.store.unpin(id);
+		if (versions) {
+			this.noteVersions(versions);
+			if (reapplied.size > 0) this.reload([...reapplied]);
+		} else if (local) {
+			this.reload([...local.keys()]);
+		}
+	}
+
+	/**
+	 * Take the versions an op of this page made. A chunk this page had at the
+	 * version just before is now current; otherwise someone else changed it
+	 * too, and it reloads.
+	 */
+	noteVersions(versions: { key: Vec3; version: number }[]): void {
+		const stale: string[] = [];
+		for (const { key, version } of versions) {
+			const id = key.join("/");
+			const chunk = this.store.get(id);
+			if (!chunk || chunk.version === undefined) continue;
+			if (chunk.version === version - 1) chunk.version = version;
+			else if (chunk.version < version) stale.push(id);
+		}
+		if (stale.length > 0) this.reload(stale);
+	}
+
+	#emit(ids: string[]): void {
+		if (ids.length === 0) return;
+		for (const listener of this.#listeners) listener(ids);
 	}
 
 	/** Call `listener` with the ids of chunks that changed. */

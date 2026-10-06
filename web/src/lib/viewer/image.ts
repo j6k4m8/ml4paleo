@@ -12,7 +12,7 @@ interface Multiscales {
 
 /** An absolute URL for a gateway path, as zarrita's FetchStore needs. */
 export function absolute(url: string): string {
-	return new URL(url, globalThis.location?.href).href;
+	return new URL(url, globalThis.location?.href ?? "http://localhost/").href;
 }
 
 /** Level-0 voxels per voxel of each level, from the levels' scales. */

@@ -9,6 +9,8 @@ export interface Chunk {
 	data: ArrayBufferView & { length: number };
 	/** Shape of the chunk, (z, y, x). Edge chunks may be smaller. */
 	shape: number[];
+	/** For label chunks, the version the server served. */
+	version?: number;
 }
 
 export type Loader = (id: string, signal: AbortSignal) => Promise<Chunk>;
@@ -19,6 +21,8 @@ interface Pending {
 	reject: (error: unknown) => void;
 	controller: AbortController;
 	started: boolean;
+	/** Replaces a cached copy that is now out of date. */
+	refresh: boolean;
 }
 
 export class ChunkStore {
@@ -30,6 +34,8 @@ export class ChunkStore {
 	#pinned = new Set<string>();
 	#wanted = new Map<string, Set<string>>();
 	#protected = new Map<string, Set<string>>();
+	/** Called with each loaded chunk before it is cached and returned. */
+	onLoad: ((id: string, chunk: Chunk) => void) | null = null;
 
 	constructor(
 		private load: Loader,
@@ -57,9 +63,34 @@ export class ChunkStore {
 		if (cached) return Promise.resolve(cached);
 		const pending = this.#pending.get(id);
 		if (pending) return pending.promise;
+		return this.#enqueue(id, false);
+	}
+
+	/**
+	 * Load a chunk again (for example after someone edited it), keeping the
+	 * cached copy in use until the new one replaces it.
+	 */
+	refresh(id: string): Promise<Chunk> {
+		const pending = this.#pending.get(id);
+		if (pending) {
+			pending.entry.controller.abort();
+			this.#pending.delete(id);
+			this.#queue = this.#queue.filter((entry) => entry !== pending.entry);
+			pending.entry.reject(new DOMException("Changed while loading", "AbortError"));
+		}
+		return this.#enqueue(id, true);
+	}
+
+	/** Whether any view needs this chunk now. */
+	isWanted(id: string): boolean {
+		for (const set of this.#wanted.values()) if (set.has(id)) return true;
+		return false;
+	}
+
+	#enqueue(id: string, refresh: boolean): Promise<Chunk> {
 		let entry!: Pending;
 		const promise = new Promise<Chunk>((resolve, reject) => {
-			entry = { id, resolve, reject, controller: new AbortController(), started: false };
+			entry = { id, resolve, reject, controller: new AbortController(), started: false, refresh };
 		});
 		this.#pending.set(id, { promise, entry });
 		this.#queue.push(entry);
@@ -91,6 +122,9 @@ export class ChunkStore {
 			if (wanted.has(id)) continue;
 			entry.controller.abort();
 			this.#pending.delete(id);
+			// A cancelled refresh leaves an out-of-date copy: drop it, so the
+			// next request loads afresh.
+			if (entry.refresh) this.#drop(id);
 			entry.reject(new DOMException("No longer needed", "AbortError"));
 		}
 		this.#queue = this.#queue.filter((entry) => wanted.has(entry.id));
@@ -111,17 +145,21 @@ export class ChunkStore {
 	 * running might return the old contents, so it is cancelled too.
 	 */
 	invalidate(id: string): void {
-		const chunk = this.#cache.get(id);
-		if (chunk) {
-			this.#cache.delete(id);
-			this.#bytes -= chunk.data.byteLength;
-		}
+		this.#drop(id);
 		const pending = this.#pending.get(id);
 		if (pending) {
 			pending.entry.controller.abort();
 			this.#pending.delete(id);
 			this.#queue = this.#queue.filter((entry) => entry !== pending.entry);
 			pending.entry.reject(new DOMException("Changed while loading", "AbortError"));
+		}
+	}
+
+	#drop(id: string): void {
+		const chunk = this.#cache.get(id);
+		if (chunk) {
+			this.#cache.delete(id);
+			this.#bytes -= chunk.data.byteLength;
 		}
 	}
 
@@ -143,6 +181,12 @@ export class ChunkStore {
 				.then((chunk) => {
 					if (this.#pending.get(entry.id)?.entry !== entry) return;
 					this.#pending.delete(entry.id);
+					this.onLoad?.(entry.id, chunk);
+					const old = this.#cache.get(entry.id);
+					if (old) {
+						this.#cache.delete(entry.id);
+						this.#bytes -= old.data.byteLength;
+					}
 					this.#cache.set(entry.id, chunk);
 					this.#bytes += chunk.data.byteLength;
 					this.#evict();

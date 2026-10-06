@@ -4,10 +4,31 @@
  * this browser.
  */
 
+import type { PlaneMask } from "../labels/raster";
 import type { Plane, Vec3 } from "./tiles";
 
 export type Layout = "four" | Plane["name"];
 export const LAYOUTS: Layout[] = ["four", "xy", "xz", "yz"];
+
+export type Tool = "navigate" | "brush" | "eraser" | "polygon";
+
+/** A finished brush or eraser stroke and the settings it was drawn with. */
+export interface Stroke {
+	plane: Plane;
+	slice: number;
+	mask: PlaneMask;
+	erase: boolean;
+	value: number;
+	onlyIf: string;
+	radius: number;
+}
+
+/** A polygon being drawn: its plane, slice, and vertices in plane voxels. */
+export interface Polygon {
+	plane: Plane["name"];
+	slice: number;
+	points: [number, number][];
+}
 
 const PREFERENCES = "m4p.viewer";
 
@@ -15,6 +36,8 @@ interface Preferences {
 	opacity: number;
 	showLabels: boolean;
 	layout: Layout;
+	brushRadius: number;
+	protectLabels: boolean;
 }
 
 function loadPreferences(): Partial<Preferences> {
@@ -38,6 +61,16 @@ export class ViewerState {
 	help = $state(false);
 	/** Refit the image as views resize, until the user pans or zooms. */
 	autoFit = true;
+	tool = $state<Tool>("navigate");
+	/** The class brushes and polygons paint. */
+	activeClass = $state<number | null>(null);
+	/** Brush radius in voxels of the finest axis. */
+	brushRadius = $state(4);
+	/** Paint only voxels without a label. */
+	protectLabels = $state(false);
+	polygon = $state<Polygon | null>(null);
+	/** Space is held: drag pans whatever the tool. */
+	panning = $state(false);
 
 	constructor(
 		public shape: Vec3,
@@ -47,6 +80,8 @@ export class ViewerState {
 		if (typeof saved.opacity === "number") this.opacity = Math.min(1, Math.max(0, saved.opacity));
 		if (typeof saved.showLabels === "boolean") this.showLabels = saved.showLabels;
 		if (saved.layout && LAYOUTS.includes(saved.layout)) this.layout = saved.layout;
+		if (typeof saved.brushRadius === "number") this.brushRadius = Math.min(64, Math.max(0.5, saved.brushRadius));
+		if (typeof saved.protectLabels === "boolean") this.protectLabels = saved.protectLabels;
 	}
 
 	savePreferences(): void {
@@ -55,6 +90,8 @@ export class ViewerState {
 				opacity: this.opacity,
 				showLabels: this.showLabels,
 				layout: this.layout,
+				brushRadius: this.brushRadius,
+				protectLabels: this.protectLabels,
 			};
 			localStorage.setItem(PREFERENCES, JSON.stringify(preferences));
 		} catch {

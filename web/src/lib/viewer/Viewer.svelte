@@ -1,13 +1,17 @@
 <script lang="ts">
 	import { onDestroy, onMount, untrack } from "svelte";
+	import { session } from "#lib/session.svelte.ts";
 	import type { ProjectImage } from "#lib/types.ts";
+	import { splitIntoDeltas } from "../labels/deltas";
+	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
+	import { PlaneMask } from "../labels/raster";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
-	import { actionFor, KEYMAP, MOUSE } from "./keymap";
+	import { actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
 	import { type LabelClass, LabelLayer } from "./labels";
 	import { imageLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
-	import { ViewerState } from "./state.svelte";
+	import { type Stroke, ViewerState } from "./state.svelte";
 	import { aspectOf, type Level, type Plane, PLANES, type Vec3 } from "./tiles";
 
 	let { image, projectId }: { image: ProjectImage; projectId: string } = $props();
@@ -29,6 +33,17 @@
 	let error = $state("");
 	let pool: WorkerPool | undefined;
 	let hovered: Plane = PLANES.xy;
+	let notice = $state("");
+	const queue = new OpQueue(project, indexedDbStorage(session.current?.user.id ?? "", project));
+	// Strict edits compare against the chunk versions current when they're
+	// sent, after this page's earlier edits have landed; if any version is
+	// unknown, the edit applies like a brush stroke instead.
+	queue.beforeSend = (op: QueuedEdit) => {
+		if (!op.strict || !labels) return op;
+		const versions = op.deltas.map((d) => labels!.versionOf(d.key.join("/")));
+		if (versions.some((v) => v === undefined)) return { ...op, strict: false };
+		return { ...op, deltas: op.deltas.map((d, i) => ({ ...d, base_version: versions[i]! })) };
+	};
 	const sizes = new Map<string, [number, number]>();
 	const controller = new AbortController();
 
@@ -46,6 +61,27 @@
 			layer.onStopped = () => (error = "Live label updates stopped. Reload the page to see others' edits.");
 			labels = layer;
 			classes = layer.classes;
+			viewer.activeClass ??= classes[0]?.value ?? null;
+			queue.onOutcome((outcome) => {
+				if ("cancelled" in outcome) {
+					layer.settle(outcome.op.local, null);
+				} else if (outcome.op.kind !== "edit") {
+					if ("result" in outcome) layer.noteVersions(outcome.result.chunks);
+					else if (!outcome.alreadyDone) notice = `That ${outcome.op.kind} didn't go through: ${outcome.error}`;
+				} else if ("result" in outcome) {
+					layer.settle(outcome.op.local, outcome.result.chunks);
+				} else {
+					layer.settle(outcome.op.local, null);
+					notice = outcome.conflict
+						? "Someone changed those labels while you drew; your polygon was dropped. Draw it again."
+						: `That edit didn't save: ${outcome.error}`;
+				}
+			});
+			queue.onRequeue((ops) => {
+				for (const op of ops) layer.applyLocal(op.local, op.deltas);
+			});
+			// Edits a previous visit left unsent show until they're saved.
+			for (const op of await queue.start()) if (op.kind === "edit") layer.applyLocal(op.local, op.deltas);
 		} catch (e) {
 			if (!controller.signal.aborted) error = e instanceof Error ? e.message : String(e);
 		}
@@ -53,13 +89,14 @@
 
 	onDestroy(() => {
 		controller.abort();
+		queue.stop();
 		labels?.stop();
 		images?.keepOnly(new Set());
 		pool?.close();
 	});
 
 	$effect(() => {
-		void [viewer.opacity, viewer.showLabels, viewer.layout];
+		void [viewer.opacity, viewer.showLabels, viewer.layout, viewer.brushRadius, viewer.protectLabels];
 		viewer.savePreferences();
 	});
 
@@ -86,6 +123,62 @@
 		if (viewer.autoFit && plane.name === main) fit();
 	}
 
+	// --- editing -------------------------------------------------------------
+
+	/** Send one edit of a plane mask, showing it at once. */
+	function commit(plane: Plane, slice: number, mask: PlaneMask, value: number, onlyIf: string, tool: Record<string, unknown>, strict = false) {
+		if (!labels) return;
+		const volume = mask.toVolume(plane, slice);
+		const deltas = splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value, onlyIf });
+		notice = "";
+		for (const op of queue.edit(deltas, { strict, tool })) labels.applyLocal(op.local, op.deltas);
+	}
+
+	function stroke(drawn: Stroke) {
+		if (!drawn.erase && drawn.value === 0) return;
+		commit(drawn.plane, drawn.slice, drawn.mask, drawn.value, drawn.onlyIf, {
+			name: drawn.erase ? "eraser" : "brush",
+			radius: drawn.radius,
+			plane: drawn.plane.name,
+			slice: drawn.slice,
+		});
+	}
+
+	/** Fill the polygon being drawn; `erase` clears the active class inside it instead. */
+	function closePolygon(erase = false) {
+		const polygon = viewer.polygon;
+		viewer.polygon = null;
+		if (!polygon || polygon.points.length < 3 || viewer.activeClass === null) return;
+		const plane = PLANES[polygon.plane];
+		const mask = new PlaneMask(viewer.shape[plane.u], viewer.shape[plane.v]);
+		mask.polygon(polygon.points);
+		if (mask.count === 0) return;
+		const value = erase ? 0 : viewer.activeClass;
+		const onlyIf = erase ? `class:${viewer.activeClass}` : viewer.protectLabels ? "unlabeled" : "any";
+		const points = polygon.points.map(([u, v]) => [Math.round(u * 10) / 10, Math.round(v * 10) / 10]);
+		const tool = { name: erase ? "polygon-erase" : "polygon", plane: plane.name, slice: polygon.slice, points: points.length <= 500 ? points : undefined };
+		commit(plane, polygon.slice, mask, value, onlyIf, tool, true);
+	}
+
+	function setTool(tool: typeof viewer.tool) {
+		viewer.tool = tool;
+		if (tool !== "polygon") viewer.polygon = null;
+	}
+
+	const status = $derived(
+		queue.error
+			? queue.error
+			: queue.offline
+				? `Offline · ${queue.pending} waiting`
+				: queue.pending > 0
+					? `Saving ${queue.pending}`
+					: "Saved",
+	);
+
+	function keyUp(event: KeyboardEvent) {
+		if (event.key === " ") viewer.panning = false;
+	}
+
 	/** The view that slice keys step: the only one, or the one last pointed at. */
 	function activePlane(): Plane {
 		return viewer.layout === "four" ? hovered : PLANES[viewer.layout];
@@ -97,11 +190,49 @@
 			event.preventDefault();
 			return;
 		}
+		if (event.key === " " && !forFocused(event)) {
+			viewer.panning = true;
+			event.preventDefault();
+			return;
+		}
 		const action = actionFor(event);
 		if (!action) return;
+		// Enter and Backspace only mean something while drawing a polygon.
+		if ((action === "close-polygon" || action === "remove-point") && !viewer.polygon) return;
 		event.preventDefault();
 		const step = event.shiftKey ? 10 : 1;
 		switch (action) {
+			case "navigate":
+			case "brush":
+			case "eraser":
+			case "polygon":
+				return setTool(action);
+			case "smaller":
+				viewer.brushRadius = Math.max(0.5, Math.round(viewer.brushRadius / 1.25 * 2) / 2);
+				return;
+			case "bigger":
+				viewer.brushRadius = Math.min(64, Math.max(viewer.brushRadius + 0.5, Math.round(viewer.brushRadius * 1.25 * 2) / 2));
+				return;
+			case "class": {
+				const chosen = classes[Number(event.key) - 1];
+				if (chosen) viewer.activeClass = chosen.value;
+				return;
+			}
+			case "close-polygon":
+				return closePolygon(event.altKey);
+			case "remove-point":
+				if (viewer.polygon) viewer.polygon = { ...viewer.polygon, points: viewer.polygon.points.slice(0, -1) };
+				return;
+			case "cancel":
+				if (viewer.polygon) viewer.polygon = null;
+				else setTool("navigate");
+				return;
+			case "undo":
+				queue.undo();
+				return;
+			case "redo":
+				queue.redo();
+				return;
 			case "slice-next":
 				return viewer.step(activePlane().normal, step);
 			case "slice-previous":
@@ -133,7 +264,7 @@
 	}
 </script>
 
-<svelte:window onkeydown={key} />
+<svelte:window onkeydown={key} onkeyup={keyUp} onblur={() => (viewer.panning = false)} />
 
 <div class="viewer layout-{viewer.layout}">
 	<div class="views">
@@ -147,6 +278,8 @@
 					{labels}
 					onhover={(p) => (hovered = p)}
 					onresize={resized}
+					onstroke={stroke}
+					onpolygon={() => closePolygon()}
 				/>
 			{/each}
 		{/if}
@@ -168,13 +301,43 @@
 				Label opacity
 				<input type="range" min="0" max="1" step="0.05" bind:value={viewer.opacity} />
 			</label>
+			<div class="tools" role="radiogroup" aria-label="Tool">
+				{#each [["navigate", "Navigate", "n"], ["brush", "Brush", "b"], ["eraser", "Eraser", "e"], ["polygon", "Polygon", "p"]] as [tool, name, shortcut] (tool)}
+					<button
+						class:secondary={viewer.tool !== tool}
+						role="radio"
+						aria-checked={viewer.tool === tool}
+						title="{name} ({shortcut})"
+						onclick={() => setTool(tool as typeof viewer.tool)}>{name}</button
+					>
+				{/each}
+			</div>
 			{#if classes.length > 0}
-				<ul class="classes">
-					{#each classes as label (label.value)}
-						<li><span class="swatch" style:background={label.color}></span>{label.name}</li>
+				<fieldset class="classes">
+					<legend>Class</legend>
+					{#each classes as label, index (label.value)}
+						<label class="row">
+							<input type="radio" name="class" value={label.value} bind:group={viewer.activeClass} />
+							<span class="swatch" style:background={label.color}></span>
+							{label.name}
+							{#if index < 9}<kbd>{index + 1}</kbd>{/if}
+						</label>
 					{/each}
-				</ul>
+				</fieldset>
+			{:else if labels}
+				<p class="muted">Add label classes in the project settings to start labeling.</p>
 			{/if}
+			<label>
+				Brush radius: {viewer.brushRadius} voxels
+				<input type="range" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} />
+			</label>
+			<label class="row"><input type="checkbox" bind:checked={viewer.protectLabels} /> Paint only unlabeled voxels</label>
+			<div class="row history">
+				<button class="secondary" disabled={queue.undoable === 0} onclick={() => queue.undo()} title="Undo (Ctrl+Z)">Undo</button>
+				<button class="secondary" disabled={queue.redoable === 0} onclick={() => queue.redo()} title="Redo (Ctrl+Shift+Z)">Redo</button>
+				<span class="status" class:error={!!queue.error} role="status">{status}</span>
+			</div>
+			{#if notice}<p class="error" role="alert">{notice}</p>{/if}
 			<p class="muted">Press <kbd>?</kbd> for keys.</p>
 			{#if error}<p class="error" role="alert">{error}</p>{/if}
 		</aside>
@@ -259,15 +422,37 @@
 	.axis-z {
 		color: #539bf5;
 	}
-	.classes {
-		list-style: none;
-		margin: 0;
-		padding: 0;
+	.tools {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem;
 	}
-	.classes li {
+	.tools button {
+		padding: 0.25rem 0.5rem;
+	}
+	.classes {
+		border: 1px solid var(--line);
+		border-radius: 4px;
+		margin: 0;
+		padding: 0.3rem 0.5rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+	}
+	.classes kbd {
+		margin-left: auto;
+	}
+	.history {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
+	}
+	.history button {
+		padding: 0.2rem 0.5rem;
+	}
+	.status {
+		margin-left: auto;
+		font-size: 0.85rem;
 	}
 	.swatch {
 		width: 0.8rem;
