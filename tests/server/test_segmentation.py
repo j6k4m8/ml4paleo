@@ -15,7 +15,7 @@ import pytest
 import zarr
 from helpers import SECRET_KEY, add_worker, run_db, signup
 from ml4paleo_server import artifacts, labels
-from ml4paleo_server.db import Artifact, LabelOp, TrainedModel, TrainingSet
+from ml4paleo_server.db import Artifact, Job, LabelOp, TrainedModel, TrainingSet
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
@@ -34,7 +34,7 @@ from ml4paleo.segmentation.predict import (
     open_prediction,
     shard_boxes,
 )
-from ml4paleo.storage import StorageGrant, object_store, zarr_store
+from ml4paleo.storage import StorageGrant, get_bytes, object_store, zarr_store
 
 SHAPE = (20, 24, 28)
 BONE, TOOTH = 2, 3
@@ -66,19 +66,21 @@ def predicted() -> np.ndarray:
     return classes
 
 
-async def new_image(db, project: str):
+async def new_image(db, project: str, shape=SHAPE):
     image = await artifacts.create_staging(
         db, project_id=uuid.UUID(project), kind="image", head_slot="image"
     )
     image.state = "committed"
-    image.manifest = {"shape_czyx": [1, *SHAPE], "window": [0, 1]}
+    image.manifest = {"shape_czyx": [1, *shape], "window": [0, 1]}
     await artifacts.set_head(db, image)
     return image
 
 
-def add_prediction(settings, database_url, project: str):
+def add_prediction(settings, database_url, project: str, classes=None):
+    classes = predicted() if classes is None else classes
+
     async def create(db):
-        image = await new_image(db, project)
+        image = await new_image(db, project, classes.shape)
         artifact = await artifacts.create_staging(
             db,
             project_id=uuid.UUID(project),
@@ -87,17 +89,52 @@ def add_prediction(settings, database_url, project: str):
             inputs={"model_id": None, "image_artifact_id": str(image.id)},
         )
         grant = project_storage(settings).child(artifacts.artifact_path(artifact))
-        group = create_prediction(grant, SHAPE)
-        group["class"][:] = predicted()  # type: ignore[index]
+        group = create_prediction(grant, classes.shape)
+        group["class"][:] = classes  # type: ignore[index]
         artifact.state = "committed"
         artifact.manifest = {
             "kind": "prediction",
-            "shape_zyx": list(SHAPE),
+            "shape_zyx": list(classes.shape),
             "class_values": [BONE],
         }
         await artifacts.set_head(db, artifact)
 
     run_db(database_url, create)
+
+
+def run_worker(database_url, live_server, browser, project: str, pipeline_id: str):
+    """Run a worker until the pipeline finishes, and return the pipeline."""
+    token = add_worker(database_url)
+    client = ServerClient(token, base_url=live_server)
+    worker = Worker(
+        client,
+        WorkerCaps(version="test", kinds=sorted(HANDLERS)),
+        claim_wait_seconds=0.5,
+        heartbeat_seconds=0.2,
+    )
+    thread = threading.Thread(target=worker.run, kwargs={"max_jobs": None})
+    thread.start()
+    try:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            pipeline = browser.get(
+                f"/api/projects/{project}/pipelines/{pipeline_id}"
+            ).json()
+            if pipeline["status"] in ("succeeded", "failed", "cancelled"):
+                return pipeline
+            time.sleep(0.3)
+    finally:
+        worker.stop()
+        thread.join(timeout=30)
+        client.close()
+    raise AssertionError("The pipeline didn't finish.")
+
+
+def made(settings, project: str, artifact_id: str) -> np.ndarray:
+    grant = project_storage(settings).child(
+        f"projects/{project}/artifacts/{artifact_id}"
+    )
+    return np.asarray(zarr.open_group(store=zarr_store(grant), mode="r")["class"][:])
 
 
 def paint(settings, database_url, project, origin, mask, value):
@@ -161,45 +198,20 @@ def test_a_worker_composes_the_final_segmentation(
         np.ones((1, 1, 1)),
         TOOTH,
     )
-    token = add_worker(migrated_database_url)
-    client = ServerClient(token, base_url=live_server)
-    worker = Worker(
-        client,
-        WorkerCaps(version="test", kinds=sorted(HANDLERS)),
-        claim_wait_seconds=0.5,
-        heartbeat_seconds=0.2,
+    pipeline = run_worker(
+        migrated_database_url,
+        live_server,
+        ada,
+        project,
+        started.json()["pipeline_id"],
     )
-    thread = threading.Thread(target=worker.run, kwargs={"max_jobs": None})
-    thread.start()
-    try:
-        deadline = time.monotonic() + 120
-        pipeline_url = (
-            f"/api/projects/{project}/pipelines/{started.json()['pipeline_id']}"
-        )
-        while time.monotonic() < deadline:
-            pipeline = ada.get(pipeline_url).json()
-            if pipeline["status"] in ("succeeded", "failed", "cancelled"):
-                break
-            time.sleep(0.3)
-    finally:
-        worker.stop()
-        thread.join(timeout=30)
-        client.close()
     assert pipeline["status"] == "succeeded", pipeline
     assert pipeline["kind"] == "segmentation"
 
     segmentation = ada.get(base).json()
     assert segmentation["min_voxels"] == 10
     assert datetime.datetime.fromisoformat(segmentation["labels_as_of"]) == pinned
-    group = zarr.open_group(
-        store=zarr_store(
-            project_storage(settings).child(
-                f"projects/{project}/artifacts/{segmentation['artifact_id']}"
-            )
-        ),
-        mode="r",
-    )
-    final = np.asarray(group["class"][:])
+    final = made(settings, project, segmentation["artifact_id"])
     # Labels overrule the prediction.
     assert (final[2:4, 2:4, 2:4] == TOOTH).all()
     assert (final[4:12, 4:12, 4:12] == BONE).all()
@@ -209,13 +221,94 @@ def test_a_worker_composes_the_final_segmentation(
     assert final[15, 20, 20] == 1
     assert (final[15, 5, 20:22] == BONE).all()
     # Scratch files are cleaned up; the pinned labels stay, for the record.
-    from ml4paleo.storage import get_bytes
-
     grant = project_storage(settings).child(
         f"projects/{project}/artifacts/{segmentation['artifact_id']}"
     )
     assert get_bytes(grant, "scratch/0.npz") is None
     assert get_bytes(grant, "inputs.json") is not None
+
+
+def test_shards_decide_their_own_specks_and_seams_join_once_per_pair(
+    new_browser, settings, migrated_database_url, live_server
+):
+    # Three shards along x, with seams after x 511 and x 1023.
+    classes = np.ones((4, 8, 1030), dtype=np.uint8)
+    classes[:, :, 500:530] = BONE  # a slab through the first seam: 32 voxels touch
+    classes[0, 0, 511:513] = TOOTH  # a speck across the first seam
+    classes[3, 7, 1020:1030] = BONE  # a bar across the second, too short to keep
+    classes[1, 1, 100] = BONE  # specks inside the first and last shards
+    classes[2, 2, 1027] = TOOTH
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    add_prediction(settings, migrated_database_url, project, classes)
+    started = ada.post(f"/api/projects/{project}/segmentation", json={"min_voxels": 20})
+    assert started.status_code == 202, started.text
+    pipeline_id = started.json()["pipeline_id"]
+    pipeline = run_worker(migrated_database_url, live_server, ada, project, pipeline_id)
+    assert pipeline["status"] == "succeeded", pipeline
+
+    async def results(db):
+        rows = await db.execute(
+            select(Job.kind, Job.payload, Job.result).where(
+                Job.root_id == uuid.UUID(pipeline_id)
+            )
+        )
+        return {(kind, payload.get("shard")): result for kind, payload, result in rows}
+
+    found = run_db(migrated_database_url, results)
+    # Each shard decides the specks inside it, and passes on only its pieces
+    # on seams: the slab, the tooth speck, and the bar.
+    assert [found["cc.block", shard] for shard in range(3)] == [
+        {"specks": 1, "seam_pieces": 2},
+        {"specks": 0, "seam_pieces": 3},
+        {"specks": 1, "seam_pieces": 1},
+    ]
+    # The merge joins each pair of touching pieces once, however many voxels
+    # touch, and finds the halves of the tooth speck and the bar too small.
+    assert found["cc.merge", None] == {"specks": 4, "pairs": 3}
+    want = classes.copy()
+    for speck in [
+        (0, 0, slice(511, 513)),
+        (3, 7, slice(1020, 1030)),
+        (1, 1, 100),
+        (2, 2, 1027),
+    ]:
+        want[speck] = 1
+    segmentation = ada.get(f"/api/projects/{project}/segmentation").json()
+    assert np.array_equal(made(settings, project, segmentation["artifact_id"]), want)
+
+
+def test_a_retried_finalize_succeeds_on_local_disk(tmp_path):
+    noisy = Noisy(tmp_path)
+    jobs.prepare(noisy.job("compose.prepare"))
+    for index in range(4):
+        jobs.block(noisy.job("cc.block", index))
+    jobs.merge(noisy.job("cc.merge"))
+    for index in range(4):
+        jobs.apply(noisy.job("cc.apply", index))
+    jobs.finalize(noisy.job("compose.finalize"))
+    # Again, as after a success the server never heard about: the scratch
+    # files are gone already.
+    jobs.finalize(noisy.job("compose.finalize"))
+    assert get_bytes(noisy.grants[2], "_MANIFEST.json") is not None
+    assert get_bytes(noisy.grants[2], "scratch/0.npz") is None
+    assert np.array_equal(noisy.made(), noisy.want())
+
+
+def test_others_cant_reach_the_final_segmentation(
+    new_browser, settings, migrated_database_url
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    add_prediction(settings, migrated_database_url, project)
+    bob = new_browser()
+    signup(bob, username="bob")
+    base = f"/api/projects/{project}/segmentation"
+    assert bob.get(base).status_code == 404
+    assert bob.post(base, json={}).status_code == 404
+    assert ada.post(base, json={}).status_code == 202
 
 
 def test_the_final_segmentation_is_described_by_what_the_server_recorded(
