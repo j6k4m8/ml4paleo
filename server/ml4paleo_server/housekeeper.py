@@ -1,10 +1,10 @@
 """
 The housekeeper: one background process for periodic upkeep.
 
-It takes jobs back from workers that stopped responding, sends queued
-email, and deletes expired sessions, used or expired tokens, stale rate-limit
-counters, and mail that failed for good. Later build steps add storage
-garbage collection here.
+It takes jobs back from workers that stopped responding, deletes the files
+of artifacts that are no longer needed (`artifacts.collect_garbage`), sends
+queued email, and deletes expired sessions, used or expired tokens, stale
+rate-limit counters, and mail that failed for good.
 """
 
 import asyncio
@@ -15,6 +15,7 @@ import signal
 from sqlalchemy import delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .artifacts import collect_garbage
 from .db import (
     AuthToken,
     EmailOutbox,
@@ -83,13 +84,31 @@ async def reap_jobs(sessionmaker: async_sessionmaker[AsyncSession]) -> int:
 async def run_once(
     sessionmaker: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
-    expired = await reap_jobs(sessionmaker)
-    if expired:
-        log.info("Took back %d jobs from workers that stopped responding", expired)
-    sent = await send_pending(sessionmaker, settings)
-    if sent:
-        log.info("Sent %d queued emails", sent)
-    await prune(sessionmaker)
+    """
+    One pass of every task. A task that fails is logged and doesn't stop the
+    others.
+    """
+
+    async def reap() -> None:
+        if expired := await reap_jobs(sessionmaker):
+            log.info("Took back %d jobs from workers that stopped responding", expired)
+
+    async def collect() -> None:
+        if collected := await collect_garbage(sessionmaker, settings):
+            log.info("Deleted %d artifacts that are no longer needed", collected)
+
+    async def send() -> None:
+        if sent := await send_pending(sessionmaker, settings):
+            log.info("Sent %d queued emails", sent)
+
+    async def tidy() -> None:
+        await prune(sessionmaker)
+
+    for task in (reap, collect, send, tidy):
+        try:
+            await task()
+        except Exception:
+            log.exception("Housekeeping task %s failed", task.__name__)
 
 
 async def run_forever(settings: Settings | None = None) -> None:

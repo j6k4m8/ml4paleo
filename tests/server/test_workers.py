@@ -300,18 +300,22 @@ def test_stopping_a_worker_gives_its_job_back(
     assert outcomes(migrated_database_url, job_id) == ["released"]
 
 
-def test_check_workers_command(new_browser, token, migrated_database_url, monkeypatch):
+def test_check_workers_command(token, migrated_database_url, monkeypatch, live_server):
     from ml4paleo_server import cli
 
     monkeypatch.setenv("M4P_DATABASE_URL", migrated_database_url)
     assert cli.main(["check-workers", "--timeout", "1"]) == 1
-    worker = make_worker(new_browser, token)
+    # The check job writes through the storage proxy, so the worker talks to
+    # a real server.
+    client = ServerClient(token, base_url=live_server)
+    worker = Worker(client, CAPS, claim_wait_seconds=0.5, heartbeat_seconds=0.1)
     thread = start(worker, max_jobs=None)
     try:
         assert cli.main(["check-workers", "--timeout", "20"]) == 0
     finally:
         worker.stop()
         thread.join(timeout=10)
+        client.close()
 
 
 def test_the_local_worker_token_can_be_rotated(new_browser, migrated_database_url):

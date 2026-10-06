@@ -39,6 +39,16 @@ class StorageSettings(BaseModel):
     region: str | None = None
     access_key_id: SecretStr | None = None
     secret_access_key: SecretStr | None = None
+    # How workers reach project storage. "proxy" (the default): through the
+    # API, limited to each job's own files for as long as it holds the job.
+    # "direct": workers on this machine get the server's own credentials,
+    # which reach every project; use it only when the local workers are as
+    # trusted as the server and can reach the storage themselves (for example
+    # a shared disk). Remote and burst workers always use the proxy.
+    worker_access: Literal["proxy", "direct"] = "proxy"
+    # How long garbage collection keeps replaced and failed artifacts.
+    keep_superseded_days: float = Field(default=7, ge=0)
+    keep_failed_hours: float = Field(default=48, ge=0)
 
 
 class AuthSettings(BaseModel):

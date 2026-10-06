@@ -76,7 +76,10 @@ def test_read_only_grants_reject_writes(grant):
         "file://relative/path",
         "file:///tmp/..",
         "s3:///no-bucket",
-        "http://example.com/data",
+        "ftp://example.com/data",
+        "https:///no-host",
+        "https://example.com/storage/../other",
+        "https://user:token@example.com/storage",
         "s3://bucket/data?versionId=1",
         "s3://user:secret@bucket/data",
         "s3://bucket/a\x00b",
@@ -172,3 +175,25 @@ def test_refresh_supplies_credentials(s3_endpoint, s3_bucket, tmp_path):
     obstore.put(store, "x.txt", b"x")
     assert obstore.get(store, "x.txt").bytes().to_bytes() == b"x"
     assert calls
+
+
+def test_proxy_grants_use_an_http_store_with_the_lease_token():
+    from obstore.store import HTTPStore
+
+    grant = StorageGrant(
+        url="https://ml4paleo.example.org/api/worker/v1/jobs/j/storage/0",
+        access="rw",
+        credentials={"token": "lease-token"},
+    )
+    assert isinstance(object_store(grant), HTTPStore)
+    assert grant.bucket is None
+    assert "lease-token" not in repr(grant)
+    child = grant.child("labels/blobs")
+    assert child.url.endswith("/storage/0/labels/blobs")
+    assert child.secret("token") == "lease-token"
+    with pytest.raises(ValueError):
+        object_store(
+            StorageGrant(
+                url="https://example.org/s", credentials={"access_key_id": "x"}
+            )
+        )

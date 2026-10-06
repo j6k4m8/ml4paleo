@@ -109,6 +109,36 @@ def settings(migrated_database_url, tmp_path):
 
 
 @pytest.fixture
+def live_server(settings):
+    """
+    Serve the app over real HTTP (in a thread) and return its URL, for
+    clients that can't use the test client, such as obstore's HTTP store
+    talking to the storage proxy.
+    """
+    import threading
+    import time
+
+    import uvicorn
+
+    port = _free_port()
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(settings), host="127.0.0.1", port=port, log_level="warning"
+        )
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 20
+    while not server.started:
+        if time.monotonic() > deadline or not thread.is_alive():
+            raise RuntimeError("The test server did not start")
+        time.sleep(0.05)
+    yield f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    thread.join(timeout=10)
+
+
+@pytest.fixture
 def client(settings):
     with TestClient(create_app(settings)) as test_client:
         yield test_client
