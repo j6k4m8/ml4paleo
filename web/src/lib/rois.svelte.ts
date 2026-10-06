@@ -5,6 +5,7 @@
 
 import { ApiError, api, message } from "#lib/api.ts";
 import type { Vec3 } from "./viewer/tiles";
+import { whileVisible } from "./refresh";
 
 export type RoiStatus = "open" | "complete" | "skipped";
 export type Box = [number, number, number, number, number, number];
@@ -20,9 +21,6 @@ export interface Roi {
 	score: number | null;
 	created_at: string;
 }
-
-// How often to pick up ROIs collaborators added, changed, or deleted.
-const REFRESH_MS = 30_000;
 
 export class RoiList {
 	items = $state<Roi[]>([]);
@@ -48,17 +46,7 @@ export class RoiList {
 
 	/** Reload while the page is visible, and when it comes back into view. */
 	keepFresh(): () => void {
-		const reload = () => {
-			if (document.visibilityState === "visible") void this.load();
-		};
-		const timer = setInterval(reload, REFRESH_MS);
-		document.addEventListener("visibilitychange", reload);
-		window.addEventListener("focus", reload);
-		return () => {
-			clearInterval(timer);
-			document.removeEventListener("visibilitychange", reload);
-			window.removeEventListener("focus", reload);
-		};
+		return whileVisible(() => void this.load());
 	}
 
 	/** Note a failure; an ROI someone else deleted leaves the list. */
