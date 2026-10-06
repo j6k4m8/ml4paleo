@@ -2,6 +2,7 @@
 	import Brush from "@lucide/svelte/icons/brush";
 	import Combine from "@lucide/svelte/icons/combine";
 	import Shapes from "@lucide/svelte/icons/shapes";
+	import { untrack } from "svelte";
 	import { page } from "$app/state";
 	import { ApiError, api, message } from "#lib/api.ts";
 	import type { Pipeline } from "#lib/types.ts";
@@ -14,6 +15,7 @@
 	}
 
 	interface Segmentation {
+		artifact_id: string;
 		model_name: string | null;
 		min_voxels: number;
 		label_seq: number;
@@ -24,11 +26,14 @@
 	let projectName = $state("");
 	let prediction: Prediction | null = $state(null);
 	let segmentation: Segmentation | null = $state(null);
+	let pipelines: Pipeline[] = $state([]);
 	let loaded = $state(false);
 	let minVoxels = $state(50);
-	let running: string | null = $state(null);
-	let progress = $state(0);
 	let error = $state("");
+	let composeError = $state("");
+	// Set while a request to start a pipeline is out, so a double click
+	// doesn't start two.
+	let starting = $state(false);
 
 	$effect(() => {
 		crumbs.set([{ label: "Projects", href: "/projects" }, { label: projectName || "…", href: `/p/${pid}` }, { label: "Results" }]);
@@ -38,12 +43,18 @@
 		if (e instanceof ApiError && e.status === 404) return null;
 		throw e;
 	};
+	const active = (p: Pipeline | undefined) => p?.status === "waiting" || p?.status === "running";
+	// The newest of each kind (the list is newest first).
+	const composing = $derived(pipelines.find((p) => p.kind === "segmentation"));
 
 	async function refresh() {
 		try {
 			projectName = (await api<{ name: string }>(`/api/projects/${pid}`)).name;
-			prediction = await api<Prediction>(`/api/projects/${pid}/prediction`).catch(missing);
-			segmentation = await api<Segmentation>(`/api/projects/${pid}/segmentation`).catch(missing);
+			[prediction, segmentation, pipelines] = await Promise.all([
+				api<Prediction>(`/api/projects/${pid}/prediction`).catch(missing),
+				api<Segmentation>(`/api/projects/${pid}/segmentation`).catch(missing),
+				api<Pipeline[]>(`/api/projects/${pid}/pipelines`),
+			]);
 		} catch (e) {
 			error = message(e);
 		} finally {
@@ -55,40 +66,69 @@
 		if (pid) refresh();
 	});
 
-	// Follow the pipeline this page started.
+	// Only which pipelines run, so status updates don't reopen the streams.
+	const running = $derived(
+		[composing]
+			.filter(active)
+			.map((p) => p?.id)
+			.join(","),
+	);
+
+	// Follow the running pipelines; the server ends a stream (204) once its
+	// pipeline is done, so refresh then too.
 	$effect(() => {
-		if (!running) return;
-		const source = new EventSource(`/api/projects/${pid}/pipelines/${running}/events`);
-		source.addEventListener("status", (event) => {
-			const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
-			progress = update.progress;
-			if (update.status !== "waiting" && update.status !== "running") {
-				if (update.status !== "succeeded") error = update.error ?? `The final segmentation ${update.status}.`;
-				running = null;
-				refresh();
-			}
+		const ids = running ? running.split(",") : [];
+		const sources = ids.map((id) => {
+			const source = new EventSource(`/api/projects/${untrack(() => pid)}/pipelines/${id}/events`);
+			source.addEventListener("status", (event) => {
+				const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
+				pipelines = untrack(() => pipelines).map((p) => (p.id === update.id ? update : p));
+				if (!active(update)) refresh();
+			});
+			source.addEventListener("error", () => {
+				if (source.readyState === EventSource.CLOSED) refresh();
+			});
+			return source;
 		});
-		return () => source.close();
+		return () => sources.forEach((source) => source.close());
 	});
 
-	async function compose(event: SubmitEvent) {
-		event.preventDefault();
-		error = "";
+	async function start(url: string, body: object, fail: (text: string) => void) {
+		if (starting) return;
+		starting = true;
+		fail("");
 		try {
-			const started = await api<{ pipeline_id: string }>(`/api/projects/${pid}/segmentation`, {
-				body: { min_voxels: minVoxels },
-			});
-			progress = 0;
-			running = started.pipeline_id;
+			await api(url, { body });
 		} catch (e) {
-			error = message(e);
+			fail(message(e));
 		}
+		await refresh();
+		starting = false;
+	}
+
+	function compose(event: SubmitEvent) {
+		event.preventDefault();
+		start(`/api/projects/${pid}/segmentation`, { min_voxels: minVoxels }, (text) => (composeError = text));
 	}
 </script>
+
+{#snippet progress(pipeline: Pipeline | undefined, failed: string)}
+	{#if pipeline && active(pipeline)}
+		<div class="flex items-center gap-2">
+			<progress class="h-1 flex-1 accent-accent" max="1" value={pipeline.progress}></progress>
+			<span class="font-mono text-2xs text-ink-dim">{Math.round(pipeline.progress * 100)}%</span>
+		</div>
+	{:else if pipeline && pipeline.status !== "succeeded"}
+		<p class="error" role="alert">{pipeline.error ?? `The last one ${pipeline.status}.`}</p>
+	{/if}
+	{#if failed}<p class="error" role="alert">{failed}</p>{/if}
+{/snippet}
 
 <ProjectTabs {pid} />
 
 <div class="mx-auto grid max-w-6xl gap-4 p-6 lg:grid-cols-2">
+	{#if error}<p class="error lg:col-span-2" role="alert">{error}</p>{/if}
+
 	<section class="panel self-start">
 		<h2 class="panel-title">Prediction</h2>
 		<div class="flex flex-col gap-2 p-3">
@@ -128,18 +168,12 @@
 					Smallest piece kept (voxels)
 					<input class="field w-32 font-mono" type="number" min="0" step="1" bind:value={minVoxels} />
 				</label>
-				<button class="btn btn-primary" disabled={!prediction || !!running}>
+				<button class="btn btn-primary" disabled={!prediction || active(composing) || starting}>
 					<Combine size={13} />
-					{running ? "Making…" : segmentation ? "Make it again" : "Make final segmentation"}
+					{active(composing) ? "Making…" : segmentation ? "Make it again" : "Make final segmentation"}
 				</button>
 			</form>
-			{#if running}
-				<div class="flex items-center gap-2">
-					<progress class="h-1 flex-1 accent-accent" max="1" value={progress}></progress>
-					<span class="font-mono text-2xs text-ink-dim">{Math.round(progress * 100)}%</span>
-				</div>
-			{/if}
-			{#if error}<p class="error" role="alert">{error}</p>{/if}
+			{@render progress(composing, composeError)}
 		</div>
 	</section>
 </div>
