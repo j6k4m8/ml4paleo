@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 
 from ml4paleo.segmentation.compose import (
+    Progress,
     TooLarge,
     apply_shard,
     find_specks,
@@ -53,6 +54,16 @@ def _box(ctx: JobContext) -> tuple[int, int, int, int, int, int]:
     return tuple(int(n) for n in ctx.payload["box"])  # type: ignore[return-value]
 
 
+def _progress(ctx: JobContext, start: float, end: float) -> Progress:
+    """Report a step's progress as `start` to `end` of the job's, and stop if asked."""
+
+    def report(fraction: float) -> None:
+        ctx.progress(start + (end - start) * fraction)
+        ctx.check()
+
+    return report
+
+
 def _merged(ctx: JobContext) -> tuple[np.ndarray, np.ndarray]:
     prediction_grant, labels_grant, segmentation_grant = ctx.grants
     inputs = _inputs(segmentation_grant)
@@ -85,6 +96,7 @@ def block(ctx: JobContext) -> dict[str, Any]:
             seams(_box(ctx), ctx.payload["shape_zyx"]),
             slab=slab_depth(ctx.memory_budget_bytes, merged.shape),
             budget_bytes=ctx.memory_budget_bytes,
+            progress=_progress(ctx, 0.1, 0.9),
         )
     except TooLarge as exc:
         raise PermanentError(str(exc)) from exc
@@ -103,14 +115,16 @@ def block(ctx: JobContext) -> dict[str, Any]:
 
 
 def merge(ctx: JobContext) -> dict[str, Any]:
-    grant = ctx.grants[2]
+    grant, shards = ctx.grants[2], int(ctx.payload["shards"])
+    reading, writing = _progress(ctx, 0, 0.8), _progress(ctx, 0.8, 1)
 
     def summaries():
-        for index in range(int(ctx.payload["shards"])):
+        for index in range(shards):
             summary = get_bytes(grant, f"scratch/{index}.npz")
             if summary is None:
                 raise PermanentError(f"Shard {index}'s piece summary is missing.")
             yield summary
+            reading((index + 1) / shards)
 
     try:
         joined = find_specks(
@@ -123,6 +137,7 @@ def merge(ctx: JobContext) -> dict[str, Any]:
         raise PermanentError(str(exc)) from exc
     for index, specks in enumerate(joined.specks):
         put_bytes(grant, f"scratch/{index}.joined.npz", npz(specks=specks))
+        writing((index + 1) / shards)
     return {
         "specks": int(sum(specks.sum() for specks in joined.specks)),
         "pairs": joined.pairs,
@@ -146,6 +161,7 @@ def apply(ctx: JobContext) -> dict[str, Any]:
             specks,
             slab=slab_depth(ctx.memory_budget_bytes, merged.shape),
             budget_bytes=ctx.memory_budget_bytes,
+            progress=_progress(ctx, 0.1, 0.9),
         )
     except TooLarge as exc:
         raise PermanentError(str(exc)) from exc
@@ -156,10 +172,12 @@ def apply(ctx: JobContext) -> dict[str, Any]:
 
 
 def finalize(ctx: JobContext) -> dict[str, Any]:
-    grant = ctx.grants[2]
-    for index in range(int(ctx.payload["shards"])):
+    grant, shards = ctx.grants[2], int(ctx.payload["shards"])
+    deleting = _progress(ctx, 0, 0.9)
+    for index in range(shards):
         for name in SCRATCH:
             delete_object(grant, f"scratch/{index}.{name}")
+        deleting((index + 1) / shards)
     write_manifest(
         grant,
         {

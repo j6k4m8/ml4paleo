@@ -35,7 +35,7 @@ time, so their int64 copies stay small (`slab_depth`). Each step raises
 
 import io
 import itertools
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import Any, NamedTuple, cast
 
 import numpy as np
@@ -78,6 +78,9 @@ _LABEL_BYTES_PER_PIECE = 24
 _JOIN_BYTES_PER_PIECE = 48
 _JOIN_BYTES_PER_PAIR = 64
 _PAIRING_BYTES_PER_VOXEL = 96
+
+# Told the fraction of a step done so far.
+Progress = Callable[[float], None]
 
 
 class TooLarge(Exception):
@@ -236,6 +239,7 @@ def label_shard(
     seams: Sequence[bool],
     slab: int = SLAB,
     budget_bytes: int | None = None,
+    progress: Progress | None = None,
 ) -> ShardPieces:
     """
     Label one shard's pieces. A piece that touches no seam is whole already,
@@ -246,7 +250,8 @@ def label_shard(
     one counts as `min_voxels`, since it stays).
 
     Raises `TooLarge` rather than take more than `budget_bytes`, counting
-    the merged classes and labeled voxels the caller holds.
+    the merged classes and labeled voxels the caller holds. Calls `progress`
+    with the fraction done after each slab.
     """
     names = [name for name, seam in zip(_FACES, seams, strict=True) if seam]
     faces = {name: np.zeros(merged[_FACES[name]].shape, np.int32) for name in names}
@@ -272,7 +277,7 @@ def label_shard(
     ids = np.empty(merged.shape if values else 0, dtype=np.int32)
     mask = np.empty(merged.shape if values else 0, dtype=bool)
     offset = numbered = 0
-    for value in values:
+    for done, value in enumerate(values):
         count = label_class(merged, value, mask, ids)
         _fits(
             fixed + _LABEL_BYTES_PER_PIECE * count + offset + 9 * numbered,
@@ -285,6 +290,8 @@ def label_shard(
             counted = np.bincount(ids[z].ravel())
             size[: len(counted)] += counted
             held[np.where(labeled[z], ids[z], 0)] = True
+            if progress:
+                progress((done + min(z.stop, len(ids)) / len(ids)) / len(values))
         on_seam = np.zeros(count + 1, dtype=bool)
         for name in names:
             on_seam[ids[_FACES[name]]] = True
@@ -447,6 +454,7 @@ def apply_shard(
     specks: np.ndarray,
     slab: int = SLAB,
     budget_bytes: int | None = None,
+    progress: Progress | None = None,
 ) -> np.ndarray:
     """
     The shard's final classes: its merged classes without the specks (which
@@ -454,7 +462,8 @@ def apply_shard(
     `merged` and returns it.
 
     Raises `TooLarge` rather than take more than `budget_bytes`, counting
-    the merged classes and specks the caller holds.
+    the merged classes and specks the caller holds. Calls `progress` with
+    the fraction done after each class and slab.
     """
     if not specks.any():
         return merged
@@ -473,7 +482,7 @@ def apply_shard(
     ids = np.empty(merged.shape, dtype=np.int32)
     mask = np.empty(merged.shape, dtype=bool)
     offset = 0
-    for value in values:
+    for done, value in enumerate(values):
         if offset >= last:
             break
         # Turning this class's specks into background leaves the other
@@ -486,13 +495,18 @@ def apply_shard(
         if table.any():
             for z in _slabs(len(ids), slab):
                 np.copyto(merged[z], BACKGROUND, where=table[ids[z]])
+                if progress:
+                    progress((done + min(z.stop, len(ids)) / len(ids)) / len(values))
         offset += count
+        if progress:
+            progress((done + 1) / len(values))
     return merged
 
 
 __all__ = [
     "SLAB",
     "Joined",
+    "Progress",
     "ShardPieces",
     "TooLarge",
     "apply_shard",

@@ -18,7 +18,7 @@ from ml4paleo_server import artifacts, labels
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
-from ml4paleo_worker.context import JobContext, PermanentError
+from ml4paleo_worker.context import Cancelled, JobContext, PermanentError
 from ml4paleo_worker.handlers import HANDLERS
 from ml4paleo_worker.handlers import compose as jobs
 from ml4paleo_worker.main import Worker
@@ -192,21 +192,77 @@ def test_a_worker_composes_the_final_segmentation(
     assert get_bytes(grant, "inputs.json") is not None
 
 
-def job(kind: str, payload: dict, grants: list, budget: int) -> JobContext:
-    """A job as a worker would get it, with `budget` bytes to use."""
-    return JobContext(
-        JobLease(
-            job_id=uuid.uuid4(),
-            kind=kind,
-            payload=payload,
-            lease_token="token",
-            lease_expires_at=datetime.datetime.now(datetime.UTC)
-            + datetime.timedelta(minutes=5),
-            attempt=1,
-            grants=grants,
-        ),
-        memory_budget_bytes=budget,
-    )
+class Noisy:
+    """
+    A final segmentation's jobs over a noisy prediction on local disk: every
+    voxel background, bone, or tooth at random, over four shards, so hundreds
+    of thousands of pieces, most of them specks.
+    """
+
+    shape = (4, 520, 520)
+
+    def __init__(self, root):
+        rng = np.random.default_rng(3)
+        self.classes = rng.choice(
+            np.array([1, BONE, TOOTH], dtype=np.uint8),
+            size=self.shape,
+            p=[0.5, 0.25, 0.25],
+        )
+        prediction = StorageGrant(url=f"file://{root}/prediction", access="rw")
+        group = create_prediction(prediction, self.shape)
+        group["class"][:] = self.classes  # type: ignore[index]
+        self.grants = [
+            prediction.model_copy(update={"access": "r"}),
+            StorageGrant(url=f"file://{root}/labels"),
+            StorageGrant(url=f"file://{root}/segmentation", access="rw"),
+        ]
+        put_bytes(
+            self.grants[2],
+            "inputs.json",
+            json.dumps({"chunks": [], "complete_rois": [], "label_seq": 0}).encode(),
+        )
+        self.boxes = shard_boxes(self.shape, SHARD_ZYX)
+        assert len(self.boxes) == 4
+        self.payload = {
+            "shape_zyx": list(self.shape),
+            "min_voxels": 20,
+            "model_id": None,
+            "prediction_artifact_id": str(uuid.uuid4()),
+            "label_seq": 0,
+            "shards": len(self.boxes),
+        }
+
+    def job(self, kind, shard=None, budget=32 * 1024**2, context=JobContext):
+        """A job as a worker would get it, with `budget` bytes to use."""
+        payload = dict(self.payload)
+        if shard is not None:
+            payload.update(shard=shard, box=list(self.boxes[shard]))
+        return context(
+            JobLease(
+                job_id=uuid.uuid4(),
+                kind=kind,
+                payload=payload,
+                lease_token="token",
+                lease_expires_at=datetime.datetime.now(datetime.UTC)
+                + datetime.timedelta(minutes=5),
+                attempt=1,
+                grants=self.grants,
+            ),
+            memory_budget_bytes=budget,
+        )
+
+    def want(self) -> np.ndarray:
+        """The final segmentation, from labeling the whole volume at once."""
+        want = self.classes.copy()
+        for value in (BONE, TOOTH):
+            ids, count = ndimage.label(self.classes == value)  # type: ignore[misc]
+            speck = np.bincount(ids.ravel(), minlength=count + 1) < 20
+            speck[0] = False
+            want[speck[ids]] = 1
+        return want
+
+    def made(self) -> np.ndarray:
+        return open_prediction(self.grants[2])["class"][:]  # type: ignore[index]
 
 
 def run_within(ctx: JobContext, handler) -> dict:
@@ -221,60 +277,49 @@ def run_within(ctx: JobContext, handler) -> dict:
 
 
 def test_noisy_compose_jobs_stay_within_their_budget_or_fail_for_good(tmp_path):
-    # Every voxel background, bone, or tooth at random, over four shards:
-    # hundreds of thousands of pieces, most of them specks.
-    shape = (4, 520, 520)
-    rng = np.random.default_rng(3)
-    classes = rng.choice(
-        np.array([1, BONE, TOOTH], dtype=np.uint8), size=shape, p=[0.5, 0.25, 0.25]
-    )
-    prediction = StorageGrant(url=f"file://{tmp_path}/prediction", access="rw")
-    create_prediction(prediction, shape)["class"][:] = classes  # type: ignore[index]
-    grants = [
-        prediction.model_copy(update={"access": "r"}),
-        StorageGrant(url=f"file://{tmp_path}/labels"),
-        StorageGrant(url=f"file://{tmp_path}/segmentation", access="rw"),
-    ]
-    put_bytes(
-        grants[2],
-        "inputs.json",
-        json.dumps({"chunks": [], "complete_rois": [], "label_seq": 0}).encode(),
-    )
-    boxes = shard_boxes(shape, SHARD_ZYX)
-    assert len(boxes) == 4
-    payload = {
-        "shape_zyx": list(shape),
-        "min_voxels": 20,
-        "model_id": None,
-        "prediction_artifact_id": str(uuid.uuid4()),
-        "label_seq": 0,
-        "shards": len(boxes),
-    }
-    budget = 32 * 1024**2
-    jobs.prepare(job("compose.prepare", payload, grants, budget))
-
-    def shard(kind: str, index: int, budget: int) -> JobContext:
-        return job(
-            kind, {**payload, "shard": index, "box": list(boxes[index])}, grants, budget
-        )
-
+    noisy = Noisy(tmp_path)
+    jobs.prepare(noisy.job("compose.prepare"))
     # Too little memory to label a 4×512×512 shard: it fails for good, at once.
     with pytest.raises(PermanentError, match="a job may use on this worker"):
-        jobs.block(shard("cc.block", 0, 8 * 1024**2))
-    blocks = [run_within(shard("cc.block", i, budget), jobs.block) for i in range(4)]
+        jobs.block(noisy.job("cc.block", 0, budget=8 * 1024**2))
+    blocks = [run_within(noisy.job("cc.block", i), jobs.block) for i in range(4)]
     assert sum(found["specks"] for found in blocks) > 100_000
     with pytest.raises(PermanentError, match="Joining the pieces"):
-        jobs.merge(job("cc.merge", payload, grants, 64 * 1024))
-    run_within(job("cc.merge", payload, grants, budget), jobs.merge)
+        jobs.merge(noisy.job("cc.merge", budget=64 * 1024))
+    run_within(noisy.job("cc.merge"), jobs.merge)
     for index in range(4):
-        run_within(shard("cc.apply", index, budget), jobs.apply)
-    jobs.finalize(job("compose.finalize", payload, grants, budget))
+        run_within(noisy.job("cc.apply", index), jobs.apply)
+    jobs.finalize(noisy.job("compose.finalize"))
+    assert np.array_equal(noisy.made(), noisy.want())
 
-    want = classes.copy()
-    for value in (BONE, TOOTH):
-        ids, count = ndimage.label(classes == value)  # type: ignore[misc]
-        speck = np.bincount(ids.ravel(), minlength=count + 1) < 20
-        speck[0] = False
-        want[speck[ids]] = 1
-    final = open_prediction(grants[2])["class"][:]  # type: ignore[index]
-    assert np.array_equal(final, want)
+
+class StopsAtOnce(JobContext):
+    """A job that is asked to stop as soon as it reports progress."""
+
+    def progress(self, fraction: float, message: str | None = None) -> None:
+        super().progress(fraction, message)
+        self.stop("cancelled")
+
+
+def test_compose_jobs_report_progress_and_stop_partway(tmp_path):
+    noisy = Noisy(tmp_path)
+    jobs.prepare(noisy.job("compose.prepare"))
+    steps = [
+        ("cc.block", jobs.block, range(4)),
+        ("cc.merge", jobs.merge, [None]),
+        ("cc.apply", jobs.apply, range(4)),
+        ("compose.finalize", jobs.finalize, [None]),
+    ]
+    for kind, handler, shards in steps:
+        # Each step checks in as it goes, not just once.
+        stopping = noisy.job(kind, next(iter(shards)), context=StopsAtOnce)
+        with pytest.raises(Cancelled):
+            handler(stopping)
+        done, _ = stopping.take_progress()
+        assert done is not None and done < 1, kind
+        for shard in shards:
+            ctx = noisy.job(kind, shard)
+            handler(ctx)
+            done, _ = ctx.take_progress()
+            assert done is not None and done >= 0.8, kind
+    assert np.array_equal(noisy.made(), noisy.want())
