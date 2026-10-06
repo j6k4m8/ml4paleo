@@ -300,10 +300,17 @@ def write_manifest(grant: StorageGrant, manifest: dict[str, Any]) -> None:
 def delete_object(grant: StorageGrant, key: str) -> None:
     """
     Delete one object under the grant. Refuses read-only grants.
+
+    An object that isn't there counts as deleted, as it does on S3 and
+    through the storage proxy, so a retried job can delete what its last
+    attempt already did.
     """
     _check_writable(grant)
     _check_path_segments(key)
-    obstore.delete(object_store(grant), key)
+    try:
+        obstore.delete(object_store(grant), key)
+    except FileNotFoundError:
+        pass
 
 
 def _check_writable(grant: StorageGrant) -> None:

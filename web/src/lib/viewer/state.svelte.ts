@@ -41,6 +41,8 @@ interface Preferences {
 	roiDepth: number;
 	showPrediction: boolean;
 	predictionOpacity: number;
+	showSegmentation: boolean;
+	segmentationOpacity: number;
 }
 
 function loadPreferences(): Partial<Preferences> {
@@ -62,6 +64,8 @@ export class ViewerState {
 	showLabels = $state(true);
 	showPrediction = $state(true);
 	predictionOpacity = $state(0.35);
+	showSegmentation = $state(true);
+	segmentationOpacity = $state(0.45);
 	layout = $state<Layout>("four");
 	help = $state(false);
 	/** Refit the image as views resize, until the user pans or zooms. */
@@ -93,6 +97,8 @@ export class ViewerState {
 		if (typeof saved.roiDepth === "number") this.roiDepth = Math.min(512, Math.max(1, Math.round(saved.roiDepth)));
 		if (typeof saved.showPrediction === "boolean") this.showPrediction = saved.showPrediction;
 		if (typeof saved.predictionOpacity === "number") this.predictionOpacity = Math.min(1, Math.max(0, saved.predictionOpacity));
+		if (typeof saved.showSegmentation === "boolean") this.showSegmentation = saved.showSegmentation;
+		if (typeof saved.segmentationOpacity === "number") this.segmentationOpacity = Math.min(1, Math.max(0, saved.segmentationOpacity));
 	}
 
 	savePreferences(): void {
@@ -106,6 +112,8 @@ export class ViewerState {
 				roiDepth: this.roiDepth,
 				showPrediction: this.showPrediction,
 				predictionOpacity: this.predictionOpacity,
+				showSegmentation: this.showSegmentation,
+				segmentationOpacity: this.segmentationOpacity,
 			};
 			localStorage.setItem(PREFERENCES, JSON.stringify(preferences));
 		} catch {

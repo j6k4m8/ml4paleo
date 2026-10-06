@@ -1898,6 +1898,7 @@ mesh = [
 rf = [
     { name = "scikit-image" },
     { name = "scikit-learn" },
+    { name = "scipy" },
 ]
 v1 = [
     { name = "flask" },
@@ -1909,6 +1910,7 @@ v1 = [
     { name = "pydicom" },
     { name = "scikit-image" },
     { name = "scikit-learn" },
+    { name = "scipy" },
     { name = "zmesh" },
 ]
 
@@ -1945,6 +1947,7 @@ requires-dist = [
     { name = "scikit-image", marker = "extra == 'mesh'", specifier = ">=0.24.0" },
     { name = "scikit-image", marker = "extra == 'rf'", specifier = ">=0.24.0" },
     { name = "scikit-learn", marker = "extra == 'rf'", specifier = ">=1.6.1" },
+    { name = "scipy", marker = "extra == 'rf'", specifier = ">=1.13" },
     { name = "tqdm", specifier = ">=4.65.0" },
     { name = "zarr", specifier = ">=3.4" },
     { name = "zmesh", marker = "extra == 'mesh'", specifier = ">=1.11.0" },

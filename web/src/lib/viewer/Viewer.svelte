@@ -63,6 +63,7 @@
 	let prediction: ChunkStore | null = $state(null);
 	let predictionModel = $state("");
 	let predictionArtifact = "";
+	let segmentation: ChunkStore | null = $state(null);
 	let classes: LabelClass[] = $state([]);
 	let error = $state("");
 	let pool: WorkerPool | undefined;
@@ -110,6 +111,15 @@
 					prediction = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
 					predictionModel = found.model_name ?? "a model";
 					predictionArtifact = found.artifact_id;
+				},
+				(e: unknown) => {
+					if (!(e instanceof ApiError && e.status === 404)) error = e instanceof Error ? e.message : String(e);
+				},
+			);
+			api<{ zarr_url: string }>(`/api/projects/${project}/segmentation`).then(
+				(found) => {
+					if (!pool || controller.signal.aborted) return;
+					segmentation = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
 				},
 				(e: unknown) => {
 					if (!(e instanceof ApiError && e.status === 404)) error = e instanceof Error ? e.message : String(e);
@@ -168,6 +178,8 @@
 			viewer.roiDepth,
 			viewer.showPrediction,
 			viewer.predictionOpacity,
+			viewer.showSegmentation,
+			viewer.segmentationOpacity,
 		];
 		viewer.savePreferences();
 	});
@@ -634,6 +646,7 @@
 							{images}
 							{labels}
 							{prediction}
+							{segmentation}
 							onhover={(p) => (hovered = p)}
 							onresize={resized}
 							onstroke={stroke}
@@ -703,6 +716,18 @@
 								<span class="font-mono text-2xs text-ink-dim">{Math.round(viewer.predictionOpacity * 100)}%</span>
 							</div>
 							<input type="range" min="0" max="1" step="0.05" bind:value={viewer.predictionOpacity} aria-label="Prediction opacity" />
+						</li>
+					{/if}
+					{#if segmentation}
+						<li class="flex flex-col gap-1.5 px-2.5 py-2">
+							<div class="flex items-center gap-2">
+								<button class="text-ink-dim hover:text-ink" aria-label="{viewer.showSegmentation ? 'Hide' : 'Show'} final segmentation" onclick={() => (viewer.showSegmentation = !viewer.showSegmentation)}>
+									{#if viewer.showSegmentation}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
+								</button>
+								<span class="flex-1">Final segmentation</span>
+								<span class="font-mono text-2xs text-ink-dim">{Math.round(viewer.segmentationOpacity * 100)}%</span>
+							</div>
+							<input type="range" min="0" max="1" step="0.05" bind:value={viewer.segmentationOpacity} aria-label="Final segmentation opacity" />
 						</li>
 					{/if}
 					<li class="flex items-center gap-2 px-2.5 py-2 text-ink-dim">

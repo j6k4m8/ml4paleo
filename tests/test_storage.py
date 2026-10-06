@@ -142,6 +142,15 @@ def test_object_helpers_round_trip_and_respect_read_only(grant):
         put_bytes(grant, "../escape.txt", b"nope")
 
 
+def test_deleting_a_missing_object_succeeds(grant):
+    # As a retried job does, after its last attempt deleted the object.
+    put_bytes(grant, "scratch/0.npz", b"summary")
+    delete_object(grant, "scratch/0.npz")
+    delete_object(grant, "scratch/0.npz")
+    delete_object(grant, "scratch/never.npz")
+    assert get_bytes(grant, "scratch/0.npz") is None
+
+
 def test_credentials_are_hidden_from_repr_but_sent_as_json():
     grant = StorageGrant(
         url="s3://bucket/p",
