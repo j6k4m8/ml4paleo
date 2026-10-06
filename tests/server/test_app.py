@@ -2,6 +2,8 @@
 The API skeleton: health, security headers, SPA serving, and migrations.
 """
 
+import base64
+import hashlib
 import uuid
 
 import pytest
@@ -60,6 +62,24 @@ def test_web_app_serves_files_and_falls_back_to_index(settings, web_dir):
             response = client.get(path)
             assert response.status_code == 200
             assert response.text == "<html>app shell</html>", path
+
+
+def test_the_web_apps_inline_script_is_allowed_by_hash(settings, web_dir):
+    script = "\n\t\t\t{ start(); }\n\t\t"
+    (web_dir / "index.html").write_text(
+        f'<html><script src="/x.js"></script><script>{script}</script></html>'
+    )
+    digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+    settings = settings.model_copy(update={"web_dir": web_dir})
+    with TestClient(create_app(settings)) as client:
+        policy = client.get("/projects").headers["content-security-policy"]
+    script_src = next(d for d in policy.split("; ") if d.startswith("script-src"))
+    assert script_src.split() == [
+        "script-src",
+        "'self'",
+        "'wasm-unsafe-eval'",
+        f"'sha256-{digest}'",
+    ]
 
 
 def test_migrations_round_trip_and_match_the_models(database_url):
