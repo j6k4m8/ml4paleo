@@ -8,9 +8,14 @@ so surfaces close there. Vertices come out in (x, y, z) order, in level-0
 voxel units (voxel corners: voxel i spans [i, i + 1)), with triangles wound
 so normals point out.
 
-Each piece marks its vertices on the planes it shares with other blocks
-(its seams), and `Join` welds those while it streams a class's pieces into
-STL, OBJ, and GLB files, so no whole class is ever held in memory.
+zmesh needs memory and time in proportion to a surface's size, and holds
+the GIL throughout, so a porous block can take gigabytes and minutes in one
+call. A block with more surface than one call should take is meshed in
+sub-boxes instead, halved on a power-of-two grid until each is small enough;
+sub-boxes meet each other the way blocks do. Each piece marks its vertices
+on the planes it shares with other pieces (its seams), and `Join` welds
+those while it streams a class's pieces into STL, OBJ, and GLB files, so no
+whole class is ever held in memory.
 
 Downsampling (#22, #24) meshes at 1/d resolution, keeping a coarse voxel if
 any of its fine voxels is the class ("any", which keeps thin structures) or
@@ -31,6 +36,16 @@ import numpy as np
 Box = tuple[int, int, int, int, int, int]
 Method = Literal["any", "majority"]
 
+# What zmesh takes per voxel face of surface (a class voxel next to one that
+# isn't), with room to spare: peaks of 470 to 1050 bytes were measured on
+# porous, noisy, and smooth volumes, and 1 µs a face (12 µs simplifying).
+BYTES_PER_FACE = 1200
+SECONDS_PER_FACE = 1.5e-6
+SECONDS_PER_FACE_SIMPLIFIED = 15e-6
+# How long one zmesh call may hold the GIL; the job's heartbeats wait for it.
+TARGET_SECONDS = 20
+# Sub-boxes stop halving at this many coarse voxels a side.
+SMALLEST = 16
 # Triangles handled at once while joining, and OBJ lines formatted at once:
 # about 10 MB of arrays or strings.
 CHUNK = 1 << 16
@@ -44,13 +59,13 @@ _STL_RECORD = np.dtype(
 
 class TooDetailed(ValueError):
     """
-    A mesh too large to write as one file.
+    A surface too large to mesh or store with what the job has.
     """
 
 
 class Piece(NamedTuple):
     """
-    Part of one class's surface, from one block.
+    Part of one class's surface, from one block or sub-box.
     """
 
     # float32 (x, y, z), level-0 voxel corners
@@ -88,6 +103,15 @@ def read_box(box: Box, shape_zyx: Sequence[int], downsample: int) -> Box:
     )
 
 
+def face_limit(memory_budget_bytes: int, simplify: bool) -> int:
+    """
+    The most surface, in voxel faces, to give zmesh at once: what fits in
+    half a job's memory and takes about `TARGET_SECONDS`.
+    """
+    seconds = SECONDS_PER_FACE_SIMPLIFIED if simplify else SECONDS_PER_FACE
+    return int(min(memory_budget_bytes / 2 / BYTES_PER_FACE, TARGET_SECONDS / seconds))
+
+
 def _downsample(mask: np.ndarray, d: int, method: Method) -> np.ndarray:
     if d == 1:
         return mask
@@ -103,6 +127,11 @@ def _downsample(mask: np.ndarray, d: int, method: Method) -> np.ndarray:
     return counts * 2 > d**3
 
 
+def _faces(mask: np.ndarray) -> int:
+    """Voxel faces between the class and the rest, inside `mask`."""
+    return sum(int(np.count_nonzero(np.diff(mask, axis=a))) for a in range(3))
+
+
 def mesh_block(
     classes: np.ndarray,
     box: Box,
@@ -111,10 +140,13 @@ def mesh_block(
     downsample: int = 1,
     method: Method = "any",
     max_error: float = 0.0,
+    max_faces: int | None = None,
 ) -> Iterator[tuple[int, Piece]]:
     """
     Mesh one block. `classes` holds the region `read_box` names. Yields
-    each class value present with its piece of the surface.
+    each class value present with its pieces: one for the block, or one per
+    sub-box when its surface has more than `max_faces` voxel faces. Raises
+    `TooDetailed` if even the smallest sub-boxes have more.
 
     With `max_error` above 0, surfaces are simplified as far as they can be
     without moving more than that many (meshed, so coarse) voxels. Vertices
@@ -122,23 +154,65 @@ def mesh_block(
     """
     d = downsample
     assert all(box[a] % d == 0 for a in range(3)), "Blocks start on coarse voxels"
-    lo = [box[a] // d for a in range(3)]
-    hi = [lo[a] + -(-(box[a + 3] - box[a]) // d) for a in range(3)]
+    start = [box[a] // d for a in range(3)]
+    own = [-(-(box[a + 3] - box[a]) // d) for a in range(3)]
     end = [-(-int(n) // d) for n in shape_zyx]
-    # A plane of nothing beyond the volume's faces closes surfaces there;
-    # anywhere else, the block keeps the next coarse voxel, where the next
-    # block starts.
-    before = [1 if lo[a] == 0 else 0 for a in range(3)]
-    after = [1 if hi[a] >= end[a] else 0 for a in range(3)]
     for value in values:
         mask = _downsample(classes == value, d, method)
         if not mask.any():
             continue
-        region = mask[tuple(slice(0, hi[a] - lo[a] + 1 - after[a]) for a in range(3))]
+        for lo, hi, padded in _sub_boxes(mask, start, own, end, max_faces):
+            piece = _mesh(padded, lo, hi, end, d, max_error)
+            if piece is not None:
+                yield int(value), piece
+
+
+def _sub_boxes(
+    mask: np.ndarray,
+    start: Sequence[int],
+    own: Sequence[int],
+    end: Sequence[int],
+    max_faces: int | None,
+) -> Iterator[tuple[list[int], list[int], np.ndarray]]:
+    """
+    The block's coarse voxels (`own` of them from `start`) in sub-boxes on a
+    power-of-two grid, each halved until it has at most `max_faces` voxel
+    faces of surface. Yields each one's first and end coarse voxels and its
+    mask ready to mesh: with the next coarse voxel on its high sides, as
+    blocks have, and a plane of nothing beyond the volume's faces.
+    """
+    todo = [((0, 0, 0), 1 << (max(own) - 1).bit_length())]
+    while todo:
+        corner, size = todo.pop()
+        lo = [start[a] + corner[a] for a in range(3)]
+        hi = [start[a] + min(corner[a] + size, own[a]) for a in range(3)]
+        if any(lo[a] >= hi[a] for a in range(3)):
+            continue
+        before = [1 if lo[a] == 0 else 0 for a in range(3)]
+        after = [1 if hi[a] >= end[a] else 0 for a in range(3)]
+        region = mask[
+            tuple(
+                slice(lo[a] - start[a], hi[a] - start[a] + 1 - after[a])
+                for a in range(3)
+            )
+        ]
         padded = np.pad(region.astype(np.uint8), list(zip(before, after, strict=True)))
-        piece = _mesh(padded, lo, hi, end, d, max_error)
-        if piece is not None:
-            yield int(value), piece
+        faces = _faces(padded)
+        if faces == 0:
+            continue
+        if max_faces is None or faces <= max_faces:
+            yield lo, hi, padded
+        elif size <= SMALLEST:
+            raise TooDetailed(
+                f"{faces} voxel faces of surface in {size}³ coarse voxels, more "
+                f"than the {max_faces} that fit"
+            )
+        else:
+            half = size // 2
+            todo += [
+                (tuple(c + o for c, o in zip(corner, offset, strict=True)), half)
+                for offset in itertools.product((0, half), repeat=3)
+            ]
 
 
 def _mesh(

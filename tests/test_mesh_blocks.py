@@ -1,6 +1,7 @@
 """
 Block meshing: exact surfaces in (x, y, z) voxel corners, outward normals,
-and watertight joins across blocks, streamed into STL, OBJ, and GLB files.
+and watertight joins across blocks and the sub-boxes that porous blocks are
+meshed in, streamed into STL, OBJ, and GLB files.
 """
 
 import json
@@ -11,10 +12,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from ml4paleo.meshing import blocks
 from ml4paleo.meshing.blocks import (
     Join,
     Piece,
     PieceWriter,
+    TooDetailed,
     mesh_block,
     mesh_blocks,
     read_box,
@@ -53,14 +56,16 @@ def join(per_block, shape, block, voxel_size=(1.0, 1.0, 1.0)):
     return vertices, faces
 
 
-def mesh_volume(volume, block, values, downsample=1, method="any", max_error=0.0):
+def mesh_volume(
+    volume, block, values, downsample=1, method="any", max_error=0.0, max_faces=None
+):
     per_class: dict[int, list] = {value: [] for value in values}
     for box in mesh_blocks(volume.shape, block):
         rb = read_box(box, volume.shape, downsample)
         region = volume[rb[0] : rb[3], rb[1] : rb[4], rb[2] : rb[5]]
         found: dict[int, list] = {value: [] for value in values}
         for value, piece in mesh_block(
-            region, box, volume.shape, values, downsample, method, max_error
+            region, box, volume.shape, values, downsample, method, max_error, max_faces
         ):
             found[value].append(piece)
         for value in values:
@@ -150,16 +155,45 @@ def test_blocks_of_odd_volumes_mesh_like_the_whole(shape, downsample, method):
         assert all(np.array_equal(a, b) for a, b in zip(got, expected, strict=True))
 
 
+def test_porous_blocks_mesh_in_sub_boxes_that_join(monkeypatch):
+    volume = blobs((70, 50, 90), seed=1, sigma=2.0)
+    largest = []
+    mesh = blocks._mesh
+
+    def measured(padded, *args):
+        largest.append(blocks._faces(padded))
+        return mesh(padded, *args)
+
+    monkeypatch.setattr(blocks, "_mesh", measured)
+    split = mesh_volume(volume, 64, [2, 3], max_faces=5000)
+    assert len(largest) > 4 * len(mesh_blocks(volume.shape, 64))
+    assert max(largest) <= 5000
+    whole = mesh_whole(volume, [2, 3])
+    for value, (v, f) in split.items():
+        assert edges_shared_twice(f)
+        got, expected = triangles(v, f), triangles(*whole[value])
+        assert all(np.array_equal(a, b) for a, b in zip(got, expected, strict=True))
+
+
+def test_too_much_surface_for_the_smallest_sub_boxes_is_refused():
+    noise = np.random.default_rng(0).random((32, 32, 32)) < 0.5
+    with pytest.raises(TooDetailed):
+        mesh_volume(noise.astype(np.uint8) * 2, 32, [2], max_faces=1000)
+
+
 def test_simplified_blocks_still_join():
     rng = np.random.default_rng(0)
     z, y, x = np.indices((40, 44, 48))
     ball = (z - 20) ** 2 + (y - 22) ** 2 + (x - 24) ** 2 <= 15**2
     rough = np.where(ball ^ (rng.random(ball.shape) < 0.02), 2, 1).astype(np.uint8)
     full_v, full_f = mesh_volume(rough, 16, [2])[2]
-    v, f = mesh_volume(rough, 16, [2], max_error=2)[2]
-    assert edges_shared_twice(f)
-    assert len(f) < 0.6 * len(full_f)
-    assert signed_volume(v, f) == pytest.approx(signed_volume(full_v, full_f), rel=0.02)
+    for max_faces in (None, 2000):
+        v, f = mesh_volume(rough, 32, [2], max_error=2, max_faces=max_faces)[2]
+        assert edges_shared_twice(f)
+        assert len(f) < 0.6 * len(full_f)
+        assert signed_volume(v, f) == pytest.approx(
+            signed_volume(full_v, full_f), rel=0.02
+        )
 
 
 def test_objects_touching_the_volume_edges_are_closed():

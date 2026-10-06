@@ -4,8 +4,9 @@ Mesh jobs (see the server's `pipelines/mesh.py`).
 Grants, in order: the segmentation artifact (read) and the meshes artifact
 (write).
 
-Neither kind of job holds a whole class's mesh. A block writes each
-class's piece to `scratch/<block>/<value>.npz`, and its summary (pieces,
+Neither kind of job holds more than a piece of a class at a time. A block
+meshes each class in pieces sized to the job's memory budget, writes them to
+`scratch/<block>/<value>.npz` as they come, and writes its summary (pieces,
 triangles, and vertices per class) to `scratch/<block>.json` last. A join
 streams one class's pieces, block by block, into local files, uploads them,
 and writes `<value>.json` (triangles, vertices, and files) for finalize.
@@ -23,6 +24,7 @@ from ml4paleo.meshing.blocks import (
     Join,
     PieceWriter,
     TooDetailed,
+    face_limit,
     mesh_block,
     read_box,
     read_pieces,
@@ -64,13 +66,14 @@ def block(ctx: JobContext) -> dict[str, Any]:
         ]  # type: ignore[index]
     )
     ctx.check()
+    limit = face_limit(ctx.memory_budget_bytes, simplify > 0)
     classes: dict[str, dict[str, int]] = {}
     for done, value in enumerate(values):
         counts = {"pieces": 0, "triangles": 0, "vertices": 0}
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pieces.npz"
             with PieceWriter(path) as writer:
-                for _, piece in mesh_block(
+                pieces = mesh_block(
                     region,
                     box,  # type: ignore[arg-type]
                     shape,
@@ -78,12 +81,20 @@ def block(ctx: JobContext) -> dict[str, Any]:
                     downsample=d,
                     method=ctx.payload["method"],
                     max_error=simplify,
-                ):
-                    writer.add(piece)
-                    counts["pieces"] += 1
-                    counts["triangles"] += len(piece.faces)
-                    counts["vertices"] += len(piece.vertices)
-                    ctx.check()
+                    max_faces=limit,
+                )
+                try:
+                    for _, piece in pieces:
+                        writer.add(piece)
+                        counts["pieces"] += 1
+                        counts["triangles"] += len(piece.faces)
+                        counts["vertices"] += len(piece.vertices)
+                        ctx.check()
+                except TooDetailed as exc:
+                    raise PermanentError(
+                        f"Block {index} has more surface than this worker can mesh "
+                        f"({exc}); mesh at a coarser resolution."
+                    ) from None
             if counts["pieces"]:
                 put_file(meshes_grant, f"scratch/{index}/{value}.npz", path)
                 classes[str(value)] = counts

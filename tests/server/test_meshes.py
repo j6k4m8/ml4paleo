@@ -1,11 +1,14 @@
 """
 Meshes, end to end: a worker meshes the final segmentation block by block
 into one closed surface per class, in the scan's units, as STL, OBJ, and GLB;
-and the mesh jobs fail for good, saying what to change, when they can't work.
+and the mesh jobs stay within a small memory budget on porous classes, or
+fail for good saying what to change.
 """
 
 import json
 import struct
+import subprocess
+import sys
 import threading
 import time
 import types
@@ -219,6 +222,26 @@ def test_a_worker_meshes_each_class(
     assert ada.get(meshes["files_url"] + "4.stl").status_code == 404
 
 
+# One mesh job on local storage, in a process of its own, and how far its
+# peak memory rose while it ran (with libraries loaded beforehand).
+MEASURE = """
+import json, resource, sys, types
+import zmesh
+from ml4paleo.storage import StorageGrant, get_bytes
+from ml4paleo_worker.handlers import mesh
+
+kind, root, budget, payload = sys.argv[1], sys.argv[2], int(sys.argv[3]), json.loads(sys.argv[4])
+grants = [StorageGrant(url=f"file://{root}/segmentation"), StorageGrant(url=f"file://{root}/meshes", access="rw")]
+get_bytes(grants[1], "nothing")
+ctx = types.SimpleNamespace(payload=payload, grants=grants, memory_budget_bytes=budget, check=lambda: None, progress=lambda *a: None)
+scale = 1 if sys.platform == "darwin" else 1024
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale
+result = getattr(mesh, kind)(ctx)
+grew = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale - before
+print(json.dumps({"result": result, "grew": grew}))
+"""
+
+
 def porous(tmp_path, side: int) -> dict:
     """
     A class of random voxels, as porous as a class can be, and the payload
@@ -247,6 +270,42 @@ def porous(tmp_path, side: int) -> dict:
     }
 
 
+def run_job(kind: str, tmp_path, budget: int, payload: dict) -> dict:
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            MEASURE,
+            kind,
+            str(tmp_path),
+            str(budget),
+            json.dumps(payload),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_porous_classes_mesh_within_a_small_memory_budget(tmp_path):
+    payload = porous(tmp_path, 96)
+    budget = 192 * 2**20
+    # Meshed in one go, at the 600 or so bytes a voxel face zmesh was
+    # measured to take, this block would need several times the budget.
+    volume = np.pad(np.random.default_rng(0).random((96,) * 3) < 0.5, 1)
+    faces = sum(int(np.count_nonzero(np.diff(volume, axis=a))) for a in range(3))
+    assert faces * 600 > 3 * budget
+
+    block = run_job("block", tmp_path, budget, payload)
+    assert block["result"] == {"classes": [BONE]}
+    assert block["grew"] < budget
+    join = run_job("join_class", tmp_path, budget, payload)
+    assert join["grew"] < budget
+    stl = (tmp_path / "meshes" / f"{BONE}.stl").read_bytes()
+    assert struct.unpack_from("<I", stl, 80)[0] == join["result"]["triangles"]
+
+
 def job(tmp_path, payload: dict, budget: int = 3 * 2**30):
     return types.SimpleNamespace(
         payload=payload,
@@ -258,6 +317,12 @@ def job(tmp_path, payload: dict, budget: int = 3 * 2**30):
         check=lambda: None,
         progress=lambda *args: None,
     )
+
+
+def test_a_block_too_porous_for_its_budget_fails_for_good(tmp_path):
+    payload = porous(tmp_path, 32)
+    with pytest.raises(PermanentError, match="coarser resolution"):
+        mesh_jobs.block(job(tmp_path, payload, budget=2**20))
 
 
 def test_a_join_refuses_files_too_large_to_store(tmp_path, monkeypatch):

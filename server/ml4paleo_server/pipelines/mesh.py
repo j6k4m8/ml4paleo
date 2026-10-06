@@ -4,12 +4,13 @@ that becomes the project's "meshes" head.
 
     mesh.block x N -> mesh.join x K -> mesh.finalize
 
-Each `mesh.block` meshes one 256³ block (with one voxel of overlap) and
-writes each class's pieces under `scratch/`; each `mesh.join` welds one
-class's pieces as it streams them into `<value>.stl`, `.obj`, and `.glb`,
-and sums them up in `<value>.json`; `mesh.finalize` writes `mesh_info.json`
-(axis order, units, voxel size, files per class), cleans up `scratch/`, and
-writes the manifest.
+Each `mesh.block` meshes one 256³ block (with one voxel of overlap), in
+sub-boxes when its surface is too large to mesh at once, and writes each
+class's pieces under `scratch/`; each `mesh.join` welds one class's pieces
+as it streams them into `<value>.stl`, `.obj`, and `.glb`, and sums them up
+in `<value>.json`; `mesh.finalize` writes `mesh_info.json` (axis order,
+units, voxel size, files per class), cleans up `scratch/`, and writes the
+manifest.
 """
 
 import uuid
