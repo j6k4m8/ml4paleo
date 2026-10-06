@@ -88,6 +88,55 @@ def test_crops_follow_roi_status_split_and_free_labels():
     assert (val[0].targets != PLUGIN_IGNORE).all()
 
 
+def test_validation_rois_are_held_out_where_they_overlap_training():
+    image, _ = synthetic()
+    labels = np.zeros(SHAPE, dtype=np.uint8)
+    labels[10, 10, 10] = BONE  # training only
+    labels[20, 20, 20] = BONE  # in both ROIs
+    labels[28, 28, 28] = BONE  # validation only
+    rois = [
+        RoiSpec((8, 8, 8, 24, 24, 24), "complete", "train"),
+        RoiSpec((16, 16, 16, 32, 32, 32), "open", "val"),
+    ]
+    source = DictLabels(labels)
+    data = TrainingSet(
+        image, source, source.chunks, rois, [BONE], (200.0, 800.0), tile=32
+    )
+    [train] = data.crops("train", halo=2)
+    # The overlap is ignored, labeled or not, though the training ROI is complete.
+    assert (train.targets[8:, 8:, 8:] == PLUGIN_IGNORE).all()
+    assert int((train.targets != PLUGIN_IGNORE).sum()) == 16**3 - 8**3
+    assert int((train.targets == 1).sum()) == 1 and train.targets[2, 2, 2] == 1
+    [val] = data.crops("val", halo=2)
+    assert int((val.targets == 1).sum()) == 2
+    assert int((val.targets != PLUGIN_IGNORE).sum()) == 2
+
+
+def test_overlapping_training_rois_count_each_voxel_once():
+    image, _ = synthetic()
+    labels = np.zeros(SHAPE, dtype=np.uint8)
+    labels[11, 11, 11] = 1  # only in the open ROI
+    labels[17, 17, 17] = BONE  # in both
+    rois = [
+        RoiSpec((10, 10, 10, 20, 20, 20), "open", "train"),
+        RoiSpec((15, 15, 15, 25, 25, 25), "complete", "train"),
+    ]
+    source = DictLabels(labels)
+    data = TrainingSet(
+        image, source, source.chunks, rois, [BONE], (200.0, 800.0), tile=32
+    )
+    first, second = data.crops("train", halo=2)
+    # In the open ROI, the part inside the complete ROI is complete too.
+    assert (first.targets[5:, 5:, 5:] != PLUGIN_IGNORE).all()
+    assert int((first.targets != PLUGIN_IGNORE).sum()) == 5**3 + 1
+    # The complete ROI leaves the overlap to the open ROI, which came first.
+    assert (second.targets[:5, :5, :5] == PLUGIN_IGNORE).all()
+    assert int((second.targets != PLUGIN_IGNORE).sum()) == 10**3 - 5**3
+    known = sum(int((c.targets != PLUGIN_IGNORE).sum()) for c in (first, second))
+    assert known == 10**3 + 1
+    assert sum(int((c.targets == 1).sum()) for c in (first, second)) == 1
+
+
 def test_labels_assemble_across_chunks_and_edges():
     labels = np.zeros(SHAPE, dtype=np.uint8)
     labels[60:70, 60:68, 60:90] = BONE

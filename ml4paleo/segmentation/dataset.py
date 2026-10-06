@@ -6,9 +6,11 @@ code): the image artifact, the label chunk hashes at one moment, and the
 ROIs. Crops come from two places:
 
 - ROIs that are open or complete, tiled into blocks of at most `tile`
-  voxels a side. Inside a complete ROI, unlabeled voxels are background;
-  elsewhere unlabeled voxels are ignored. Each ROI's train/val split carries
-  over to its crops.
+  voxels a side. Inside a complete ROI of a crop's split, unlabeled voxels
+  are background; elsewhere unlabeled voxels are ignored. Each ROI's
+  train/val split carries over to its crops. ROIs may overlap: training
+  crops ignore every voxel inside a validation ROI, and a voxel inside
+  several ROIs of one split counts once, in the first of them.
 - Labeled chunks outside those ROIs ("free" labels, for example from hand
   annotating the whole volume), for training only. Voxels inside open or
   complete ROIs are left to the ROI crops, so validation labels never leak
@@ -155,10 +157,10 @@ class TrainingSet:
         interior = tuple(slice(box[a] - lo[a], box[a + 3] - lo[a]) for a in range(3))
         return normalize(block, self.window), interior  # type: ignore[return-value]
 
-    def _inside_rois(self, box: Box) -> np.ndarray:
-        """Which voxels of a box are inside open or complete ROIs."""
+    def _inside(self, box: Box, rois: Iterable[RoiSpec]) -> np.ndarray:
+        """Which voxels of a box are inside any of `rois`."""
         inside = np.zeros(tuple(box[a + 3] - box[a] for a in range(3)), dtype=bool)
-        for roi in self.rois:
+        for roi in rois:
             lo = [max(box[a], roi.bbox[a]) for a in range(3)]
             hi = [min(box[a + 3], roi.bbox[a + 3]) for a in range(3)]
             if all(a < b for a, b in zip(lo, hi, strict=True)):
@@ -168,15 +170,21 @@ class TrainingSet:
         return inside
 
     def crops(self, split: Split, halo: int) -> Iterator[Crop]:
-        for roi in self.rois:
-            if roi.split != split:
-                continue
+        mine = [roi for roi in self.rois if roi.split == split]
+        complete = [roi for roi in mine if roi.status == "complete"]
+        # Validation ROIs are held out of training wherever they overlap it.
+        held_out = (
+            [roi for roi in self.rois if roi.split == "val"] if split == "train" else []
+        )
+        for index, roi in enumerate(mine):
             for box in tiles(roi.bbox, self.tile):
                 targets = to_plugin_space(
                     self.read_labels(box),
                     self.class_values,
-                    complete=roi.status == "complete",
+                    complete=self._inside(box, complete),
                 )
+                # Voxels of earlier ROIs of this split were counted there.
+                targets[self._inside(box, mine[:index] + held_out)] = PLUGIN_IGNORE
                 if (targets == PLUGIN_IGNORE).all():
                     continue
                 image, interior = self.read_image(box, halo)
@@ -196,7 +204,7 @@ class TrainingSet:
             if any(box[a] >= box[a + 3] for a in range(3)):
                 continue
             targets = to_plugin_space(self.read_labels(box), self.class_values)
-            targets[self._inside_rois(box)] = PLUGIN_IGNORE
+            targets[self._inside(box, self.rois)] = PLUGIN_IGNORE
             if (targets == PLUGIN_IGNORE).all():
                 continue
             image, interior = self.read_image(box, halo)
