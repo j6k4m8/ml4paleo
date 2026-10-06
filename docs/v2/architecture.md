@@ -11,7 +11,7 @@ v1 (`webapp/` Flask + three polling runner scripts + `volume/jobs.json`, plus th
 | Repo | Monorepo uv workspace: `ml4paleo/` (library), `server/` (FastAPI), `worker/`, `web/` (SvelteKit), `deploy/`, `tests/`. Delete `webapp/` once the v1 importer works. Python ≥ 3.12. |
 | Database | Postgres only: app data, op log, and the job queue. No Redis. Alembic migrations. |
 | Auth | Local username/password (argon2id via pwdlib, Postgres sessions, CSRF, rate limits, optional TOTP; TOTP required for admins) + admin-configured OIDC (Authlib). |
-| Signup | Open signup (admin can switch to invite-only). Optional SMTP for verification, reset, job-done notices. |
+| Signup | Open signup (admin can switch to invite-only) with an email address, required by default; until it's confirmed an account has starter limits (1 GB, one trained model). Optional SMTP for confirmation, reset, job-done notices. |
 | Sharing | Owner + collaborators, full access, no role tiers. |
 | Project | One volume per project (optionally multichannel), multi-class label set. |
 | Quotas | User-facing limits are plain: **storage** (default 10 GB) and **trained models** (count of models a user keeps; deleting one frees a slot). Every dimension (also optional CPU-hours, GPU-hours) is independently configurable per deploy; unset = unlimited. Unlimited projects within quota. "Request more" button → short form → email (or admin inbox when no SMTP). |

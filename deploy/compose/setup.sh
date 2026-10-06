@@ -87,7 +87,7 @@ if [ ! -f .env ]; then
 # The domain people use to reach ml4paleo. Caddy gets an HTTPS certificate for
 # it automatically ("localhost" uses Caddy's own local certificate authority).
 M4P_DOMAIN=$domain
-# Optional outgoing email (signup verification, password resets). Leave
+# Optional outgoing email (confirming addresses, password resets). Leave
 # M4P_SMTP__HOST empty to turn email off. Put the password in
 # secrets/smtp_password.
 M4P_SMTP__HOST=
