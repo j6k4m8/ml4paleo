@@ -20,15 +20,18 @@
 	--color-edge: #141414;
 	--color-line: #3c3c3c;
 	--color-ink: #d4d4d4;
-	--color-ink-dim: #9b9b9b;
-	--color-ink-faint: #6f6f6f;
+	--color-ink-dim: #a6a6a6;
+	--color-ink-faint: #959595;
 	--color-accent: #2f86e0;
 	--color-accent-hover: #4a98ea;
 	--color-accent-soft: #23466b;
-	--color-danger: #e5534b;
+	/* Darker blues for white text to sit on; the accent is for lines and focus. */
+	--color-accent-fill: #2272c9;
+	--color-accent-fill-hover: #1c64b4;
+	--color-danger: #f47067;
 	--color-ok: #57ab5a;
 	--color-warn: #e3b341;
-	--color-axis-x: #e5534b;
+	--color-axis-x: #f47067;
 	--color-axis-y: #57ab5a;
 	--color-axis-z: #539bf5;
 
@@ -86,7 +89,7 @@
 	}
 
 	.btn-primary {
-		@apply border-accent bg-accent text-white hover:bg-accent-hover disabled:hover:bg-accent;
+		@apply border-accent-fill bg-accent-fill text-white hover:border-accent-fill-hover hover:bg-accent-fill-hover disabled:hover:border-accent-fill disabled:hover:bg-accent-fill;
 	}
 
 	.btn-ghost {
@@ -94,7 +97,7 @@
 	}
 
 	.btn-danger {
-		@apply hover:border-danger hover:bg-danger/20 hover:text-danger;
+		@apply hover:border-danger hover:bg-danger/5 hover:text-danger;
 	}
 
 	.field {

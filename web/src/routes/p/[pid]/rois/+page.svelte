@@ -98,11 +98,11 @@
 			{#each ["all", "open", "complete", "skipped"] as option (option)}
 				<label
 					class="flex cursor-pointer items-center gap-1.5 px-2.5 py-1 capitalize
-						{filter === option ? 'bg-accent text-white' : 'bg-panel text-ink-dim hover:bg-raised hover:text-ink'}"
+						{filter === option ? 'bg-accent-fill text-white' : 'bg-panel text-ink-dim hover:bg-raised hover:text-ink'}"
 				>
 					<input class="sr-only" type="radio" name="filter" value={option} bind:group={filter} />
 					{option}
-					<span class="font-mono text-2xs opacity-70">
+					<span class="font-mono text-2xs">
 						{option === "all" ? (rois?.items.length ?? 0) : (rois?.items.filter((r) => r.status === option).length ?? 0)}
 					</span>
 				</label>

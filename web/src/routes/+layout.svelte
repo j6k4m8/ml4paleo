@@ -67,7 +67,7 @@
 <div class="flex h-full flex-col">
 	<header class="flex h-9 shrink-0 items-center gap-3 border-b border-edge bg-chrome px-3">
 		<a href="/projects" class="flex items-center gap-2 text-ink no-underline hover:no-underline" aria-label="ml4paleo home">
-			<span class="grid size-5 place-items-center rounded-[3px] bg-accent text-[9px] font-bold tracking-tight text-white">m4</span>
+			<span class="grid size-5 place-items-center rounded-[3px] bg-accent-fill text-[9px] font-bold tracking-tight text-white">m4</span>
 			<span class="text-xs font-semibold">ml4paleo</span>
 		</a>
 		{#if crumbs.items.length > 0}
@@ -106,10 +106,10 @@
 						id="account-menu"
 						class="absolute top-7 right-0 z-30 flex w-44 flex-col rounded-sm border border-edge bg-panel py-1 shadow-lg shadow-black/40"
 					>
-						<a href="/account" class="px-3 py-1.5 text-ink hover:bg-accent hover:text-white hover:no-underline" onclick={() => (menu = false)}>
+						<a href="/account" class="px-3 py-1.5 text-ink hover:bg-accent-fill hover:text-white hover:no-underline" onclick={() => (menu = false)}>
 							Account
 						</a>
-						<button class="flex items-center gap-2 px-3 py-1.5 text-left hover:bg-accent hover:text-white" onclick={logout}>
+						<button class="flex items-center gap-2 px-3 py-1.5 text-left hover:bg-accent-fill hover:text-white" onclick={logout}>
 							<LogOut size={13} /> Sign out
 						</button>
 					</div>

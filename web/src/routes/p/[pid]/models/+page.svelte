@@ -230,7 +230,7 @@
 							<span class="font-medium">{model.name}</span>
 							<span class="rounded-sm bg-field px-1.5 py-0.5 text-2xs text-ink-dim">{model.status}</span>
 							{#if prediction?.model_id === model.id}
-								<span class="rounded-sm bg-accent-soft px-1.5 py-0.5 text-2xs text-accent-hover">shown in the annotator</span>
+								<span class="rounded-sm bg-accent-soft px-1.5 py-0.5 text-2xs text-ink">shown in the annotator</span>
 							{/if}
 							<div class="ml-auto flex gap-1">
 								{#if model.status === "ready"}

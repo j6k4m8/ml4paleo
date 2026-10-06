@@ -488,7 +488,7 @@
 						<button
 							role="radio"
 							aria-checked={viewer.layout === layout}
-							class="flex h-6 items-center gap-1 px-2 {viewer.layout === layout ? 'bg-accent text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
+							class="flex h-6 items-center gap-1 px-2 {viewer.layout === layout ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
 							onclick={() => (viewer.layout = layout)}
 						>
 							{#if layout === "four"}<LayoutGrid size={12} />{/if}
