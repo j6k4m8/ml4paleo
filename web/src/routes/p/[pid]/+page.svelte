@@ -171,7 +171,7 @@
 						</label>
 						{#if uploading}
 							<div class="flex items-center gap-2">
-								<progress class="h-1.5 flex-1 accent-accent" max="1" value={uploaded}></progress>
+								<progress class="h-1.5 flex-1" max="1" value={uploaded}></progress>
 								<span class="font-mono text-2xs text-ink-dim">{percent(uploaded)}</span>
 							</div>
 						{/if}
@@ -204,7 +204,7 @@
 							</div>
 							{#if pipeline.status === "waiting" || pipeline.status === "running"}
 								<div class="flex items-center gap-2">
-									<progress class="h-1 flex-1 accent-accent" max="1" value={pipeline.progress}></progress>
+									<progress class="h-1 flex-1" max="1" value={pipeline.progress}></progress>
 									<span class="font-mono text-2xs text-ink-dim">{percent(pipeline.progress)}</span>
 								</div>
 							{:else}

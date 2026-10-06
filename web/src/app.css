@@ -81,6 +81,23 @@
 	input[type="radio"] {
 		@apply accent-accent;
 	}
+
+	/* Drawn from the theme: some platforms ignore accent-color here (Chrome on macOS paints it green). */
+	progress {
+		@apply appearance-none overflow-hidden rounded-full border-0 bg-field;
+	}
+
+	progress::-webkit-progress-bar {
+		@apply rounded-full bg-field;
+	}
+
+	progress::-webkit-progress-value {
+		@apply rounded-full bg-accent;
+	}
+
+	progress::-moz-progress-bar {
+		@apply rounded-full bg-accent;
+	}
 }
 
 @layer components {

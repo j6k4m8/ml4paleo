@@ -245,9 +245,9 @@
 							</div>
 						</div>
 						{#if model.status === "training"}
-							<progress class="h-1 w-full accent-accent" max="1" value={progress[model.pipeline_id ?? ""] ?? 0}></progress>
+							<progress class="h-1 w-full" max="1" value={progress[model.pipeline_id ?? ""] ?? 0}></progress>
 						{:else if predicting[model.id]}
-							<progress class="h-1 w-full accent-accent" max="1" value={progress[predicting[model.id] ?? ""] ?? 0}></progress>
+							<progress class="h-1 w-full" max="1" value={progress[predicting[model.id] ?? ""] ?? 0}></progress>
 						{/if}
 						<p class="text-2xs text-ink-faint">
 							{model.plugin} · {new Date(model.created_at).toLocaleString()} · {model.training_set.labeled_chunks ?? 0} labeled
