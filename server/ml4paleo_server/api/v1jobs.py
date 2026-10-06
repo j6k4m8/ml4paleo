@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from starlette.concurrency import run_in_threadpool
 
-from ml4paleo.v1import import image_path, normalize_job_id, read_jobs
+from ml4paleo.v1import import UNCONVERTED, normalize_job_id, read_jobs, status
 
 from .. import audit
 from ..auth import ratelimit
@@ -85,6 +85,12 @@ async def claim(
     record = (await run_in_threadpool(read_jobs, root)).get(job_id)
     if record is None:
         raise HTTPException(status_code=404, detail="There's no v1 job with that id.")
+    if status(record) in UNCONVERTED:
+        raise HTTPException(
+            status_code=409,
+            detail="This v1 job never finished converting its upload, so there's "
+            "no scan to import.",
+        )
     # The first claim wins.
     await _lock(db, job_id)
     existing = await db.scalar(select(Project).where(Project.v1_job_id == job_id))
@@ -101,13 +107,6 @@ async def claim(
         # A deleted project lets go of its job.
         existing.v1_job_id = None
         await db.flush()
-    converted = await run_in_threadpool(
-        lambda: (image_path(root, job_id) / ".zarray").is_file()
-    )
-    if not converted:
-        raise HTTPException(
-            status_code=409, detail="This v1 job never finished converting its upload."
-        )
     name = str(record.get("name") or "").strip() or f"v1 job {job_id}"
     project = Project(name=name[:100], owner_id=auth.user.id, v1_job_id=job_id)
     db.add(project)

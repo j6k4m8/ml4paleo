@@ -27,6 +27,9 @@ import numpy as np
 
 JOB_ID = re.compile(r"[0-9A-F]{6}")
 JOBS_FILE = "jobs.json"
+# Statuses of jobs whose upload never became an image (as v1's job page
+# decides whether it can be annotated); v1 never used "pending".
+UNCONVERTED = {"pending", "uploading", "uploaded", "converting", "convert_error"}
 # Statuses that mean the newest segmentation finished. v1 also sets
 # "annotated" whenever someone annotates, even after segmenting, so this is
 # only a fallback for jobs without sidecars from v1's segment runner (older

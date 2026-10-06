@@ -9,6 +9,7 @@ tests. Jobs:
 - `FEED01`: converted, annotated after segmenting, with no sidecars naming
   segmentations, so nothing counts as finished.
 - `DEAD00`: uploaded but never converted.
+- `DEAD01`: its conversion failed partway, leaving part of an array.
 """
 
 import json
@@ -132,12 +133,17 @@ def make(root: Path) -> Path:
         "ABC123": record("ABC123", "MESHED", "Burrow"),
         "FEED01": record("FEED01", "ANNOTATED", ""),
         "DEAD00": record("DEAD00", "UPLOADED", "Never converted"),
+        "DEAD01": record("DEAD01", "CONVERT_ERROR", "Failed conversion"),
     }
     root.mkdir(parents=True, exist_ok=True)
     (root / "jobs.json").write_text(json.dumps(jobs, indent=4))
     attrs = {"voxel_size_xyz_mm": list(VOXEL_SIZE_XYZ_MM)}
     for job_id in ("ABC123", "FEED01"):
         _array(root / "chunks" / job_id, image(), (16, 16, 8), attrs)
+    # Its conversion failed after writing the first slab.
+    partial = np.zeros(SHAPE_XYZ, dtype=np.uint16)
+    partial[:, :, :8] = image()[:, :, :8]
+    _array(root / "chunks" / "DEAD01", partial, (16, 16, 8))
 
     training = root / "training" / "ABC123"
     training.mkdir(parents=True)

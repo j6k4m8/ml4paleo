@@ -5,6 +5,8 @@ annotation samples as labels with complete slice ROIs, and the finished
 segmentation as the prediction. The first claim wins; admins can release.
 """
 
+import datetime
+import shutil
 import threading
 import time
 import uuid
@@ -20,14 +22,15 @@ from ml4paleo_server.db import Worker as WorkerRow
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
-from ml4paleo_worker.handlers import HANDLERS, V1_HANDLERS
+from ml4paleo_worker.context import JobContext, PermanentError
+from ml4paleo_worker.handlers import HANDLERS, V1_HANDLERS, v1import
 from ml4paleo_worker.main import Worker
 from sqlalchemy import select
 
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX
 from ml4paleo.labels.codec import decode_chunk
-from ml4paleo.protocol import WorkerCaps
-from ml4paleo.storage import zarr_store
+from ml4paleo.protocol import JobLease, WorkerCaps
+from ml4paleo.storage import StorageGrant, zarr_store
 
 
 @pytest.fixture
@@ -51,6 +54,20 @@ def settings(migrated_database_url, tmp_path, s3_endpoint, s3_bucket, volume):
         },
         v1={"volume_path": volume},
     )
+
+
+def context(volume, kind, payload, grants=(), memory=4 * 1024**3) -> JobContext:
+    """A job's context, to run one handler by itself."""
+    lease = JobLease(
+        job_id=uuid.uuid4(),
+        kind=kind,
+        payload=payload,
+        lease_token="t",
+        lease_expires_at=datetime.datetime.now(datetime.UTC),
+        attempt=1,
+        grants=list(grants),
+    )
+    return JobContext(lease, memory, v1_volume=volume)
 
 
 def run_import(database_url, live_server, browser, project, pipeline, volume):
@@ -294,3 +311,32 @@ def test_only_import_jobs_write_labels(new_browser, settings, migrated_database_
     assert refused.status_code == 403
     lost = worker.post(url, json={"lease_token": "nope", **op}, headers=bearer(token))
     assert lost.status_code == 409
+
+
+def test_jobs_that_never_converted_cant_be_claimed(new_browser, settings, tmp_path):
+    # The API reads only jobs.json.
+    folder = tmp_path / "jobs-only"
+    folder.mkdir()
+    assert settings.v1.volume_path is not None
+    shutil.copy(settings.v1.volume_path / "jobs.json", folder / "jobs.json")
+    ada = new_browser(
+        settings.model_copy(
+            update={"v1": settings.v1.model_copy(update={"volume_path": folder})}
+        )
+    )
+    signup(ada)
+    for job_id in ("DEAD00", "DEAD01"):
+        refused = ada.post(f"/api/v1-jobs/{job_id}/claim")
+        assert refused.status_code == 409
+        assert "never finished converting" in refused.json()["detail"]
+    assert ada.post("/api/v1-jobs/ABC123/claim").status_code == 201
+
+
+def test_the_probe_refuses_jobs_that_never_converted(volume, tmp_path):
+    # DEAD01's conversion left part of an array behind.
+    assert (volume / "chunks" / "DEAD01" / ".zarray").is_file()
+    image = StorageGrant(url=(tmp_path / "image").as_uri(), access="rw")
+    for job_id in ("DEAD00", "DEAD01"):
+        ctx = context(volume, "v1.probe", {"job_id": job_id}, [image])
+        with pytest.raises(PermanentError, match="never finished converting"):
+            v1import.probe(ctx)

@@ -102,9 +102,9 @@ class V1Settings(BaseModel):
     a job by visiting its old link (`/job/<id>`) signed in.
     """
 
-    # v1's volume folder (with jobs.json), mounted read-only; unset when there
-    # are no v1 jobs to import. A worker started with --v1-volume does the
-    # importing.
+    # A folder with v1's jobs.json (the API reads nothing else of v1's),
+    # mounted read-only; unset when there are no v1 jobs to import. A worker
+    # started with --v1-volume does the importing.
     volume_path: pathlib.Path | None = None
     # Claims each account may try per hour. v1 job ids are only six hex
     # digits, so this keeps people from guessing other people's jobs.

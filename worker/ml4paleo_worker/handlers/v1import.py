@@ -29,6 +29,7 @@ from ml4paleo.ome import OmeImage, write_from_provider
 from ml4paleo.segmentation.predict import create_prediction
 from ml4paleo.storage import write_manifest
 from ml4paleo.v1import import (
+    UNCONVERTED,
     annotations,
     image_path,
     read_jobs,
@@ -62,6 +63,9 @@ def probe(ctx: JobContext) -> dict[str, Any]:
     root = _root(ctx)
     job_id = ctx.payload["job_id"]
     record = _record(root, job_id)
+    if status(record) in UNCONVERTED:
+        # Its array, if any, is partial.
+        raise PermanentError("This v1 job never finished converting its upload.")
     path = image_path(root, job_id)
     if not (path / ".zarray").is_file():
         raise PermanentError("This v1 job has no converted image to import.")

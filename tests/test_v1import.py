@@ -27,8 +27,9 @@ def test_job_ids_and_records(root):
     assert normalize_job_id("ABC12") is None
     assert normalize_job_id("../ABC1") is None
     jobs = read_jobs(root)
-    assert sorted(jobs) == ["ABC123", "DEAD00", "FEED01"]
+    assert sorted(jobs) == ["ABC123", "DEAD00", "DEAD01", "FEED01"]
     assert status(jobs["ABC123"]) == "meshed"
+    assert status(jobs["DEAD01"]) == "convert_error"
     assert read_jobs(root / "nowhere") == {}
 
 
