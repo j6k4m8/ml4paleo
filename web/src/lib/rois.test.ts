@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { roiBox, thinAxis, within } from "./rois.svelte";
+import { clipBox, roiBox, thinAxis, voxels, within } from "./rois.svelte";
 import { PLANES } from "./viewer/tiles";
 
 describe("roiBox", () => {
@@ -40,5 +40,20 @@ describe("within", () => {
 		expect(within([5, 15, 25, 6, 30, 45], outer)).toBe(true);
 		expect(within([5, 15, 25, 6, 30, 51], outer)).toBe(false);
 		expect(within([5, 9, 25, 6, 30, 45], outer)).toBe(false);
+	});
+});
+
+describe("clipBox", () => {
+	const shape = [10, 20, 30];
+
+	it("cuts a box to the image", () => {
+		expect(clipBox([-5, 5, 25, 4, 25, 40], shape)).toEqual([0, 5, 25, 4, 20, 30]);
+		expect(clipBox([1, 2, 3, 4, 5, 6], shape)).toEqual([1, 2, 3, 4, 5, 6]);
+		expect(voxels([0, 5, 25, 4, 20, 30])).toBe(4 * 15 * 5);
+	});
+
+	it("is null for a box outside the image", () => {
+		expect(clipBox([10, 0, 0, 12, 5, 5], shape)).toBeNull();
+		expect(clipBox([0, 0, -9, 5, 5, 0], shape)).toBeNull();
 	});
 });

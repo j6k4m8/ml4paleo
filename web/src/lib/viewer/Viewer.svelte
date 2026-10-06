@@ -33,7 +33,7 @@
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
 	import { PlaneMask } from "../labels/raster";
-	import { type Box, describe, revert, type Roi, RoiList, roiBox, thinAxis, within } from "../rois.svelte";
+	import { type Box, clipBox, describe, revert, type Roi, RoiList, roiBox, thinAxis, voxels, within } from "../rois.svelte";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
 	import { actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
@@ -369,12 +369,18 @@
 		return { ...found, box: found.box, kind, store };
 	}
 
+	/** The part of an ROI inside the image, or null if none is. */
+	function inImage(roi: Roi): Box | null {
+		return clipBox(roi.bbox, viewer.shape);
+	}
+
 	/**
 	 * The layer an ROI shows, which accepting there reads: the proposal if the
 	 * ROI is inside its box, else the prediction.
 	 */
 	function covering(roi: Roi): Prediction | null {
-		return [proposal, prediction].find((layer) => layer && within(roi.bbox, layer.box)) ?? null;
+		const box = inImage(roi);
+		return box ? ([proposal, prediction].find((layer) => layer && within(box, layer.box)) ?? null) : null;
 	}
 
 	/**
@@ -483,8 +489,9 @@
 	// Why proposing for the selected ROI can't help, if it can't.
 	const proposeBlocked = $derived.by(() => {
 		if (!selectedRoi || !proposer) return "";
-		const [z0, y0, x0, z1, y1, x1] = selectedRoi.bbox;
-		if ((z1 - z0) * (y1 - y0) * (x1 - x0) > MAX_PROPOSAL_VOXELS) {
+		const box = inImage(selectedRoi);
+		if (!box) return "That ROI is outside the image";
+		if (voxels(box) > MAX_PROPOSAL_VOXELS) {
 			return "Proposals are for ROIs up to 256³ voxels; predict the whole image on the Models page instead";
 		}
 		if (shownHere?.model_id === proposer.id) return `The ${shownHere.kind} here is already from ${proposer.name}, the newest model`;
@@ -503,6 +510,12 @@
 	 */
 	async function acceptPrediction(roi: Roi) {
 		if (!labels || accepting) return;
+		// Only the part of the ROI inside the image has anything to accept.
+		const box = inImage(roi);
+		if (!box) {
+			notice = "That ROI is outside the image.";
+			return;
+		}
 		// Kept whole, so a newer prediction or proposal arriving while this
 		// reads doesn't change what it accepts from.
 		const layer = covering(roi);
@@ -510,8 +523,7 @@
 			if (proposal) notice = "Nothing is predicted in that ROI yet; propose it first.";
 			return;
 		}
-		const [z0, y0, x0, z1, y1, x1] = roi.bbox;
-		if ((z1 - z0) * (y1 - y0) * (x1 - x0) > MAX_ACCEPT_VOXELS) {
+		if (voxels(box) > MAX_ACCEPT_VOXELS) {
 			notice = "That ROI is too big to accept at once; draw a smaller one.";
 			return;
 		}
@@ -523,8 +535,8 @@
 				// Keep these loads from being cancelled by the views' own requests.
 				store.want(`accept:${id}`, new Set([id]));
 				return store.request(id).finally(() => store.want(`accept:${id}`, new Set()));
-			}, roi.bbox as [number, number, number, number, number, number]);
-			const parts = acceptParts(values, roi.bbox as [number, number, number, number, number, number]);
+			}, box);
+			const parts = acceptParts(values, box);
 			const ops = queue.editMany(parts, { accept: { prediction: artifact, roi: roi.id } });
 			for (const op of ops) labels.applyLocal(op.local, op.deltas);
 			if (ops.length === 0) notice = `The ${kind} has nothing in that ROI.`;
