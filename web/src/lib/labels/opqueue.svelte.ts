@@ -14,6 +14,8 @@ import type { Vec3 } from "../viewer/tiles";
 import type { DeltaIn } from "./deltas";
 
 export const MAX_DELTAS = 512;
+// Keep each op's body well under the API's 8 MiB request limit.
+export const MAX_OP_BYTES = 5 * 1024 * 1024;
 
 export interface OpOut {
 	seq: number;
@@ -27,6 +29,13 @@ export interface QueuedEdit {
 	deltas: DeltaIn[];
 	strict: boolean;
 	tool: Record<string, unknown>;
+	/** Set when the edit accepts a model's prediction inside an ROI; the server checks it. */
+	accept?: Accept;
+}
+
+export interface Accept {
+	prediction: string;
+	roi: string;
 }
 
 export interface QueuedToggle {
@@ -60,6 +69,31 @@ interface UndoGroup {
 }
 
 type Send = (path: string, body: unknown) => Promise<OpOut>;
+
+export interface EditOptions {
+	strict?: boolean;
+	tool?: Record<string, unknown>;
+	accept?: Accept;
+}
+
+/** Split deltas into op-sized batches, by count and by encoded size. */
+export function batches(deltas: DeltaIn[]): DeltaIn[][] {
+	const out: DeltaIn[][] = [];
+	let current: DeltaIn[] = [];
+	let bytes = 0;
+	for (const delta of deltas) {
+		const size = delta.mask.length + (delta.values?.length ?? 0) + 200;
+		if (current.length > 0 && (current.length >= MAX_DELTAS || bytes + size > MAX_OP_BYTES)) {
+			out.push(current);
+			current = [];
+			bytes = 0;
+		}
+		current.push(delta);
+		bytes += size;
+	}
+	if (current.length > 0) out.push(current);
+	return out;
+}
 
 const defaultSend: Send = (path, body) => api<OpOut>(path, { body });
 
@@ -124,19 +158,30 @@ export class OpQueue {
 
 	/**
 	 * Queue an edit; returns its ops (more than one when it touches more
-	 * chunks than one op may carry; undo treats them as one).
+	 * chunks, or more bytes, than one op may carry; undo treats them as one).
 	 */
-	edit(deltas: DeltaIn[], options: { strict?: boolean; tool?: Record<string, unknown> } = {}): QueuedEdit[] {
+	edit(deltas: DeltaIn[], options: EditOptions = {}): QueuedEdit[] {
+		return this.editMany([deltas], options);
+	}
+
+	/**
+	 * Queue several edits that undo and redo together, such as one per label
+	 * value when accepting a prediction (an op may only touch a chunk once).
+	 */
+	editMany(parts: DeltaIn[][], options: EditOptions = {}): QueuedEdit[] {
 		const ops: QueuedEdit[] = [];
-		for (let i = 0; i < deltas.length; i += MAX_DELTAS) {
-			ops.push({
-				kind: "edit",
-				local: newId(),
-				clientOpId: newId(),
-				deltas: deltas.slice(i, i + MAX_DELTAS),
-				strict: options.strict ?? false,
-				tool: options.tool ?? {},
-			});
+		for (const deltas of parts) {
+			for (const batch of batches(deltas)) {
+				ops.push({
+					kind: "edit",
+					local: newId(),
+					clientOpId: newId(),
+					deltas: batch,
+					strict: options.strict ?? false,
+					tool: options.tool ?? {},
+					...(options.accept ? { accept: options.accept } : {}),
+				});
+			}
 		}
 		if (ops.length === 0) return ops;
 		this.#enqueue(ops);
@@ -254,12 +299,19 @@ export class OpQueue {
 			let result: OpOut;
 			if (op.kind === "edit") {
 				const ready = this.beforeSend ? this.beforeSend(op) : op;
-				result = await this.send(`${base}/ops`, {
-					client_op_id: ready.clientOpId,
-					deltas: ready.deltas,
-					strict: ready.strict,
-					tool: ready.tool,
-				});
+				result = ready.accept
+					? await this.send(`${base}/accept`, {
+							client_op_id: ready.clientOpId,
+							prediction_artifact_id: ready.accept.prediction,
+							roi_id: ready.accept.roi,
+							deltas: ready.deltas,
+						})
+					: await this.send(`${base}/ops`, {
+							client_op_id: ready.clientOpId,
+							deltas: ready.deltas,
+							strict: ready.strict,
+							tool: ready.tool,
+						});
 				this.#seqs.set(op.local, result.seq);
 			} else {
 				const seq = op.seq ?? this.#seqs.get(op.target);

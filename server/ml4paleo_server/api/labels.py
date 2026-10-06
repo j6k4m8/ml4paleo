@@ -28,23 +28,35 @@ import datetime
 import json
 import re
 import uuid
+from collections.abc import Sequence
 from typing import Annotated, Any
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select
 from starlette.concurrency import run_in_threadpool
 
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
 from ml4paleo.labels.codec import ZARR_CODECS, blob_key
-from ml4paleo.labels.deltas import ChunkDelta, unpack_values
+from ml4paleo.labels.deltas import ChunkDelta, unpack_mask, unpack_values
+from ml4paleo.segmentation.predict import open_prediction
 from ml4paleo.storage import get_bytes
 
-from .. import audit, labels
+from .. import artifacts, audit, labels
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
-from ..db import LabelChunk, LabelClass, LabelOp, Project, ProjectMember, UserSession
+from ..db import (
+    Artifact,
+    LabelChunk,
+    LabelClass,
+    LabelOp,
+    Project,
+    ProjectMember,
+    Roi,
+    UserSession,
+)
+from ..storage import project_storage
 from .projects import MemberProject
 
 router = APIRouter(prefix="/api/projects/{project_id}/labels", tags=["labels"])
@@ -220,6 +232,10 @@ class DeltaIn(BaseModel):
 
 
 class OpIn(BaseModel):
+    # Edits here are always people's own (`Source.HUMAN`); accepting a
+    # prediction has its own endpoint, which checks it.
+    model_config = ConfigDict(extra="forbid")
+
     client_op_id: uuid.UUID
     deltas: list[DeltaIn] = Field(min_length=1, max_length=MAX_DELTAS)
     # Refuse the edit if any chunk changed since the client read it.
@@ -316,6 +332,123 @@ async def apply_op(
         raise HTTPException(
             status_code=409,
             detail={"message": "Some chunks changed; reload them.", "chunks": exc.keys},
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    await db.commit()
+    return _op_out(result)
+
+
+# The most of a prediction one accept may read (16 MiB of label values).
+MAX_ACCEPT_VOXELS = 256**3
+
+
+class AcceptIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client_op_id: uuid.UUID
+    prediction_artifact_id: uuid.UUID
+    roi_id: uuid.UUID
+    # One predicted value per delta (an op touches a chunk once), written
+    # only into unlabeled voxels.
+    deltas: list[DeltaIn] = Field(min_length=1, max_length=MAX_DELTAS)
+
+
+def _check_against_prediction(
+    deltas: list[ChunkDelta], predicted: np.ndarray, origin: Sequence[int]
+) -> None:
+    """Every voxel a delta selects must hold the value it writes."""
+    for delta in deltas:
+        start = [
+            k * c + b - o
+            for k, c, b, o in zip(
+                delta.key, LABEL_CHUNK_ZYX, delta.box[:3], origin, strict=True
+            )
+        ]
+        shape = delta.box_shape
+        region = predicted[
+            tuple(slice(a, a + n) for a, n in zip(start, shape, strict=True))
+        ]
+        mask = unpack_mask(delta.mask, shape)
+        if (region[mask] != delta.value).any():
+            raise ValueError("Those labels don't match the prediction")
+
+
+@router.post("/accept", status_code=201)
+async def accept_prediction(
+    body: AcceptIn,
+    project: MemberProject,
+    auth: CurrentAuth,
+    db: DbSession,
+    settings: SettingsDep,
+) -> OpOut:
+    """
+    Accept part of a model's prediction as labels, recorded as
+    model-verified with the prediction, its model, and the ROI.
+
+    The server checks the claim: each delta writes one predicted value (not
+    0) into only unlabeled voxels inside the ROI, and the stored prediction
+    has exactly that value at every voxel it selects. Undo and redo work as
+    for any edit.
+    """
+    if done := await labels.existing(db, project.id, body.client_op_id):
+        return _op_out(done)
+    prediction = await db.scalar(
+        select(Artifact).where(
+            Artifact.id == body.prediction_artifact_id,
+            Artifact.project_id == project.id,
+            Artifact.kind == "prediction",
+            Artifact.state.in_(("committed", "superseded")),
+        )
+    )
+    roi = await db.scalar(
+        select(Roi).where(Roi.id == body.roi_id, Roi.project_id == project.id)
+    )
+    if prediction is None or roi is None:
+        raise HTTPException(status_code=404, detail="No such prediction or ROI.")
+    try:
+        deltas = [delta.to_delta() for delta in body.deltas]
+        for delta in deltas:
+            if (
+                delta.values is not None
+                or not delta.value
+                or delta.only_if != "unlabeled"
+            ):
+                raise ValueError(
+                    "An accepted prediction writes one predicted value per chunk, "
+                    "only into unlabeled voxels"
+                )
+        allowed = await _allowed_values(db, project.id)
+        await run_in_threadpool(_check_values, deltas, allowed)
+        box = labels.global_box(deltas)
+        if any(box[a] < roi.bbox[a] or box[a + 3] > roi.bbox[a + 3] for a in range(3)):
+            raise ValueError("Those labels reach outside the ROI")
+        if np.prod([box[a + 3] - box[a] for a in range(3)]) > MAX_ACCEPT_VOXELS:
+            raise ValueError("That's too much to accept at once; use a smaller ROI")
+        grant = project_storage(settings).child(artifacts.artifact_path(prediction))
+        region = tuple(slice(box[a], box[a + 3]) for a in range(3))
+        predicted = await run_in_threadpool(
+            lambda: np.asarray(open_prediction(grant)["class"][region])  # type: ignore[index]
+        )
+        await run_in_threadpool(_check_against_prediction, deltas, predicted, box[:3])
+        result = await labels.apply_edit(
+            db,
+            settings,
+            project.id,
+            client_op_id=body.client_op_id,
+            deltas=deltas,
+            source=Source.MODEL_VERIFIED,
+            tool={
+                "name": "accept-prediction",
+                "prediction": str(prediction.id),
+                "model": prediction.inputs.get("model_id"),
+                "roi": str(roi.id),
+            },
+            user_id=auth.user.id,
+        )
+    except labels.NoImage:
+        raise HTTPException(
+            status_code=409, detail="This project has no image yet."
         ) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None

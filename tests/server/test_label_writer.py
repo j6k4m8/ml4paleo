@@ -15,11 +15,13 @@ import pytest
 from helpers import run_db, signup
 from ml4paleo_server import artifacts, labels
 from ml4paleo_server.db import LabelOp, create_engine, create_sessionmaker
+from ml4paleo_server.storage import project_storage
 from sqlalchemy import func, select
 
 from ml4paleo.labels import LABEL_CHUNK_ZYX, Source
 from ml4paleo.labels.codec import decode_chunk
 from ml4paleo.labels.deltas import split_into_deltas
+from ml4paleo.segmentation.predict import create_prediction
 
 SHAPE = (70, 130, 100)  # (z, y, x): chunks along each edge are partial
 
@@ -366,6 +368,90 @@ def test_concurrent_retries_return_the_first_result(
     assert edits[0] == edits[1]
     assert undos[0] == undos[1]
     assert count == 2
+
+
+def add_prediction(settings, database_url, project: str) -> str:
+    """A committed prediction: bone in z 0..8, y 0..8, x 0..8, background elsewhere."""
+
+    async def create(db):
+        artifact = await artifacts.create_staging(
+            db,
+            project_id=uuid.UUID(project),
+            kind="prediction",
+            inputs={"model_id": None},
+        )
+        group = create_prediction(
+            project_storage(settings).child(artifacts.artifact_path(artifact)), SHAPE
+        )
+        classes = np.ones(SHAPE, dtype=np.uint8)
+        classes[:8, :8, :8] = 2
+        group["class"][:] = classes  # type: ignore[index]
+        artifact.state = "committed"
+        artifact.manifest = {"kind": "prediction", "shape_zyx": list(SHAPE)}
+        return str(artifact.id)
+
+    return run_db(database_url, create)
+
+
+def test_accepting_a_prediction_is_checked_against_it(
+    ada, project, settings, migrated_database_url
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    ada.post(
+        f"/api/projects/{project}/rois",
+        json={"bbox": [0, 0, 0, 10, 10, 10], "kind": "cube"},
+    )
+    roi = ada.get(f"/api/projects/{project}/rois").json()[0]["id"]
+    url = f"/api/projects/{project}/labels/accept"
+
+    def accept(mask, origin, value, **kw):
+        return ada.post(
+            url,
+            json={
+                "client_op_id": str(uuid.uuid4()),
+                "prediction_artifact_id": prediction,
+                "roi_id": roi,
+                "deltas": deltas_for(
+                    mask, origin, value=value, only_if=kw.pop("only_if", "unlabeled")
+                ),
+                **kw,
+            },
+        )
+
+    bone = np.ones((8, 8, 8), dtype=bool)
+    # The prediction doesn't say tooth (3) there, or bone outside its cube.
+    assert accept(bone, (0, 0, 0), 3).status_code == 422
+    assert accept(np.ones((2, 2, 2), dtype=bool), (7, 7, 7), 2).status_code == 422
+    # Accepted labels go only into unlabeled voxels, and stay in the ROI.
+    assert accept(bone, (0, 0, 0), 2, only_if="any").status_code == 422
+    assert accept(np.ones((1, 1, 1), dtype=bool), (10, 0, 0), 1).status_code == 422
+    # Nobody can claim the result is anything but the server's call.
+    assert accept(bone, (0, 0, 0), 2, tool={"name": "mine"}).status_code == 422
+
+    accepted = accept(bone, (0, 0, 0), 2)
+    assert accepted.status_code == 201, accepted.text
+    source = chunk(ada, project, (0, 0, 0), array="source")
+    assert (source[:8, :8, :8] == Source.MODEL_VERIFIED).all()
+    [op] = ada.get(f"/api/projects/{project}/labels/ops?limit=1").json()
+    assert op["source"] == Source.MODEL_VERIFIED
+    assert op["tool"] == {
+        "name": "accept-prediction",
+        "prediction": prediction,
+        "model": None,
+        "roi": roi,
+    }
+
+    # Plain edits are always people's own.
+    mask = np.ones((2, 2, 2), dtype=bool)
+    claimed = ada.post(
+        f"/api/projects/{project}/labels/ops",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "deltas": deltas_for(mask, (20, 0, 0), value=2),
+            "source": "model_verified",
+        },
+    )
+    assert claimed.status_code == 422
 
 
 def test_out_of_range_numbers_are_refused(ada, project):
