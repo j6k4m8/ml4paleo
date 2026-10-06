@@ -92,6 +92,9 @@
 	let segmentation: ChunkStore | null = $state(null);
 	let classes: LabelClass[] = $state([]);
 	let error = $state("");
+	// Why the prediction layer couldn't load when the page opened; cleared
+	// when a later load works.
+	let predictionError = $state("");
 	let pool: WorkerPool | undefined;
 	let hovered: Plane = PLANES.xy;
 	let notice = $state("");
@@ -127,7 +130,9 @@
 			});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
-			void loadPrediction(controller.signal);
+			loadPrediction(controller.signal).catch((e: unknown) => {
+				if (!controller.signal.aborted) predictionError = message(e);
+			});
 			// Your proposal still being made (asked for before a reload, say) shows when it's done.
 			api<Pipeline[]>(`/api/projects/${project}/pipelines`, { signal: controller.signal }).then(
 				(pipelines) => {
@@ -179,7 +184,8 @@
 
 	const stopRefreshing = rois.keepFresh();
 	// Models trained or deleted, and predictions and proposals made, since.
-	const stopReloading = whileVisible(() => void loadPrediction(controller.signal));
+	// A reload that fails keeps what's shown, quietly, and the next one tries again.
+	const stopReloading = whileVisible(() => void loadPrediction(controller.signal).catch(() => {}));
 
 	onDestroy(() => {
 		controller.abort();
@@ -336,7 +342,8 @@
 
 	/**
 	 * Load the prediction, and your proposal if it was asked for after it, for
-	 * the prediction layer; and find the model "Propose here" uses.
+	 * the prediction layer; and find the model "Propose here" uses. Throws if
+	 * the server couldn't say, leaving the layer as it was.
 	 */
 	async function loadPrediction(signal: AbortSignal) {
 		const load = ++loads;
@@ -345,34 +352,31 @@
 				if (e instanceof ApiError && e.status === 404) return null;
 				throw e;
 			});
-		try {
-			const [whole, proposed, models] = await Promise.all([
-				get("prediction"),
-				get("proposal"),
-				// Without them, "Propose here" keeps the model it had.
-				api<{ id: string; name: string; status: string }[]>(`/api/projects/${project}/models`, { signal }).catch(
-					() => null,
-				),
-			]);
-			if (signal.aborted || load !== loads) return;
-			// Newest first.
-			if (models) proposer = models.find((m) => m.status === "ready") ?? null;
-			// One of another image (one that replaced this since) wouldn't line up.
-			const fits = (found: Predicted | null) => (found?.shape_zyx.join() === viewer.shape.join() ? found : null);
-			const current = fits(whole);
-			const newer = fits(proposed);
-			const image: Box = [0, 0, 0, ...viewer.shape];
-			prediction = show(prediction, current && { ...current, box: image }, "prediction");
-			// A proposal asked for before the prediction is out of date; one asked
-			// for after it shows, even if the prediction was done later.
-			proposal = show(
-				proposal,
-				newer?.box && (!current || Date.parse(newer.started_at) > Date.parse(current.started_at)) ? newer : null,
-				"proposal",
-			);
-		} catch (e) {
-			if (!signal.aborted) error = message(e);
-		}
+		const [whole, proposed, models] = await Promise.all([
+			get("prediction"),
+			get("proposal"),
+			// Without them, "Propose here" keeps the model it had.
+			api<{ id: string; name: string; status: string }[]>(`/api/projects/${project}/models`, { signal }).catch(
+				() => null,
+			),
+		]);
+		if (signal.aborted || load !== loads) return;
+		predictionError = "";
+		// Newest first.
+		if (models) proposer = models.find((m) => m.status === "ready") ?? null;
+		// One of another image (one that replaced this since) wouldn't line up.
+		const fits = (found: Predicted | null) => (found?.shape_zyx.join() === viewer.shape.join() ? found : null);
+		const current = fits(whole);
+		const newer = fits(proposed);
+		const image: Box = [0, 0, 0, ...viewer.shape];
+		prediction = show(prediction, current && { ...current, box: image }, "prediction");
+		// A proposal asked for before the prediction is out of date; one asked
+		// for after it shows, even if the prediction was done later.
+		proposal = show(
+			proposal,
+			newer?.box && (!current || Date.parse(newer.started_at) > Date.parse(current.started_at)) ? newer : null,
+			"proposal",
+		);
 	}
 
 	/** `found` as the layer shows it, with `before`'s chunks if it's the same one. */
@@ -887,9 +891,10 @@
 				</div>
 			</div>
 			<!-- What went wrong, over the views, where it shows even with the dock closed. -->
-			{#if error || notice || rois.error}
+			{#if error || predictionError || notice || rois.error}
 				<div class="pointer-events-none absolute inset-x-0 top-8 z-30 flex flex-col items-center gap-1 px-2">
 					{#if error}{@render problem(error, () => (error = ""))}{/if}
+					{#if predictionError}{@render problem(predictionError, () => (predictionError = ""))}{/if}
 					{#if notice}{@render problem(notice, () => (notice = ""))}{/if}
 					{#if rois.error}{@render problem(rois.error, () => (rois.error = ""))}{/if}
 				</div>
