@@ -535,7 +535,10 @@
 				style:background={activeClass?.color ?? "transparent"}
 				title={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "No class to paint"}
 				aria-label={activeClass ? `Active class: ${activeClass.name}` : "No active class"}
-				onclick={() => (classesOpen = true)}
+				onclick={() => {
+					classesOpen = true;
+					dockOpen = true;
+				}}
 			></button>
 			<span class="my-1.5 h-px w-6 bg-line"></span>
 			<ToolButton icon={Undo2} label="Undo" shortcut="Ctrl+Z" disabled={queue.undoable === 0} onclick={() => queue.undo()} />
