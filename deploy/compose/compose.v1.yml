@@ -7,7 +7,9 @@
 # The API reads only jobs.json, to check claims, and worker-v1 (the only
 # worker that sees the folder) imports what people claim. Signed in, people
 # claim a job by visiting its old link (/job/<id>) or from /import; the first
-# claim wins, and admins can release a job someone else claimed.
+# claim wins, and admins can release a job someone else claimed. /import
+# lists the jobs each browser opened in v1, which only v1's own origin can
+# read: serve v2 at exactly v1's scheme, host, and port.
 #
 # v1 saves jobs.json by replacing the file, and the API's mount keeps showing
 # the file it started with: if v1 is still running, restart the API

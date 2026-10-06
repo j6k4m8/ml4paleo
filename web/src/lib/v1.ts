@@ -1,7 +1,8 @@
 /**
  * Jobs from the ml4paleo v1 app this one replaced. v1 kept the jobs each
  * browser had opened in `localStorage["jobs"]`, as `[{id, name}]`, and this
- * app runs on the same site, so it can read them.
+ * app runs on v1's origin (the same scheme, host, and port), so it can read
+ * them.
  */
 
 export interface V1Job {

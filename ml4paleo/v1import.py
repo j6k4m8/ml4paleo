@@ -6,15 +6,18 @@ v1 (the Flask app in `webapp/`) kept everything under one folder:
     jobs.json                         {job id: record}
     chunks/<JOB>/                     the image: a zarr v2 array, (x, y, z)
     training/<JOB>/img<ts>.png        annotation samples: an 8-bit view,
-                   seg<ts>.png        its mask (red 255 is foreground),
+                   seg<ts>.png        its mask (red above 0 is foreground),
                    meta<ts>.json      and where it came from (April 2026 on)
     models/<JOB>/<ts>.model, .json    random forests and their sidecars
-    segmented/<JOB>/<ts>.zarr/        segmentations: zarr v2, (x, y, z), 0 or 255
+    segmented/<JOB>/<ts>.zarr/        segmentations: zarr v2, (x, y, z), 0 for
+                                      background and anything else (usually
+                                      255) for foreground
 
 Job ids are six uppercase hex digits. Each annotation sample is a fully
-labeled 512² XY slice of a random cutout: red 255 is foreground and
-everything else background. Only samples with metadata can be placed in the
-volume; older ones are skipped. PNG rows are y and columns x.
+labeled 512² XY slice of a random cutout: red above 0 is foreground (v1
+trained on any red) and everything else background. Only samples with
+metadata can be placed in the volume; older ones are skipped. PNG rows are
+y and columns x.
 """
 
 import json

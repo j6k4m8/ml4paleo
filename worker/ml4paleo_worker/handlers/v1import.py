@@ -140,7 +140,7 @@ def probe(ctx: JobContext) -> dict[str, Any]:
         ctx.grants[0],
         shape_czyx=(1, z, y, x),
         dtype=np.dtype(provider.dtype),
-        # v1 recorded voxel sizes (in mm) for DICOM scans only.
+        # v1 recorded voxel sizes (in mm) only for DICOM scans, from #76 on.
         voxel_size_zyx=tuple(reversed(voxel)) if voxel else None,
         unit="millimeter" if voxel else None,
         name=str(record.get("name") or job_id),
@@ -247,8 +247,9 @@ def labels(ctx: JobContext) -> dict[str, Any]:
 
 def prediction(ctx: JobContext) -> dict[str, Any]:
     """
-    v1 segmentations hold 255 where the model found the foreground and 0
-    elsewhere; the prediction holds the foreground class and background.
+    v1 segmentations hold 0 for background and anything else (usually 255)
+    where the model found the foreground; the prediction holds background and
+    the foreground class.
     """
     root = _root(ctx)
     job_id = ctx.payload["job_id"]
