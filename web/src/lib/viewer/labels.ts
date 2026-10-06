@@ -33,6 +33,8 @@ export class LabelLayer {
 	#events: EventSource | null = null;
 	// Edits sent but not yet confirmed, in order, by op: chunk id → delta.
 	#local = new Map<string, Map<string, LocalDelta>>();
+	/** Called if live updates stop for good (signed out, or removed from the project). */
+	onStopped: (() => void) | null = null;
 
 	constructor(
 		private projectId: string,
@@ -60,6 +62,10 @@ export class LabelLayer {
 		this.classes = await api<LabelClass[]>(`${base}/classes`);
 		const [latest] = await api<{ seq: number }[]>(`${base}/ops?limit=1`);
 		this.#events = new EventSource(`${base}/events?after=${latest?.seq ?? 0}`);
+		this.#events.onerror = () => {
+			// The browser retries dropped streams itself; a closed one is final.
+			if (this.#events?.readyState === EventSource.CLOSED) this.onStopped?.();
+		};
 		this.#events.addEventListener("change", (event) => {
 			const change = JSON.parse((event as MessageEvent<string>).data) as { chunks: { key: Vec3 }[] };
 			this.reload(change.chunks.map(({ key }) => key.join("/")));
