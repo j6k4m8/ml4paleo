@@ -38,6 +38,7 @@ from sqlalchemy import select, update
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX
 from ml4paleo.labels.codec import decode_chunk
 from ml4paleo.labels.deltas import split_into_deltas
+from ml4paleo.ome import OmeImage
 from ml4paleo.protocol import JobLease, WorkerCaps
 from ml4paleo.storage import StorageGrant, zarr_store
 
@@ -594,6 +595,35 @@ def test_segmentations_must_be_named_as_v1_named_them(volume, tmp_path):
         ctx = context(volume, "v1.prediction", payload, [prediction])
         with pytest.raises(PermanentError, match="v1 segmentation"):
             v1import.prediction(ctx)
+
+
+def test_small_workers_read_a_chunk_at_a_time(volume, tmp_path):
+    # Room for about one of the fixture's chunks at a time.
+    small = 64 * 1024
+    image = StorageGrant(url=(tmp_path / "image").as_uri(), access="rw")
+    probed = v1import.probe(context(volume, "v1.probe", {"job_id": "ABC123"}, [image]))
+    for z_range in probed["slabs"]:
+        payload = {"job_id": "ABC123", "z_range": z_range}
+        v1import.slab(context(volume, "v1.slab", payload, [image], memory=small))
+    stored = np.asarray(OmeImage.open(image).array(0)[0])
+    np.testing.assert_array_equal(stored, v1_volume.image().transpose(2, 1, 0))
+
+    grant = StorageGrant(url=(tmp_path / "prediction").as_uri(), access="rw")
+    payload = {
+        "job_id": "ABC123",
+        "segmentation": "1745400150.zarr",
+        "shape_zyx": probed["shape_zyx"],
+        "foreground": 2,
+    }
+    v1import.prediction(
+        context(volume, "v1.prediction", payload, [grant], memory=small)
+    )
+    predicted = zarr.open_group(store=zarr_store(grant), mode="r")["class"]
+    segmented = v1_volume.segmentation().transpose(2, 1, 0)
+    np.testing.assert_array_equal(
+        np.asarray(predicted[:]),  # type: ignore[index]
+        np.where(segmented > 0, 2, BACKGROUND),
+    )
 
 
 def test_a_worker_without_the_volume_leaves_the_import_to_another(tmp_path):
