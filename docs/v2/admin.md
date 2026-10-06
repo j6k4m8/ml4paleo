@@ -60,6 +60,8 @@ own projects' jobs as progress on each page.
 ## v1 jobs
 
 If you import jobs from v1 (see [install.md](install.md)), the first person to
-claim a job gets it. If someone claims a job that isn't theirs, release it
-under **v1 jobs**: that deletes their project made from it, and the job's
-owner can then claim it from its old link.
+claim a job gets it. If someone claims a job that isn't theirs, give it to its
+owner under **v1 jobs** (the job's id or link, and the owner's username): that
+stops and deletes the project anyone else made from it, and only the owner's
+account can claim it next, from its old link. Giving a job to someone again
+undoes a mistake.

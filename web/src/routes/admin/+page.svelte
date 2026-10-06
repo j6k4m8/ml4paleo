@@ -73,6 +73,7 @@
 	let jobs: JobRow[] = $state([]);
 	let jobStatus = $state("");
 	let releaseId = $state("");
+	let releaseTo = $state("");
 	let notice = $state("");
 	let error = $state("");
 
@@ -494,19 +495,24 @@
 							error = "That isn't a v1 job's id or link.";
 							return;
 						}
-						confirmed(`Release ${id}? This deletes the project made from it.`, () =>
+						const to = releaseTo.trim();
+						confirmed(`Give ${id} to ${to}? A project someone else made from it is deleted.`, () =>
 							run(async () => {
-								await api(`/api/v1-jobs/${id}/release`, { method: "POST" });
-								releaseId = "";
-							}, `Released ${id}: its project is deleted, and the job can be claimed again.`),
+								await api(`/api/v1-jobs/${id}/release`, { body: { to } });
+								releaseId = releaseTo = "";
+							}, `${id} is for ${to} to claim now, from its old link.`),
 						);
 					}}
 				>
 					<label class="label flex-1">
-						Release a job someone else claimed (deletes their project from it)
-						<input class="field font-mono" bind:value={releaseId} placeholder="AB12CD" />
+						Give a job to its owner (deletes a project someone else made from it)
+						<input class="field font-mono" bind:value={releaseId} placeholder="AB12CD" required />
 					</label>
-					<button class="btn btn-danger">Release</button>
+					<label class="label w-36">
+						Their username
+						<input class="field" bind:value={releaseTo} autocomplete="off" required />
+					</label>
+					<button class="btn btn-danger">Give it to them</button>
 				</form>
 			</section>
 		</div>

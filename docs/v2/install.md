@@ -148,11 +148,12 @@ The `migrate` service upgrades the database before the API starts.
 v2 replaces the v1 app on the same site, and v1's job links (`/job/<id>`)
 keep working: signed in, someone visiting one can bring that job over into a
 new project (its scan, its placeable annotation samples as labels, and its
-last finished segmentation as the prediction). People can also import every
-job their browser opened in v1 from the Import page, which works only when v2
-is served from exactly the address v1 was (scheme, host, and port), since
-browsers keep that list per site. The first person to import a job gets it;
-admins can release a job claimed by the wrong person.
+last finished segmentation as the prediction). The Import page also lists
+the jobs a browser opened in v1, which can include jobs other people shared,
+to import one at a time; it works only when v2 is served from exactly the
+address v1 was (scheme, host, and port), since browsers keep that list per
+site. The first person to import a job gets it; admins can give a job claimed
+by the wrong person to its owner.
 
 Mount v1's volume folder (the one with `jobs.json`) read-only with the v1
 override, which also starts a worker that can read it. Put both lines in
