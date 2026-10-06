@@ -1,0 +1,133 @@
+/**
+ * A cache of decoded chunks, kept under a byte budget (least recently used
+ * chunks go first), that loads each chunk once however often it is asked
+ * for, runs a limited number of loads at a time, and drops loads that the
+ * view no longer needs.
+ */
+
+export interface Chunk {
+	data: ArrayBufferView & { length: number };
+	/** Shape of the chunk, (z, y, x). Edge chunks may be smaller. */
+	shape: number[];
+}
+
+export type Loader = (id: string, signal: AbortSignal) => Promise<Chunk>;
+
+interface Pending {
+	id: string;
+	resolve: (chunk: Chunk) => void;
+	reject: (error: unknown) => void;
+	controller: AbortController;
+	started: boolean;
+}
+
+export class ChunkStore {
+	#cache = new Map<string, Chunk>();
+	#bytes = 0;
+	#pending = new Map<string, { promise: Promise<Chunk>; entry: Pending }>();
+	#queue: Pending[] = [];
+	#running = 0;
+	#pinned = new Set<string>();
+
+	constructor(
+		private load: Loader,
+		private maxBytes: number,
+		private concurrency = 8,
+	) {}
+
+	get bytes(): number {
+		return this.#bytes;
+	}
+
+	/** A cached chunk, marked as just used. */
+	get(id: string): Chunk | undefined {
+		const chunk = this.#cache.get(id);
+		if (chunk) {
+			this.#cache.delete(id);
+			this.#cache.set(id, chunk);
+		}
+		return chunk;
+	}
+
+	/** Load a chunk (once), queueing behind loads asked for earlier. */
+	request(id: string): Promise<Chunk> {
+		const cached = this.get(id);
+		if (cached) return Promise.resolve(cached);
+		const pending = this.#pending.get(id);
+		if (pending) return pending.promise;
+		let entry!: Pending;
+		const promise = new Promise<Chunk>((resolve, reject) => {
+			entry = { id, resolve, reject, controller: new AbortController(), started: false };
+		});
+		this.#pending.set(id, { promise, entry });
+		this.#queue.push(entry);
+		this.#pump();
+		return promise;
+	}
+
+	/** Cancel queued and running loads of chunks not in `wanted`. */
+	keepOnly(wanted: Set<string>): void {
+		for (const [id, { entry }] of this.#pending) {
+			if (wanted.has(id)) continue;
+			entry.controller.abort();
+			this.#pending.delete(id);
+			entry.reject(new DOMException("No longer needed", "AbortError"));
+		}
+		this.#queue = this.#queue.filter((entry) => wanted.has(entry.id));
+	}
+
+	/** Keep a chunk however full the cache gets (for example while edited). */
+	pin(id: string): void {
+		this.#pinned.add(id);
+	}
+
+	unpin(id: string): void {
+		this.#pinned.delete(id);
+		this.#evict();
+	}
+
+	/** Forget a chunk, for example after an edit changed it. */
+	invalidate(id: string): void {
+		const chunk = this.#cache.get(id);
+		if (chunk) {
+			this.#cache.delete(id);
+			this.#bytes -= chunk.data.byteLength;
+		}
+	}
+
+	#pump(): void {
+		while (this.#running < this.concurrency) {
+			const entry = this.#queue.shift();
+			if (!entry) return;
+			if (entry.controller.signal.aborted) continue;
+			entry.started = true;
+			this.#running += 1;
+			this.load(entry.id, entry.controller.signal)
+				.then((chunk) => {
+					if (this.#pending.get(entry.id)?.entry !== entry) return;
+					this.#pending.delete(entry.id);
+					this.#cache.set(entry.id, chunk);
+					this.#bytes += chunk.data.byteLength;
+					this.#evict();
+					entry.resolve(chunk);
+				})
+				.catch((error: unknown) => {
+					if (this.#pending.get(entry.id)?.entry === entry) this.#pending.delete(entry.id);
+					entry.reject(error);
+				})
+				.finally(() => {
+					this.#running -= 1;
+					this.#pump();
+				});
+		}
+	}
+
+	#evict(): void {
+		for (const [id, chunk] of this.#cache) {
+			if (this.#bytes <= this.maxBytes) return;
+			if (this.#pinned.has(id)) continue;
+			this.#cache.delete(id);
+			this.#bytes -= chunk.data.byteLength;
+		}
+	}
+}
