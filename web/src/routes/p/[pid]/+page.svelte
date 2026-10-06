@@ -97,6 +97,7 @@
 			<p>{x} × {y} × {z} voxels, {image.manifest.dtype}</p>
 			<p>
 				<a href="/p/{pid}/annotate">Open the annotator</a>
+				· <a href="/p/{pid}/rois">ROIs</a>
 				{#if image.neuroglancer_url}
 					· <a href={image.neuroglancer_url} target="_blank" rel="noopener">Open in Neuroglancer</a>
 				{/if}

@@ -5,6 +5,7 @@
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
 	import { PlaneMask } from "../labels/raster";
+	import { describe, revert, type Roi, RoiList, roiBox, thinAxis } from "../rois.svelte";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
 	import { actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
@@ -14,7 +15,7 @@
 	import { type Stroke, ViewerState } from "./state.svelte";
 	import { aspectOf, type Level, type Plane, PLANES, type Vec3 } from "./tiles";
 
-	let { image, projectId }: { image: ProjectImage; projectId: string } = $props();
+	let { image, projectId, roi: startRoi = null }: { image: ProjectImage; projectId: string; roi?: string | null } = $props();
 
 	const CACHE_BYTES = 512 * 1024 * 1024;
 
@@ -44,6 +45,8 @@
 		if (versions.some((v) => v === undefined)) return { ...op, strict: false };
 		return { ...op, deltas: op.deltas.map((d, i) => ({ ...d, base_version: versions[i]! })) };
 	};
+	const rois = new RoiList(project);
+	const firstRoi = untrack(() => startRoi);
 	const sizes = new Map<string, [number, number]>();
 	const controller = new AbortController();
 
@@ -53,6 +56,11 @@
 	onMount(async () => {
 		try {
 			levels = await loadLevels(zarrUrl, controller.signal);
+			rois.load().then(() => {
+				const found = rois.items.find((r) => r.id === firstRoi);
+				if (found) goTo(found);
+				else if (firstRoi) rois.error = "That ROI isn't in this project any more.";
+			});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
 			const layer = new LabelLayer(project, pool, viewer.shape);
@@ -87,8 +95,11 @@
 		}
 	});
 
+	const stopRefreshing = rois.keepFresh();
+
 	onDestroy(() => {
 		controller.abort();
+		stopRefreshing();
 		queue.stop();
 		labels?.stop();
 		images?.keepOnly(new Set());
@@ -96,7 +107,7 @@
 	});
 
 	$effect(() => {
-		void [viewer.opacity, viewer.showLabels, viewer.layout, viewer.brushRadius, viewer.protectLabels];
+		void [viewer.opacity, viewer.showLabels, viewer.layout, viewer.brushRadius, viewer.protectLabels, viewer.roiDepth];
 		viewer.savePreferences();
 	});
 
@@ -119,8 +130,9 @@
 
 	function resized(plane: Plane, width: number, height: number) {
 		sizes.set(plane.name, [width, height]);
+		if (pendingGoTo) return goTo(pendingGoTo);
 		const main = viewer.layout === "four" ? "xy" : viewer.layout;
-		if (viewer.autoFit && plane.name === main) fit();
+		if (plane.name === main && viewer.autoFit) fit();
 	}
 
 	// --- editing -------------------------------------------------------------
@@ -158,6 +170,58 @@
 		const points = polygon.points.map(([u, v]) => [Math.round(u * 10) / 10, Math.round(v * 10) / 10]);
 		const tool = { name: erase ? "polygon-erase" : "polygon", plane: plane.name, slice: polygon.slice, points: points.length <= 500 ? points : undefined };
 		commit(plane, polygon.slice, mask, value, onlyIf, tool, true);
+	}
+
+	// --- ROIs ----------------------------------------------------------------
+
+	async function drawRoi(plane: Plane, slice: number, corners: [[number, number], [number, number]]) {
+		const bbox = roiBox(plane, slice, corners, viewer.roiDepth, viewer.shape);
+		if (!bbox) return;
+		const roi = await rois.add(bbox, viewer.roiDepth === 1 ? "slice" : "cube");
+		if (roi) viewer.selectedRoi = roi.id;
+	}
+
+	// An ROI to fit once the main view knows its size.
+	let pendingGoTo: Roi | null = null;
+
+	/**
+	 * Center the views on an ROI and fit it: a slice ROI in the view of its
+	 * plane, a cube in every view shown.
+	 */
+	function goTo(roi: Roi) {
+		viewer.selectedRoi = roi.id;
+		viewer.autoFit = false;
+		const { bbox } = roi;
+		const thin = thinAxis(bbox);
+		const slicePlane = thin === 0 ? PLANES.xy : thin === 1 ? PLANES.xz : PLANES.yz;
+		viewer.moveTo([0, 1, 2].map((a) => (bbox[a]! + bbox[a + 3]!) / 2) as Vec3);
+		if (roi.kind === "slice" && viewer.layout !== "four" && viewer.layout !== slicePlane.name) {
+			// The new view's size arrives when it lays out; fit then.
+			viewer.layout = slicePlane.name;
+			sizes.clear();
+			pendingGoTo = roi;
+			return;
+		}
+		const planes = roi.kind === "slice" ? [slicePlane] : shown;
+		const extent = (axis: number) => (bbox[axis + 3]! - bbox[axis]!) * viewer.aspect[axis]!;
+		const zooms = planes.flatMap((plane) => {
+			const size = sizes.get(plane.name);
+			return size ? [Math.min(size[0] / extent(plane.u), size[1] / extent(plane.v))] : [];
+		});
+		pendingGoTo = zooms.length === planes.length ? null : roi;
+		if (zooms.length > 0) viewer.zoom = Math.min(64, Math.max(1 / 512, 0.85 * Math.min(...zooms)));
+	}
+
+	const openRois = $derived(rois.items.filter((r) => r.status === "open"));
+
+	/** The next open ROI after the selected one, in list order. */
+	function nextOpen() {
+		const items = rois.items;
+		const at = items.findIndex((r) => r.id === viewer.selectedRoi);
+		for (let step = 1; step <= items.length; step++) {
+			const roi = items[(at + step) % items.length]!;
+			if (roi.status === "open") return goTo(roi);
+		}
 	}
 
 	function setTool(tool: typeof viewer.tool) {
@@ -206,7 +270,13 @@
 			case "brush":
 			case "eraser":
 			case "polygon":
+			case "roi":
 				return setTool(action);
+			case "next-roi":
+				return nextOpen();
+			case "complete-roi":
+				if (viewer.selectedRoi) rois.update(viewer.selectedRoi, { status: event.shiftKey ? "open" : "complete" });
+				return;
 			case "smaller":
 				viewer.brushRadius = Math.max(0.5, Math.round(viewer.brushRadius / 1.25 * 2) / 2);
 				return;
@@ -280,6 +350,8 @@
 					onresize={resized}
 					onstroke={stroke}
 					onpolygon={() => closePolygon()}
+					rois={rois.items}
+					onroi={drawRoi}
 				/>
 			{/each}
 		{/if}
@@ -302,7 +374,7 @@
 				<input type="range" min="0" max="1" step="0.05" bind:value={viewer.opacity} />
 			</label>
 			<div class="tools" role="radiogroup" aria-label="Tool">
-				{#each [["navigate", "Navigate", "n"], ["brush", "Brush", "b"], ["eraser", "Eraser", "e"], ["polygon", "Polygon", "p"]] as [tool, name, shortcut] (tool)}
+				{#each [["navigate", "Navigate", "n"], ["brush", "Brush", "b"], ["eraser", "Eraser", "e"], ["polygon", "Polygon", "p"], ["roi", "ROI", "r"]] as [tool, name, shortcut] (tool)}
 					<button
 						class:secondary={viewer.tool !== tool}
 						role="radio"
@@ -338,6 +410,37 @@
 				<span class="status" class:error={!!queue.error} role="status">{status}</span>
 			</div>
 			{#if notice}<p class="error" role="alert">{notice}</p>{/if}
+			<details class="rois" open>
+				<summary>ROIs · {openRois.length} open of {rois.items.length}</summary>
+				<label>
+					New ROIs: {viewer.roiDepth === 1 ? "one-voxel slices" : `cubes ${viewer.roiDepth} deep`}
+					<input type="range" min="1" max="256" step="1" bind:value={viewer.roiDepth} />
+				</label>
+				<ul>
+					{#each rois.items as roi (roi.id)}
+						<li class:selected={roi.id === viewer.selectedRoi}>
+							<button class="link" onclick={() => goTo(roi)}>
+								<span class="dot dot-{roi.status}"></span>
+								{describe(roi)}
+							</button>
+							<select
+								aria-label="Status of the {describe(roi)} ROI"
+								value={roi.status}
+								onchange={async (e) => {
+									const select = e.currentTarget;
+									if (!(await rois.update(roi.id, { status: select.value as Roi["status"] }))) revert(select, roi.status);
+								}}
+							>
+								<option value="open">open</option>
+								<option value="complete">complete</option>
+								<option value="skipped">skipped</option>
+							</select>
+						</li>
+					{/each}
+				</ul>
+				{#if rois.error}<p class="error" role="alert">{rois.error}</p>{/if}
+				<p><a href="/p/{project}/rois">All ROIs</a></p>
+			</details>
 			<p class="muted">Press <kbd>?</kbd> for keys.</p>
 			{#if error}<p class="error" role="alert">{error}</p>{/if}
 		</aside>
@@ -449,6 +552,49 @@
 	}
 	.history button {
 		padding: 0.2rem 0.5rem;
+	}
+	.rois ul {
+		list-style: none;
+		margin: 0.3rem 0;
+		padding: 0;
+		max-height: 12rem;
+		overflow: auto;
+	}
+	.rois li {
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
+	}
+	.rois li.selected {
+		font-weight: 600;
+	}
+	.rois p {
+		margin: 0.2rem 0;
+	}
+	button.link {
+		background: none;
+		border: none;
+		color: var(--fg);
+		padding: 0;
+		text-align: left;
+		flex: 1;
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
+	}
+	.dot {
+		width: 0.6rem;
+		height: 0.6rem;
+		border-radius: 50%;
+	}
+	.dot-open {
+		background: #e3b341;
+	}
+	.dot-complete {
+		background: #57ab5a;
+	}
+	.dot-skipped {
+		background: #768390;
 	}
 	.status {
 		margin-left: auto;
