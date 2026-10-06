@@ -13,6 +13,7 @@ from . import (
     pipelines,
     projects,
     rois,
+    segmentation,
     storage_proxy,
     uploads,
     worker,
@@ -30,6 +31,7 @@ ROUTERS = [
     labels.router,
     rois.router,
     models.router,
+    segmentation.router,
     worker.router,
     storage_proxy.router,
 ]

@@ -30,20 +30,29 @@ SHARD_ZYX = (512, 512, 512)
 ARRAYS = ("class", "uncertainty")
 
 
-def create_prediction(grant: StorageGrant, shape_zyx: Sequence[int]) -> zarr.Group:
-    group = zarr.create_group(
-        store=zarr_store(grant),
-        zarr_format=3,
-        attributes={"kind": "prediction"},
-        overwrite=True,
-    )
+def create_prediction(
+    grant: StorageGrant,
+    shape_zyx: Sequence[int],
+    arrays: Sequence[str] = ARRAYS,
+    kind: str = "prediction",
+) -> zarr.Group:
+    """
+    Create the arrays of a prediction (or of another volume of label values
+    in the same layout, such as a final segmentation).
+
+    Other files already in the artifact stay (a final segmentation keeps its
+    pinned labels there), and running this again, as a retried job does,
+    replaces the arrays.
+    """
+    group = zarr.open_group(store=zarr_store(grant), mode="a", zarr_format=3)
+    group.attrs["kind"] = kind
     shape = tuple(int(n) for n in shape_zyx)
     chunks = tuple(min(c, n) for c, n in zip(CHUNK_ZYX, shape, strict=True))
     shards = tuple(
         min(s, math.ceil(n / c) * c)
         for s, n, c in zip(SHARD_ZYX, shape, chunks, strict=True)
     )
-    for name in ARRAYS:
+    for name in arrays:
         group.create_array(
             name,
             shape=shape,
@@ -52,6 +61,7 @@ def create_prediction(grant: StorageGrant, shape_zyx: Sequence[int]) -> zarr.Gro
             dtype=np.uint8,
             fill_value=0,
             dimension_names=("z", "y", "x"),
+            overwrite=True,
         )
     return group
 

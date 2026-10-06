@@ -28,6 +28,7 @@
 		images,
 		labels,
 		prediction = null,
+		segmentation = null,
 		onhover,
 		onresize,
 		onstroke,
@@ -42,6 +43,8 @@
 		labels: LabelLayer | null;
 		/** A model's prediction (label values), drawn under the labels. */
 		prediction?: ChunkStore | null;
+		/** The final segmentation (label values), drawn over the prediction. */
+		segmentation?: ChunkStore | null;
 		onhover: (plane: Plane) => void;
 		onresize: (plane: Plane, width: number, height: number) => void;
 		/** A finished brush or eraser stroke, with the settings it began with. */
@@ -135,6 +138,7 @@
 		images.want(plane.name, new Set());
 		labels?.store.want(plane.name, new Set());
 		prediction?.want(plane.name, new Set());
+		segmentation?.want(plane.name, new Set());
 		renderer?.destroy();
 		renderer = undefined;
 	});
@@ -166,10 +170,13 @@
 			viewer.showLabels,
 			viewer.showPrediction,
 			viewer.predictionOpacity,
+			viewer.showSegmentation,
+			viewer.segmentationOpacity,
 			width,
 			height,
 			labels,
 			prediction,
+			segmentation,
 		];
 		schedule();
 	});
@@ -204,14 +211,15 @@
 			layers.flatMap(({ level }) => visibleTiles(level, current, 0).map(tileId)),
 		);
 		images.want(plane.name, imageIds, shownIds);
-		renderer.reserve(imageIds.size, 2 * MAX_LABEL_TILES);
+		renderer.reserve(imageIds.size, 3 * MAX_LABEL_TILES);
 		for (const { slice, tiles } of layers) {
 			for (const key of tiles) loadImage(key, slice);
 		}
 
 		const full = levels[0]!;
 		const fullTiles = visibleTiles(full, current, 0);
-		labelsHidden = (viewer.showLabels || viewer.showPrediction) && fullTiles.length > MAX_LABEL_TILES;
+		labelsHidden =
+			(viewer.showLabels || viewer.showPrediction || viewer.showSegmentation) && fullTiles.length > MAX_LABEL_TILES;
 		const overlays: Overlay[] = [];
 		const add = (store: ChunkStore | null | undefined, prefix: string, shown: boolean, opacity: number) => {
 			if (!store) return;
@@ -223,6 +231,7 @@
 			overlays.push({ slice, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity });
 		};
 		add(prediction, "prediction/", viewer.showPrediction, viewer.predictionOpacity);
+		add(segmentation, "segmentation/", viewer.showSegmentation, viewer.segmentationOpacity);
 		add(labels?.store, "", viewer.showLabels, viewer.opacity);
 		renderer.draw(current, viewer.window, layers, overlays);
 	}

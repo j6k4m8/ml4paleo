@@ -1,6 +1,7 @@
 <script lang="ts">
 	import Brain from "@lucide/svelte/icons/brain";
 	import Brush from "@lucide/svelte/icons/brush";
+	import Shapes from "@lucide/svelte/icons/shapes";
 	import House from "@lucide/svelte/icons/house";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
 	import { page } from "$app/state";
@@ -12,6 +13,7 @@
 		{ href: `/p/${pid}/annotate`, label: "Annotate", icon: Brush },
 		{ href: `/p/${pid}/rois`, label: "ROIs", icon: SquareDashed },
 		{ href: `/p/${pid}/models`, label: "Models", icon: Brain },
+		{ href: `/p/${pid}/results`, label: "Results", icon: Shapes },
 	]);
 </script>
 
