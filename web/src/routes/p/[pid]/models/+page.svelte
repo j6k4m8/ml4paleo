@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from "$app/state";
 	import { ApiError, api, message } from "#lib/api.ts";
+	import { latestPredictions, unfinished } from "#lib/pipelines.ts";
 	import type { Pipeline } from "#lib/types.ts";
 	import type { LabelClass } from "#lib/viewer/labels.ts";
 
@@ -41,8 +42,8 @@
 	let quota: Quota | null = $state(null);
 	let progress: Record<string, number> = $state({});
 	let prediction: { model_id: string | null; model_name: string | null } | null = $state(null);
-	// Prediction pipelines started from this page, by model.
-	let predicting: Record<string, string> = $state({});
+	// Each model's latest prediction pipeline.
+	let predictions: Record<string, Pipeline> = $state({});
 	let plugin = $state("rf");
 	let params: Record<string, number> = $state({});
 	let name = $state("");
@@ -50,6 +51,10 @@
 	let busy = $state(false);
 
 	const chosen = $derived(plugins.find((p) => p.name === plugin));
+	// The prediction pipelines still running, by model.
+	const predicting: Record<string, string> = $derived(
+		Object.fromEntries(Object.entries(predictions).flatMap(([model, p]) => (unfinished(p) ? [[model, p.id]] : []))),
+	);
 	const training = $derived(
 		[...models.filter((m) => m.status === "training").map((m) => m.pipeline_id), ...Object.values(predicting)].join(","),
 	);
@@ -61,6 +66,7 @@
 			prediction = await api<{ model_id: string | null; model_name: string | null }>(
 				`/api/projects/${pid}/prediction`,
 			).catch(() => null);
+			predictions = latestPredictions(await api<Pipeline[]>(`/api/projects/${pid}/pipelines`));
 		} catch (e) {
 			error = message(e);
 		}
@@ -77,7 +83,9 @@
 		api<LabelClass[]>(`/api/projects/${pid}/labels/classes`).then((list) => (classes = list), () => {});
 	});
 
-	// Follow running trainings; refresh when one ends.
+	// Follow running trainings and predictions; refresh when one ends. For a
+	// pipeline that has already ended the server answers 204, which closes
+	// the stream without a status event.
 	$effect(() => {
 		const ids = training ? training.split(",") : [];
 		const sources = ids.map((id) => {
@@ -85,10 +93,13 @@
 			source.addEventListener("status", (event) => {
 				const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
 				progress = { ...progress, [id]: update.progress };
-				if (update.status !== "waiting" && update.status !== "running") {
-					predicting = Object.fromEntries(Object.entries(predicting).filter(([, p]) => p !== id));
+				if (!unfinished(update)) {
+					source.close();
 					refresh();
 				}
+			});
+			source.addEventListener("error", () => {
+				if (source.readyState === EventSource.CLOSED) refresh();
 			});
 			return source;
 		});
@@ -114,15 +125,17 @@
 	}
 
 	async function predict(model: Model) {
+		busy = true;
 		error = "";
 		try {
-			const started = await api<{ pipeline_id: string }>(`/api/projects/${pid}/models/${model.id}/predict`, {
-				method: "POST",
-			});
-			predicting = { ...predicting, [model.id]: started.pipeline_id };
+			await api(`/api/projects/${pid}/models/${model.id}/predict`, { method: "POST" });
 		} catch (e) {
 			error = message(e);
 		}
+		// Shows the new prediction running, or the one already running if
+		// this was refused.
+		await refresh();
+		busy = false;
 	}
 
 	async function remove(model: Model) {
@@ -195,6 +208,7 @@
 	{:else}
 		<ul class="models">
 			{#each models as model (model.id)}
+				{@const last = predictions[model.id]}
 				<li class="card status-{model.status}">
 					<div class="head">
 						<strong>{model.name}</strong>
@@ -202,7 +216,7 @@
 							{model.status}{#if prediction?.model_id === model.id} · its prediction shows in the annotator{/if}
 						</span>
 						{#if model.status === "ready"}
-							<button disabled={!!predicting[model.id]} onclick={() => predict(model)}>
+							<button disabled={busy || !!predicting[model.id]} onclick={() => predict(model)}>
 								{predicting[model.id] ? "Predicting…" : "Predict"}
 							</button>
 						{/if}
@@ -210,8 +224,11 @@
 					</div>
 					{#if model.status === "training"}
 						<progress max="1" value={progress[model.pipeline_id ?? ""] ?? 0}></progress>
-					{:else if predicting[model.id]}
-						<progress max="1" value={progress[predicting[model.id] ?? ""] ?? 0}></progress>
+					{:else if last && predicting[model.id]}
+						<progress max="1" value={progress[last.id] ?? last.progress}></progress>
+					{/if}
+					{#if last?.status === "failed"}
+						<p class="error">The last prediction failed{last.error ? `: ${last.error}` : "."}</p>
 					{/if}
 					<p class="muted">
 						{model.plugin} · {new Date(model.created_at).toLocaleString()} · trained on
