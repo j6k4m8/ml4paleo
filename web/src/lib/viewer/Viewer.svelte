@@ -383,6 +383,31 @@
 		}
 	}
 
+	/** Focus the keys dialog while it's open, and give focus back to whatever had it. */
+	function holdFocus(dialog: HTMLElement) {
+		const opener = document.activeElement;
+		dialog.focus();
+		return () => {
+			if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+		};
+	}
+
+	function helpKey(event: KeyboardEvent) {
+		// The viewer's keys wait until the dialog closes.
+		event.stopPropagation();
+		if (event.key === "Escape" || event.key === "?") {
+			event.preventDefault();
+			viewer.help = false;
+		} else if (event.key === "Tab") {
+			// Tab cycles through the dialog's controls without leaving it.
+			event.preventDefault();
+			const dialog = event.currentTarget as HTMLElement;
+			const stops = [...dialog.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea")];
+			const at = stops.indexOf(document.activeElement as HTMLElement);
+			stops.at(event.shiftKey ? (at <= 0 ? -1 : at - 1) : (at + 1) % stops.length)?.focus();
+		}
+	}
+
 	function voxel(axis: number): string {
 		const index = Math.floor(viewer.position[axis]!);
 		if (!voxelSize || !unit) return String(index);
@@ -696,8 +721,9 @@
 			aria-modal="true"
 			aria-label="Keys"
 			tabindex="-1"
+			{@attach holdFocus}
 			onclick={(e) => e.stopPropagation()}
-			onkeydown={(e) => e.stopPropagation()}
+			onkeydown={helpKey}
 		>
 			<div class="panel-title">Keyboard shortcuts</div>
 			<table class="w-full">
@@ -719,8 +745,7 @@
 				</tbody>
 			</table>
 			<div class="flex justify-end p-2">
-				<!-- svelte-ignore a11y_autofocus -->
-				<button class="btn" autofocus onclick={() => (viewer.help = false)}>Close</button>
+				<button class="btn" onclick={() => (viewer.help = false)}>Close</button>
 			</div>
 		</div>
 	</div>
