@@ -10,7 +10,7 @@
 	let password = $state("");
 	let error = $state("");
 	let busy = $state(false);
-	let config = $state({ signup_mode: "open", require_email: false, password_min_length: 12 });
+	let config = $state({ signup_mode: "open", require_email: false, email_enabled: false, password_min_length: 12 });
 	const invite = $derived(page.url.searchParams.get("invite") ?? undefined);
 
 	$effect(() => {
@@ -47,7 +47,11 @@
 			{config.require_email ? "Email" : "Email (optional)"}
 			<input class="field" type="email" bind:value={email} autocomplete="email" required={config.require_email} />
 			{#if config.require_email}
-				<span>Until you confirm it, your account has starter limits.</span>
+				<span>
+					{config.email_enabled
+						? "Until you confirm it, your account has starter limits."
+						: "Until an admin confirms it, your account has starter limits."}
+				</span>
 			{/if}
 		</label>
 		<label class="label">

@@ -91,7 +91,7 @@ async def update_site_settings(
 
 
 class InviteIn(BaseModel):
-    # When set, signing up with this email skips email verification.
+    # When set, signing up with this email counts as confirming it.
     email: Email = None
 
 
@@ -322,7 +322,6 @@ async def set_user_status(
     request: Request,
     auth: AdminAuth,
     db: DbSession,
-    settings: SettingsDep,
 ) -> None:
     """
     Disable an account (it is signed out at once, can't sign in again, and

@@ -94,7 +94,7 @@
 	{#if session.current?.starter_limits && !workspace && !SETUP.includes(page.url.pathname)}
 		<div class="flex h-7 shrink-0 items-center gap-2 border-b border-warn/30 bg-warn/10 px-3 text-2xs text-warn" role="status">
 			<MailWarning size={13} />
-			Your account has starter limits until its email address is confirmed.
+			Your account has starter limits until it has a confirmed email address.
 			<a href="/account" class="text-warn underline">Account</a>
 		</div>
 	{/if}

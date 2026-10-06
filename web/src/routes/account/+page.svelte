@@ -22,7 +22,8 @@
 	let code = $state("");
 	let totpError = $state("");
 
-	let emailOn = $state(false);
+	// Whether this site sends email (null until known).
+	let emailOn: boolean | null = $state(null);
 	let resent = $state(false);
 	let resendError = $state("");
 	let address = $state("");
@@ -150,7 +151,7 @@
 					{/if}
 				</p>
 				{#if !user.email_verified}
-					{#if emailOn}
+					{#if emailOn === true}
 						<p class="muted">Open the link we sent to confirm it's yours.</p>
 						{#if resent}
 							<p class="muted">Sent another one.</p>
@@ -158,7 +159,7 @@
 							<button class="btn self-start" onclick={resend}>Send the link again</button>
 						{/if}
 						{#if resendError}<p class="error" role="alert">{resendError}</p>{/if}
-					{:else}
+					{:else if emailOn === false}
 						<p class="muted">This site doesn't send email, so an admin confirms addresses.</p>
 					{/if}
 				{/if}
