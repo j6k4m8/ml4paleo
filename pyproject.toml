@@ -24,6 +24,8 @@ dicom = ["pydicom>=2.4.4"]
 # `rf` also brings scipy, which composing final segmentations needs.
 rf = ["scikit-image>=0.24.0", "scikit-learn>=1.6.1", "scipy>=1.13"]
 mesh = ["numpy-stl>=3.0.1", "scikit-image>=0.24.0", "zmesh>=1.11.0"]
+# TIFF stacks; PNG needs only pillow, which everything has.
+export = ["tifffile>=2024.8.10"]
 v1 = [
     "flask>=2.3.2",
     "flask-cors>=3.0.10",
@@ -66,5 +68,5 @@ select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
 testpaths = ["tests"]
 
 [tool.pyright]
-include = ["server", "worker", "ml4paleo/storage", "ml4paleo/blocks.py", "ml4paleo/ome.py", "ml4paleo/labels", "ml4paleo/protocol.py", "ml4paleo/ingest.py", "ml4paleo/segmentation/plugin.py", "ml4paleo/segmentation/dataset.py", "ml4paleo/segmentation/metrics.py", "ml4paleo/segmentation/predict.py", "ml4paleo/segmentation/compose.py", "ml4paleo/segmentation/plugins", "ml4paleo/meshing/blocks.py"]
+include = ["server", "worker", "ml4paleo/storage", "ml4paleo/blocks.py", "ml4paleo/ome.py", "ml4paleo/labels", "ml4paleo/protocol.py", "ml4paleo/ingest.py", "ml4paleo/segmentation/plugin.py", "ml4paleo/segmentation/dataset.py", "ml4paleo/segmentation/metrics.py", "ml4paleo/segmentation/predict.py", "ml4paleo/segmentation/compose.py", "ml4paleo/segmentation/plugins", "ml4paleo/meshing/blocks.py", "ml4paleo/export.py"]
 pythonVersion = "3.12"

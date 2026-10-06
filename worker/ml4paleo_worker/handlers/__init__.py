@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..context import JobContext
-from . import compose, ingest, mesh, noop, predict, train
+from . import compose, export, ingest, mesh, noop, predict, train
 
 Handler = Callable[[JobContext], dict[str, Any]]
 
@@ -32,4 +32,6 @@ HANDLERS: dict[str, Handler] = {
     "mesh.block": mesh.block,
     "mesh.join": mesh.join_class,
     "mesh.finalize": mesh.finalize,
+    "export.files": export.files,
+    "export.images": export.images,
 }

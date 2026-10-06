@@ -6,6 +6,7 @@ from . import (
     admin,
     admin_jobs,
     auth,
+    exports,
     gateway,
     labels,
     me,
@@ -35,6 +36,7 @@ ROUTERS = [
     models.router,
     segmentation.router,
     meshes.router,
+    exports.router,
     worker.router,
     storage_proxy.router,
 ]

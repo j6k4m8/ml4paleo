@@ -1,9 +1,11 @@
 <script lang="ts">
+	import Archive from "@lucide/svelte/icons/archive";
 	import Box from "@lucide/svelte/icons/box";
 	import Brush from "@lucide/svelte/icons/brush";
 	import Combine from "@lucide/svelte/icons/combine";
 	import Download from "@lucide/svelte/icons/download";
 	import Shapes from "@lucide/svelte/icons/shapes";
+	import Trash from "@lucide/svelte/icons/trash";
 	import { untrack } from "svelte";
 	import { page } from "$app/state";
 	import { ApiError, api, message } from "#lib/api.ts";
@@ -12,6 +14,7 @@
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 
 	interface Prediction {
+		artifact_id: string;
 		model_name: string | null;
 		committed_at: string;
 	}
@@ -28,6 +31,7 @@
 	type Format = "stl" | "obj" | "glb";
 
 	interface Meshes {
+		artifact_id: string;
 		segmentation_artifact_id: string | null;
 		info: {
 			units: string;
@@ -38,6 +42,35 @@
 		files_url: string;
 		committed_at: string;
 	}
+
+	type Source = "image" | "prediction" | "segmentation" | "meshes";
+
+	interface Export {
+		id: string;
+		source: Source;
+		source_artifact_id: string | null;
+		format: string;
+		filename: string;
+		status: "making" | "ready" | "failed";
+		pipeline_id: string | null;
+		progress: number;
+		error: string | null;
+		bytes: number;
+		created_at: string;
+		expires_at: string;
+		download_url: string | null;
+	}
+
+	const SLICES: [string, string][] = [
+		["tiff", "TIFF stack"],
+		["png", "PNG stack"],
+	];
+	const SOURCES: { source: Source; label: string; formats: [string, string][] }[] = [
+		{ source: "image", label: "Image", formats: [["zarr", "OME-Zarr"], ...SLICES] },
+		{ source: "prediction", label: "Prediction", formats: [["zarr", "Zarr"], ...SLICES] },
+		{ source: "segmentation", label: "Final segmentation", formats: [["zarr", "Zarr"], ...SLICES] },
+		{ source: "meshes", label: "Meshes", formats: [["zip", "Every file"]] },
+	];
 
 	const FORMATS: [Format, string][] = [
 		["stl", "STL"],
@@ -50,6 +83,10 @@
 	let prediction: Prediction | null = $state(null);
 	let segmentation: Segmentation | null = $state(null);
 	let meshes: Meshes | null = $state(null);
+	// The image's dtype (numpy's notation, such as "<u2"), once there is one.
+	let imageDtype: string | null = $state(null);
+	let imageId: string | null = $state(null);
+	let exports: Export[] = $state([]);
 	let pipelines: Pipeline[] = $state([]);
 	let loaded = $state(false);
 	let minVoxels = $state(50);
@@ -59,6 +96,7 @@
 	let error = $state("");
 	let composeError = $state("");
 	let meshError = $state("");
+	let exportError = $state("");
 	// Set while a request to start a pipeline is out, so a double click
 	// doesn't start two.
 	let starting = $state(false);
@@ -80,12 +118,17 @@
 	async function refresh() {
 		try {
 			projectName = (await api<{ name: string }>(`/api/projects/${pid}`)).name;
-			[prediction, segmentation, meshes, pipelines] = await Promise.all([
+			let image: { artifact_id: string; manifest: { dtype: string } } | null;
+			[prediction, segmentation, meshes, pipelines, image, exports] = await Promise.all([
 				api<Prediction>(`/api/projects/${pid}/prediction`).catch(missing),
 				api<Segmentation>(`/api/projects/${pid}/segmentation`).catch(missing),
 				api<Meshes>(`/api/projects/${pid}/meshes`).catch(missing),
 				api<Pipeline[]>(`/api/projects/${pid}/pipelines`),
+				api<{ artifact_id: string; manifest: { dtype: string } }>(`/api/projects/${pid}/image`).catch(missing),
+				api<Export[]>(`/api/projects/${pid}/exports`),
 			]);
+			imageDtype = image?.manifest.dtype ?? null;
+			imageId = image?.artifact_id ?? null;
 		} catch (e) {
 			error = message(e);
 		} finally {
@@ -99,9 +142,11 @@
 
 	// Only which pipelines run, so status updates don't reopen the streams.
 	const running = $derived(
-		[composing, meshing]
-			.filter(active)
-			.map((p) => p?.id)
+		[
+			...[composing, meshing].filter(active).map((p) => p?.id),
+			...exports.filter((e) => e.status === "making").map((e) => e.pipeline_id),
+		]
+			.filter(Boolean)
 			.join(","),
 	);
 
@@ -114,6 +159,7 @@
 			source.addEventListener("status", (event) => {
 				const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
 				pipelines = untrack(() => pipelines).map((p) => (p.id === update.id ? update : p));
+				exports = untrack(() => exports).map((e) => (e.pipeline_id === update.id ? { ...e, progress: update.progress } : e));
 				if (!active(update)) refresh();
 			});
 			source.addEventListener("error", () => {
@@ -149,6 +195,45 @@
 	function makeMeshes(event: SubmitEvent) {
 		event.preventDefault();
 		start(`/api/projects/${pid}/meshes`, { downsample, method, simplify }, (text) => (meshError = text));
+	}
+
+	const available = (source: Source) =>
+		({ image: imageDtype !== null, prediction: !!prediction, segmentation: !!segmentation, meshes: !!meshes })[source];
+	// PNG holds 8- or 16-bit unsigned values; labels are 8-bit.
+	const pngHolds = (source: Source) => source !== "image" || /u[12]$/.test(imageDtype ?? "");
+
+	function exportAs(source: Source, format: string) {
+		start(`/api/projects/${pid}/exports`, { source, format }, (text) => (exportError = text));
+	}
+
+	// What each source is now, to flag exports made from an older one.
+	const current = $derived.by(
+		(): Record<Source, string | null> => ({
+			image: imageId,
+			prediction: prediction?.artifact_id ?? null,
+			segmentation: segmentation?.artifact_id ?? null,
+			meshes: meshes?.artifact_id ?? null,
+		}),
+	);
+	let forgetting = $state(new Set<string>());
+
+	async function forget(item: Export) {
+		if (forgetting.has(item.id)) return;
+		forgetting = new Set([...forgetting, item.id]);
+		exportError = "";
+		try {
+			await api(`/api/projects/${pid}/exports/${item.id}`, { method: "DELETE" });
+		} catch (e) {
+			exportError = message(e);
+		}
+		await refresh();
+		forgetting = new Set([...forgetting].filter((id) => id !== item.id));
+	}
+
+	function size(bytes: number): string {
+		if (bytes < 1024 ** 2) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+		if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+		return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 	}
 
 	// Letters, with their combining marks, and digits in any script, so names
@@ -301,6 +386,76 @@
 				<p class="text-2xs text-ink-dim">Make a final segmentation first.</p>
 			{/if}
 			{@render progress(meshing, meshError)}
+		</div>
+	</section>
+
+	<section class="panel self-start lg:col-span-2">
+		<h2 class="panel-title">Downloads</h2>
+		<div class="flex flex-col gap-3 p-3">
+			<p class="text-ink-dim">
+				Zip archives of the project's volumes and meshes. Stacks hold one image per slice, as the scan was uploaded. Archives
+				are kept for a week, and count against your storage until then.
+			</p>
+			<div class="grid items-center gap-2 sm:grid-cols-[max-content_1fr]">
+				{#each SOURCES as { source, label, formats } (source)}
+					<span class="font-medium" class:text-ink-faint={!available(source)}>{label}</span>
+					<div class="flex flex-wrap gap-1.5">
+						{#each formats as [format, name] (format)}
+							{@const holds = format !== "png" || pngHolds(source)}
+							<button
+								class="btn"
+								disabled={!available(source) || !holds || starting}
+								title={holds ? undefined : "PNG holds 8- or 16-bit unsigned values; use TIFF for this image"}
+								onclick={() => exportAs(source, format)}
+							>
+								<Archive size={13} />
+								{name}
+							</button>
+						{/each}
+					</div>
+				{/each}
+			</div>
+			{#if exports.length}
+				<ul class="flex flex-col divide-y divide-edge rounded-sm border border-edge bg-field">
+					{#each exports as item (item.id)}
+						<li class="flex flex-wrap items-center gap-2 px-2 py-1.5">
+							<span class="flex min-w-0 flex-1 flex-col">
+								<span class="truncate font-mono text-2xs">{item.filename}</span>
+								<span class="text-2xs text-ink-dim">
+									{new Date(item.created_at).toLocaleString()}
+									{#if item.source_artifact_id && current[item.source] && item.source_artifact_id !== current[item.source]}
+										· <span class="text-warn">from an older {item.source}</span>
+									{/if}
+								</span>
+							</span>
+							{#if item.status === "making"}
+								<progress class="h-1 w-32 accent-accent" max="1" value={item.progress}></progress>
+								<span class="font-mono text-2xs text-ink-dim">{Math.round(item.progress * 100)}%</span>
+							{:else if item.status === "ready" && item.download_url}
+								<span class="text-2xs text-ink-dim">
+									{size(item.bytes)} · kept until {new Date(item.expires_at).toLocaleString()}
+								</span>
+								<a class="btn btn-primary hover:no-underline" href={item.download_url} download={item.filename}>
+									<Download size={13} />
+									Download
+								</a>
+							{:else}
+								<span class="error text-2xs" role="alert">{item.error}</span>
+							{/if}
+							<button
+								class="btn btn-ghost"
+								disabled={forgetting.has(item.id)}
+								title={item.status === "making" ? "Stop" : "Delete"}
+								aria-label="{item.status === 'making' ? 'Stop' : 'Delete'} {item.filename}"
+								onclick={() => forget(item)}
+							>
+								<Trash size={13} />
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+			{#if exportError}<p class="error" role="alert">{exportError}</p>{/if}
 		</div>
 	</section>
 </div>

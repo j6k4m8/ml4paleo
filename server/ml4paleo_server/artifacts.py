@@ -45,6 +45,9 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 COLLECT_BATCH = 50
 # Staging artifacts that no job will commit are abandoned after this long.
 ABANDONED_AFTER = datetime.timedelta(hours=48)
+# Expired artifacts (exports) are deleted this long after they expire, so
+# downloads already running can finish.
+EXPIRED_GRACE = datetime.timedelta(minutes=30)
 
 
 def now() -> datetime.datetime:
@@ -289,7 +292,10 @@ def _collectable(settings: Settings):
                         < current
                         - datetime.timedelta(days=storage.keep_superseded_days),
                     ),
-                    and_(Artifact.state == "committed", Artifact.expires_at < current),
+                    and_(
+                        Artifact.state == "committed",
+                        Artifact.expires_at < current - EXPIRED_GRACE,
+                    ),
                 ),
             ),
         ),
