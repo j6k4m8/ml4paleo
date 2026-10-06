@@ -74,6 +74,9 @@ class TrainingData(Protocol):
 
     # The project's class values (2..254), in plugin order 1..K.
     class_values: list[int]
+    # The display window crops are normalized with (low, high); prediction
+    # normalizes with the same one.
+    window: tuple[float, float]
 
     @property
     def num_classes(self) -> int:

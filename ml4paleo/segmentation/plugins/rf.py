@@ -205,6 +205,7 @@ class RandomForestPlugin:
             "halo": halo,
             "num_classes": data.num_classes,
             "class_values": data.class_values,
+            "window": [float(v) for v in data.window],
             "features": int(x.shape[1]),
         }
         (out / META_FILE).write_text(json.dumps(meta, indent=2))

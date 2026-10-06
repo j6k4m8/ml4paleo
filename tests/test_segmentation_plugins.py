@@ -3,6 +3,7 @@ Segmentation plugins: training sets built from ROIs and sparse labels, and
 the random forest plugin trained and scored on a synthetic volume.
 """
 
+import json
 import subprocess
 import sys
 
@@ -249,6 +250,8 @@ def test_random_forest_learns_from_sparse_labels(tmp_path):
     assert ctx.fractions[-1] == 1.0
     # The forest fits on the context's threads, not every core.
     assert joblib.load(tmp_path / "forest.joblib").n_jobs == 2
+    meta = json.loads((tmp_path / "model.json").read_text())
+    assert meta["window"] == [200.0, 800.0]
     assert set(result.samples) == {0, 1}
     assert result.metrics["validation_crops"] >= 1
     assert result.metrics["classes"][str(BONE)]["dice"] > 0.8
