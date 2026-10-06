@@ -294,6 +294,9 @@ def test_plugins_are_listed_and_check_their_params():
         params(n_estimators=0)
     with pytest.raises(ValueError):
         params(sigma_max=9.0)
+    for seed in (-1, 2**32):
+        with pytest.raises(ValueError):
+            params(seed=seed)
     with pytest.raises(ValueError, match="No segmentation plugin"):
         get_plugin("nope")
 

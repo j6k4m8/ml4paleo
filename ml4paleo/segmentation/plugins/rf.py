@@ -41,7 +41,8 @@ class RandomForestParams(BaseModel):
     max_depth: int = Field(16, ge=1, le=64)
     samples_per_class: int = Field(50_000, ge=100, le=1_000_000)
     sigma_max: float = Field(8.0, ge=1.0, le=8.0)
-    seed: int = 0
+    # scikit-learn takes seeds from 0 to 2³² - 1.
+    seed: int = Field(0, ge=0, le=2**32 - 1)
 
 
 def halo_for(sigma_max: float) -> int:
