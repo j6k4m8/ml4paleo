@@ -18,6 +18,7 @@ ones (caches such as exports), and everything in deleted projects. It skips
 artifacts that a waiting or running job may still read.
 """
 
+import base64
 import datetime
 import json
 import logging
@@ -49,10 +50,22 @@ ABANDONED_AFTER = datetime.timedelta(hours=48)
 # people make many and look at the newest, but accepts from one just
 # replaced may still be on their way.
 KEEP_SUPERSEDED_PROPOSALS = datetime.timedelta(hours=1)
+# Each person's newest proposal in a project is a head of its own, in a slot
+# named for them (see `proposal_slot`).
+PROPOSAL_SLOTS = "proposal:"
 
 
 def now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
+
+
+def proposal_slot(user_id: uuid.UUID) -> str:
+    """
+    The head slot of a person's newest proposal: their id in base64url,
+    unpadded, so the slot fits its 32 characters.
+    """
+    encoded = base64.urlsafe_b64encode(user_id.bytes).rstrip(b"=")
+    return PROPOSAL_SLOTS + encoded.decode()
 
 
 def project_path(project_id: uuid.UUID) -> str:
@@ -295,7 +308,7 @@ def _collectable(settings: Settings):
                     ),
                     and_(
                         Artifact.state == "superseded",
-                        Artifact.head_slot == "proposal",
+                        Artifact.head_slot.startswith(PROPOSAL_SLOTS, autoescape=True),
                         Artifact.state_changed_at < current - KEEP_SUPERSEDED_PROPOSALS,
                     ),
                     and_(Artifact.state == "committed", Artifact.expires_at < current),

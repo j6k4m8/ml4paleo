@@ -16,8 +16,9 @@ model; then the new one is refused.
 
 A proposal (`propose`) predicts just one ROI, on demand and ahead of other
 work, as a single `predict.region` job: a prediction artifact in the image's
-grid with only that box filled, which becomes the project's "proposal" head
-for people to look over and accept. A newer proposal stops older ones.
+grid with only that box filled, which becomes the head of the person's own
+proposal slot (see `artifacts.proposal_slot`) for them to look over and
+accept. Their newer proposal stops their older ones; other people's go on.
 """
 
 import math
@@ -47,12 +48,13 @@ async def running(
     project_id: uuid.UUID,
     model_id: uuid.UUID | None = None,
     kinds: Sequence[str] = ("predict.prepare",),
+    created_by: uuid.UUID | None = None,
 ) -> list[Job]:
     """
     The first jobs of a project's pipelines starting with one of `kinds`
     (its predictions by default; "predict.region" for its proposals) that
     are still running (any of their jobs is), or only of those with
-    `model_id`.
+    `model_id`, or only of those `created_by` someone.
     """
     job = aliased(Job)
     query = select(Job).where(
@@ -64,6 +66,8 @@ async def running(
     )
     if model_id is not None:
         query = query.where(Job.payload.contains({"model_id": str(model_id)}))
+    if created_by is not None:
+        query = query.where(Job.created_by == created_by)
     return list((await db.scalars(query.order_by(Job.id))).all())
 
 
@@ -205,8 +209,8 @@ async def propose(
     created_by: uuid.UUID,
 ) -> tuple[Job, Artifact]:
     """
-    Predict one ROI with `model` into a new proposal (see the module
-    docstring), stopping the project's other proposals still running.
+    Predict one ROI with `model` into a new proposal for `created_by` (see
+    the module docstring), stopping their other proposals still running.
     """
     shape = _shape(image)
     clipped = clip_box(roi.bbox, shape)
@@ -220,14 +224,16 @@ async def propose(
         )
     model_artifact = await _start_with(db, model)
     plugin = get_plugin(model.plugin)
-    for root in await running(db, model.project_id, kinds=["predict.region"]):
+    for root in await running(
+        db, model.project_id, kinds=["predict.region"], created_by=created_by
+    ):
         await jobs.cancel_pipeline(db, root.id)
     window = _window(model_artifact, image)
     proposal = await artifacts.create_staging(
         db,
         project_id=model.project_id,
         kind="prediction",
-        head_slot="proposal",
+        head_slot=artifacts.proposal_slot(created_by),
         inputs={
             "model_id": str(model.id),
             "image_artifact_id": str(image.id),

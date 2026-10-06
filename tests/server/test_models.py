@@ -516,6 +516,62 @@ def test_deleting_a_model_stops_its_proposals(ada, settings, migrated_database_u
     assert pipeline_status(ada, project, started) == "cancelled"
 
 
+def made(database_url, started: dict) -> None:
+    """Finish a proposal as its job would: commit it, which moves its head."""
+
+    async def commit(db):
+        artifact = await db.get(Artifact, uuid.UUID(started["artifact_id"]))
+        artifact.state = "committed"
+        artifact.manifest = {"class_values": [BONE], "shape_zyx": list(SHAPE)}
+        await artifacts.set_head(db, artifact)
+        await db.execute(
+            update(Job)
+            .where(Job.id == uuid.UUID(started["pipeline_id"]))
+            .values(status="succeeded")
+        )
+
+    run_db(database_url, commit)
+
+
+def test_each_person_has_their_own_proposal(
+    ada, new_browser, settings, migrated_database_url
+):
+    project = labeled_project(ada, settings, migrated_database_url)
+    bob = new_browser()
+    signup(bob, username="bob")
+    ada.post(f"/api/projects/{project}/members", json={"username": "bob"})
+    model = ready_model(ada, migrated_database_url, project)
+    first = propose(ada, project, model).json()
+    theirs = propose(bob, project, model, bbox=(8, 8, 8, 24, 24, 24)).json()
+    # Bob's proposal leaves Ada's running; her next one stops only hers.
+    assert pipeline_status(ada, project, first["pipeline_id"]) == "waiting"
+    second = propose(ada, project, model).json()
+    assert pipeline_status(ada, project, first["pipeline_id"]) == "cancelled"
+    assert pipeline_status(ada, project, theirs["pipeline_id"]) == "waiting"
+
+    url = f"/api/projects/{project}/proposal"
+    assert ada.get(url).status_code == 404
+    made(migrated_database_url, theirs)
+    assert ada.get(url).status_code == 404
+    assert bob.get(url).json()["artifact_id"] == theirs["artifact_id"]
+    made(migrated_database_url, second)
+    assert ada.get(url).json()["artifact_id"] == second["artifact_id"]
+    assert bob.get(url).json()["artifact_id"] == theirs["artifact_id"]
+    # Ada's newer proposal replaces her own, not Bob's.
+    third = propose(ada, project, model).json()
+    made(migrated_database_url, third)
+    assert ada.get(url).json()["artifact_id"] == third["artifact_id"]
+    assert bob.get(url).json()["artifact_id"] == theirs["artifact_id"]
+
+    async def states(db):
+        return [
+            (await db.get(Artifact, uuid.UUID(started["artifact_id"]))).state
+            for started in (second, theirs)
+        ]
+
+    assert run_db(migrated_database_url, states) == ["superseded", "committed"]
+
+
 def test_proposals_cut_rois_to_the_image(ada, settings, migrated_database_url):
     project = labeled_project(ada, settings, migrated_database_url)
     model = ready_model(ada, migrated_database_url, project)

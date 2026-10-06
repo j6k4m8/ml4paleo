@@ -9,7 +9,7 @@ Segmentation models.
     POST   /api/projects/{id}/models/{model}/predict
     POST   /api/projects/{id}/models/{model}/propose  {roi_id}
     GET    /api/projects/{id}/prediction           the prediction of the current image
-    GET    /api/projects/{id}/proposal             the newest proposal (one ROI predicted)
+    GET    /api/projects/{id}/proposal             your newest proposal (one ROI predicted)
 
 Training pins the project's labels and ROIs as a training set and starts a
 `model.train` pipeline (follow it under /pipelines). A model is "training"
@@ -313,7 +313,8 @@ async def propose_with(
 ) -> PredictionStarted:
     """
     Predict one ROI (up to 256³ voxels) with a ready model, ahead of other
-    work; the result becomes the project's proposal to look over and accept.
+    work; the result becomes your proposal to look over and accept. Your
+    proposals still running stop; other people's go on.
     """
     model = await _model(db, project, model_id)
     image = await artifacts.head(db, project.id, "image")
@@ -362,7 +363,7 @@ async def current_prediction(project: MemberProject, db: DbSession) -> Predictio
     The project's prediction, if it is of the current image (a prediction of
     an image that has since been replaced doesn't fit the new one).
     """
-    head = await _current(db, project.id, "prediction")
+    head = await _current(db, project.id, "prediction", "prediction")
     return await _prediction_out(db, project.id, head, PredictionOut)
 
 
@@ -373,12 +374,15 @@ class ProposalOut(PredictionOut):
 
 
 @router.get("/projects/{project_id}/proposal")
-async def current_proposal(project: MemberProject, db: DbSession) -> ProposalOut:
+async def current_proposal(
+    project: MemberProject, auth: CurrentAuth, db: DbSession
+) -> ProposalOut:
     """
-    The project's newest proposal (one ROI predicted on demand), if it is of
-    the current image.
+    Your newest proposal (one ROI predicted on demand) in the project, if it
+    is of the current image. Each person has their own.
     """
-    head = await _current(db, project.id, "proposal")
+    slot = artifacts.proposal_slot(auth.user.id)
+    head = await _current(db, project.id, slot, "proposal")
     return await _prediction_out(
         db,
         project.id,
@@ -389,14 +393,15 @@ async def current_proposal(project: MemberProject, db: DbSession) -> ProposalOut
     )
 
 
-async def _current(db, project_id: uuid.UUID, slot: str) -> Artifact:
+async def _current(db, project_id: uuid.UUID, slot: str, what: str) -> Artifact:
+    """The head of `slot`, if it is of the current image; `what` names it."""
     head = await artifacts.head(db, project_id, slot)
     if head is None or not head.manifest:
-        raise HTTPException(status_code=404, detail=f"This project has no {slot} yet.")
+        raise HTTPException(status_code=404, detail=f"This project has no {what} yet.")
     image = await artifacts.head(db, project_id, "image")
     if image is None or head.inputs.get("image_artifact_id") != str(image.id):
         raise HTTPException(
-            status_code=404, detail=f"This project has no {slot} of its image."
+            status_code=404, detail=f"This project has no {what} of its image."
         )
     return head
 
