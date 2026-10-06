@@ -5,6 +5,8 @@ notice cancellation.
 
 import threading
 import uuid
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from ml4paleo.protocol import JobLease
@@ -35,6 +37,9 @@ class JobContext:
         lease: JobLease,
         memory_budget_bytes: int = 4 * 1024**3,
         threads: int = 1,
+        *,
+        v1_volume: Path | None = None,
+        label_ops: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ):
         self.lease = lease
         # How much memory this job may use: the worker's memory shared among
@@ -43,6 +48,9 @@ class JobContext:
         # How many CPU threads this job may use: the worker's CPUs shared
         # among its slots.
         self.threads = threads
+        # The v1 app's volume folder, on workers started with --v1-volume.
+        self.v1_volume = v1_volume
+        self._label_ops = label_ops
         self._progress: float | None = None
         self._message: str | None = None
         self._lock = threading.Lock()
@@ -90,6 +98,16 @@ class JobContext:
     def check(self) -> None:
         if self._stop.is_set():
             raise Cancelled(self.stop_reason)
+
+    def apply_label_op(self, op: dict[str, Any]) -> dict[str, Any]:
+        """
+        Apply a label edit (`ml4paleo.protocol.LabelOpIn`, without the lease
+        token) to the job's project, through the server's label writer.
+        """
+        if self._label_ops is None:
+            raise RuntimeError("This worker can't send label edits")
+        self.check()
+        return self._label_ops(op)
 
     def sleep(self, seconds: float) -> None:
         """

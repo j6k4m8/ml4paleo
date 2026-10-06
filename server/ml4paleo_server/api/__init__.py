@@ -18,6 +18,7 @@ from . import (
     segmentation,
     storage_proxy,
     uploads,
+    v1jobs,
     worker,
 )
 
@@ -37,6 +38,7 @@ ROUTERS = [
     segmentation.router,
     meshes.router,
     exports.router,
+    v1jobs.router,
     worker.router,
     storage_proxy.router,
 ]

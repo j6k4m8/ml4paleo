@@ -130,3 +130,18 @@ class ReleaseIn(BaseModel):
     """
 
     lease_token: str = Field(max_length=128)
+
+
+class LabelOpIn(BaseModel):
+    """
+    A label edit from a job, applied to the job's project as an edit from the
+    annotator is (`POST /api/projects/{id}/labels/ops`). Only some kinds of
+    job may send them.
+    """
+
+    lease_token: str = Field(max_length=128)
+    # Sending the same id again applies the edit once.
+    client_op_id: uuid.UUID
+    # As the labels API takes them: masks and values base64-encoded.
+    deltas: list[dict[str, Any]] = Field(min_length=1, max_length=512)
+    tool: dict[str, Any] = {}

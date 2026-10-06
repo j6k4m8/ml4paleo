@@ -17,7 +17,8 @@ from ml4paleo_server.db import (
     create_engine,
     create_sessionmaker,
 )
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import OperationalError
 
 from ml4paleo.protocol import Tier, WorkerCaps
 
@@ -253,6 +254,45 @@ def test_failures_back_off_then_fail_the_pipeline(migrated_database_url):
     )
 
 
+@pytest.mark.parametrize(
+    ("retryable", "expected"), [(False, "failed"), (True, "queued")]
+)
+def test_a_pipeline_can_refuse_a_success(migrated_database_url, retryable, expected):
+    async def scenario(db):
+        worker = await make_worker(db)
+        job = await jobs.enqueue(db, "noop", {})
+        claimed = await jobs.claim(db, worker, CPU)
+
+        async def next_steps(done):
+            await jobs.enqueue(db, "noop", {}, pipeline=done, depends_on=[done])
+            raise jobs.Rejected("It won't fit.", retryable=retryable)
+
+        with pytest.raises(jobs.Rejected):
+            await jobs.complete(
+                db, job.id, worker, claimed.lease_token, {"ok": 1}, after=next_steps
+            )
+        added = await db.scalars(select(Job.id).where(Job.id != job.id))
+        outcomes = await db.scalars(
+            select(JobAttempt.outcome).where(JobAttempt.job_id == job.id)
+        )
+        return (
+            await status_of(db, job),
+            job.result,
+            job.error,
+            added.all(),
+            outcomes.all(),
+        )
+
+    # The success and the jobs it added are undone; the attempt failed.
+    assert run_db(migrated_database_url, scenario) == (
+        expected,
+        None,
+        "It won't fit.",
+        [],
+        ["failed"],
+    )
+
+
 def test_permanent_failures_are_not_retried(migrated_database_url):
     async def scenario(db):
         worker = await make_worker(db)
@@ -370,6 +410,28 @@ async def _two_sessions(database_url, scenario):
         return await scenario(create_sessionmaker(engine))
     finally:
         await engine.dispose()
+
+
+def test_a_held_job_cannot_finish_until_its_holder_commits(migrated_database_url):
+    async def scenario(sessionmaker):
+        async with sessionmaker() as db:
+            worker = await make_worker(db)
+            job = await jobs.enqueue(db, "noop", {})
+            lease = await jobs.claim(db, worker, CPU)
+            await db.commit()
+        async with sessionmaker() as holding, sessionmaker() as finishing:
+            # As the label-op endpoint holds a job until its edit commits.
+            await jobs.leased_job(holding, job.id, worker, lease.lease_token)
+            await finishing.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            with pytest.raises(OperationalError, match="lock timeout"):
+                await jobs.complete(finishing, job.id, worker, lease.lease_token, {})
+            await finishing.rollback()
+            await holding.commit()
+            done = await jobs.complete(finishing, job.id, worker, lease.lease_token, {})
+            await finishing.commit()
+            return done.status
+
+    assert asyncio.run(_two_sessions(migrated_database_url, scenario)) == "succeeded"
 
 
 def test_cancelling_catches_a_job_being_requeued(migrated_database_url):

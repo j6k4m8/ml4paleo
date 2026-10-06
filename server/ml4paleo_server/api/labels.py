@@ -114,7 +114,8 @@ async def add_class(
     """
     Add a class. It gets the next value never used in this project.
     """
-    # Lock the project so two new classes can't take the same value.
+    # Lock the project (FOR NO KEY UPDATE, which conflicts with itself) so two
+    # new classes, or this and the v1 import's, can't take the same value.
     await db.scalar(
         select(Project.id)
         .where(Project.id == project.id)
@@ -271,7 +272,7 @@ def _op_out(result: labels.OpResult) -> OpOut:
     )
 
 
-async def _allowed_values(db, project_id: uuid.UUID) -> set[int]:
+async def allowed_values(db, project_id: uuid.UUID) -> set[int]:
     classes = await db.scalars(
         select(LabelClass.value).where(
             LabelClass.project_id == project_id, LabelClass.deleted_at.is_(None)
@@ -280,7 +281,7 @@ async def _allowed_values(db, project_id: uuid.UUID) -> set[int]:
     return {UNLABELED, BACKGROUND, *classes}
 
 
-def _check_values(deltas: list[ChunkDelta], allowed: set[int]) -> None:
+def check_values(deltas: list[ChunkDelta], allowed: set[int]) -> None:
     for delta in deltas:
         if delta.value is not None:
             used = {delta.value}
@@ -311,8 +312,8 @@ async def apply_op(
         return _op_out(done)
     try:
         deltas = [delta.to_delta() for delta in body.deltas]
-        allowed = await _allowed_values(db, project.id)
-        await run_in_threadpool(_check_values, deltas, allowed)
+        allowed = await allowed_values(db, project.id)
+        await run_in_threadpool(check_values, deltas, allowed)
         result = await labels.apply_edit(
             db,
             settings,
@@ -424,8 +425,8 @@ async def accept_prediction(
                     "An accepted prediction writes one predicted value per chunk, "
                     "only into unlabeled voxels"
                 )
-        allowed = await _allowed_values(db, project.id)
-        await run_in_threadpool(_check_values, deltas, allowed)
+        allowed = await allowed_values(db, project.id)
+        await run_in_threadpool(check_values, deltas, allowed)
         box = labels.global_box(deltas)
         if any(box[a] < roi.bbox[a] or box[a + 3] > roi.bbox[a + 3] for a in range(3)):
             raise ValueError("Those labels reach outside the ROI")

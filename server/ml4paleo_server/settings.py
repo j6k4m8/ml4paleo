@@ -96,6 +96,29 @@ class QuotaSettings(BaseModel):
     gpu_hours_per_day: float | None = Field(default=None, ge=0)
 
 
+class V1Settings(BaseModel):
+    """
+    Importing jobs from the ml4paleo v1 app this one replaced. Signed in,
+    people import a job from its old link (`/job/<id>`, which asks first) or
+    the import page.
+    """
+
+    # A folder with v1's jobs.json (the API reads nothing else of v1's),
+    # mounted read-only; unset when there are no v1 jobs to import. A worker
+    # started with --v1-volume does the importing.
+    volume_path: pathlib.Path | None = None
+    # Claims each account, and each address, may try per hour. v1 job ids are
+    # only six hex digits, so this keeps people from guessing other people's
+    # jobs.
+    claims_per_hour: int = Field(default=30, ge=1)
+    # Of those, how many may be ids that aren't v1 jobs (people mistype a
+    # few; guessing misses nearly every time).
+    misses_per_hour: int = Field(default=5, ge=1)
+    # Misses from everyone per hour. Past this, nobody can claim until the
+    # hour is up; reaching it takes dozens of addresses.
+    site_misses_per_hour: int = Field(default=200, ge=1)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix=ENV_PREFIX,
@@ -114,6 +137,7 @@ class Settings(BaseSettings):
     auth: AuthSettings = AuthSettings()
     smtp: SmtpSettings = SmtpSettings()
     quota: QuotaSettings = QuotaSettings()
+    v1: V1Settings = V1Settings()
     # The first admin account's password (usually M4P_INITIAL_ADMIN_PASSWORD_FILE).
     # Without it, `migrate` generates one and prints it once.
     initial_admin_password: SecretStr | None = None

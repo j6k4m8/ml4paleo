@@ -5,6 +5,7 @@ Work out what this machine can run: CPUs, memory, and GPUs.
 import os
 import pathlib
 import subprocess
+from collections.abc import Iterable
 
 from ml4paleo.protocol import WorkerCaps
 
@@ -73,14 +74,16 @@ def _memory_gb() -> float:
     return round(total / 1024**3, 1)
 
 
-def detect(labels: list[str] | None = None, slots: int = 1) -> WorkerCaps:
+def detect(
+    labels: list[str] | None = None, slots: int = 1, kinds: Iterable[str] = HANDLERS
+) -> WorkerCaps:
     gpus = gpu_memory_gb()
     all_labels = set(labels or [])
     if gpus:
         all_labels.add("gpu")
     return WorkerCaps(
         version=__version__,
-        kinds=sorted(HANDLERS),
+        kinds=sorted(kinds),
         labels=sorted(all_labels),
         vram_gb=max(gpus, default=0),
         cpus=_cpus(),
