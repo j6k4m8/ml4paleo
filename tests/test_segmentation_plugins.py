@@ -270,6 +270,8 @@ def test_random_forest_learns_from_sparse_labels(tmp_path):
     assert result.metrics["validation_crops"] >= 1
     assert result.metrics["classes"][str(BONE)]["dice"] > 0.8
     predictor = plugin.load(tmp_path)
+    # What predicting holds per voxel grows with the features, as training does.
+    assert predictor.bytes_per_voxel == 16 * meta["features"] + 32 * 2
     h = predictor.halo
     block = np.pad(
         image[:, 10:42, 10:42, 10:42].astype(np.float32),

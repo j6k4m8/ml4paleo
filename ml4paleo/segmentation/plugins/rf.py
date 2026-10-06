@@ -159,8 +159,10 @@ class RandomForestPredictor:
         self.num_classes = int(meta["num_classes"])
         # float32 features, about four times over as for training crops (see
         # `crop_cost`), then the class probabilities as float64, a few times
-        # over while scikit-learn adds up its trees.
-        self.bytes_per_voxel = 4 * 4 * int(meta["features"]) + 32 * self.num_classes
+        # over while scikit-learn adds up its trees. (The forest knows how
+        # many features it takes, also for models from before `meta` did.)
+        features = int(forest.n_features_in_)
+        self.bytes_per_voxel = 4 * 4 * features + 32 * self.num_classes
         # Threads for features (None: every core); the trees predict on one.
         self.threads = threads
         self.forest.n_jobs = 1
