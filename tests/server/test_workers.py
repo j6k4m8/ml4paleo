@@ -420,7 +420,13 @@ def test_memory_comes_from_the_container_limit(monkeypatch, tmp_path):
     assert worker_caps.detect().memory_gb == 2.0
 
 
-def test_each_slot_gets_a_share_of_memory():
-    caps = CAPS.model_copy(update={"memory_gb": 8.0, "slots": 2})
+def test_each_slot_gets_a_share_of_memory_and_cpus():
+    caps = CAPS.model_copy(update={"memory_gb": 8.0, "cpus": 7, "slots": 2})
     worker = Worker(ServerClient("m4pw_x", http=object()), caps)  # type: ignore[arg-type]
     assert worker.memory_budget_bytes() == 3 * 1024**3
+    assert worker.threads() == 3
+    one = Worker(
+        ServerClient("m4pw_x", http=object()),  # type: ignore[arg-type]
+        caps.model_copy(update={"cpus": 1}),
+    )
+    assert one.threads() == 1

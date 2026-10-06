@@ -7,6 +7,7 @@
 	import Eye from "@lucide/svelte/icons/eye";
 	import EyeOff from "@lucide/svelte/icons/eye-off";
 	import Hand from "@lucide/svelte/icons/hand";
+	import ImageOff from "@lucide/svelte/icons/image-off";
 	import Keyboard from "@lucide/svelte/icons/keyboard";
 	import LayoutGrid from "@lucide/svelte/icons/layout-grid";
 	import LoaderCircle from "@lucide/svelte/icons/loader-circle";
@@ -17,6 +18,7 @@
 	import Redo2 from "@lucide/svelte/icons/redo-2";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
 	import Undo2 from "@lucide/svelte/icons/undo-2";
+	import X from "@lucide/svelte/icons/x";
 	import { onDestroy, onMount, untrack } from "svelte";
 	import Histogram from "#lib/ui/Histogram.svelte";
 	import Panel from "#lib/ui/Panel.svelte";
@@ -98,9 +100,13 @@
 			});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
-			api<{ artifact_id: string; zarr_url: string; model_name: string | null }>(`/api/projects/${project}/prediction`).then(
+			api<{ artifact_id: string; zarr_url: string; model_name: string | null; shape_zyx: number[] }>(
+				`/api/projects/${project}/prediction`,
+			).then(
 				(found) => {
 					if (!pool || controller.signal.aborted) return;
+					// A prediction of another image (one that replaced this since) wouldn't line up.
+					if (found.shape_zyx.join() !== viewer.shape.join()) return;
 					// Predictions never change once made, so their chunks cache like the image's.
 					prediction = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
 					predictionModel = found.model_name ?? "a model";
@@ -433,6 +439,43 @@
 		}
 	}
 
+	/**
+	 * Clicking a button in here leaves focus where it was, so Space still pans
+	 * rather than pressing the button again. Tab still reaches the buttons.
+	 */
+	function keepFocus(node: HTMLElement) {
+		const down = (event: MouseEvent) => {
+			if ((event.target as Element).closest("button")) event.preventDefault();
+		};
+		node.addEventListener("mousedown", down);
+		return () => node.removeEventListener("mousedown", down);
+	}
+
+	/** Focus the keys dialog while it's open, and give focus back to whatever had it. */
+	function holdFocus(dialog: HTMLElement) {
+		const opener = document.activeElement;
+		dialog.focus();
+		return () => {
+			if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+		};
+	}
+
+	function helpKey(event: KeyboardEvent) {
+		// The viewer's keys wait until the dialog closes.
+		event.stopPropagation();
+		if (event.key === "Escape" || event.key === "?") {
+			event.preventDefault();
+			viewer.help = false;
+		} else if (event.key === "Tab") {
+			// Tab cycles through the dialog's controls without leaving it.
+			event.preventDefault();
+			const dialog = event.currentTarget as HTMLElement;
+			const stops = [...dialog.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea")];
+			const at = stops.indexOf(document.activeElement as HTMLElement);
+			stops.at(event.shiftKey ? (at <= 0 ? -1 : at - 1) : (at + 1) % stops.length)?.focus();
+		}
+	}
+
 	function voxel(axis: number): string {
 		const index = Math.floor(viewer.position[axis]!);
 		if (!voxelSize || !unit) return String(index);
@@ -468,53 +511,66 @@
 
 <svelte:window onkeydown={key} onkeyup={keyUp} onblur={() => (viewer.panning = false)} />
 
+{#snippet problem(text: string, dismiss: () => void)}
+	<div
+		class="pointer-events-auto flex w-full max-w-lg items-start gap-2 rounded-sm border border-danger/50 bg-panel px-2.5 py-1.5 text-danger shadow-lg shadow-black/40"
+		role="alert"
+	>
+		<span class="flex-1">{text}</span>
+		<button class="text-ink-dim hover:text-ink" aria-label="Dismiss" onclick={dismiss}><X size={14} /></button>
+	</div>
+{/snippet}
+
 <div class="flex h-full flex-col bg-chrome text-ink">
-	<!-- Options bar: the active tool's settings. -->
-	<div class="flex h-9 shrink-0 items-center gap-3 overflow-x-auto border-b border-edge bg-panel px-3 whitespace-nowrap">
-		<span class="flex items-center gap-1.5 font-medium">
-			{#each TOOLS as entry (entry.tool)}
-				{#if entry.tool === viewer.tool}<entry.icon size={14} class="text-ink-dim" />{entry.label}{/if}
-			{/each}
-		</span>
-		<span class="h-4 w-px bg-line"></span>
-		{#if viewer.tool === "brush" || viewer.tool === "eraser"}
-			<label class="flex items-center gap-2 text-ink-dim">
-				Size
-				<input class="w-28" type="range" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} />
-				<input class="field w-14 font-mono" type="number" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} aria-label="Brush radius" />
-			</label>
-		{/if}
-		{#if viewer.tool === "brush" || viewer.tool === "polygon"}
-			<label class="flex items-center gap-1.5 text-ink-dim">
-				<input type="checkbox" bind:checked={viewer.protectLabels} /> Only unlabeled voxels
-			</label>
-		{/if}
-		{#if viewer.tool === "roi"}
-			<label class="flex items-center gap-2 text-ink-dim">
-				Depth
-				<input class="w-28" type="range" min="1" max="256" step="1" bind:value={viewer.roiDepth} />
-				<span class="w-24 font-mono text-ink">{viewer.roiDepth === 1 ? "slice" : `${viewer.roiDepth} voxels`}</span>
-			</label>
-		{/if}
-		{#if viewer.tool === "navigate"}
-			<div class="flex overflow-hidden rounded-sm border border-edge" role="radiogroup" aria-label="Layout">
-				{#each LAYOUTS as layout (layout)}
-					<button
-						role="radio"
-						aria-checked={viewer.layout === layout}
-						class="flex h-6 items-center gap-1 px-2 {viewer.layout === layout ? 'bg-accent text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
-						onclick={() => (viewer.layout = layout)}
-					>
-						{#if layout === "four"}<LayoutGrid size={12} />{/if}
-						{LAYOUT_NAMES[layout]}
-					</button>
+	<!-- Options bar: the active tool's settings, scrolling sideways when they don't fit. -->
+	<div class="flex h-9 shrink-0 items-center border-b border-edge bg-panel" {@attach keepFocus}>
+		<div class="flex min-w-0 flex-1 items-center gap-3 self-stretch overflow-x-auto px-3 whitespace-nowrap">
+			<span class="flex shrink-0 items-center gap-1.5 font-medium">
+				{#each TOOLS as entry (entry.tool)}
+					{#if entry.tool === viewer.tool}<entry.icon size={14} class="text-ink-dim" />{entry.label}{/if}
 				{/each}
-			</div>
-			<button class="btn" onclick={fit} title="Fit the image (0)"><Maximize2 size={12} /> Fit</button>
-		{/if}
-		<span class="ml-auto hidden truncate text-2xs text-ink-faint lg:inline">{hint}</span>
+			</span>
+			<span class="h-4 w-px shrink-0 bg-line"></span>
+			{#if viewer.tool === "brush" || viewer.tool === "eraser"}
+				<label class="flex shrink-0 items-center gap-2 text-ink-dim">
+					Size
+					<input class="w-28" type="range" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} />
+					<input class="field w-14 font-mono" type="number" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} aria-label="Brush radius" />
+				</label>
+			{/if}
+			{#if viewer.tool === "brush" || viewer.tool === "polygon"}
+				<label class="flex shrink-0 items-center gap-1.5 text-ink-dim">
+					<input type="checkbox" bind:checked={viewer.protectLabels} /> Only unlabeled voxels
+				</label>
+			{/if}
+			{#if viewer.tool === "roi"}
+				<label class="flex shrink-0 items-center gap-2 text-ink-dim">
+					Depth
+					<input class="w-28" type="range" min="1" max="256" step="1" bind:value={viewer.roiDepth} />
+					<span class="w-24 font-mono text-ink">{viewer.roiDepth === 1 ? "slice" : `${viewer.roiDepth} voxels`}</span>
+				</label>
+			{/if}
+			{#if viewer.tool === "navigate"}
+				<div class="flex shrink-0 rounded-sm border border-edge" role="group" aria-label="Layout">
+					{#each LAYOUTS as layout (layout)}
+						<button
+							aria-pressed={viewer.layout === layout}
+							class="relative flex h-6 items-center gap-1 px-2 first:rounded-l-[3px] last:rounded-r-[3px] focus-visible:z-10
+								{viewer.layout === layout ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
+							onclick={() => (viewer.layout = layout)}
+						>
+							{#if layout === "four"}<LayoutGrid size={12} />{/if}
+							{LAYOUT_NAMES[layout]}
+						</button>
+					{/each}
+				</div>
+				<button class="btn shrink-0" onclick={fit} title="Fit the image (0)"><Maximize2 size={12} /> Fit</button>
+			{/if}
+			<span class="ml-auto hidden truncate text-2xs text-ink-faint lg:inline">{hint}</span>
+		</div>
+		<!-- Outside the scrolling part, so it's always in reach. -->
 		<button
-			class="btn btn-ghost ml-auto md:hidden"
+			class="btn btn-ghost mx-1.5 shrink-0 md:hidden"
 			aria-label="Panels"
 			aria-expanded={dockOpen}
 			onclick={() => (dockOpen = !dockOpen)}
@@ -525,7 +581,13 @@
 
 	<div class="relative flex min-h-0 flex-1">
 		<!-- Tools -->
-		<nav class="flex w-11 shrink-0 flex-col items-center gap-0.5 border-r border-edge bg-panel py-1.5" aria-label="Tools">
+		<div
+			class="flex w-11 shrink-0 flex-col items-center gap-0.5 border-r border-edge bg-panel py-1.5"
+			role="toolbar"
+			aria-label="Tools"
+			aria-orientation="vertical"
+			{@attach keepFocus}
+		>
 			{#each TOOLS as entry (entry.tool)}
 				<ToolButton
 					icon={entry.icon}
@@ -542,7 +604,10 @@
 				style:background={activeClass?.color ?? "transparent"}
 				title={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "No class to paint"}
 				aria-label={activeClass ? `Active class: ${activeClass.name}` : "No active class"}
-				onclick={() => (classesOpen = true)}
+				onclick={() => {
+					classesOpen = true;
+					dockOpen = true;
+				}}
 			></button>
 			<span class="my-1.5 h-px w-6 bg-line"></span>
 			<ToolButton icon={Undo2} label="Undo" shortcut="Ctrl+Z" disabled={queue.undoable === 0} onclick={() => queue.undo()} />
@@ -550,16 +615,24 @@
 			<div class="mt-auto">
 				<ToolButton icon={Keyboard} label="Keys" shortcut="?" active={viewer.help} onclick={() => (viewer.help = !viewer.help)} />
 			</div>
-		</nav>
+		</div>
 
 		<!-- Document -->
-		<div class="flex min-w-0 flex-1 flex-col">
+		<div class="relative flex min-w-0 flex-1 flex-col">
 			<div class="flex h-7 shrink-0 items-end border-b border-edge bg-chrome px-2">
 				<div class="flex h-6 items-center gap-2 rounded-t-sm bg-pasteboard px-3 shadow-[inset_0_1px_0_var(--color-accent)]">
 					<span class="font-medium">{title}</span>
 					<span class="font-mono text-2xs text-ink-faint">{imageX}×{imageY}×{imageZ} · {manifest.dtype}</span>
 				</div>
 			</div>
+			<!-- What went wrong, over the views, where it shows even with the dock closed. -->
+			{#if error || notice || rois.error}
+				<div class="pointer-events-none absolute inset-x-0 top-8 z-30 flex flex-col items-center gap-1 px-2">
+					{#if error}{@render problem(error, () => (error = ""))}{/if}
+					{#if notice}{@render problem(notice, () => (notice = ""))}{/if}
+					{#if rois.error}{@render problem(rois.error, () => (rois.error = ""))}{/if}
+				</div>
+			{/if}
 			<div
 				class="grid min-h-0 flex-1 gap-px bg-edge
 					{viewer.layout === 'four' ? 'grid-cols-2 grid-rows-2' : 'grid-cols-1 grid-rows-1'}"
@@ -590,8 +663,8 @@
 						</div>
 					{/if}
 				{:else}
-					<div class="grid place-items-center bg-pasteboard text-ink-faint">
-						{#if error}<span class="error">{error}</span>{:else}<LoaderCircle size={20} class="animate-spin" />{/if}
+					<div class="col-span-full row-span-full grid place-items-center bg-pasteboard text-ink-faint">
+						{#if error}<ImageOff size={20} />{:else}<LoaderCircle size={20} class="animate-spin" />{/if}
 					</div>
 				{/if}
 			</div>
@@ -601,6 +674,7 @@
 		<aside
 			class="{dockOpen ? 'flex' : 'hidden'} absolute inset-y-0 right-0 z-20 w-64 shrink-0 flex-col overflow-y-auto border-l border-edge bg-panel shadow-2xl shadow-black/50 md:static md:flex md:shadow-none"
 			aria-label="Panels"
+			{@attach keepFocus}
 		>
 			<Panel title="Info">
 				<div class="grid grid-cols-[1rem_1fr] gap-x-1 gap-y-0.5 font-mono text-2xs">
@@ -712,7 +786,6 @@
 						<li class="px-2.5 text-ink-dim">Draw one with the ROI tool (R).</li>
 					{/each}
 				</ul>
-				{#if rois.error}<p class="error" role="alert">{rois.error}</p>{/if}
 				{#if prediction && selectedRoi}
 					<button
 						class="btn"
@@ -726,10 +799,6 @@
 				{/if}
 				<a href="/p/{project}/rois" class="self-start text-2xs">Open the ROI gallery</a>
 			</Panel>
-
-			{#if notice}
-				<p class="m-2.5 rounded-sm border border-danger/40 bg-danger/10 p-2 text-danger" role="alert">{notice}</p>
-			{/if}
 		</aside>
 	</div>
 
@@ -757,8 +826,9 @@
 			aria-modal="true"
 			aria-label="Keys"
 			tabindex="-1"
+			{@attach holdFocus}
 			onclick={(e) => e.stopPropagation()}
-			onkeydown={(e) => e.stopPropagation()}
+			onkeydown={helpKey}
 		>
 			<div class="panel-title">Keyboard shortcuts</div>
 			<table class="w-full">
@@ -780,8 +850,7 @@
 				</tbody>
 			</table>
 			<div class="flex justify-end p-2">
-				<!-- svelte-ignore a11y_autofocus -->
-				<button class="btn" autofocus onclick={() => (viewer.help = false)}>Close</button>
+				<button class="btn" onclick={() => (viewer.help = false)}>Close</button>
 			</div>
 		</div>
 	</div>

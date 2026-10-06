@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { handleAt } from "#lib/ui/histogram.ts";
+
 	let {
 		counts,
 		edges,
@@ -10,7 +12,8 @@
 	} = $props();
 
 	// Levels-style: the image's histogram (log scale), with the display
-	// window's ends as handles to drag.
+	// window's ends as handles to drag. It's for the pointer only; the Black
+	// and White fields next to it set the same values.
 	const WIDTH = 220;
 	const HEIGHT = 56;
 	let svg: SVGSVGElement;
@@ -37,8 +40,7 @@
 	};
 
 	function down(event: PointerEvent) {
-		const value = valueAt(event.clientX);
-		dragging = Math.abs(value - window[0]) <= Math.abs(value - window[1]) ? 0 : 1;
+		dragging = handleAt(valueAt(event.clientX), window);
 		svg.setPointerCapture(event.pointerId);
 		move(event);
 	}
@@ -54,22 +56,17 @@
 	bind:this={svg}
 	viewBox="0 0 {WIDTH} {HEIGHT + 8}"
 	class="w-full cursor-ew-resize touch-none select-none"
-	role="slider"
-	aria-label="Display window"
-	aria-valuemin={lo}
-	aria-valuemax={hi}
-	aria-valuenow={window[0]}
-	aria-valuetext="{window[0]} to {window[1]}"
-	tabindex="-1"
+	aria-hidden="true"
 	onpointerdown={down}
 	onpointermove={move}
 	onpointerup={() => (dragging = null)}
+	onpointercancel={() => (dragging = null)}
 >
 	<rect width={WIDTH} height={HEIGHT} fill="var(--color-field)" />
 	<rect x={x(window[0])} width={Math.max(0, x(window[1]) - x(window[0]))} height={HEIGHT} fill="var(--color-accent-soft)" opacity="0.6" />
 	<path d={path} fill="var(--color-ink-dim)" opacity="0.8" />
 	{#each [window[0], window[1]] as value, i (i)}
 		<line x1={x(value)} x2={x(value)} y1="0" y2={HEIGHT} stroke="var(--color-accent-hover)" stroke-width="1" />
-		<path d="M{x(value)},{HEIGHT} l-4,7 h8 z" fill={i === 0 ? "#111" : "#eee"} stroke="var(--color-accent-hover)" stroke-width="0.8" />
+		<path d="M{x(value)},{HEIGHT} l-4,7 h8 z" fill={i === 0 ? "var(--color-edge)" : "var(--color-ink)"} stroke="var(--color-accent-hover)" stroke-width="0.8" />
 	{/each}
 </svg>

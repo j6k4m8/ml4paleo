@@ -36,6 +36,7 @@ class JobContext:
         self,
         lease: JobLease,
         memory_budget_bytes: int = 4 * 1024**3,
+        threads: int = 1,
         *,
         v1_volume: Path | None = None,
         label_ops: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
@@ -44,6 +45,9 @@ class JobContext:
         # How much memory this job may use: the worker's memory shared among
         # its slots. Handlers size what they hold at once from it.
         self.memory_budget_bytes = memory_budget_bytes
+        # How many CPU threads this job may use: the worker's CPUs shared
+        # among its slots.
+        self.threads = threads
         # The v1 app's volume folder, on workers started with --v1-volume.
         self.v1_volume = v1_volume
         self._label_ops = label_ops

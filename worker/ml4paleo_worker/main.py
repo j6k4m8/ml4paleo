@@ -151,10 +151,15 @@ class Worker:
         memory = self.caps.memory_gb * 1024**3 or 4 * 1024**3
         return int(memory * 0.75 / self.caps.slots)
 
+    def threads(self) -> int:
+        """A job's share of the worker's CPUs (at least one)."""
+        return max(1, self.caps.cpus // self.caps.slots)
+
     def run_job(self, lease: JobLease) -> None:
         ctx = JobContext(
             lease,
             self.memory_budget_bytes(),
+            self.threads(),
             v1_volume=self.v1_volume,
             label_ops=lambda op: self.client.label_op(
                 lease.job_id, lease.lease_token, op

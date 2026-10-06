@@ -7,7 +7,7 @@ Segmentation models.
     GET    /api/projects/{id}/models/{model}
     DELETE /api/projects/{id}/models/{model}
     POST   /api/projects/{id}/models/{model}/predict
-    GET    /api/projects/{id}/prediction           the current prediction
+    GET    /api/projects/{id}/prediction           the prediction of the current image
 
 Training pins the project's labels and ROIs as a training set and starts a
 `model.train` pipeline (follow it under /pipelines). A model is "training"
@@ -26,11 +26,10 @@ from sqlalchemy import select
 
 from ml4paleo.segmentation.plugin import get_plugin, plugins
 
-from .. import artifacts, audit, jobs, training
+from .. import artifacts, audit, jobs, quotas, training
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
-from ..db import Artifact, Job, Project, TrainedModel, TrainingSet
+from ..db import Artifact, Job, Project, TrainedModel, TrainingSet, User
 from ..pipelines import predict, train
-from ..quotas import release_trained_model
 from .gateway import zarr_path
 from .projects import MemberProject
 
@@ -123,7 +122,7 @@ async def _model(db, project: Project, model_id: uuid.UUID) -> TrainedModel:
 
 @router.get("/projects/{project_id}/models")
 async def list_models(project: MemberProject, db: DbSession) -> list[ModelOut]:
-    await train.release_failed_slots(db, project.id)
+    await train.release_failed_slots(db, project.owner_id, project.id)
     await db.commit()
     models = (
         await db.scalars(
@@ -156,6 +155,15 @@ async def train_model(
         raise HTTPException(
             status_code=422, detail=exc.errors(include_url=False)
         ) from None
+    # Look for a free model slot before pinning a training set, so a refused
+    # training stores nothing; `train.start` reserves the slot. Commit the
+    # slots of failed trainings at once, so the owner's usage row isn't
+    # locked while the snapshot is taken.
+    owner = await db.get(User, project.owner_id)
+    assert owner is not None
+    await train.release_failed_slots(db, owner.id)
+    await db.commit()
+    await quotas.check_trained_model(db, settings, owner)
     try:
         training_set = await training.snapshot(
             db, request.app.state.sessionmaker, settings, project.id
@@ -213,22 +221,25 @@ async def delete_model(
     db: DbSession,
 ) -> None:
     """
-    Delete a model: stop its training if it's still running, free its slot,
-    and let garbage collection remove its files.
+    Delete a model: stop its training and its predictions if they're still
+    running, free its slot, and let garbage collection remove its files.
     """
     model = await _model(db, project, model_id)
     model.deleted_at = datetime.datetime.now(datetime.UTC)
+    # Waits for a prediction being started with it, so the search below
+    # finds (and stops) that one too.
+    await db.flush()
     if model.job_id:
         job = await db.get(Job, model.job_id)
-        if job is not None and job.status in ("blocked", "queued", "leased"):
+        if job is not None and job.status in train.RUNNING_JOB:
             await jobs.cancel_pipeline(db, job.root_id)
+    for root in await predict.running(db, project.id, model.id):
+        await jobs.cancel_pipeline(db, root.id)
     if model.artifact_id:
         artifact = await db.get(Artifact, model.artifact_id)
         if artifact is not None and artifact.state == "committed":
             artifact.expires_at = datetime.datetime.now(datetime.UTC)
-    if model.holds_slot:
-        model.holds_slot = False
-        await release_trained_model(db, project.owner_id)
+    await train.release_slots(db, project.owner_id, TrainedModel.id == model.id)
     audit.record(
         db,
         actor_id=auth.user.id,
@@ -256,7 +267,9 @@ async def predict_with(
 ) -> PredictionStarted:
     """
     Run a ready model over the project's image; the result becomes the
-    project's prediction when the pipeline succeeds.
+    project's prediction when the pipeline succeeds. Other predictions still
+    running are cancelled, and if this model is already predicting this
+    image, the answer is 409.
     """
     model = await _model(db, project, model_id)
     image = await artifacts.head(db, project.id, "image")
@@ -286,6 +299,8 @@ class PredictionOut(BaseModel):
     model_id: uuid.UUID | None
     model_name: str | None
     class_values: list[int]
+    # The image's (z, y, x) shape when it was predicted.
+    shape_zyx: list[int]
     # The prediction's zarr group (arrays `class` and `uncertainty`), through
     # the data gateway.
     zarr_url: str
@@ -294,10 +309,19 @@ class PredictionOut(BaseModel):
 
 @router.get("/projects/{project_id}/prediction")
 async def current_prediction(project: MemberProject, db: DbSession) -> PredictionOut:
+    """
+    The project's prediction, if it is of the current image (a prediction of
+    an image that has since been replaced doesn't fit the new one).
+    """
     head = await artifacts.head(db, project.id, "prediction")
     if head is None or not head.manifest:
         raise HTTPException(
             status_code=404, detail="This project has no prediction yet."
+        )
+    image = await artifacts.head(db, project.id, "image")
+    if image is None or head.inputs.get("image_artifact_id") != str(image.id):
+        raise HTTPException(
+            status_code=404, detail="This project has no prediction of its image."
         )
     model_id = head.inputs.get("model_id")
     model = (
@@ -310,6 +334,7 @@ async def current_prediction(project: MemberProject, db: DbSession) -> Predictio
         model_id=model.id if model else None,
         model_name=model.name if model else None,
         class_values=list(head.manifest.get("class_values", [])),
+        shape_zyx=list(head.manifest.get("shape_zyx", [])),
         zarr_url=zarr_path(project.id, head.id),
         committed_at=head.state_changed_at,
     )
