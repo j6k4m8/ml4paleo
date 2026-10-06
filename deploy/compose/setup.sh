@@ -96,8 +96,10 @@ M4P_SMTP__USERNAME=
 M4P_SMTP__FROM_ADDRESS=ml4paleo <no-reply@$domain>
 # "gpu" also runs worker-gpu (set automatically when an NVIDIA GPU was found).
 COMPOSE_PROFILES=$profiles
-# How many jobs the CPU worker runs at once.
+# How many jobs the CPU worker runs at once, and the memory it may use.
 M4P_CPU_WORKER_SLOTS=1
+M4P_CPU_WORKER_MEMORY=4g
+M4P_GPU_WORKER_MEMORY=16g
 ENV
     echo "Created .env for https://$domain"
 fi

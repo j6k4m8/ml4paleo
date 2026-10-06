@@ -22,7 +22,7 @@ from ml4paleo.protocol import (
     ReleaseIn,
 )
 
-from .. import artifacts, broker, jobs
+from .. import artifacts, broker, jobs, pipelines
 from ..auth.deps import DbSession, SettingsDep
 from ..jobs.workers import CurrentWorker
 
@@ -135,16 +135,31 @@ async def complete(
     settings: SettingsDep,
 ) -> None:
     """
-    Mark the job succeeded, committing the artifacts it produced in the same
-    transaction.
+    Mark the job succeeded, committing the artifacts it produced and adding
+    its pipeline's next jobs in the same transaction.
     """
 
     async def commit_artifacts(job):
+        try:
+            pipelines.check_result(job, body.result)
+        except ValueError as exc:
+            raise jobs.Rejected(
+                f"The job's result is malformed: {exc}", retryable=False
+            ) from None
         await artifacts.commit_outputs(db, settings, job)
+
+    async def continue_pipeline(job):
+        await pipelines.after_success(db, job)
 
     try:
         await jobs.complete(
-            db, job_id, worker, body.lease_token, body.result, check=commit_artifacts
+            db,
+            job_id,
+            worker,
+            body.lease_token,
+            body.result,
+            check=commit_artifacts,
+            after=continue_pipeline,
         )
     except jobs.LeaseLost:
         raise _lease_lost() from None

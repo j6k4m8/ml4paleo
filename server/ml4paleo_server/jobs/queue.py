@@ -419,13 +419,16 @@ async def complete(
     lease_token: str,
     result: dict[str, Any],
     check: Callable[[Job], Awaitable[None]] | None = None,
+    after: Callable[[Job], Awaitable[None]] | None = None,
 ) -> Job:
     """
     Mark a job succeeded and queue the jobs that were waiting only for it.
 
     `check` runs first, in the same transaction (the server commits the job's
     artifacts there); if it raises `Rejected`, the attempt fails instead and
-    the exception propagates.
+    the exception propagates. `after` runs once the job is succeeded (the
+    server adds the pipeline's next jobs there); a repeated report of the same
+    success runs neither.
 
     Reporting the same success twice is harmless. Raises `JobCancelled` if the
     job was cancelled while it ran.
@@ -455,6 +458,8 @@ async def complete(
     job.progress = 1
     await _finish(db, job, "succeeded", outcome="succeeded")
     await _unblock_children(db, job.id)
+    if after is not None:
+        await after(job)
     return job
 
 
