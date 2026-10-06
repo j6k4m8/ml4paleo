@@ -306,7 +306,8 @@ export class PlaneRenderer {
 		const { u, v } = this.plane;
 		const px = pixelsPerVoxel(view);
 		gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
-		gl.clearColor(0, 0, 0, 1);
+		// The pasteboard around the image, as in the rest of the workspace.
+		gl.clearColor(0x28 / 255, 0x28 / 255, 0x28 / 255, 1);
 		gl.clear(gl.COLOR_BUFFER_BIT);
 		const place = (uniforms: Record<string, WebGLUniformLocation | null>) => {
 			gl.uniform2f(uniforms.center ?? null, view.position[u], view.position[v]);

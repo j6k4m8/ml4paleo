@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { api, message } from "#lib/api.ts";
 	import { session } from "#lib/session.svelte.ts";
+	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
+	import Panel from "#lib/ui/Panel.svelte";
 
 	let current = $state("");
 	let next = $state("");
@@ -12,6 +14,7 @@
 	let totpError = $state("");
 
 	const steps = $derived(session.current?.required_steps ?? []);
+	$effect(() => crumbs.set([{ label: "Account" }]));
 	let resent = $state(false);
 	let resendError = $state("");
 
@@ -60,55 +63,56 @@
 	}
 </script>
 
-<h1>Account</h1>
-{#if steps.length > 0}
-	<p>Finish these steps to use ml4paleo.</p>
-{/if}
+<div class="mx-auto flex max-w-xl flex-col gap-3 p-6">
+	<h1>Account</h1>
+	{#if steps.length > 0}
+		<p class="rounded-sm border border-warn/40 bg-warn/10 p-2 text-warn">Finish these steps to use ml4paleo.</p>
+	{/if}
 
-{#if steps.includes("verify_email")}
-	<section>
-		<h2>Email</h2>
-		<p>Open the link we sent to {session.current?.user.email} to confirm it's yours.</p>
-		{#if resent}
-			<p>Sent another one.</p>
-		{:else}
-			<button class="secondary" onclick={resend}>Send the link again</button>
-		{/if}
-		{#if resendError}<p class="error" role="alert">{resendError}</p>{/if}
-	</section>
-{/if}
+	{#if steps.includes("verify_email")}
+		<Panel title="Email">
+			<p>Open the link we sent to {session.current?.user.email} to confirm it's yours.</p>
+			{#if resent}
+				<p class="muted">Sent another one.</p>
+			{:else}
+				<button class="btn self-start" onclick={resend}>Send the link again</button>
+			{/if}
+			{#if resendError}<p class="error" role="alert">{resendError}</p>{/if}
+		</Panel>
+	{/if}
 
-<section>
-	<h2>Password</h2>
-	<form class="stack" onsubmit={changePassword}>
-		<label>
-			Current password
-			<input type="password" bind:value={current} autocomplete="current-password" required />
-		</label>
-		<label>
-			New password
-			<input type="password" bind:value={next} autocomplete="new-password" minlength="12" required />
-		</label>
-		{#if passwordError}<p class="error" role="alert">{passwordError}</p>{/if}
-		{#if passwordDone}<p>Password changed.</p>{/if}
-		<button>Change password</button>
-	</form>
-</section>
-
-{#if steps.includes("set_up_two_factor")}
-	<section>
-		<h2>Two-factor sign-in</h2>
-		{#if setup}
-			<p>Add this key to your authenticator app, then enter the code it shows.</p>
-			<p><code>{setup.secret}</code></p>
-			<p><a href={setup.otpauth_uri}>Open in an authenticator app</a></p>
-			<form class="stack" onsubmit={confirmTotp}>
-				<label>Code <input bind:value={code} inputmode="numeric" autocomplete="one-time-code" required /></label>
-				<button>Turn on</button>
+	<div class="panel overflow-hidden">
+		<Panel title="Password">
+			<form class="flex max-w-sm flex-col gap-3" onsubmit={changePassword}>
+				<label class="label">
+					Current password
+					<input class="field" type="password" bind:value={current} autocomplete="current-password" required />
+				</label>
+				<label class="label">
+					New password
+					<input class="field" type="password" bind:value={next} autocomplete="new-password" minlength="12" required />
+				</label>
+				{#if passwordError}<p class="error" role="alert">{passwordError}</p>{/if}
+				{#if passwordDone}<p class="text-ok">Password changed.</p>{/if}
+				<button class="btn btn-primary self-start">Change password</button>
 			</form>
-		{:else}
-			<button onclick={startTotp}>Set up two-factor sign-in</button>
+		</Panel>
+
+		{#if steps.includes("set_up_two_factor")}
+			<Panel title="Two-factor sign-in">
+				{#if setup}
+					<p>Add this key to your authenticator app, then enter the code it shows.</p>
+					<code class="kbd self-start !text-xs">{setup.secret}</code>
+					<a href={setup.otpauth_uri}>Open in an authenticator app</a>
+					<form class="flex max-w-sm flex-col gap-3" onsubmit={confirmTotp}>
+						<label class="label">Code <input class="field" bind:value={code} inputmode="numeric" autocomplete="one-time-code" required /></label>
+						<button class="btn btn-primary self-start">Turn on</button>
+					</form>
+				{:else}
+					<button class="btn btn-primary self-start" onclick={startTotp}>Set up two-factor sign-in</button>
+				{/if}
+				{#if totpError}<p class="error" role="alert">{totpError}</p>{/if}
+			</Panel>
 		{/if}
-		{#if totpError}<p class="error" role="alert">{totpError}</p>{/if}
-	</section>
-{/if}
+	</div>
+</div>

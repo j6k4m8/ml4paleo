@@ -4,6 +4,7 @@
 	import { ApiError, api, message } from "#lib/api.ts";
 	import { safeNext } from "#lib/navigation.ts";
 	import { session } from "#lib/session.svelte.ts";
+	import Card from "#lib/ui/Card.svelte";
 
 	let username = $state("");
 	let password = $state("");
@@ -11,7 +12,6 @@
 	let needsCode = $state(false);
 	let error = $state("");
 	let busy = $state(false);
-
 	let emailEnabled = $state(false);
 
 	$effect(() => {
@@ -37,23 +37,24 @@
 	}
 </script>
 
-<h1>Sign in</h1>
-<form class="stack" onsubmit={submit}>
-	<label>Username or email <input bind:value={username} autocomplete="username" required /></label>
-	<label>
-		Password
-		<input type="password" bind:value={password} autocomplete="current-password" required />
-	</label>
-	{#if needsCode}
-		<label>
-			Two-factor code
-			<input bind:value={code} inputmode="numeric" autocomplete="one-time-code" required />
+<Card title="Sign in">
+	<form class="flex flex-col gap-3" onsubmit={submit}>
+		<label class="label">Username or email <input class="field" bind:value={username} autocomplete="username" required /></label>
+		<label class="label">
+			Password
+			<input class="field" type="password" bind:value={password} autocomplete="current-password" required />
 		</label>
-	{/if}
-	{#if error}<p class="error" role="alert">{error}</p>{/if}
-	<button disabled={busy}>Sign in</button>
-	<p class="muted">
+		{#if needsCode}
+			<label class="label">
+				Two-factor code
+				<input class="field" bind:value={code} inputmode="numeric" autocomplete="one-time-code" required />
+			</label>
+		{/if}
+		{#if error}<p class="error" role="alert">{error}</p>{/if}
+		<button class="btn btn-primary h-7" disabled={busy}>Sign in</button>
+	</form>
+	{#snippet footer()}
 		No account? <a href="/signup">Sign up</a>
 		{#if emailEnabled}· <a href="/reset-password">Forgot your password?</a>{/if}
-	</p>
-</form>
+	{/snippet}
+</Card>

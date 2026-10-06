@@ -573,7 +573,8 @@
 		position: relative;
 		min-width: 0;
 		min-height: 0;
-		border: 1px solid var(--axis-color);
+		border-top: 2px solid var(--axis-color);
+		background: var(--color-pasteboard);
 		overflow: hidden;
 	}
 	.plane-0 {
@@ -589,7 +590,7 @@
 		display: block;
 		width: 100%;
 		height: 100%;
-		background: #000;
+		background: var(--color-pasteboard);
 		touch-action: none;
 		cursor: grab;
 	}
@@ -627,7 +628,7 @@
 		background: none;
 	}
 	canvas:focus-visible {
-		outline: 2px solid var(--accent);
+		outline: 1px solid var(--color-accent);
 		outline-offset: -2px;
 	}
 	.crosshair {
@@ -659,21 +660,28 @@
 	}
 	.caption {
 		position: absolute;
-		left: 0.4rem;
-		top: 0.25rem;
-		font-size: 0.8rem;
-		color: #fff;
-		text-shadow: 0 0 3px #000;
+		left: 0.375rem;
+		top: 0.375rem;
+		padding: 0.0625rem 0.375rem;
+		border-radius: 2px;
+		background: rgb(0 0 0 / 0.55);
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		color: #e2e2e2;
 		pointer-events: none;
 	}
 	.caption .muted {
-		color: #ccc;
+		color: #a8a8a8;
 	}
 	.error {
 		position: absolute;
-		bottom: 0.25rem;
-		left: 0.4rem;
+		bottom: 0.375rem;
+		left: 0.375rem;
 		margin: 0;
-		font-size: 0.8rem;
+		padding: 0.125rem 0.375rem;
+		border-radius: 2px;
+		background: rgb(0 0 0 / 0.7);
+		color: var(--color-danger);
+		font-size: 0.6875rem;
 	}
 </style>

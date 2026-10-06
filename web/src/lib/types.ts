@@ -48,6 +48,8 @@ export interface ImageManifest {
 	voxel_size_zyx: [number, number, number] | null;
 	unit: string | null;
 	window: [number, number];
+	/** Counts of the coarsest level's values in equal bins between `edges`. */
+	histogram?: { counts: number[]; edges: number[] } | [];
 	min: number;
 	max: number;
 }

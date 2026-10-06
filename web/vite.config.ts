@@ -1,9 +1,11 @@
 import adapter from "@sveltejs/adapter-static";
 import { sveltekit } from "@sveltejs/kit/vite";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
 	plugins: [
+		tailwindcss(),
 		sveltekit({
 			// A static single-page app: the API server serves index.html for
 			// every path that isn't a file, and the app routes in the browser.
