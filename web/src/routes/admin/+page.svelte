@@ -18,6 +18,8 @@
 		last_login_at: string | null;
 		storage_bytes_used: number;
 		trained_models_used: number;
+		storage_bytes_limit: number | null;
+		trained_models_limit: number | null;
 		quota_override: Override;
 	}
 
@@ -53,7 +55,10 @@
 
 	const ACTIVE = ["blocked", "queued", "leased"];
 
+	const LISTED = 100;
+
 	let signupMode = $state<"open" | "invite">("open");
+	let emailOn = $state(false);
 	let inviteEmail = $state("");
 	let inviteUrl = $state("");
 	let requests: QuotaRequest[] = $state([]);
@@ -91,17 +96,34 @@
 	async function load() {
 		await run(async () => {
 			signupMode = (await api<{ signup_mode: "open" | "invite" }>("/api/admin/settings")).signup_mode;
-			[requests, workers] = await Promise.all([
+			emailOn = (await api<{ email_enabled: boolean }>("/api/auth/config")).email_enabled;
+			const [open, listed] = await Promise.all([
 				api<QuotaRequest[]>("/api/admin/quota-requests"),
 				api<WorkerRow[]>("/api/admin/workers"),
 			]);
+			// Grant fields start at what each person has now, so granting one
+			// limit leaves the others as they are.
+			grants = Object.fromEntries(
+				open.map((r) => [
+					r.id,
+					grants[r.id] ?? {
+						storage: limitText(r.quota_override.storage_gb),
+						models: limitText(r.quota_override.trained_models),
+					},
+				]),
+			);
+			requests = open;
+			workers = listed;
 			await Promise.all([loadAccounts(), loadJobs()]);
 		});
 	}
 
 	async function loadAccounts() {
-		accounts = await api<Account[]>(`/api/admin/users?q=${encodeURIComponent(search)}`);
+		accounts = await api<Account[]>(`/api/admin/users?q=${encodeURIComponent(search)}&limit=${LISTED}`);
 	}
+
+	/** An override limit as the forms show it. */
+	const limitText = (value: number | null | undefined) => (value === null ? "unlimited" : String(value ?? ""));
 
 	async function loadJobs() {
 		jobs = await api<JobRow[]>(`/api/admin/jobs?limit=50${jobStatus ? `&status=${jobStatus}` : ""}`);
@@ -126,16 +148,23 @@
 		return result;
 	}
 
-	const showLimit = (value: number | null | undefined, unit: string) =>
-		value === undefined ? "default" : value === null ? "unlimited" : `${value}${unit}`;
 	const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(bytes < 1024 ** 3 ? 2 : 1)} GB`;
+	const limitOf = (value: number | null, show: (n: number) => string) => (value === null ? "unlimited" : show(value));
 	const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : "never");
 
 	function copy(text: string) {
 		navigator.clipboard?.writeText(text).then(
-			() => (notice = "Copied."),
+			() => {
+				error = "";
+				notice = "Copied.";
+			},
 			() => {},
 		);
+	}
+
+	/** Run `action` once the admin confirms `question`. */
+	function confirmed(question: string, action: () => void) {
+		if (confirm(question)) action();
 	}
 </script>
 
@@ -180,7 +209,9 @@
 						}}
 					>
 						<label class="label flex-1">
-							Invite (an email address is optional; with mail set up, it gets the link)
+							{emailOn
+								? "Invite (give an address to email them the link)"
+								: "Invite (mail isn't set up, so send the link yourself)"}
 							<input class="field" type="email" bind:value={inviteEmail} placeholder="someone@example.org" />
 						</label>
 						<button class="btn">Make an invite link</button>
@@ -199,7 +230,6 @@
 				<h2 class="panel-title">Requests for more</h2>
 				<div class="flex flex-col gap-2 p-3">
 					{#each requests as request (request.id)}
-						{@const grant = (grants[request.id] ??= { storage: "", models: "" })}
 						<div class="flex flex-col gap-2 rounded-sm border border-edge bg-field p-2">
 							<div class="flex items-center gap-2">
 								<span class="font-medium">{request.username}</span>
@@ -209,16 +239,17 @@
 							<div class="flex flex-wrap items-end gap-2">
 								<label class="label">
 									Storage (GB)
-									<input class="field w-28" bind:value={grant.storage} placeholder={showLimit(request.quota_override.storage_gb, "")} />
+									<input class="field w-28" bind:value={grants[request.id]!.storage} placeholder="default" />
 								</label>
 								<label class="label">
 									Models
-									<input class="field w-24" bind:value={grant.models} placeholder={showLimit(request.quota_override.trained_models, "")} />
+									<input class="field w-24" bind:value={grants[request.id]!.models} placeholder="default" />
 								</label>
 								<button
 									class="btn btn-primary"
 									onclick={() =>
 										run(async () => {
+											const grant = grants[request.id]!;
 											await api(`/api/admin/quota-requests/${request.id}`, {
 												body: { decision: "grant", quota_override: override(grant.storage, grant.models) },
 											});
@@ -230,10 +261,12 @@
 								<button
 									class="btn btn-ghost"
 									onclick={() =>
-										run(async () => {
-											await api(`/api/admin/quota-requests/${request.id}`, { body: { decision: "decline" } });
-											await load();
-										})}
+										confirmed(`Decline ${request.username}'s request?`, () =>
+											run(async () => {
+												await api(`/api/admin/quota-requests/${request.id}`, { body: { decision: "decline" } });
+												await load();
+											}),
+										)}
 								>
 									Decline
 								</button>
@@ -286,10 +319,12 @@
 									</td>
 									<td class="py-1.5 pr-3" class:text-danger={account.status === "disabled"}>{account.status}</td>
 									<td class="py-1.5 pr-3 font-mono text-2xs">
-										{gb(account.storage_bytes_used)} / {showLimit(account.quota_override.storage_gb, " GB")}
+										{gb(account.storage_bytes_used)} / {limitOf(account.storage_bytes_limit, gb)}
+										{#if "storage_gb" in account.quota_override}<span class="font-sans text-ink-dim"> (set)</span>{/if}
 									</td>
 									<td class="py-1.5 pr-3 font-mono text-2xs">
-										{account.trained_models_used} / {showLimit(account.quota_override.trained_models, "")}
+										{account.trained_models_used} / {limitOf(account.trained_models_limit, String)}
+										{#if "trained_models" in account.quota_override}<span class="font-sans text-ink-dim"> (set)</span>{/if}
 									</td>
 									<td class="py-1.5 pr-3 text-2xs text-ink-dim">{when(account.last_login_at)}</td>
 									<td class="py-1.5">
@@ -299,8 +334,8 @@
 												onclick={() => {
 													editing = editing === account.id ? null : account.id;
 													limits = {
-														storage: account.quota_override.storage_gb === null ? "unlimited" : String(account.quota_override.storage_gb ?? ""),
-														models: account.quota_override.trained_models === null ? "unlimited" : String(account.quota_override.trained_models ?? ""),
+														storage: limitText(account.quota_override.storage_gb),
+														models: limitText(account.quota_override.trained_models),
 													};
 												}}
 											>
@@ -321,10 +356,14 @@
 												<button
 													class="btn btn-danger"
 													onclick={() =>
-														run(async () => {
-															await api(`/api/admin/users/${account.id}/status`, { method: "PUT", body: { status: "disabled" } });
-															await loadAccounts();
-														}, `${account.username} can't sign in now.`)}
+														confirmed(
+															`Disable ${account.username}? They're signed out at once, and the jobs they started stop.`,
+															() =>
+																run(async () => {
+																	await api(`/api/admin/users/${account.id}/status`, { method: "PUT", body: { status: "disabled" } });
+																	await loadAccounts();
+																}, `${account.username} can't sign in now.`),
+														)}
 												>
 													Disable
 												</button>
@@ -340,9 +379,11 @@
 												onsubmit={(event) => {
 													event.preventDefault();
 													run(async () => {
+														// Keep any other limits set for them (such as compute hours).
+														const { storage_gb: _s, trained_models: _m, ...others } = account.quota_override;
 														await api(`/api/admin/users/${account.id}/quota`, {
 															method: "PUT",
-															body: override(limits.storage, limits.models),
+															body: { ...others, ...override(limits.storage, limits.models) },
 														});
 														editing = null;
 														await loadAccounts();
@@ -367,6 +408,9 @@
 						</tbody>
 					</table>
 				</div>
+				{#if accounts.length === LISTED}
+					<p class="text-2xs text-ink-dim">Showing the newest {LISTED}; find others by name.</p>
+				{/if}
 			</div>
 		</section>
 
@@ -390,10 +434,12 @@
 									<button
 										class="btn btn-ghost ml-auto"
 										onclick={() =>
-											run(async () => {
-												await api(`/api/admin/workers/${worker.id}`, { method: "DELETE" });
-												workers = await api<WorkerRow[]>("/api/admin/workers");
-											}, `${worker.name} can't take jobs now.`)}
+											confirmed(`Revoke ${worker.name}? Its running jobs go back in the queue.`, () =>
+												run(async () => {
+													await api(`/api/admin/workers/${worker.id}`, { method: "DELETE" });
+													workers = await api<WorkerRow[]>("/api/admin/workers");
+												}, `${worker.name} can't take jobs now.`),
+											)}
 									>
 										Revoke
 									</button>
@@ -448,10 +494,12 @@
 							error = "That isn't a v1 job's id or link.";
 							return;
 						}
-						run(async () => {
-							await api(`/api/v1-jobs/${id}/release`, { method: "POST" });
-							releaseId = "";
-						}, `Released ${id}: its project is deleted, and the job can be claimed again.`);
+						confirmed(`Release ${id}? This deletes the project made from it.`, () =>
+							run(async () => {
+								await api(`/api/v1-jobs/${id}/release`, { method: "POST" });
+								releaseId = "";
+							}, `Released ${id}: its project is deleted, and the job can be claimed again.`),
+						);
 					}}
 				>
 					<label class="label flex-1">
@@ -501,10 +549,12 @@
 										<button
 											class="btn btn-ghost"
 											onclick={() =>
-												run(async () => {
-													await api(`/api/admin/jobs/${job.id}/cancel`, { method: "POST" });
-													await loadJobs();
-												})}
+												confirmed(`Cancel this ${job.kind} job and the rest of its pipeline?`, () =>
+													run(async () => {
+														await api(`/api/admin/jobs/${job.id}/cancel`, { method: "POST" });
+														await loadJobs();
+													}),
+												)}
 										>
 											Cancel
 										</button>
