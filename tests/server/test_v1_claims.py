@@ -39,7 +39,7 @@ from ml4paleo_worker.client import ServerClient
 from ml4paleo_worker.context import JobContext, PermanentError
 from ml4paleo_worker.handlers import HANDLERS, V1_HANDLERS, v1import
 from ml4paleo_worker.main import Worker
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX
 from ml4paleo.labels.codec import decode_chunk
@@ -639,6 +639,61 @@ def test_releasing_a_job_stops_its_project(
     assert beat.json()["cancel"] is True
     # As deleting the project would, releasing gives the model's slot back.
     assert ada.get("/api/me/quota").json()["trained_models_used"] == 0
+
+
+def test_a_release_stops_what_a_finishing_import_starts(
+    new_browser, settings, migrated_database_url
+):
+    ada = new_browser()
+    signup(ada)
+    bob = new_browser()
+    signup(bob, username="bob")
+    claimed = ada.post("/api/v1-jobs/ABC123/claim").json()
+    project = uuid.UUID(claimed["project_id"])
+    [probe] = [uuid.UUID(pipeline) for pipeline in claimed["pipeline_ids"]]
+    admin, _ = make_admin(new_browser, migrated_database_url)
+    release = "/api/v1-jobs/ABC123/release"
+
+    async def scenario():
+        engine = create_engine(migrated_database_url)
+        sessions = create_sessionmaker(engine)
+        try:
+            # As the image's finalize starts the labels when the release
+            # comes: the release waits for it, then stops what it started.
+            async with sessions() as finishing:
+                await finishing.execute(
+                    select(Job.id).where(Job.id == probe).with_for_update(read=True)
+                )
+                labels = await jobs.enqueue(
+                    finishing,
+                    "v1.labels",
+                    {},
+                    project_id=project,
+                    required_labels=["v1-volume"],
+                )
+                releasing = asyncio.get_running_loop().run_in_executor(
+                    None, lambda: admin.post(release, json={"to": "bob"})
+                )
+                await asyncio.sleep(0.5)
+                waited = not releasing.done()
+                await finishing.commit()
+                released = await asyncio.wait_for(releasing, 10)
+            # And a finalize that comes after the release starts nothing.
+            async with sessions() as late:
+                await pipelines.v1import.after_image(late, settings, Job(root_id=probe))
+                started = await late.scalar(
+                    select(func.count())
+                    .select_from(Job)
+                    .where(Job.project_id == project, Job.id.not_in([probe, labels.id]))
+                )
+                status = await late.scalar(
+                    select(Job.status).where(Job.id == labels.id)
+                )
+        finally:
+            await engine.dispose()
+        return waited, released.status_code, status, started
+
+    assert asyncio.run(scenario()) == (True, 204, "cancelled", 0)
 
 
 def test_releasing_doesnt_wait_for_rows_that_refer_to_the_project(

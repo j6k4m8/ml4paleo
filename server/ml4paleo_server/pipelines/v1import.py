@@ -305,8 +305,21 @@ async def after_probe(db: AsyncSession, settings: Settings, probe: Job) -> None:
 
 async def after_image(db: AsyncSession, settings: Settings, finalize: Job) -> None:
     """The image is in: start what else the probe found to bring over."""
-    probe = await db.get(Job, finalize.root_id)
+    # Share-locked: stopping the project (`train.stop_project`) cancels this
+    # pipeline under a lock, then looks for pipelines started meanwhile. So
+    # either it has, and this sees it, or it waits and finds what this starts.
+    probe = await db.scalar(
+        select(Job)
+        .where(Job.id == finalize.root_id)
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
+    )
     assert probe is not None and probe.created_by is not None
+    deleted = await db.scalar(
+        select(Project.deleted_at).where(Project.id == probe.project_id)
+    )
+    if probe.cancel_requested or deleted is not None:
+        return
     result = probe.result or {}
     await follow_ups(
         db,
