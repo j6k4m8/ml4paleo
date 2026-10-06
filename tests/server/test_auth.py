@@ -368,6 +368,9 @@ def test_admins_set_the_requirement_and_confirm_addresses(
         f"/api/admin/users/{bob_id}/confirm-email", json={"email": "bob@example.org"}
     )
     assert refused.status_code == 403
+    # Settings changes say what to change.
+    assert admin.put("/api/admin/settings", json={}).status_code == 422
+    assert admin.put("/api/admin/settings", json={"require": True}).status_code == 422
 
     # People without an address can add one (it isn't confirmed by that).
     added = bob.put(

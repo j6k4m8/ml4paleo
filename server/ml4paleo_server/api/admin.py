@@ -7,7 +7,7 @@ import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, or_, select
 
 from .. import audit, jobs, quotas
@@ -41,6 +41,8 @@ class SiteSettingsOut(BaseModel):
 class SiteSettingsIn(BaseModel):
     """The settings to change; those left out stay as they are."""
 
+    model_config = ConfigDict(extra="forbid")
+
     signup_mode: SignupMode | None = None
     require_email: bool | None = None
 
@@ -68,6 +70,9 @@ async def update_site_settings(
     db: DbSession,
     settings: SettingsDep,
 ) -> SiteSettingsOut:
+    changes = body.model_dump(exclude_none=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="Say which settings to change.")
     if body.signup_mode is not None:
         await set_signup_mode(db, body.signup_mode)
     if body.require_email is not None:
@@ -79,7 +84,7 @@ async def update_site_settings(
         target_type="site",
         target_id="settings",
         request=request,
-        details=body.model_dump(exclude_none=True),
+        details=changes,
     )
     await db.commit()
     return await _site_settings(db, settings)
