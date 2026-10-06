@@ -15,7 +15,9 @@ Garbage collection (run by the housekeeper) is the only thing that deletes
 artifact files: failed artifacts after `keep_failed_hours`, replaced ones
 after `keep_superseded_days` (replaced proposals sooner, after two days),
 expired ones (caches such as exports), and everything in deleted projects.
-It skips artifacts that a waiting or running job may still read.
+It skips artifacts that a waiting or running job may still read, and
+predictions that labels were accepted from, which those labels' record of
+where they came from names.
 """
 
 import base64
@@ -27,14 +29,15 @@ from typing import Any
 
 import obstore
 from fastapi import HTTPException
-from sqlalchemy import and_, delete, exists, func, or_, select, update
+from sqlalchemy import String, and_, cast, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ml4paleo.labels import Source
 from ml4paleo.storage import MANIFEST_KEY, object_store
 
 from . import quotas
-from .db import Artifact, ArtifactHead, Job, Project, User
+from .db import Artifact, ArtifactHead, Job, LabelOp, Project, User
 from .jobs.queue import Rejected
 from .settings import Settings
 from .storage import project_storage
@@ -276,10 +279,24 @@ def _in_use():
     )
 
 
+def _accepted_from():
+    """
+    SQL: labels were accepted from the artifact (a prediction or proposal),
+    so their ops name it as where they came from (live or undone, since a
+    redo brings them back).
+    """
+    return exists().where(
+        LabelOp.project_id == Artifact.project_id,
+        LabelOp.source == int(Source.MODEL_VERIFIED),
+        LabelOp.tool["prediction"].astext == cast(Artifact.id, String),
+    )
+
+
 def _collectable(settings: Settings):
     """
     SQL: artifacts whose files garbage collection may delete now. A current
-    head is never collected unless its project was deleted.
+    head, or a prediction labels were accepted from, is never collected
+    unless its project was deleted.
     """
     current = now()
     storage = settings.storage
@@ -295,6 +312,7 @@ def _collectable(settings: Settings):
             and_(Artifact.state != "staging", deleted_project),
             and_(
                 ~is_head,
+                ~_accepted_from(),
                 or_(
                     and_(
                         Artifact.state == "failed",

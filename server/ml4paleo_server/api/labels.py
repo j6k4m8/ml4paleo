@@ -393,13 +393,19 @@ async def accept_prediction(
     """
     if done := await labels.existing(db, project.id, body.client_op_id):
         return _op_out(done)
+    # Share-locked until the op commits: garbage collection locks the
+    # artifact and then looks for ops accepted from it, so it either waits
+    # and finds this one, or has already started deleting it and this
+    # finds nothing.
     prediction = await db.scalar(
-        select(Artifact).where(
+        select(Artifact)
+        .where(
             Artifact.id == body.prediction_artifact_id,
             Artifact.project_id == project.id,
             Artifact.kind == "prediction",
             Artifact.state.in_(("committed", "superseded")),
         )
+        .with_for_update(read=True)
     )
     roi = await db.scalar(
         select(Roi).where(Roi.id == body.roi_id, Roi.project_id == project.id)
