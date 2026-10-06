@@ -98,8 +98,9 @@ class QuotaSettings(BaseModel):
 
 class V1Settings(BaseModel):
     """
-    Importing jobs from the ml4paleo v1 app this one replaced. People claim
-    a job by visiting its old link (`/job/<id>`) signed in.
+    Importing jobs from the ml4paleo v1 app this one replaced. Signed in,
+    people import a job from its old link (`/job/<id>`, which asks first) or
+    the import page.
     """
 
     # A folder with v1's jobs.json (the API reads nothing else of v1's),
