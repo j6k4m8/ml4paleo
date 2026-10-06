@@ -19,6 +19,7 @@ export type Action =
 	| "roi"
 	| "next-roi"
 	| "complete-roi"
+	| "accept"
 	| "smaller"
 	| "bigger"
 	| "class"
@@ -52,6 +53,7 @@ export const KEYMAP: Binding[] = [
 	{ action: "roi", keys: ["r"], label: "Draw an ROI" },
 	{ action: "next-roi", keys: ["g"], label: "Go to the next open ROI" },
 	{ action: "complete-roi", keys: ["c"], label: "Mark the selected ROI complete (with Shift: reopen)" },
+	{ action: "accept", keys: ["a"], label: "Accept the prediction in the selected ROI as labels" },
 	{ action: "smaller", keys: ["["], label: "Smaller brush" },
 	{ action: "bigger", keys: ["]"], label: "Bigger brush" },
 	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class" },

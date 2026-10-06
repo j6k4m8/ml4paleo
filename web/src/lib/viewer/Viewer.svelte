@@ -1,6 +1,7 @@
 <script lang="ts">
 	import Brush from "@lucide/svelte/icons/brush";
 	import Check from "@lucide/svelte/icons/check";
+	import CheckCheck from "@lucide/svelte/icons/check-check";
 	import CloudOff from "@lucide/svelte/icons/cloud-off";
 	import Eraser from "@lucide/svelte/icons/eraser";
 	import Eye from "@lucide/svelte/icons/eye";
@@ -23,6 +24,7 @@
 	import { ApiError, api } from "#lib/api.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { ProjectImage } from "#lib/types.ts";
+	import { acceptParts, MAX_ACCEPT_VOXELS, readBox } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
 	import { PlaneMask } from "../labels/raster";
@@ -264,6 +266,42 @@
 	}
 
 	const openRois = $derived(rois.items.filter((r) => r.status === "open"));
+	const selectedRoi = $derived(rois.items.find((r) => r.id === viewer.selectedRoi) ?? null);
+	let accepting = $state(false);
+
+	/**
+	 * Copy the model's prediction inside an ROI into the labels, as accepted
+	 * (model-verified) labels, without touching voxels anyone labeled.
+	 */
+	async function acceptPrediction(roi: Roi) {
+		if (!prediction || !labels || accepting) return;
+		const [z0, y0, x0, z1, y1, x1] = roi.bbox;
+		if ((z1 - z0) * (y1 - y0) * (x1 - x0) > MAX_ACCEPT_VOXELS) {
+			notice = "That ROI is too big to accept at once; draw a smaller one.";
+			return;
+		}
+		accepting = true;
+		notice = "";
+		const store = prediction;
+		try {
+			const values = await readBox((id) => {
+				// Keep these loads from being cancelled by the views' own requests.
+				store.want(`accept:${id}`, new Set([id]));
+				return store.request(id).finally(() => store.want(`accept:${id}`, new Set()));
+			}, roi.bbox as [number, number, number, number, number, number]);
+			const parts = acceptParts(values, roi.bbox as [number, number, number, number, number, number]);
+			const ops = queue.editMany(parts, {
+				source: "model_verified",
+				tool: { name: "accept-prediction", roi: roi.id, model: predictionModel },
+			});
+			for (const op of ops) labels.applyLocal(op.local, op.deltas);
+			if (ops.length === 0) notice = "The prediction has nothing in that ROI.";
+		} catch (e) {
+			notice = `Couldn't read the prediction: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			accepting = false;
+		}
+	}
 
 	/** The next open ROI after the selected one, in list order. */
 	function nextOpen() {
@@ -325,6 +363,9 @@
 				return setTool(action);
 			case "next-roi":
 				return nextOpen();
+			case "accept":
+				if (selectedRoi) void acceptPrediction(selectedRoi);
+				return;
 			case "complete-roi":
 				if (viewer.selectedRoi) rois.update(viewer.selectedRoi, { status: event.shiftKey ? "open" : "complete" });
 				return;
@@ -648,6 +689,17 @@
 					{/each}
 				</ul>
 				{#if rois.error}<p class="error" role="alert">{rois.error}</p>{/if}
+				{#if prediction && selectedRoi}
+					<button
+						class="btn"
+						disabled={accepting}
+						title="Fill the selected ROI's unlabeled voxels with the prediction (A)"
+						onclick={() => selectedRoi && acceptPrediction(selectedRoi)}
+					>
+						<CheckCheck size={13} />
+						{accepting ? "Accepting…" : "Accept prediction here"}
+					</button>
+				{/if}
 				<a href="/p/{project}/rois" class="self-start text-2xs">Open the ROI gallery</a>
 			</Panel>
 

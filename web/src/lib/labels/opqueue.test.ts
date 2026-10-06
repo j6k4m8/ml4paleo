@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "#lib/api.ts";
 import type { DeltaIn } from "./deltas";
-import { MAX_DELTAS, type OpOut, OpQueue, type Outcome } from "./opqueue.svelte";
+import { batches, MAX_DELTAS, MAX_OP_BYTES, type OpOut, OpQueue, type Outcome } from "./opqueue.svelte";
 
 const delta = (x: number): DeltaIn => ({ key: [0, 0, x], base_version: 0, box: [0, 0, 0, 1, 1, 1], mask: "", value: 2, only_if: "any" });
 
@@ -126,6 +126,24 @@ describe("OpQueue", () => {
 			["edit", undefined],
 			["undo", 1],
 		]);
+	});
+
+	it("keeps ops under the request size limit", () => {
+		const big = (x: number): DeltaIn => ({ ...delta(x), mask: "a".repeat(MAX_OP_BYTES / 3) });
+		const parts = batches([big(0), big(1), big(2), big(3)]);
+		expect(parts.map((p) => p.length)).toEqual([2, 2]);
+	});
+
+	it("undoes edits made together as one, and sends their source", async () => {
+		const { calls, send } = server();
+		const queue = new OpQueue("p", null, send);
+		queue.editMany([[delta(0)], [delta(1)]], { source: "model_verified" });
+		await settle(queue);
+		expect(calls.map((c) => (c.body as unknown as { source: string }).source)).toEqual(["model_verified", "model_verified"]);
+		queue.undo();
+		await settle(queue);
+		expect(calls.slice(2).map((c) => c.path.split("/labels/")[1])).toEqual(["ops/2/undo", "ops/1/undo"]);
+		expect(queue.undoable).toBe(0);
 	});
 
 	it("lets the page adjust an edit just before it goes", async () => {

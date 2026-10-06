@@ -368,6 +368,32 @@ def test_concurrent_retries_return_the_first_result(
     assert count == 2
 
 
+def test_accepted_predictions_are_marked_model_verified(ada, project):
+    mask = np.ones((2, 2, 2), dtype=bool)
+    response = ada.post(
+        f"/api/projects/{project}/labels/ops",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "deltas": deltas_for(mask, (0, 0, 0), value=2),
+            "source": "model_verified",
+            "tool": {"name": "accept-prediction"},
+        },
+    )
+    assert response.status_code == 201, response.text
+    source = chunk(ada, project, (0, 0, 0), array="source")
+    assert (source[:2, :2, :2] == Source.MODEL_VERIFIED).all()
+    # People can't claim other sources (a model's raw output, an import).
+    refused = ada.post(
+        f"/api/projects/{project}/labels/ops",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "deltas": deltas_for(mask, (0, 0, 0), value=2),
+            "source": "imported",
+        },
+    )
+    assert refused.status_code == 422
+
+
 def test_out_of_range_numbers_are_refused(ada, project):
     base = f"/api/projects/{project}/labels"
     huge = "9" * 20

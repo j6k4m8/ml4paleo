@@ -14,6 +14,8 @@ import type { Vec3 } from "../viewer/tiles";
 import type { DeltaIn } from "./deltas";
 
 export const MAX_DELTAS = 512;
+// Keep each op's body well under the API's 8 MiB request limit.
+export const MAX_OP_BYTES = 5 * 1024 * 1024;
 
 export interface OpOut {
 	seq: number;
@@ -27,6 +29,8 @@ export interface QueuedEdit {
 	deltas: DeltaIn[];
 	strict: boolean;
 	tool: Record<string, unknown>;
+	/** "model_verified" for a model's prediction someone accepted. */
+	source?: "human" | "model_verified";
 }
 
 export interface QueuedToggle {
@@ -60,6 +64,31 @@ interface UndoGroup {
 }
 
 type Send = (path: string, body: unknown) => Promise<OpOut>;
+
+export interface EditOptions {
+	strict?: boolean;
+	tool?: Record<string, unknown>;
+	source?: "human" | "model_verified";
+}
+
+/** Split deltas into op-sized batches, by count and by encoded size. */
+export function batches(deltas: DeltaIn[]): DeltaIn[][] {
+	const out: DeltaIn[][] = [];
+	let current: DeltaIn[] = [];
+	let bytes = 0;
+	for (const delta of deltas) {
+		const size = delta.mask.length + (delta.values?.length ?? 0) + 200;
+		if (current.length > 0 && (current.length >= MAX_DELTAS || bytes + size > MAX_OP_BYTES)) {
+			out.push(current);
+			current = [];
+			bytes = 0;
+		}
+		current.push(delta);
+		bytes += size;
+	}
+	if (current.length > 0) out.push(current);
+	return out;
+}
 
 const defaultSend: Send = (path, body) => api<OpOut>(path, { body });
 
@@ -124,19 +153,30 @@ export class OpQueue {
 
 	/**
 	 * Queue an edit; returns its ops (more than one when it touches more
-	 * chunks than one op may carry; undo treats them as one).
+	 * chunks, or more bytes, than one op may carry; undo treats them as one).
 	 */
-	edit(deltas: DeltaIn[], options: { strict?: boolean; tool?: Record<string, unknown> } = {}): QueuedEdit[] {
+	edit(deltas: DeltaIn[], options: EditOptions = {}): QueuedEdit[] {
+		return this.editMany([deltas], options);
+	}
+
+	/**
+	 * Queue several edits that undo and redo together, such as one per label
+	 * value when accepting a prediction (an op may only touch a chunk once).
+	 */
+	editMany(parts: DeltaIn[][], options: EditOptions = {}): QueuedEdit[] {
 		const ops: QueuedEdit[] = [];
-		for (let i = 0; i < deltas.length; i += MAX_DELTAS) {
-			ops.push({
-				kind: "edit",
-				local: newId(),
-				clientOpId: newId(),
-				deltas: deltas.slice(i, i + MAX_DELTAS),
-				strict: options.strict ?? false,
-				tool: options.tool ?? {},
-			});
+		for (const deltas of parts) {
+			for (const batch of batches(deltas)) {
+				ops.push({
+					kind: "edit",
+					local: newId(),
+					clientOpId: newId(),
+					deltas: batch,
+					strict: options.strict ?? false,
+					tool: options.tool ?? {},
+					...(options.source ? { source: options.source } : {}),
+				});
+			}
 		}
 		if (ops.length === 0) return ops;
 		this.#enqueue(ops);
@@ -259,6 +299,7 @@ export class OpQueue {
 					deltas: ready.deltas,
 					strict: ready.strict,
 					tool: ready.tool,
+					source: ready.source ?? "human",
 				});
 				this.#seqs.set(op.local, result.seq);
 			} else {

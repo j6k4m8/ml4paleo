@@ -28,7 +28,7 @@ import datetime
 import json
 import re
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
@@ -219,12 +219,18 @@ class DeltaIn(BaseModel):
         )
 
 
+# Who made an edit, as a person can claim it: drawn by hand, or a model's
+# prediction they looked at and accepted.
+EDIT_SOURCES = {"human": Source.HUMAN, "model_verified": Source.MODEL_VERIFIED}
+
+
 class OpIn(BaseModel):
     client_op_id: uuid.UUID
     deltas: list[DeltaIn] = Field(min_length=1, max_length=MAX_DELTAS)
     # Refuse the edit if any chunk changed since the client read it.
     strict: bool = False
     tool: dict[str, Any] = {}
+    source: Literal["human", "model_verified"] = "human"
 
     @field_validator("tool")
     @classmethod
@@ -303,7 +309,7 @@ async def apply_op(
             project.id,
             client_op_id=body.client_op_id,
             deltas=deltas,
-            source=Source.HUMAN,
+            source=EDIT_SOURCES[body.source],
             tool=body.tool,
             strict=body.strict,
             user_id=auth.user.id,
