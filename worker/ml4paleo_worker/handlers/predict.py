@@ -91,6 +91,8 @@ def finalize(ctx: JobContext) -> dict[str, Any]:
             "model_id": ctx.payload["model_id"],
             "class_values": ctx.payload["class_values"],
             "shape_zyx": ctx.payload["shape_zyx"],
+            # The window the image was normalized with.
+            "window": ctx.payload["window"],
         },
     )
     return {}

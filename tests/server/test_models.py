@@ -372,6 +372,59 @@ def test_a_prediction_of_a_replaced_image_is_hidden(
     assert ada.get(f"/api/projects/{project}/prediction").status_code == 404
 
 
+def labeled_project(browser, settings, database_url) -> str:
+    project = make_project(browser)
+    add_image(settings, database_url, project)
+    add_class(browser, project)
+    paint(settings, database_url, project, (5, 5, 5), np.ones((1, 3, 3)), BONE)
+    return project
+
+
+def ready_model(browser, database_url, project: str, window=None) -> dict:
+    """A model whose training has finished, as far as the server knows."""
+    model = browser.post(f"/api/projects/{project}/models", json={}).json()
+
+    async def finish(db):
+        trained = await db.get(TrainedModel, uuid.UUID(model["id"]))
+        artifact = await db.get(Artifact, trained.artifact_id)
+        artifact.state = "committed"
+        artifact.manifest = {"kind": "model"} | ({"window": window} if window else {})
+        await db.execute(
+            update(Job).where(Job.id == trained.job_id).values(status="succeeded")
+        )
+
+    run_db(database_url, finish)
+    return model
+
+
+def predict(browser, project: str, model: dict):
+    return browser.post(f"/api/projects/{project}/models/{model['id']}/predict")
+
+
+def windows(database_url, started: dict):
+    """The window a prediction recorded, and the one its jobs were given."""
+
+    async def read(db):
+        artifact = await db.get(Artifact, uuid.UUID(started["artifact_id"]))
+        root = await db.get(Job, uuid.UUID(started["pipeline_id"]))
+        return artifact.inputs["window"], root.payload["window"]
+
+    return run_db(database_url, read)
+
+
+def test_predictions_normalize_like_the_models_training(
+    ada, settings, migrated_database_url
+):
+    project = labeled_project(ada, settings, migrated_database_url)
+    kept = ready_model(ada, migrated_database_url, project, window=[100.0, 900.0])
+    older = ready_model(ada, migrated_database_url, project)
+    started = predict(ada, project, kept).json()
+    assert windows(migrated_database_url, started) == ([100.0, 900.0],) * 2
+    # A model that doesn't keep its window gets the image's.
+    started = predict(ada, project, older).json()
+    assert windows(migrated_database_url, started) == ([200, 800],) * 2
+
+
 def test_missing_label_blobs_fail_training_for_good(tmp_path):
     from ml4paleo_worker.context import JobContext, PermanentError
     from ml4paleo_worker.handlers import train as train_handler
@@ -521,5 +574,11 @@ def test_a_worker_trains_a_random_forest(
         trained = await db.get(TrainedModel, uuid.UUID(model["id"]))
         return (await db.get(Artifact, trained.artifact_id)).manifest
 
-    # The model keeps the window its training crops were normalized with.
+    async def prediction_window(db):
+        artifact = await db.get(Artifact, uuid.UUID(prediction["artifact_id"]))
+        return artifact.manifest["window"]
+
+    # The model keeps the window its training crops were normalized with,
+    # and its prediction normalized the image with it too.
     assert run_db(migrated_database_url, model_manifest)["window"] == [200.0, 800.0]
+    assert run_db(migrated_database_url, prediction_window) == [200.0, 800.0]

@@ -37,12 +37,23 @@ async def start(
     assert image.manifest is not None
     _, z, y, x = image.manifest["shape_czyx"]
     shape = (int(z), int(y), int(x))
+    # Normalize the image as the model's training crops were; models that
+    # don't keep their window get the image's.
+    window = (
+        (model_artifact.manifest or {}).get("window")
+        or image.manifest.get("window")
+        or [0, 1]
+    )
     prediction = await artifacts.create_staging(
         db,
         project_id=model.project_id,
         kind="prediction",
         head_slot="prediction",
-        inputs={"model_id": str(model.id), "image_artifact_id": str(image.id)},
+        inputs={
+            "model_id": str(model.id),
+            "image_artifact_id": str(image.id),
+            "window": window,
+        },
     )
     grants = [
         artifacts.grant_for(image, "r"),
@@ -58,7 +69,7 @@ async def start(
         "model_id": str(model.id),
         "plugin": model.plugin,
         "class_values": list(model.class_values),
-        "window": image.manifest.get("window") or [0, 1],
+        "window": window,
         "shape_zyx": list(shape),
     }
     prepare = await jobs.enqueue(
