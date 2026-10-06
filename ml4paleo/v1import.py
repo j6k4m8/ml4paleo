@@ -21,12 +21,14 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import numpy as np
 
 JOB_ID = re.compile(r"[0-9A-F]{6}")
 JOBS_FILE = "jobs.json"
+# A segmentation's folder: the time its model was trained.
+SEGMENTATION_NAME = re.compile(r"\d+\.zarr")
 # Statuses of jobs whose upload never became an image (as v1's job page
 # decides whether it can be annotated); v1 never used "pending".
 UNCONVERTED = {"pending", "uploading", "uploaded", "converting", "convert_error"}
@@ -71,6 +73,14 @@ def _is_array(path: Path) -> bool:
     return (path / ".zarray").is_file()
 
 
+def _is_segmentation(name: Any, folder: Path) -> TypeGuard[str]:
+    return (
+        isinstance(name, str)
+        and SEGMENTATION_NAME.fullmatch(name) is not None
+        and _is_array(folder / name)
+    )
+
+
 def _stamp(name: str) -> int:
     digits = name.split(".")[0].split("-")[0]
     return int(digits) if digits.isdigit() else -1
@@ -103,11 +113,11 @@ def segmentation(root: Path, job_id: str, record: dict[str, Any]) -> str | None:
         if not (isinstance(meta, dict) and _from_segment_runner(meta)):
             continue
         name = meta.get("segmentation_id")
-        if isinstance(name, str) and "/" not in name and _is_array(folder / name):
+        if _is_segmentation(name, folder):
             named.append(name)
     if named:
         return max(named, key=_stamp)
-    found = [p.name for p in folder.glob("*.zarr") if _is_array(p)]
+    found = [p.name for p in folder.glob("*.zarr") if _is_segmentation(p.name, folder)]
     if found and status(record) in SEGMENTED:
         return max(found, key=_stamp)
     return None

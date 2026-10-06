@@ -94,3 +94,18 @@ def test_migrated_sidecars_dont_vouch_for_a_segmentation(root):
     (models / "1745400150.json").unlink()
     failed = {**jobs["ABC123"], "status": "JobStatus.SEGMENT_ERROR"}
     assert segmentation(root, "ABC123", failed) is None
+
+
+def test_only_v1_segmentation_names_count(root):
+    segmented = root / "segmented" / "FEED01"
+    (segmented / "1745400150.zarr").rename(segmented / "latest.zarr")
+    finished = {**read_jobs(root)["FEED01"], "status": "JobStatus.SEGMENTED"}
+    assert segmentation(root, "FEED01", finished) is None
+    models = root / "models" / "FEED01"
+    models.mkdir()
+    sidecar = {
+        **v1_volume.runner_sidecar("1745400150"),
+        "segmentation_id": "latest.zarr",
+    }
+    (models / "1745400150.json").write_text(json.dumps(sidecar))
+    assert segmentation(root, "FEED01", finished) is None

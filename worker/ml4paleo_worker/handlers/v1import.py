@@ -29,6 +29,7 @@ from ml4paleo.ome import OmeImage, write_from_provider
 from ml4paleo.segmentation.predict import create_prediction
 from ml4paleo.storage import write_manifest
 from ml4paleo.v1import import (
+    SEGMENTATION_NAME,
     UNCONVERTED,
     annotations,
     image_path,
@@ -181,6 +182,8 @@ def prediction(ctx: JobContext) -> dict[str, Any]:
     root = _root(ctx)
     job_id = ctx.payload["job_id"]
     name = ctx.payload["segmentation"]
+    if not (isinstance(name, str) and SEGMENTATION_NAME.fullmatch(name)):
+        raise PermanentError(f"{name!r} isn't a v1 segmentation's name.")
     foreground = int(ctx.payload["foreground"])
     source = zarr.open_array(str(root / "segmented" / job_id / name), mode="r")
     shape = [int(n) for n in ctx.payload["shape_zyx"]]

@@ -24,6 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ml4paleo.labels import FIRST_CLASS, MAX_CLASS
+from ml4paleo.v1import import SEGMENTATION_NAME
 
 from .. import artifacts, jobs, quotas
 from ..db import Artifact, Job, LabelClass, Project, Roi, User
@@ -81,9 +82,11 @@ def check_probe_result(result: dict[str, Any]) -> None:
         raise ValueError("dtype must be a numeric dtype")
     found = result.get("segmentation")
     if found is not None and not (
-        isinstance(found, str) and 0 < len(found) <= 64 and "/" not in found
+        isinstance(found, str)
+        and len(found) <= 64
+        and SEGMENTATION_NAME.fullmatch(found)
     ):
-        raise ValueError("segmentation must be a folder name")
+        raise ValueError("segmentation must be a v1 segmentation's folder name")
 
 
 def _size(nbytes: float) -> str:

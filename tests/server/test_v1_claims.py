@@ -569,6 +569,33 @@ def test_the_import_class_and_new_classes_take_turns(
     assert asyncio.run(scenario()) == (2, True, 3)
 
 
+def test_segmentations_must_be_named_as_v1_named_them(volume, tmp_path):
+    probed = {
+        "kind": "v1",
+        "shape_zyx": [20, 30, 40],
+        "dtype": "<u2",
+        "levels": 1,
+        "slabs": [[0, 20]],
+        "annotations": 0,
+        "skipped_annotations": 0,
+    }
+    check = pipelines.v1import.check_probe_result
+    check({**probed, "segmentation": "1745400150.zarr"})
+    for name in ("latest.zarr", "..", "1745400150.zarr/..", "../FEED01/1.zarr"):
+        with pytest.raises(ValueError, match="segmentation"):
+            check({**probed, "segmentation": name})
+        payload = {
+            "job_id": "ABC123",
+            "segmentation": name,
+            "shape_zyx": [20, 30, 40],
+            "foreground": 2,
+        }
+        prediction = StorageGrant(url=(tmp_path / "prediction").as_uri(), access="rw")
+        ctx = context(volume, "v1.prediction", payload, [prediction])
+        with pytest.raises(PermanentError, match="v1 segmentation"):
+            v1import.prediction(ctx)
+
+
 def test_a_worker_without_the_volume_leaves_the_import_to_another(tmp_path):
     image = StorageGrant(url=(tmp_path / "image").as_uri(), access="rw")
     ctx = context(None, "v1.probe", {"job_id": "ABC123"}, [image])
