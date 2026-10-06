@@ -11,9 +11,13 @@ export interface V1Job {
 
 const JOB_ID = /^[0-9A-F]{6}$/;
 
-/** The v1 job id in a pasted id or link (`…/job/ab12cd`), or null. */
+/**
+ * The v1 job id in a pasted id or link, or null. v1 linked to a job's page
+ * (`…/job/ab12cd`), the pages under it (`…/job/ab12cd/models`), and its
+ * annotators (`…/job/annotate/ab12cd`, `…/job/annotate-v2/ab12cd`).
+ */
 export function parseJobId(text: string): string | null {
-	const match = /(?:^|\/job\/)([0-9a-f]{6})(?:[/?#]|$)/i.exec(text.trim());
+	const match = /(?:^|\/job\/(?:annotate(?:-v2)?\/)?)([0-9a-f]{6})(?:[/?#]|$)/i.exec(text.trim());
 	return match?.[1] ? match[1].toUpperCase() : null;
 }
 
