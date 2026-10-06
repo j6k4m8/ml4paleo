@@ -157,6 +157,10 @@ class RandomForestPredictor:
         self.sigma_max = float(meta["sigma_max"])
         self.halo = int(meta["halo"])
         self.num_classes = int(meta["num_classes"])
+        # float32 features, about four times over as for training crops (see
+        # `crop_cost`), then the class probabilities as float64, a few times
+        # over while scikit-learn adds up its trees.
+        self.bytes_per_voxel = 4 * 4 * int(meta["features"]) + 32 * self.num_classes
         # Threads for features (None: every core); the trees predict on one.
         self.threads = threads
         self.forest.n_jobs = 1
