@@ -16,6 +16,7 @@ from .base import Base, uuid7
 from .models import (
     ARTIFACT_STATES,
     JOB_STATUSES,
+    UPLOAD_STATES,
     Artifact,
     ArtifactHead,
     AuditEvent,
@@ -29,6 +30,7 @@ from .models import (
     QuotaRequest,
     RateLimit,
     SiteSetting,
+    Upload,
     User,
     UserSession,
     UserUsage,
@@ -55,6 +57,7 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 __all__ = [
     "ARTIFACT_STATES",
     "JOB_STATUSES",
+    "UPLOAD_STATES",
     "Artifact",
     "ArtifactHead",
     "AuditEvent",
@@ -71,6 +74,7 @@ __all__ = [
     "SiteSetting",
     "User",
     "UserSession",
+    "Upload",
     "UserUsage",
     "Worker",
     "create_engine",

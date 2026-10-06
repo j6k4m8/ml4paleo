@@ -111,6 +111,9 @@ jobs:
           --status 'http://caddy:8080/api/worker/v1/claim@9437184=413|-1'
           --status http://caddy:8080/api/auth/login=404
 
+      - name: Upload a file through Caddy straight to SeaweedFS
+        run: python3 .github/scripts/check_upload.py https://localhost
+
       - name: Run a job on the local worker
         run: >-
           docker compose -f deploy/compose/compose.yml

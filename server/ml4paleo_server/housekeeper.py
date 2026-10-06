@@ -15,6 +15,7 @@ import signal
 from sqlalchemy import delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from . import uploads
 from .artifacts import collect_garbage
 from .db import (
     AuthToken,
@@ -97,6 +98,10 @@ async def run_once(
         if collected := await collect_garbage(sessionmaker, settings):
             log.info("Deleted %d artifacts that are no longer needed", collected)
 
+    async def collect_uploads() -> None:
+        if removed := await uploads.collect_garbage(sessionmaker, settings):
+            log.info("Removed %d expired uploads", removed)
+
     async def send() -> None:
         if sent := await send_pending(sessionmaker, settings):
             log.info("Sent %d queued emails", sent)
@@ -104,7 +109,7 @@ async def run_once(
     async def tidy() -> None:
         await prune(sessionmaker)
 
-    for task in (reap, collect, send, tidy):
+    for task in (reap, collect, collect_uploads, send, tidy):
         try:
             await task()
         except Exception:

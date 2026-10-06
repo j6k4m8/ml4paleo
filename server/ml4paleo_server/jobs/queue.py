@@ -30,7 +30,7 @@ what is left), so a job that was busy at that moment can't slip through.
 
 Locks are taken in a fixed order to avoid deadlocks: a transaction locks the
 jobs it reports on or depends on, then that pipeline's root, then (for
-completions) the waiting children, then artifacts. `cancel_pipeline` waits only for the root;
+completions) the waiting children, then artifacts and uploads. `cancel_pipeline` waits only for the root;
 it skips other rows that are busy. Worker rows are only touched after job
 rows. Row locks are `FOR NO KEY UPDATE` (no key column ever changes), so they
 don't collide with the `KEY SHARE` locks that foreign-key checks take on the
@@ -57,7 +57,7 @@ from sqlalchemy.orm import aliased
 from ml4paleo.protocol import Tier, WorkerCaps
 from ml4paleo.storage import StorageGrant
 
-from ..db import Artifact, Job, JobAttempt, JobDep, Worker, uuid7
+from ..db import Artifact, Job, JobAttempt, JobDep, Upload, Worker, uuid7
 
 LEASE = datetime.timedelta(seconds=120)
 HEARTBEAT = datetime.timedelta(seconds=30)
@@ -191,7 +191,7 @@ async def enqueue(
         if cancelled:
             raise ValueError("The pipeline was cancelled")
     checked_grants = [_check_grant(g) for g in grants]
-    await _lock_granted_artifacts(db, [g["path"] for g in checked_grants])
+    await _lock_granted_files(db, [g["path"] for g in checked_grants])
     job = Job(
         id=uuid7(),
         kind=kind,
@@ -253,34 +253,45 @@ def _check_grant(grant: dict[str, str]) -> dict[str, str]:
     return {"path": path, "access": access}
 
 
-async def _lock_granted_artifacts(db: AsyncSession, paths: list[str]) -> None:
+async def _lock_granted_files(db: AsyncSession, paths: list[str]) -> None:
     """
-    Refuse grants to artifacts that garbage collection is deleting, and
-    share-lock the others until the caller commits. Collection locks an
-    artifact and then checks for jobs that use it, so the two can't pass
-    each other.
+    Refuse grants to artifacts and uploads that are gone or going, and
+    share-lock the rest until the caller commits. Garbage collection locks a
+    row and then checks for jobs that use it, so the two can't pass each
+    other. Uploads must be complete.
     """
-    ids = set()
+    ids: dict[str, set[uuid.UUID]] = {"artifacts": set(), "uploads": set()}
     for path in paths:
         parts = path.split("/")
-        if len(parts) >= 4 and parts[2] == "artifacts":
+        if len(parts) >= 4 and parts[2] in ids:
             try:
-                ids.add(uuid.UUID(parts[3]))
+                ids[parts[2]].add(uuid.UUID(parts[3]))
             except ValueError:
                 continue
-    if not ids:
-        return
-    rows = (
-        await db.execute(
-            select(Artifact.id, Artifact.state)
-            .where(Artifact.id.in_(sorted(ids)))
-            .order_by(Artifact.id)
-            .with_for_update(read=True)
+    for table, usable in ((Artifact, None), (Upload, "complete")):
+        wanted = sorted(ids[table.__tablename__])
+        if not wanted:
+            continue
+        rows = (
+            await db.execute(
+                select(table.id, table.state)
+                .where(table.id.in_(wanted))
+                .order_by(table.id)
+                .with_for_update(read=True)
+            )
+        ).all()
+        found = {row.id: row.state for row in rows}
+        bad = sorted(
+            str(i)
+            for i in wanted
+            if found.get(i) in (None, "deleting", "deleted", "aborted")
+            or (usable is not None and found.get(i) != usable)
         )
-    ).all()
-    gone = sorted(str(row.id) for row in rows if row.state in ("deleting", "deleted"))
-    if gone:
-        raise ValueError(f"Artifacts {gone} have been deleted")
+        if bad:
+            raise ValueError(
+                f"{table.__tablename__} {bad} are deleted or unfinished, so jobs "
+                "can't use them"
+            )
 
 
 async def claim(db: AsyncSession, worker: Worker, caps: WorkerCaps) -> Claimed | None:

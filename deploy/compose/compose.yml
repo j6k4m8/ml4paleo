@@ -18,6 +18,8 @@ x-server-environment: &server-environment
   M4P_SECRET_KEY_FILE: /run/secrets/secret_key
   M4P_STORAGE__URL: s3://ml4paleo
   M4P_STORAGE__ENDPOINT: http://seaweedfs:8333
+  # Browsers upload file parts to storage through Caddy, on this origin.
+  M4P_STORAGE__PUBLIC_ENDPOINT: https://${M4P_DOMAIN:?run setup.sh first}
   M4P_STORAGE__ACCESS_KEY_ID_FILE: /run/secrets/s3_access_key_id
   M4P_STORAGE__SECRET_ACCESS_KEY_FILE: /run/secrets/s3_secret_access_key
   # Optional outgoing email; see .env. The password is in secrets/.
@@ -60,7 +62,7 @@ services:
   caddy:
     image: caddy:2.11.6-alpine
     restart: unless-stopped
-    networks: [public, jobs]
+    networks: [public, jobs, uploads]
     ports:
       - "80:80"
       - "443:443"
@@ -126,9 +128,12 @@ services:
   seaweedfs:
     image: chrislusf/seaweedfs:4.48
     restart: unless-stopped
-    networks: [private]
+    networks: [private, uploads]
+    # -ip names the address SeaweedFS gives out for itself. It is on two
+    # networks, so give the service name, which each client resolves on its
+    # own network (an IP from one network is unreachable from the other).
     command: >-
-      server -dir=/data -ip.bind=0.0.0.0
+      server -dir=/data -ip=seaweedfs -ip.bind=0.0.0.0
       -s3 -s3.port=8333 -s3.config=/run/secrets/seaweedfs_s3_config
     secrets:
       - seaweedfs_s3_config
@@ -256,6 +261,10 @@ networks:
   # Caddy's worker port and the workers. Workers may need the internet (for
   # example to download model weights), so this one is not internal.
   jobs:
+  # Caddy and SeaweedFS only: Caddy passes browsers' signed part uploads to
+  # SeaweedFS's S3 port, and nothing else.
+  uploads:
+    internal: true
 
 secrets:
   database_url:

@@ -19,7 +19,32 @@
 		max_size 4GiB
 	}
 
-	reverse_proxy api:8000
+	# Browsers upload file parts straight to object storage, with URLs the
+	# API presigns for one part each. Only those requests reach SeaweedFS:
+	# a PUT of one part, into the project area of the ml4paleo bucket (the
+	# bucket in M4P_STORAGE__URL), with a signature. SeaweedFS checks the
+	# signature, which covers the exact length. The signature doesn't cover
+	# other headers, so no x-amz-* header gets through: one could turn the
+	# upload into a copy of another object (x-amz-copy-source).
+	@upload_part {
+		method PUT
+		path /ml4paleo/projects/*
+		query uploadId=* partNumber=* X-Amz-Signature=*
+		not header X-Amz-Copy-Source *
+		not header X-Amz-Copy-Source-Range *
+	}
+	handle @upload_part {
+		request_body {
+			max_size 1GiB
+		}
+		reverse_proxy seaweedfs:8333 {
+			header_up -X-Amz-*
+		}
+	}
+
+	handle {
+		reverse_proxy api:8000
+	}
 }
 
 # Workers on this machine reach the worker API here, over the jobs network.
