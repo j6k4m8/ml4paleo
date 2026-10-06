@@ -105,6 +105,19 @@ class SegmentationOut(BaseModel):
     committed_at: datetime.datetime
 
 
+async def _model_name(db, project_id: uuid.UUID, model_id: object) -> str | None:
+    """The name of this project's model with that id, if there is one."""
+    try:
+        wanted = uuid.UUID(str(model_id))
+    except ValueError:
+        return None
+    return await db.scalar(
+        select(TrainedModel.name).where(
+            TrainedModel.id == wanted, TrainedModel.project_id == project_id
+        )
+    )
+
+
 @router.get("")
 async def current_segmentation(
     project: MemberProject, db: DbSession
@@ -114,13 +127,13 @@ async def current_segmentation(
         raise HTTPException(
             status_code=404, detail="This project has no final segmentation yet."
         )
-    model_id = head.manifest.get("model_id")
-    model = await db.get(TrainedModel, uuid.UUID(model_id)) if model_id else None
+    # What the server recorded when it started, not what the worker wrote.
+    inputs = head.inputs or {}
     return SegmentationOut(
         artifact_id=head.id,
-        model_name=model.name if model else None,
-        min_voxels=int(head.manifest.get("min_voxels", 0)),
-        label_seq=int(head.manifest.get("label_seq", 0)),
+        model_name=await _model_name(db, project.id, inputs.get("model_id")),
+        min_voxels=int(inputs.get("min_voxels", 0)),
+        label_seq=int(inputs.get("label_seq", 0)),
         zarr_url=zarr_path(project.id, head.id),
         committed_at=head.state_changed_at,
     )

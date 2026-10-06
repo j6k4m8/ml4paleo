@@ -15,7 +15,7 @@ import pytest
 import zarr
 from helpers import SECRET_KEY, add_worker, run_db, signup
 from ml4paleo_server import artifacts, labels
-from ml4paleo_server.db import Artifact
+from ml4paleo_server.db import Artifact, TrainedModel, TrainingSet
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
@@ -197,6 +197,54 @@ def test_a_worker_composes_the_final_segmentation(
     )
     assert get_bytes(grant, "scratch/0.npz") is None
     assert get_bytes(grant, "inputs.json") is not None
+
+
+def test_the_final_segmentation_is_described_by_what_the_server_recorded(
+    new_browser, settings, migrated_database_url
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    bob = new_browser()
+    signup(bob, username="bob")
+    theirs = bob.post("/api/projects", json={"name": "Jaw"}).json()["id"]
+
+    async def setup(db):
+        db.add(TrainingSet(id="a" * 64, project_id=uuid.UUID(theirs), summary={}))
+        await db.flush()
+        model = TrainedModel(
+            project_id=uuid.UUID(theirs),
+            name="Bob's secret model",
+            plugin="rf",
+            params={},
+            training_set_id="a" * 64,
+            class_values=[BONE],
+        )
+        db.add(model)
+        await db.flush()
+        artifact = await artifacts.create_staging(
+            db,
+            project_id=uuid.UUID(project),
+            kind="segmentation",
+            head_slot="segmentation",
+            inputs={"model_id": str(model.id), "min_voxels": 7, "label_seq": 0},
+        )
+        artifact.state = "committed"
+        # What a worker wrote doesn't count.
+        artifact.manifest = {
+            "kind": "segmentation",
+            "shape_zyx": list(SHAPE),
+            "model_id": "not a model",
+            "min_voxels": 99,
+        }
+        await artifacts.set_head(db, artifact)
+
+    run_db(migrated_database_url, setup)
+    out = ada.get(f"/api/projects/{project}/segmentation")
+    assert out.status_code == 200, out.text
+    # Another project's model stays unnamed.
+    assert out.json()["model_name"] is None
+    assert out.json()["min_voxels"] == 7
 
 
 def test_one_final_segmentation_at_a_time(new_browser, settings, migrated_database_url):
