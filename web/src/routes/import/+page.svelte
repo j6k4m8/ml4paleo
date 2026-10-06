@@ -41,6 +41,7 @@
 
 	function add(event: SubmitEvent) {
 		event.preventDefault();
+		if (busy) return;
 		const id = parseJobId(pasted);
 		pasteError = id ? "" : "Paste a v1 job's id (six letters and digits) or its link.";
 		if (!id) return;
@@ -49,6 +50,10 @@
 		pasted = "";
 		claim(job);
 	}
+
+	// One at a time: the server counts each import as a miss until it finds
+	// the job, so several at once could use up the misses allowed.
+	const busy = $derived(Object.values(outcomes).some((o) => o.busy));
 </script>
 
 <div class="mx-auto flex max-w-3xl flex-col gap-4 p-6">
@@ -64,7 +69,7 @@
 			A job's id or link
 			<input class="field font-mono" bind:value={pasted} placeholder="AB12CD or https://…/job/AB12CD" />
 		</label>
-		<button class="btn btn-primary">Import</button>
+		<button class="btn btn-primary" disabled={busy}>Import</button>
 	</form>
 	{#if pasteError}<p class="error" role="alert">{pasteError}</p>{/if}
 
@@ -89,7 +94,7 @@
 							<a class="btn hover:no-underline" href="/p/{outcome.project_id}">Open <ArrowRight size={13} /></a>
 						{:else}
 							{#if outcome?.error}<span class="error text-2xs" role="alert">{outcome.error}</span>{/if}
-							<button class="btn" disabled={outcome?.busy} onclick={() => claim(job)}>
+							<button class="btn" disabled={busy} onclick={() => claim(job)}>
 								{outcome?.busy ? "Importing…" : "Import"}
 							</button>
 						{/if}
