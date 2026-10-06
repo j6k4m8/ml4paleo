@@ -65,19 +65,25 @@ async def release_slots(
     return len(released)
 
 
-async def release_failed_slots(db: AsyncSession, project: Project) -> None:
+async def release_failed_slots(
+    db: AsyncSession, owner_id: uuid.UUID, project_id: uuid.UUID | None = None
+) -> None:
     """
-    Give back the trained-model slots of the project's trainings that failed.
+    Give back the trained-model slots of the owner's trainings that failed,
+    in all of their projects, or only in `project_id`.
     """
     failed = (
         select(TrainedModel.id)
+        .join(Project, Project.id == TrainedModel.project_id)
         .outerjoin(Job, Job.id == TrainedModel.job_id)
         .where(
-            TrainedModel.project_id == project.id,
+            Project.owner_id == owner_id,
             (Job.status.in_(FAILED_JOB)) | (TrainedModel.job_id.is_(None)),
         )
     )
-    await release_slots(db, project.owner_id, TrainedModel.id.in_(failed))
+    if project_id is not None:
+        failed = failed.where(TrainedModel.project_id == project_id)
+    await release_slots(db, owner_id, TrainedModel.id.in_(failed))
 
 
 async def stop_project(db: AsyncSession, project: Project) -> None:
@@ -110,7 +116,8 @@ async def start(
 ) -> tuple[Job, TrainedModel]:
     owner = await db.get(User, project.owner_id)
     assert owner is not None
-    await release_failed_slots(db, project)
+    # Failed trainings anywhere in the owner's projects free their slots.
+    await release_failed_slots(db, owner.id)
     await quotas.reserve_trained_model(db, settings, owner)
     image = await db.get(Artifact, uuid.UUID(training_set.summary["image_artifact_id"]))
     assert image is not None

@@ -183,6 +183,37 @@ def test_model_slots_follow_training_and_deletion(
     assert ada.post(base, json={}).status_code == 202
 
 
+def test_failed_trainings_give_back_slots_across_projects(
+    new_browser, settings, migrated_database_url
+):
+    limited = settings.model_copy(
+        update={"quota": settings.quota.model_copy(update={"trained_models": 1})}
+    )
+    ada = new_browser(limited)
+    signup(ada)
+    first, second = make_project(ada), make_project(ada)
+    for project in (first, second):
+        add_image(limited, migrated_database_url, project)
+        add_class(ada, project)
+        paint(
+            limited, migrated_database_url, project, (5, 5, 5), np.ones((1, 3, 3)), BONE
+        )
+    model = ada.post(f"/api/projects/{first}/models", json={}).json()
+    assert ada.post(f"/api/projects/{second}/models", json={}).status_code == 403
+
+    async def fail(db):
+        await db.execute(
+            update(Job)
+            .where(Job.id == uuid.UUID(model["pipeline_id"]))
+            .values(status="failed")
+        )
+
+    run_db(migrated_database_url, fail)
+    # Without anyone listing the first project's models.
+    assert ada.post(f"/api/projects/{second}/models", json={}).status_code == 202
+    assert ada.get("/api/me/quota").json()["trained_models_used"] == 1
+
+
 def test_deleting_a_project_gives_back_its_model_slots(
     new_browser, settings, migrated_database_url
 ):

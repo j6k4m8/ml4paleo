@@ -119,7 +119,7 @@ async def _model(db, project: Project, model_id: uuid.UUID) -> TrainedModel:
 
 @router.get("/projects/{project_id}/models")
 async def list_models(project: MemberProject, db: DbSession) -> list[ModelOut]:
-    await train.release_failed_slots(db, project)
+    await train.release_failed_slots(db, project.owner_id, project.id)
     await db.commit()
     models = (
         await db.scalars(
