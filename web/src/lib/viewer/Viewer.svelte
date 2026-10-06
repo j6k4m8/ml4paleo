@@ -378,8 +378,10 @@
 	}
 
 	/**
-	 * Follow a pipeline until it ends, passing on its updates, and give its
-	 * final state. Stops following, and rejects, when `signal` aborts.
+	 * Follow a pipeline, passing on its updates, until it ends or its stream
+	 * closes for good (the server refused it, say), and give its state then:
+	 * in the second case it may still be unfinished. Stops following, and
+	 * rejects, when `signal` aborts.
 	 */
 	function finished(id: string, signal: AbortSignal, onupdate: (pipeline: Pipeline) => void): Promise<Pipeline> {
 		return new Promise((resolve, reject) => {
