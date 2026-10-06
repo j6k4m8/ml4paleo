@@ -29,8 +29,13 @@ export interface QueuedEdit {
 	deltas: DeltaIn[];
 	strict: boolean;
 	tool: Record<string, unknown>;
-	/** "model_verified" for a model's prediction someone accepted. */
-	source?: "human" | "model_verified";
+	/** Set when the edit accepts a model's prediction inside an ROI; the server checks it. */
+	accept?: Accept;
+}
+
+export interface Accept {
+	prediction: string;
+	roi: string;
 }
 
 export interface QueuedToggle {
@@ -68,7 +73,7 @@ type Send = (path: string, body: unknown) => Promise<OpOut>;
 export interface EditOptions {
 	strict?: boolean;
 	tool?: Record<string, unknown>;
-	source?: "human" | "model_verified";
+	accept?: Accept;
 }
 
 /** Split deltas into op-sized batches, by count and by encoded size. */
@@ -174,7 +179,7 @@ export class OpQueue {
 					deltas: batch,
 					strict: options.strict ?? false,
 					tool: options.tool ?? {},
-					...(options.source ? { source: options.source } : {}),
+					...(options.accept ? { accept: options.accept } : {}),
 				});
 			}
 		}
@@ -294,13 +299,19 @@ export class OpQueue {
 			let result: OpOut;
 			if (op.kind === "edit") {
 				const ready = this.beforeSend ? this.beforeSend(op) : op;
-				result = await this.send(`${base}/ops`, {
-					client_op_id: ready.clientOpId,
-					deltas: ready.deltas,
-					strict: ready.strict,
-					tool: ready.tool,
-					source: ready.source ?? "human",
-				});
+				result = ready.accept
+					? await this.send(`${base}/accept`, {
+							client_op_id: ready.clientOpId,
+							prediction_artifact_id: ready.accept.prediction,
+							roi_id: ready.accept.roi,
+							deltas: ready.deltas,
+						})
+					: await this.send(`${base}/ops`, {
+							client_op_id: ready.clientOpId,
+							deltas: ready.deltas,
+							strict: ready.strict,
+							tool: ready.tool,
+						});
 				this.#seqs.set(op.local, result.seq);
 			} else {
 				const seq = op.seq ?? this.#seqs.get(op.target);

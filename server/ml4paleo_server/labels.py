@@ -212,7 +212,8 @@ async def result_of(db: AsyncSession, op: LabelOp) -> OpResult:
     )
 
 
-def _global_box(deltas: Sequence[ChunkDelta]) -> list[int]:
+def global_box(deltas: Sequence[ChunkDelta]) -> list[int]:
+    """The level-0 box (z0, y0, x0, z1, y1, x1) the deltas cover."""
     starts, stops = [], []
     for delta in deltas:
         origin = [k * s for k, s in zip(delta.key, LABEL_CHUNK_ZYX, strict=True)]
@@ -290,7 +291,7 @@ async def apply_edit(
         job_id=job_id,
         source=int(source),
         tool=tool or {},
-        bbox=_global_box(deltas),
+        bbox=global_box(deltas),
         live=True,
     )
     return await _record(db, op, claims)
@@ -466,6 +467,7 @@ __all__ = [
     "apply_edit",
     "changes_since",
     "existing",
+    "global_box",
     "labels_root",
     "result_of",
     "set_live",

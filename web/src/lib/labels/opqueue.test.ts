@@ -134,12 +134,13 @@ describe("OpQueue", () => {
 		expect(parts.map((p) => p.length)).toEqual([2, 2]);
 	});
 
-	it("undoes edits made together as one, and sends their source", async () => {
+	it("sends accepted predictions to be checked, and undoes them as one", async () => {
 		const { calls, send } = server();
 		const queue = new OpQueue("p", null, send);
-		queue.editMany([[delta(0)], [delta(1)]], { source: "model_verified" });
+		queue.editMany([[delta(0)], [delta(1)]], { accept: { prediction: "pred", roi: "roi" } });
 		await settle(queue);
-		expect(calls.map((c) => (c.body as unknown as { source: string }).source)).toEqual(["model_verified", "model_verified"]);
+		expect(calls.map((c) => c.path)).toEqual(["/api/projects/p/labels/accept", "/api/projects/p/labels/accept"]);
+		expect(calls[0]?.body).toMatchObject({ prediction_artifact_id: "pred", roi_id: "roi" });
 		queue.undo();
 		await settle(queue);
 		expect(calls.slice(2).map((c) => c.path.split("/labels/")[1])).toEqual(["ops/2/undo", "ops/1/undo"]);
