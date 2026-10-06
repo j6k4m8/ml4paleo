@@ -21,6 +21,7 @@ from sqlalchemy import exists, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from ml4paleo.segmentation.plugin import get_plugin
 from ml4paleo.segmentation.predict import SHARD_ZYX, shard_boxes
 
 from .. import artifacts, jobs
@@ -62,6 +63,7 @@ async def start(
     )
     if model_artifact is None or model_artifact.state != "committed":
         raise ValueError("That model isn't ready.")
+    plugin = get_plugin(model.plugin)
     # Predictions in a project start one at a time, so each sees the others.
     await db.scalar(
         select(Project.id)
@@ -120,6 +122,7 @@ async def start(
         db, "predict.prepare", payload, weight=WEIGHTS["prepare"], **common
     )
     boxes = shard_boxes(shape, SHARD_ZYX)
+    # Only the shards run the model, so only they need the plugin's GPU.
     shards = [
         await jobs.enqueue(
             db,
@@ -128,6 +131,7 @@ async def start(
             pipeline=prepare,
             depends_on=[prepare],
             weight=WEIGHTS["shards"] / len(boxes),
+            min_vram_gb=plugin.caps.min_vram_gb,
             **common,
         )
         for box in boxes

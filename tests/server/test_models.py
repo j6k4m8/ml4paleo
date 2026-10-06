@@ -31,7 +31,7 @@ from ml4paleo_server.training import training_path
 from ml4paleo_worker.client import ServerClient
 from ml4paleo_worker.handlers import HANDLERS
 from ml4paleo_worker.main import Worker
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.ome import OmeImage
@@ -479,6 +479,31 @@ def test_deleting_a_model_stops_its_predictions(ada, settings, migrated_database
     assert pipeline_status(ada, project, started) == "waiting"
     assert ada.request("DELETE", f"{base}/{model['id']}").status_code == 204
     assert pipeline_status(ada, project, started) == "cancelled"
+
+
+def test_prediction_shards_ask_for_the_plugins_gpu(
+    ada, settings, migrated_database_url, monkeypatch
+):
+    from ml4paleo.segmentation.plugin import PluginCaps
+    from ml4paleo.segmentation.plugins.rf import RandomForestPlugin
+
+    project = labeled_project(ada, settings, migrated_database_url)
+    model = ready_model(ada, migrated_database_url, project)
+    caps = PluginCaps(devices=("cuda",), min_vram_gb=6.0)
+    monkeypatch.setattr(RandomForestPlugin, "caps", caps)
+    started = predict(ada, project, model).json()["pipeline_id"]
+
+    async def needs(db):
+        rows = await db.execute(
+            select(Job.kind, Job.min_vram_gb).where(Job.root_id == uuid.UUID(started))
+        )
+        return {kind: vram for kind, vram in rows}
+
+    assert run_db(migrated_database_url, needs) == {
+        "predict.prepare": 0,
+        "predict.shard": 6.0,
+        "prediction.finalize": 0,
+    }
 
 
 def test_missing_label_blobs_fail_training_for_good(tmp_path):
