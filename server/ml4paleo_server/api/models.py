@@ -28,7 +28,7 @@ from ml4paleo.segmentation.plugin import get_plugin, plugins
 
 from .. import artifacts, audit, jobs, quotas, training
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
-from ..db import Artifact, Job, Project, TrainedModel, TrainingSet, User
+from ..db import Artifact, Job, Project, Roi, TrainedModel, TrainingSet, User
 from ..pipelines import predict, train
 from .gateway import zarr_path
 from .projects import MemberProject
@@ -294,6 +294,51 @@ async def predict_with(
     return PredictionStarted(pipeline_id=root.id, artifact_id=artifact.id)
 
 
+class ProposeIn(BaseModel):
+    roi_id: uuid.UUID
+
+
+@router.post("/projects/{project_id}/models/{model_id}/propose", status_code=202)
+async def propose_with(
+    model_id: uuid.UUID,
+    body: ProposeIn,
+    project: MemberProject,
+    request: Request,
+    auth: CurrentAuth,
+    db: DbSession,
+) -> PredictionStarted:
+    """
+    Predict one ROI (up to 256³ voxels) with a ready model, ahead of other
+    work; the result becomes the project's proposal to look over and accept.
+    """
+    model = await _model(db, project, model_id)
+    image = await artifacts.head(db, project.id, "image")
+    if image is None or not image.manifest:
+        raise HTTPException(status_code=409, detail="This project has no image yet.")
+    roi = await db.scalar(
+        select(Roi).where(Roi.id == body.roi_id, Roi.project_id == project.id)
+    )
+    if roi is None:
+        raise HTTPException(status_code=404, detail="No such ROI.")
+    try:
+        job, artifact = await predict.propose(
+            db, model=model, image=image, roi=roi, created_by=auth.user.id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    audit.record(
+        db,
+        actor_id=auth.user.id,
+        action="model.propose",
+        target_type="project",
+        target_id=project.id,
+        request=request,
+        details={"model_id": str(model.id), "roi_id": str(roi.id)},
+    )
+    await db.commit()
+    return PredictionStarted(pipeline_id=job.id, artifact_id=artifact.id)
+
+
 class PredictionOut(BaseModel):
     artifact_id: uuid.UUID
     model_id: uuid.UUID | None
@@ -313,28 +358,60 @@ async def current_prediction(project: MemberProject, db: DbSession) -> Predictio
     The project's prediction, if it is of the current image (a prediction of
     an image that has since been replaced doesn't fit the new one).
     """
-    head = await artifacts.head(db, project.id, "prediction")
+    head = await _current(db, project.id, "prediction")
+    return await _prediction_out(db, project.id, head, PredictionOut)
+
+
+class ProposalOut(PredictionOut):
+    roi_id: uuid.UUID | None
+    # The box it covers, (z0, y0, x0, z1, y1, x1); it's empty elsewhere.
+    box: list[int]
+
+
+@router.get("/projects/{project_id}/proposal")
+async def current_proposal(project: MemberProject, db: DbSession) -> ProposalOut:
+    """
+    The project's newest proposal (one ROI predicted on demand), if it is of
+    the current image.
+    """
+    head = await _current(db, project.id, "proposal")
+    return await _prediction_out(
+        db,
+        project.id,
+        head,
+        ProposalOut,
+        roi_id=head.inputs.get("roi_id"),
+        box=list(head.inputs.get("box", [])),
+    )
+
+
+async def _current(db, project_id: uuid.UUID, slot: str) -> Artifact:
+    head = await artifacts.head(db, project_id, slot)
     if head is None or not head.manifest:
-        raise HTTPException(
-            status_code=404, detail="This project has no prediction yet."
-        )
-    image = await artifacts.head(db, project.id, "image")
+        raise HTTPException(status_code=404, detail=f"This project has no {slot} yet.")
+    image = await artifacts.head(db, project_id, "image")
     if image is None or head.inputs.get("image_artifact_id") != str(image.id):
         raise HTTPException(
-            status_code=404, detail="This project has no prediction of its image."
+            status_code=404, detail=f"This project has no {slot} of its image."
         )
+    return head
+
+
+async def _prediction_out(db, project_id: uuid.UUID, head: Artifact, out, **extra):
+    assert head.manifest is not None
     model_id = head.inputs.get("model_id")
     model = (
         await db.get(TrainedModel, uuid.UUID(model_id))
         if model_id is not None
         else None
     )
-    return PredictionOut(
+    return out(
         artifact_id=head.id,
         model_id=model.id if model else None,
         model_name=model.name if model else None,
         class_values=list(head.manifest.get("class_values", [])),
         shape_zyx=list(head.manifest.get("shape_zyx", [])),
-        zarr_url=zarr_path(project.id, head.id),
+        zarr_url=zarr_path(project_id, head.id),
         committed_at=head.state_changed_at,
+        **extra,
     )

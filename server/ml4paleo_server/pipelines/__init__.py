@@ -16,6 +16,7 @@ NAMES = {
     "ingest.probe": "ingest",
     "model.train": "training",
     "predict.prepare": "prediction",
+    "predict.region": "proposal",
     "compose.prepare": "segmentation",
     "noop": "check",
 }

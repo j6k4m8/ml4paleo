@@ -636,10 +636,27 @@ def test_a_worker_trains_a_random_forest(
         ).json()
         assert pipeline["status"] == "succeeded", pipeline
         assert pipeline["kind"] == "prediction"
+
+        # A proposal predicts just one ROI, on demand.
+        assert ada.get(f"/api/projects/{project}/proposal").status_code == 404
+        proposed = ada.post(
+            f"/api/projects/{project}/models/{model['id']}/propose",
+            json={"roi_id": roi["id"]},
+        )
+        assert proposed.status_code == 202, proposed.text
+        proposal_pipeline = wait(
+            f"/api/projects/{project}/pipelines/{proposed.json()['pipeline_id']}",
+            lambda r: r.json()["status"] in ("succeeded", "failed", "cancelled"),
+        ).json()
+        assert proposal_pipeline["status"] == "succeeded", proposal_pipeline
+        assert proposal_pipeline["kind"] == "proposal"
     finally:
         worker.stop()
         thread.join(timeout=30)
         client.close()
+    proposal = ada.get(f"/api/projects/{project}/proposal").json()
+    assert proposal["roi_id"] == roi["id"]
+    assert proposal["box"] == list(val)
     prediction = ada.get(f"/api/projects/{project}/prediction").json()
     assert prediction["model_id"] == model["id"]
     assert prediction["class_values"] == [BONE]
@@ -660,6 +677,21 @@ def test_a_worker_trains_a_random_forest(
     )
     predicted = np.asarray(group["class"][:])
     assert ((predicted == BONE) == truth).mean() > 0.95
+    # The proposal holds the same prediction inside its ROI, and nothing else.
+    proposed_classes = np.asarray(
+        zarr.open_group(
+            store=zarr_store(
+                project_storage(settings).child(
+                    f"projects/{project}/artifacts/{proposal['artifact_id']}"
+                )
+            ),
+            mode="r",
+        )["class"][:]
+    )
+    inside = tuple(slice(val[a], val[a + 3]) for a in range(3))
+    np.testing.assert_array_equal(proposed_classes[inside], predicted[inside])
+    proposed_classes[inside] = 0
+    assert not proposed_classes.any()
 
     async def model_manifest(db):
         trained = await db.get(TrainedModel, uuid.UUID(model["id"]))
