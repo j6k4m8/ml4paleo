@@ -47,6 +47,8 @@ from ..context import JobContext, PermanentError
 
 # A slab job reads at least this much of the image at once.
 MIN_READ_BYTES = 16 * 1024**2
+# The namespace of the label edits' ids, one per v1 job and sample.
+SAMPLE_OPS = uuid.UUID("2bf25a04-4522-4724-907e-b2b2dd0a9691")
 
 Box = list[tuple[int, int]]
 
@@ -235,8 +237,11 @@ def labels(ctx: JobContext) -> dict[str, Any]:
         try:
             ctx.apply_label_op(
                 {
-                    # The same id on a retry, so each sample lands once.
-                    "client_op_id": str(uuid.uuid5(ctx.job_id, annotation.stamp)),
+                    # Named by the v1 job and sample, so each sample lands once
+                    # however often the labels are brought over.
+                    "client_op_id": str(
+                        uuid.uuid5(SAMPLE_OPS, f"{job_id}/{annotation.stamp}")
+                    ),
                     "deltas": [_wire(delta) for delta in deltas],
                     "tool": {
                         "name": "v1-import",

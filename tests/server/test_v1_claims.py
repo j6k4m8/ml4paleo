@@ -24,6 +24,7 @@ from ml4paleo_server.db import (
     AuditEvent,
     Job,
     User,
+    UserUsage,
     create_engine,
     create_sessionmaker,
 )
@@ -34,7 +35,7 @@ from ml4paleo_worker.client import ServerClient
 from ml4paleo_worker.context import JobContext, PermanentError
 from ml4paleo_worker.handlers import HANDLERS, V1_HANDLERS, v1import
 from ml4paleo_worker.main import Worker
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX
 from ml4paleo.labels.codec import decode_chunk
@@ -168,6 +169,21 @@ def ran_on(database_url, project) -> dict[str, set[str]]:
     return run_db(database_url, look)
 
 
+def set_room(database_url, gb: float | None) -> None:
+    """Give ada `gb` of storage (None: just what she uses now)."""
+
+    async def set_quota(db):
+        user = await db.scalar(select(User).where(User.username == "ada"))
+        if gb is None:
+            usage = await db.get(UserUsage, user.id)
+            room = (usage.storage_bytes if usage else 0) / 1024**3
+        else:
+            room = gb
+        user.quota_override = {"storage_gb": room}
+
+    run_db(database_url, set_quota)
+
+
 def refusing_after(count: int):
     """A labels job whose server refuses every sample after the first `count`."""
 
@@ -294,7 +310,7 @@ def test_a_worker_imports_a_claimed_v1_job(
     # Claiming it again gives the same project.
     again = ada.post("/api/v1-jobs/ABC123/claim")
     assert again.status_code == 200
-    assert again.json() == {"project_id": project, "pipeline_id": None}
+    assert again.json() == {"project_id": project, "pipeline_ids": []}
 
 
 def test_a_failed_import_starts_again_when_claimed_again(
@@ -302,19 +318,8 @@ def test_a_failed_import_starts_again_when_claimed_again(
 ):
     ada = new_browser()
     signup(ada)
-
-    def room(gb):
-        async def set_quota(db):
-            await db.execute(
-                update(User)
-                .where(User.username == "ada")
-                .values(quota_override={"storage_gb": gb})
-            )
-
-        run_db(migrated_database_url, set_quota)
-
     # The scan doesn't fit, so nothing of it is copied.
-    room(1e-5)
+    set_room(migrated_database_url, 1e-5)
     claimed = ada.post("/api/v1-jobs/ABC123/claim").json()
     project = claimed["project_id"]
     [failed] = run_import(migrated_database_url, live_server, ada, project, volume)
@@ -323,12 +328,12 @@ def test_a_failed_import_starts_again_when_claimed_again(
     assert ada.get(f"/api/projects/{project}/labels/classes").json() == []
 
     # With room, claiming it again starts the import again.
-    room(1)
+    set_room(migrated_database_url, 1)
     again = ada.post("/api/v1-jobs/ABC123/claim")
     assert again.status_code == 200
-    restarted = again.json()["pipeline_id"]
+    [restarted] = again.json()["pipeline_ids"]
     assert again.json()["project_id"] == project
-    assert restarted not in (None, claimed["pipeline_id"])
+    assert [restarted] != claimed["pipeline_ids"]
     # Stop it once the probe has added the class, then start it once more.
     probing = Worker(
         ServerClient(add_worker(migrated_database_url), base_url=live_server),
@@ -341,8 +346,8 @@ def test_a_failed_import_starts_again_when_claimed_again(
     probing.client.close()
     cancel = f"/api/projects/{project}/pipelines/{restarted}/cancel"
     assert ada.post(cancel).status_code == 204
-    last = ada.post("/api/v1-jobs/ABC123/claim").json()["pipeline_id"]
-    assert last not in (None, restarted)
+    [last] = ada.post("/api/v1-jobs/ABC123/claim").json()["pipeline_ids"]
+    assert last != restarted
     done = run_import(migrated_database_url, live_server, ada, project, volume)
     assert statuses(done) == {
         "import": [
@@ -355,11 +360,72 @@ def test_a_failed_import_starts_again_when_claimed_again(
     }
     classes = ada.get(f"/api/projects/{project}/labels/classes").json()
     assert [(c["value"], c["name"]) for c in classes] == [(2, "Foreground")]
-    # Now that it has its image, claiming it again just opens it.
+    # Now that all of it is in, claiming it again just opens it.
     assert ada.post("/api/v1-jobs/ABC123/claim").json() == {
         "project_id": project,
-        "pipeline_id": None,
+        "pipeline_ids": [],
     }
+
+
+def test_claiming_again_brings_over_what_an_import_is_missing(
+    new_browser, settings, migrated_database_url, live_server, volume
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/v1-jobs/ABC123/claim").json()["project_id"]
+    run_import(
+        migrated_database_url,
+        live_server,
+        ada,
+        project,
+        volume,
+        v1_handlers=IMAGE_ONLY,
+        until=image_in,
+    )
+    image = ada.get(f"/api/projects/{project}/image").json()["artifact_id"]
+
+    # Once the image is in, the server refuses the second sample, and the
+    # prediction doesn't fit in what's left of ada's storage.
+    set_room(migrated_database_url, None)
+    handlers = {**V1_HANDLERS, "v1.labels": refusing_after(1)}
+    failed = statuses(
+        run_import(
+            migrated_database_url,
+            live_server,
+            ada,
+            project,
+            volume,
+            v1_handlers=handlers,
+        )
+    )
+    [(status, error)] = failed["import prediction"]
+    assert status == "failed"
+    assert error is not None and "storage_quota_exceeded" in error
+    assert failed["import labels"][0][0] == "failed"
+
+    # Claiming the job again starts both again, and only them...
+    set_room(migrated_database_url, 1)
+    again = ada.post("/api/v1-jobs/ABC123/claim")
+    assert again.status_code == 200
+    assert len(again.json()["pipeline_ids"]) == 2
+    done = statuses(
+        run_import(migrated_database_url, live_server, ada, project, volume)
+    )
+    assert done["import"] == [("succeeded", None)]
+    assert [status for status, _ in done["import labels"]] == ["failed", "succeeded"]
+    assert [s for s, _ in done["import prediction"]] == ["failed", "succeeded"]
+
+    # ...which bring over what's missing, nothing twice.
+    assert ada.get(f"/api/projects/{project}/image").json()["artifact_id"] == image
+    ops = ada.get(f"/api/projects/{project}/labels/ops").json()
+    assert sorted(op["tool"]["sample"] for op in ops) == [
+        "1745400000",
+        "1745400100-z07",
+    ]
+    rois = ada.get(f"/api/projects/{project}/rois").json()
+    assert sorted(r["bbox"][0] for r in rois) == [9, 11]
+    assert ada.get(f"/api/projects/{project}/prediction").json()["class_values"] == [2]
+    assert ada.post("/api/v1-jobs/ABC123/claim").json()["pipeline_ids"] == []
 
 
 def test_the_labels_and_the_prediction_come_over_on_their_own(
@@ -447,7 +513,7 @@ def test_releasing_a_job_stops_its_import(new_browser, settings, migrated_databa
         json={"caps": caps, "wait_seconds": 0},
         headers=bearer(token),
     ).json()["job"]
-    assert lease["job_id"] == claimed["pipeline_id"]
+    assert [lease["job_id"]] == claimed["pipeline_ids"]
 
     admin, _ = make_admin(new_browser, migrated_database_url)
     assert admin.post("/api/v1-jobs/ABC123/release").status_code == 204

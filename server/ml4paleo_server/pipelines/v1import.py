@@ -19,6 +19,12 @@ a pipeline of its own, so one failing doesn't stop the other:
 the image commits, `after_image` starts the other two. When `v1.labels`
 succeeds, `after_labels` adds a complete slice ROI for each sample, so
 training treats the samples as fully labeled slices.
+
+A part is done when a job of it has succeeded. Claiming the job again starts
+whichever parts aren't done or running (`resume`), and each can run again:
+the image is made anew, the labels' edits are named by sample (so the ones
+that landed aren't applied twice) and their ROIs added once, and a new
+prediction replaces the one before.
 """
 
 import math
@@ -28,6 +34,7 @@ from typing import Any
 import numpy as np
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from ml4paleo.labels import FIRST_CLASS, MAX_CLASS
 from ml4paleo.v1import import SEGMENTATION_NAME
@@ -41,6 +48,7 @@ V1 = ["v1-volume"]
 FOREGROUND_NAME = "Foreground"
 FOREGROUND_COLOR = "#f2c14e"
 MAX_ROIS = 100_000
+UNFINISHED = ("blocked", "queued", "leased")
 # An image with its pyramid takes about this much more than its full
 # resolution alone (each level has an eighth of the voxels of the last).
 PYRAMID = 1.15
@@ -298,6 +306,68 @@ async def follow_ups(
     return started
 
 
+async def resume(
+    db: AsyncSession, project: Project, created_by: uuid.UUID
+) -> list[Job]:
+    """
+    Start again whichever parts of the project's import aren't done or
+    running, and return the jobs that start them.
+    """
+    assert project.v1_job_id is not None
+    image = await artifacts.head(db, project.id, "image")
+    if image is None:
+        root = aliased(Job)
+        image_running = await db.scalar(
+            select(Job.id)
+            .join(root, root.id == Job.root_id)
+            .where(
+                Job.project_id == project.id,
+                Job.status.in_(UNFINISHED),
+                root.kind == "v1.probe",
+            )
+            .limit(1)
+        )
+        if image_running is not None:
+            return []
+        probe, _ = await start(db, project, project.v1_job_id, created_by)
+        return [probe]
+    probe = await db.scalar(
+        select(Job)
+        .where(
+            Job.project_id == project.id,
+            Job.kind == "v1.probe",
+            Job.status == "succeeded",
+        )
+        .order_by(Job.created_at.desc(), Job.id.desc())
+        .limit(1)
+    )
+    if probe is None or probe.payload.get("artifact_id") != str(image.id):
+        # Someone made another image the project's; the rest of the import
+        # wouldn't fit it.
+        return []
+    result = probe.result or {}
+
+    async def missing(kind: str) -> bool:
+        done_or_running = await db.scalar(
+            select(Job.id)
+            .where(
+                Job.project_id == project.id,
+                Job.kind == kind,
+                Job.status.in_(("succeeded", *UNFINISHED)),
+            )
+            .limit(1)
+        )
+        return done_or_running is None
+
+    labels = bool(result.get("annotations")) and await missing("v1.labels")
+    prediction = bool(result.get("segmentation")) and await missing("v1.prediction")
+    if not (labels or prediction):
+        return []
+    return await follow_ups(
+        db, probe, labels=labels, prediction=prediction, created_by=created_by
+    )
+
+
 def check_labels_result(result: dict[str, Any]) -> None:
     rois = result.get("rois")
     if not isinstance(rois, list) or len(rois) > MAX_ROIS:
@@ -317,9 +387,17 @@ def check_labels_result(result: dict[str, Any]) -> None:
 
 
 async def after_labels(db: AsyncSession, settings: Settings, job: Job) -> None:
-    """Each placed sample was a fully labeled slice: a complete slice ROI."""
+    """
+    Each placed sample was a fully labeled slice: a complete slice ROI, added
+    once however often the labels are brought over.
+    """
     assert job.project_id is not None
-    seen = set()
+    seen = {
+        tuple(bbox)
+        for bbox in await db.scalars(
+            select(Roi.bbox).where(Roi.project_id == job.project_id, Roi.origin == "v1")
+        )
+    }
     for box in (job.result or {})["rois"]:
         if tuple(box) in seen:
             continue
