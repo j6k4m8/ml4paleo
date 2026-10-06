@@ -31,9 +31,8 @@ from .. import audit, jobs
 from ..auth import ratelimit
 from ..auth.deps import AdminAuth, CurrentAuth, DbSession, EngineDep, SettingsDep
 from ..auth.ratelimit import client_key
-from ..db import AuditEvent, Job, Project, ProjectMember, User
-from ..jobs.queue import FINISHED
-from ..pipelines import v1import
+from ..db import AuditEvent, Project, ProjectMember, User
+from ..pipelines import train, v1import
 from ..settings import Settings
 
 router = APIRouter(prefix="/api/v1-jobs", tags=["v1"])
@@ -229,16 +228,9 @@ async def release(
     if project is not None:
         if project.owner_id == to.id:
             raise HTTPException(status_code=409, detail="That account has the job.")
-        # Pipelines before the project: completing a job locks the job, then
-        # its project.
-        running = await db.scalars(
-            select(Job.root_id)
-            .where(Job.project_id == project.id, Job.status.not_in(FINISHED))
-            .distinct()
-            .order_by(Job.root_id)
-        )
-        for root_id in running.all():
-            await jobs.cancel_pipeline(db, root_id)
+        # As deleting a project does, with its pipelines before the project
+        # (completing a job locks the job, then its project).
+        await train.stop_project(db, project)
         # Leave v1_job_id (a key) for the next claim to clear: changing a key
         # here would wait for jobs that are adding rows to the project, which
         # can be waiting for the jobs this just locked.

@@ -24,6 +24,8 @@ from ml4paleo_server import artifacts, jobs, pipelines
 from ml4paleo_server.db import (
     AuditEvent,
     Job,
+    TrainedModel,
+    TrainingSet,
     User,
     UserUsage,
     create_engine,
@@ -586,10 +588,33 @@ def test_the_first_claim_wins_until_an_admin_gives_the_job_away(
     ]
 
 
-def test_releasing_a_job_stops_its_import(new_browser, settings, migrated_database_url):
+def test_releasing_a_job_stops_its_project(
+    new_browser, settings, migrated_database_url
+):
     ada = new_browser()
     signup(ada)
     claimed = ada.post("/api/v1-jobs/ABC123/claim").json()
+
+    # A model holds one of ada's trained-model slots.
+    async def train_one(db):
+        project = uuid.UUID(claimed["project_id"])
+        db.add(TrainingSet(id="0" * 64, project_id=project, summary={}))
+        await db.flush()
+        db.add(
+            TrainedModel(
+                project_id=project,
+                name="Bone",
+                plugin="rf",
+                params={},
+                training_set_id="0" * 64,
+                class_values=[2],
+                holds_slot=True,
+            )
+        )
+        owner = await db.scalar(select(User.id).where(User.username == "ada"))
+        db.add(UserUsage(user_id=owner, storage_bytes=0, trained_models=1))
+
+    run_db(migrated_database_url, train_one)
     # A worker is probing the job.
     token = add_worker(migrated_database_url)
     worker = new_browser()
@@ -611,6 +636,8 @@ def test_releasing_a_job_stops_its_import(new_browser, settings, migrated_databa
         headers=bearer(token),
     )
     assert beat.json()["cancel"] is True
+    # As deleting the project would, releasing gives the model's slot back.
+    assert ada.get("/api/me/quota").json()["trained_models_used"] == 0
 
 
 def test_releasing_doesnt_wait_for_rows_that_refer_to_the_project(
