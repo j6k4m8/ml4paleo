@@ -44,7 +44,7 @@ from ml4paleo.labels.deltas import ChunkDelta, unpack_mask, unpack_values
 from ml4paleo.segmentation.predict import open_prediction
 from ml4paleo.storage import get_bytes
 
-from .. import artifacts, audit, labels
+from .. import artifacts, audit, labels, streams
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import (
     Artifact,
@@ -641,11 +641,7 @@ async def events(
             if not batch:
                 await asyncio.sleep(EVENT_INTERVAL_SECONDS)
 
-    return StreamingResponse(
-        stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-    )
+    return streams.response(streams.reserve(user_id), stream())
 
 
 # --- the labels as zarr ----------------------------------------------------

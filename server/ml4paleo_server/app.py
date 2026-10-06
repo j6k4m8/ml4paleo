@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import pathlib
 import re
+import time
 from collections.abc import AsyncIterator
 from urllib.parse import urlsplit
 
@@ -38,6 +39,7 @@ from .viewer import (
 )
 
 MIN_SECRET_KEY_LENGTH = 32
+STORAGE_CHECK_SECONDS = 30.0
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # Requests that may carry a stale session cookie, so they are only checked
 # by origin. Logging in with a forged request is still blocked by the
@@ -53,12 +55,15 @@ SESSION_CSRF_EXEMPT = {
 _INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.DOTALL)
 
 
-def content_security_policy(web_dir: pathlib.Path | None) -> str:
+def content_security_policy(
+    web_dir: pathlib.Path | None, upload_origin: str | None = None
+) -> str:
     """
     The policy for everything but Neuroglancer. SvelteKit starts the web app
     with an inline script in `index.html`, allowed by its hash; nothing else
     runs inline, and nothing evaluates code (the viewer decodes zstd in plain
-    JavaScript).
+    JavaScript). Browsers upload file parts to `upload_origin` when storage
+    is on another site (a cloud bucket).
     """
     scripts = ["'self'"]
     index = web_dir / "index.html" if web_dir is not None else None
@@ -74,7 +79,7 @@ def content_security_policy(web_dir: pathlib.Path | None) -> str:
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' blob: data:",
             "worker-src 'self' blob:",
-            "connect-src 'self'",
+            f"connect-src 'self'{f' {upload_origin}' if upload_origin else ''}",
             "object-src 'none'",
             "base-uri 'self'",
             "form-action 'self'",
@@ -107,7 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     parts = urlsplit(settings.public_url)
     public_origin = f"{parts.scheme}://{parts.netloc}"
     session_cookie = cookie_name(settings)
-    app_policy = content_security_policy(settings.web_dir)
+    app_policy = content_security_policy(settings.web_dir, _upload_origin(settings))
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -178,6 +183,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return response
 
+    # When storage last answered; health checks ask it at most this often,
+    # since anyone may call them.
+    storage_checked = {"at": -STORAGE_CHECK_SECONDS}
+
     @app.get("/api/health")
     async def health(request: Request) -> dict[str, str]:
         """
@@ -185,7 +194,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         async with request.app.state.engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
-        await run_in_threadpool(_check_storage, settings)
+        if time.monotonic() - storage_checked["at"] >= STORAGE_CHECK_SECONDS:
+            await run_in_threadpool(_check_storage, settings)
+            storage_checked["at"] = time.monotonic()
         return {"status": "ok", "version": __version__}
 
     for router in ROUTERS:
@@ -206,6 +217,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _serve_web_app(settings.web_dir, path)
 
     return app
+
+
+def _upload_origin(settings: Settings) -> str | None:
+    """
+    Where browsers send upload parts, when that's another site than this one.
+    """
+    endpoint = settings.storage.public_endpoint
+    if not endpoint:
+        return None
+    parts = urlsplit(endpoint)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    here = urlsplit(settings.public_url)
+    return None if origin == f"{here.scheme}://{here.netloc}" else origin
 
 
 def _check_storage(settings: Settings) -> None:

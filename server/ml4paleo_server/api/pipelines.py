@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from .. import artifacts, audit, jobs, pipelines
+from .. import artifacts, audit, jobs, pipelines, streams
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import Job, Project, ProjectMember, Upload, UserSession
 from ..jobs.queue import FINISHED
@@ -213,11 +213,7 @@ async def pipeline_events(
                 return
             await asyncio.sleep(EVENT_INTERVAL_SECONDS)
 
-    return StreamingResponse(
-        events(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-    )
+    return streams.response(streams.reserve(user_id), events())
 
 
 @router.post("/pipelines/{pipeline_id}/cancel", status_code=204)

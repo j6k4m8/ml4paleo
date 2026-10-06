@@ -109,6 +109,11 @@
 						<a href="/account" class="px-3 py-1.5 text-ink hover:bg-accent-fill hover:text-white hover:no-underline" onclick={() => (menu = false)}>
 							Account
 						</a>
+						{#if session.current.user.is_admin}
+							<a href="/admin" class="px-3 py-1.5 text-ink hover:bg-accent-fill hover:text-white hover:no-underline" onclick={() => (menu = false)}>
+								Administration
+							</a>
+						{/if}
 						<button class="flex items-center gap-2 px-3 py-1.5 text-left hover:bg-accent-fill hover:text-white" onclick={logout}>
 							<LogOut size={13} /> Sign out
 						</button>

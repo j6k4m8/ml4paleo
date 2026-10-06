@@ -54,7 +54,12 @@ export function message(error: unknown): string {
 		if (detail && typeof detail === "object" && "message" in detail) {
 			return String((detail as { message: unknown }).message);
 		}
-		if (Array.isArray(detail)) return "Please check the form.";
+		// FastAPI's validation errors: say what the first one is about.
+		if (Array.isArray(detail)) {
+			const first = detail[0] as { loc?: unknown[]; msg?: string } | undefined;
+			const field = first?.loc?.at(-1);
+			return first?.msg ? `${typeof field === "string" ? `${field}: ` : ""}${first.msg}` : "Please check the form.";
+		}
 		return `Something went wrong (HTTP ${error.status}).`;
 	}
 	return error instanceof Error ? error.message : String(error);
