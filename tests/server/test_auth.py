@@ -352,6 +352,53 @@ def test_admins_set_the_requirement_and_confirm_addresses(
     assert ada.post(f"/api/admin/users/{bob_id}/confirm-email").status_code == 403
 
 
+def test_people_can_change_their_email(
+    new_browser, smtp_settings, migrated_database_url
+):
+    browser = new_browser(smtp_settings)
+    signup(browser, email="ada@example.org")
+    browser.post(
+        "/api/auth/verify-email",
+        json={"token": link_token(outbox(migrated_database_url)[0].body)},
+    )
+    signup(new_browser(smtp_settings), username="bob", email="bob@example.org")
+    anonymous = new_browser(smtp_settings)
+    anonymous.post(
+        "/api/auth/password-reset/request", json={"email": "ada@example.org"}
+    )
+    reset_token = link_token(outbox(migrated_database_url)[-1].body)
+
+    def change(address, password=PASSWORD):
+        return browser.put(
+            "/api/auth/email", json={"email": address, "current_password": password}
+        )
+
+    assert change("ada@lab.org", password="not my password").status_code == 403
+    assert change("bob@example.org").status_code == 409
+    assert change("ada@example.org").status_code == 422
+    changed = change("Ada@Lab.org")
+    assert changed.status_code == 200
+    assert changed.json()["user"]["email"] == "ada@lab.org"
+    assert changed.json()["user"]["email_verified"] is False
+    # A link to confirm the new address, and a notice to the old one.
+    link, notice = outbox(migrated_database_url)[-2:]
+    assert (link.to_address, notice.to_address) == ("ada@lab.org", "ada@example.org")
+    assert "ada@lab.org" in notice.body
+    # The reset link sent to the old address no longer works.
+    stale = anonymous.post(
+        "/api/auth/password-reset/confirm",
+        json={"token": reset_token, "new_password": "a brand new passphrase"},
+    )
+    assert stale.status_code == 400
+    assert (
+        browser.post(
+            "/api/auth/verify-email", json={"token": link_token(link.body)}
+        ).status_code
+        == 204
+    )
+    assert browser.get("/api/auth/session").json()["user"]["email_verified"]
+
+
 def test_password_reset_flow(new_browser, smtp_settings, migrated_database_url):
     browser = new_browser(smtp_settings)
     signup(browser, email="ada@example.org")

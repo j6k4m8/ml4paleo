@@ -10,9 +10,17 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import AfterValidator, BaseModel, Field
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from ..auth import expire_reset_tokens, passwords, ratelimit, totp
-from ..auth.deps import DbSession, EngineDep, OptionalAuth, SettingsDep, SetupAuth
+from ..auth.deps import (
+    CurrentAuth,
+    DbSession,
+    EngineDep,
+    OptionalAuth,
+    SettingsDep,
+    SetupAuth,
+)
 from ..auth.ratelimit import client_key
 from ..auth.sessions import (
     clear_session_cookie,
@@ -541,3 +549,55 @@ async def resend_verification(
     await ratelimit.hit(engine, f"verify:user:{auth.user.id}", limit=3, window=HOUR)
     await _send_confirmation(db, settings, auth.user)
     await db.commit()
+
+
+class EmailChangeIn(BaseModel):
+    email: Email
+    current_password: Password
+
+
+@router.put("/email")
+async def change_email(
+    body: EmailChangeIn,
+    auth: CurrentAuth,
+    db: DbSession,
+    engine: EngineDep,
+    settings: SettingsDep,
+) -> SessionOut:
+    """
+    Give the account a new email address, which then needs confirming. The
+    old address, if it was confirmed, is told about the change.
+    """
+    await ratelimit.hit(engine, f"email:user:{auth.user.id}", limit=5, window=HOUR)
+    user = auth.user
+    if not await passwords.verify_password(body.current_password, user.password_hash):
+        raise HTTPException(status_code=403, detail="Your current password is wrong.")
+    if body.email is None:
+        raise HTTPException(status_code=422, detail="Enter an email address.")
+    if body.email == user.email:
+        raise HTTPException(status_code=422, detail="That's your address already.")
+    taken = await db.scalar(select(User.id).where(User.email == body.email))
+    if taken is not None:
+        raise HTTPException(status_code=409, detail="That email is taken.")
+    old, confirmed = user.email, user.email_verified_at is not None
+    # Reset links went to the old address.
+    await expire_reset_tokens(db, user.id)
+    user.email = body.email
+    user.email_verified_at = None
+    await _send_confirmation(db, settings, user)
+    if old and confirmed and settings.smtp.enabled:
+        queue_email(
+            db,
+            settings,
+            old,
+            "Your ml4paleo email address changed",
+            f"Hi {user.username},\n\nYour ml4paleo account's email address is now "
+            f"{body.email}. If you didn't change it, sign in and change your "
+            "password, and tell the people who run the site.\n",
+        )
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="That email is taken.") from None
+    return await _session_out(db, settings, user, auth.token)
