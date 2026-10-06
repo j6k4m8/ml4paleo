@@ -38,6 +38,19 @@ def main(argv: list[str] | None = None) -> int:
         "server secret key changed). Admins must set it up again at next login.",
     )
     reset_two_factor.add_argument("username")
+    enable = commands.add_parser(
+        "enable-user",
+        help="Let a disabled account sign in again (for example the last admin, "
+        "disabled by mistake).",
+    )
+    enable.add_argument("username")
+    set_email = commands.add_parser(
+        "set-email",
+        help="Give an account an email address, counted as confirmed (for "
+        "example so the admin gets requests for more storage by email).",
+    )
+    set_email.add_argument("username")
+    set_email.add_argument("email")
     commands.add_parser(
         "housekeeper", help="Run background upkeep (sending queued email)."
     )
@@ -95,6 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "reset-two-factor":
         asyncio.run(_reset_two_factor(args.username))
         print(f"Turned off two-factor sign-in for {args.username}.", flush=True)
+    elif args.command == "enable-user":
+        status = asyncio.run(_enable_user(args.username))
+        print(f"{args.username} can sign in again (status: {status}).", flush=True)
+    elif args.command == "set-email":
+        asyncio.run(_set_email(args.username, args.email))
+        print(f"{args.username}'s email is now {args.email}.", flush=True)
     elif args.command == "reset-password":
         password = asyncio.run(_reset_password(args.username))
         print(f"New password for {args.username}: {password}", flush=True)
@@ -254,6 +273,66 @@ async def _reset_password(username: str) -> str:
             await expire_reset_tokens(db, user.id)
             await db.commit()
             return password
+    finally:
+        await engine.dispose()
+
+
+async def _enable_user(username: str) -> str:
+    from sqlalchemy import select
+
+    from ml4paleo_server.api.admin import enabled_status
+    from ml4paleo_server.db import User, create_engine, create_sessionmaker
+    from ml4paleo_server.settings import Settings
+
+    settings = Settings()
+    engine = create_engine(settings.database_url.get_secret_value())
+    try:
+        async with create_sessionmaker(engine)() as db:
+            user = await db.scalar(
+                select(User).where(User.username == username.lower())
+            )
+            if user is None:
+                raise SystemExit(f"No user named {username!r}.")
+            user.status = enabled_status(user, settings)
+            await db.commit()
+            return user.status
+    finally:
+        await engine.dispose()
+
+
+async def _set_email(username: str, email: str) -> None:
+    import datetime
+
+    from pydantic import TypeAdapter, ValidationError
+    from sqlalchemy import select
+
+    from ml4paleo_server.api.auth import Email
+    from ml4paleo_server.db import User, create_engine, create_sessionmaker
+    from ml4paleo_server.settings import Settings
+
+    try:
+        address = TypeAdapter(Email).validate_python(email)
+    except ValidationError:
+        raise SystemExit(f"{email!r} isn't an email address.") from None
+    engine = create_engine(Settings().database_url.get_secret_value())
+    try:
+        async with create_sessionmaker(engine)() as db:
+            user = await db.scalar(
+                select(User).where(User.username == username.lower())
+            )
+            if user is None:
+                raise SystemExit(f"No user named {username!r}.")
+            taken = await db.scalar(
+                select(User.id).where(User.email == address, User.id != user.id)
+            )
+            if taken is not None:
+                raise SystemExit("Another account has that email address.")
+            user.email = address
+            # Whoever runs this on the server vouches for the address.
+            user.email_verified_at = datetime.datetime.now(datetime.UTC)
+            if user.status == "unverified":
+                user.status = "active"
+            await db.commit()
     finally:
         await engine.dispose()
 
