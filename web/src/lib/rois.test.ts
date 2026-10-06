@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { roiBox, thinAxis } from "./rois.svelte";
+import { roiBox, thinAxis, within } from "./rois.svelte";
 import { PLANES } from "./viewer/tiles";
 
 describe("roiBox", () => {
@@ -30,5 +30,15 @@ describe("thinAxis", () => {
 		expect(thinAxis([3, 0, 0, 4, 10, 10])).toBe(0);
 		expect(thinAxis([0, 0, 7, 10, 10, 8])).toBe(2);
 		expect(thinAxis([0, 0, 0, 10, 10, 10])).toBe(0);
+	});
+});
+
+describe("within", () => {
+	it("is true only for boxes inside the other on every axis", () => {
+		const outer = [0, 10, 20, 30, 40, 50];
+		expect(within([0, 10, 20, 30, 40, 50], outer)).toBe(true);
+		expect(within([5, 15, 25, 6, 30, 45], outer)).toBe(true);
+		expect(within([5, 15, 25, 6, 30, 51], outer)).toBe(false);
+		expect(within([5, 9, 25, 6, 30, 45], outer)).toBe(false);
 	});
 });

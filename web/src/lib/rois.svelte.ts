@@ -114,6 +114,11 @@ export function revert(select: HTMLSelectElement, value: string): void {
 	select.value = value;
 }
 
+/** Whether box `inner` lies inside box `outer`. */
+export function within(inner: Box, outer: readonly number[]): boolean {
+	return [0, 1, 2].every((a) => outer[a]! <= inner[a]! && inner[a + 3]! <= outer[a + 3]!);
+}
+
 /** The thin axis of a slice ROI (or z for a cube). */
 export function thinAxis(bbox: Box): 0 | 1 | 2 {
 	const sizes = [bbox[3] - bbox[0], bbox[4] - bbox[1], bbox[5] - bbox[2]];
