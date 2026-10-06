@@ -470,6 +470,17 @@ def test_a_running_prediction_isnt_started_again(ada, settings, migrated_databas
     assert pipeline_status(ada, project, started) == "cancelled"
 
 
+def test_deleting_a_model_stops_its_predictions(ada, settings, migrated_database_url):
+    project = labeled_project(ada, settings, migrated_database_url)
+    model, other = (ready_model(ada, migrated_database_url, project) for _ in "ab")
+    started = predict(ada, project, model).json()["pipeline_id"]
+    base = f"/api/projects/{project}/models"
+    assert ada.request("DELETE", f"{base}/{other['id']}").status_code == 204
+    assert pipeline_status(ada, project, started) == "waiting"
+    assert ada.request("DELETE", f"{base}/{model['id']}").status_code == 204
+    assert pipeline_status(ada, project, started) == "cancelled"
+
+
 def test_missing_label_blobs_fail_training_for_good(tmp_path):
     from ml4paleo_worker.context import JobContext, PermanentError
     from ml4paleo_worker.handlers import train as train_handler

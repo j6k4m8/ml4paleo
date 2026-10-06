@@ -221,8 +221,8 @@ async def delete_model(
     db: DbSession,
 ) -> None:
     """
-    Delete a model: stop its training if it's still running, free its slot,
-    and let garbage collection remove its files.
+    Delete a model: stop its training and its predictions if they're still
+    running, free its slot, and let garbage collection remove its files.
     """
     model = await _model(db, project, model_id)
     model.deleted_at = datetime.datetime.now(datetime.UTC)
@@ -230,6 +230,8 @@ async def delete_model(
         job = await db.get(Job, model.job_id)
         if job is not None and job.status in train.RUNNING_JOB:
             await jobs.cancel_pipeline(db, job.root_id)
+    for root in await predict.running(db, project.id, model.id):
+        await jobs.cancel_pipeline(db, root.id)
     if model.artifact_id:
         artifact = await db.get(Artifact, model.artifact_id)
         if artifact is not None and artifact.state == "committed":
