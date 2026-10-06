@@ -21,7 +21,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, BYTEA, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, TimestampMixin, uuid7
@@ -621,4 +621,173 @@ class Upload(Base):
             name="state",
         ),
         CheckConstraint("size > 0 AND part_size > 0", name="sizes"),
+    )
+
+
+class LabelClass(Base):
+    """
+    One class in a project's label set. Values 0 (unlabeled) and 1
+    (background) are built in; classes take 2 to 254 and a value is never
+    reused, so old labels can't change meaning.
+    """
+
+    __tablename__ = "label_classes"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    value: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    color: Mapped[str] = mapped_column(String(7))
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    deleted_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    __table_args__ = (CheckConstraint("value BETWEEN 2 AND 254", name="value"),)
+
+
+class LabelChunk(Base):
+    """
+    The current state of one 64-cubed label chunk: content hashes of its class
+    and source arrays (None when all zero), stored as blobs under
+    `projects/<project>/labels/blobs/`. Every edit makes a new version.
+    """
+
+    __tablename__ = "label_chunks"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    cz: Mapped[int] = mapped_column(primary_key=True)
+    cy: Mapped[int] = mapped_column(primary_key=True)
+    cx: Mapped[int] = mapped_column(primary_key=True)
+    version: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    class_sha: Mapped[str | None] = mapped_column(String(64))
+    source_sha: Mapped[str | None] = mapped_column(String(64))
+    labeled_voxels: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    # Voxels per class value, as {"2": 1234, ...}.
+    class_counts: Mapped[dict[str, int]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class LabelOp(Base):
+    """
+    One label edit (a stroke, a polygon, a fill, an accepted proposal), or
+    the undo or redo of one. `seq` orders a project's ops; an edit is `live`
+    until undone. The label state is the overlay of the live edits' claims
+    in `seq` order (see `ml4paleo.labels.deltas`).
+    """
+
+    __tablename__ = "label_ops"
+
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    # The browser's id for the op, so a retried request applies it once.
+    client_op_id: Mapped[uuid.UUID]
+    # "edit", "undo", or "redo".
+    kind: Mapped[str] = mapped_column(String(8))
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL")
+    )
+    # ml4paleo.labels.Source of what an edit wrote.
+    source: Mapped[int] = mapped_column(SmallInteger)
+    # How the edit was made (tool, brush size, polygon points, ...).
+    tool: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+    # Global box (z0, y0, x0, z1, y1, x1) of everything the op touched.
+    bbox: Mapped[list[int]] = mapped_column(ARRAY(BigInteger))
+    # For undo and redo: the edit they act on.
+    target_seq: Mapped[int | None] = mapped_column(
+        ForeignKey("label_ops.seq", ondelete="CASCADE")
+    )
+    live: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('edit', 'undo', 'redo')", name="kind"),
+        Index("ix_label_ops_client_op", "project_id", "client_op_id", unique=True),
+    )
+
+
+class LabelOpChunk(Base):
+    """
+    What an op did to one chunk: the chunk versions before and after, and
+    (for edits) its claim, from which undo and redo recompute the chunk.
+    """
+
+    __tablename__ = "label_op_chunks"
+
+    seq: Mapped[int] = mapped_column(
+        ForeignKey("label_ops.seq", ondelete="CASCADE"), primary_key=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    cz: Mapped[int] = mapped_column(primary_key=True)
+    cy: Mapped[int] = mapped_column(primary_key=True)
+    cx: Mapped[int] = mapped_column(primary_key=True)
+    base_version: Mapped[int]
+    new_version: Mapped[int]
+    class_sha: Mapped[str | None] = mapped_column(String(64))
+    claim_box: Mapped[list[int] | None] = mapped_column(ARRAY(SmallInteger))
+    claim_mask: Mapped[bytes | None] = mapped_column(BYTEA)
+    claim_values: Mapped[bytes | None] = mapped_column(BYTEA)
+
+    __table_args__ = (
+        # Undo and redo read every claim on a chunk, in op order.
+        Index("ix_label_op_chunks_chunk", "project_id", "cz", "cy", "cx", "seq"),
+    )
+
+
+ROI_STATUSES = ("open", "complete", "skipped")
+
+
+class Roi(TimestampMixin, Base):
+    """
+    A region of interest: a cube or slab where someone labels for training.
+    Unlabeled voxels count only inside ROIs marked complete (as background).
+    """
+
+    __tablename__ = "rois"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # Global box (z0, y0, x0, z1, y1, x1), half-open.
+    bbox: Mapped[list[int]] = mapped_column(ARRAY(BigInteger))
+    # "cube" or "slice".
+    kind: Mapped[str] = mapped_column(String(8))
+    status: Mapped[str] = mapped_column(String(16), default="open")
+    # "train" or "val" (validation, held out of training).
+    split: Mapped[str] = mapped_column(String(8), default="train")
+    # "user" or "suggested".
+    origin: Mapped[str] = mapped_column(String(16), default="user")
+    score: Mapped[float | None] = mapped_column(Float)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ({})".format(", ".join(f"'{s}'" for s in ROI_STATUSES)),
+            name="status",
+        ),
+        CheckConstraint("kind IN ('cube', 'slice')", name="kind"),
+        CheckConstraint("split IN ('train', 'val')", name="split"),
     )
