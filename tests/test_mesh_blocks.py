@@ -203,6 +203,17 @@ def test_objects_touching_the_volume_edges_are_closed():
     assert v.min(axis=0).tolist() == [0, 0, 0] and v.max(axis=0).tolist() == [8, 8, 8]
 
 
+@pytest.mark.parametrize("method", ["any", "majority"])
+def test_coarse_voxels_cut_by_the_scan_end_at_its_faces(method):
+    # 20 isn't a multiple of 8, so the last coarse voxels are partly outside
+    # the scan; for "majority" only the voxels inside count.
+    volume = np.full((20, 21, 22), 2, dtype=np.uint8)
+    v, f = mesh_volume(volume, 16, [2], downsample=8, method=method)[2]
+    assert edges_shared_twice(f)
+    assert v.min(axis=0).tolist() == [0, 0, 0]
+    assert v.max(axis=0).tolist() == [22, 21, 20]
+
+
 def test_downsampling_keeps_thin_parts_with_any():
     volume = np.zeros((16, 16, 16), dtype=np.uint8)
     volume[8, 2:14, 2:14] = 2  # one voxel thick

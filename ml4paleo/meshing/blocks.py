@@ -19,7 +19,9 @@ whole class is ever held in memory.
 
 Downsampling (#22, #24) meshes at 1/d resolution, keeping a coarse voxel if
 any of its fine voxels is the class ("any", which keeps thin structures) or
-if most are ("majority", smoother).
+if most are ("majority", smoother). A coarse voxel cut by the scan's far
+faces counts only its fine voxels inside the scan, and `Join` ends its
+surfaces at those faces.
 """
 
 import itertools
@@ -124,7 +126,10 @@ def _downsample(mask: np.ndarray, d: int, method: Method) -> np.ndarray:
     counts = blocks.sum(axis=(1, 3, 5), dtype=np.int32)
     if method == "any":
         return counts > 0
-    return counts * 2 > d**3
+    # The mask ends only where the scan does, so a coarse voxel cut short
+    # holds fewer fine voxels than d³.
+    inside = [np.minimum(d, n - np.arange(0, n, d)) for n in mask.shape]
+    return counts * 2 > np.einsum("i,j,k->ijk", *inside)
 
 
 def _faces(mask: np.ndarray) -> int:
@@ -294,8 +299,9 @@ class Join:
 
     Add pieces block by block, in the order `mesh_blocks` gives, and call
     `block_done` after each block: seam vertices no later block can share
-    are forgotten then. Vertices are scaled to physical units. Triangles
-    that welding collapses are dropped.
+    are forgotten then. Vertices are scaled to physical units, after those
+    of coarse voxels cut by the scan's far faces are moved back onto them.
+    Triangles that welding collapses are dropped.
     """
 
     def __init__(
@@ -311,6 +317,7 @@ class Join:
         self._stl.write(_STL_HEADER + struct.pack("<I", 0))
         self._positions = (self.directory / "positions.bin").open("w+b")
         self._indices = (self.directory / "indices.bin").open("w+b")
+        self._extent_xyz = np.array(shape_zyx[::-1], dtype=np.float64)
         self._scale = np.asarray(voxel_size_xyz, dtype=np.float64)
         self._block = block
         self._grid = [-(-int(n) // block) for n in shape_zyx]
@@ -356,7 +363,9 @@ class Join:
                 added.append(i)
             index[i] = j
         self.pending += len(added)
-        physical = (vertices * self._scale).astype("<f4")
+        physical = np.minimum(vertices, self._extent_xyz)
+        physical *= self._scale
+        physical = physical.astype("<f4")
         fresh = physical[np.concatenate([plain, np.array(added, dtype=np.int64)])]
         if len(fresh):
             self._positions.write(fresh)
