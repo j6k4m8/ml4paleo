@@ -6,6 +6,7 @@
 	import Eye from "@lucide/svelte/icons/eye";
 	import EyeOff from "@lucide/svelte/icons/eye-off";
 	import Hand from "@lucide/svelte/icons/hand";
+	import ImageOff from "@lucide/svelte/icons/image-off";
 	import Keyboard from "@lucide/svelte/icons/keyboard";
 	import LayoutGrid from "@lucide/svelte/icons/layout-grid";
 	import LoaderCircle from "@lucide/svelte/icons/loader-circle";
@@ -16,6 +17,7 @@
 	import Redo2 from "@lucide/svelte/icons/redo-2";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
 	import Undo2 from "@lucide/svelte/icons/undo-2";
+	import X from "@lucide/svelte/icons/x";
 	import { onDestroy, onMount, untrack } from "svelte";
 	import Histogram from "#lib/ui/Histogram.svelte";
 	import Panel from "#lib/ui/Panel.svelte";
@@ -416,6 +418,16 @@
 
 <svelte:window onkeydown={key} onkeyup={keyUp} onblur={() => (viewer.panning = false)} />
 
+{#snippet problem(text: string, dismiss: () => void)}
+	<div
+		class="pointer-events-auto flex w-full max-w-lg items-start gap-2 rounded-sm border border-danger/50 bg-panel px-2.5 py-1.5 text-danger shadow-lg shadow-black/40"
+		role="alert"
+	>
+		<span class="flex-1">{text}</span>
+		<button class="text-ink-dim hover:text-ink" aria-label="Dismiss" onclick={dismiss}><X size={14} /></button>
+	</div>
+{/snippet}
+
 <div class="flex h-full flex-col bg-chrome text-ink">
 	<!-- Options bar: the active tool's settings. -->
 	<div class="flex h-9 shrink-0 items-center gap-3 overflow-x-auto border-b border-edge bg-panel px-3 whitespace-nowrap">
@@ -501,13 +513,21 @@
 		</nav>
 
 		<!-- Document -->
-		<div class="flex min-w-0 flex-1 flex-col">
+		<div class="relative flex min-w-0 flex-1 flex-col">
 			<div class="flex h-7 shrink-0 items-end border-b border-edge bg-chrome px-2">
 				<div class="flex h-6 items-center gap-2 rounded-t-sm bg-pasteboard px-3 shadow-[inset_0_1px_0_var(--color-accent)]">
 					<span class="font-medium">{title}</span>
 					<span class="font-mono text-2xs text-ink-faint">{imageX}×{imageY}×{imageZ} · {manifest.dtype}</span>
 				</div>
 			</div>
+			<!-- What went wrong, over the views, where it shows even with the dock closed. -->
+			{#if error || notice || rois.error}
+				<div class="pointer-events-none absolute inset-x-0 top-8 z-30 flex flex-col items-center gap-1 px-2">
+					{#if error}{@render problem(error, () => (error = ""))}{/if}
+					{#if notice}{@render problem(notice, () => (notice = ""))}{/if}
+					{#if rois.error}{@render problem(rois.error, () => (rois.error = ""))}{/if}
+				</div>
+			{/if}
 			<div
 				class="grid min-h-0 flex-1 gap-px bg-edge
 					{viewer.layout === 'four' ? 'grid-cols-2 grid-rows-2' : 'grid-cols-1 grid-rows-1'}"
@@ -538,7 +558,7 @@
 					{/if}
 				{:else}
 					<div class="grid place-items-center bg-pasteboard text-ink-faint">
-						{#if error}<span class="error">{error}</span>{:else}<LoaderCircle size={20} class="animate-spin" />{/if}
+						{#if error}<ImageOff size={20} />{:else}<LoaderCircle size={20} class="animate-spin" />{/if}
 					</div>
 				{/if}
 			</div>
@@ -647,13 +667,8 @@
 						<li class="px-2.5 text-ink-dim">Draw one with the ROI tool (R).</li>
 					{/each}
 				</ul>
-				{#if rois.error}<p class="error" role="alert">{rois.error}</p>{/if}
 				<a href="/p/{project}/rois" class="self-start text-2xs">Open the ROI gallery</a>
 			</Panel>
-
-			{#if notice}
-				<p class="m-2.5 rounded-sm border border-danger/40 bg-danger/10 p-2 text-danger" role="alert">{notice}</p>
-			{/if}
 		</aside>
 	</div>
 
