@@ -74,6 +74,9 @@
 	let proposing = $state(false);
 	// How far the proposal being made has got (0 to 1), once a worker has it.
 	let proposalProgress: number | null = $state(null);
+	// The proposal's pipeline, once known, so it can be cancelled.
+	let proposalPipeline: string | null = $state(null);
+	let cancelling = $state(false);
 	let segmentation: ChunkStore | null = $state(null);
 	let classes: LabelClass[] = $state([]);
 	let error = $state("");
@@ -83,7 +86,8 @@
 	let classesOpen = $state(true);
 	// On narrow screens the dock floats over the views until closed.
 	let dockOpen = $state(false);
-	const queue = new OpQueue(project, indexedDbStorage(session.current?.user.id ?? "", project));
+	const me = session.current?.user.id ?? "";
+	const queue = new OpQueue(project, indexedDbStorage(me, project));
 	// Strict edits compare against the chunk versions current when they're
 	// sent, after this page's earlier edits have landed; if any version is
 	// unknown, the edit applies like a brush stroke instead.
@@ -112,10 +116,10 @@
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
 			void loadPrediction(controller.signal);
-			// A proposal still being made (asked for before a reload, say) shows when it's done.
+			// Your proposal still being made (asked for before a reload, say) shows when it's done.
 			api<Pipeline[]>(`/api/projects/${project}/pipelines`, { signal: controller.signal }).then(
 				(pipelines) => {
-					const latest = pipelines.find((p) => p.kind === "proposal");
+					const latest = pipelines.find((p) => p.kind === "proposal" && p.created_by === me);
 					if (latest && unfinished(latest) && !proposing) void follow(latest.id);
 				},
 				() => {},
@@ -411,12 +415,12 @@
 	async function whyNot(final: Pipeline): Promise<string> {
 		if (unfinished(final)) return "Lost track of the proposal; it shows here once it's made.";
 		if (final.status === "failed") return final.error ?? "The proposal failed.";
-		// Each proposal stops the ones still running.
+		// Each of your proposals stops your others still running.
 		const pipelines = await api<Pipeline[]>(`/api/projects/${project}/pipelines`, { signal: controller.signal }).catch(
 			() => [],
 		);
-		const newest = pipelines.find((p) => p.kind === "proposal");
-		return newest && newest.id !== final.id ? "A newer proposal replaced this one." : "The proposal was cancelled.";
+		const newest = pipelines.find((p) => p.kind === "proposal" && p.created_by === me);
+		return newest && newest.id !== final.id ? "Your newer proposal replaced this one." : "The proposal was cancelled.";
 	}
 
 	/**
@@ -427,11 +431,13 @@
 		proposing = true;
 		proposalProgress = null;
 		try {
-			const final = await finished(await pipeline, controller.signal, (update) => {
+			proposalPipeline = await pipeline;
+			const final = await finished(proposalPipeline, controller.signal, (update) => {
 				proposalProgress = update.status === "running" ? update.progress : null;
 			});
 			if (final.status !== "succeeded") {
-				notice = await whyNot(final);
+				// Cancelling it was what was asked for, so it needs no notice.
+				if (!(cancelling && final.status === "cancelled")) notice = await whyNot(final);
 				return;
 			}
 			await loadPrediction(controller.signal);
@@ -440,6 +446,20 @@
 			if (!controller.signal.aborted) notice = message(e);
 		} finally {
 			proposing = false;
+			proposalPipeline = null;
+			cancelling = false;
+		}
+	}
+
+	/** Stop the proposal being made; it ends as cancelled once its worker stops. */
+	async function cancelProposal() {
+		if (!proposalPipeline || cancelling) return;
+		cancelling = true;
+		try {
+			await api(`/api/projects/${project}/pipelines/${proposalPipeline}/cancel`, { method: "POST" });
+		} catch (e) {
+			cancelling = false;
+			notice = message(e);
 		}
 	}
 
@@ -987,16 +1007,29 @@
 						<li class="px-2.5 text-ink-dim">Draw one with the ROI tool (R).</li>
 					{/each}
 				</ul>
-				{#if proposer && selectedRoi}
-					<button
-						class="btn"
-						disabled={proposing || !!proposeBlocked}
-						title={proposeBlocked || `Predict just this ROI with ${proposer.name}, ahead of other work`}
-						onclick={() => selectedRoi && propose(selectedRoi)}
-					>
-						<Sparkles size={13} />
-						{proposeLabel}
-					</button>
+				{#if (proposer && selectedRoi) || proposing}
+					<div class="flex gap-1.5">
+						<button
+							class="btn flex-1"
+							disabled={proposing || !!proposeBlocked}
+							title={proposeBlocked || `Predict just this ROI with ${proposer?.name ?? "the newest model"}, ahead of other work`}
+							onclick={() => selectedRoi && propose(selectedRoi)}
+						>
+							<Sparkles size={13} />
+							{proposeLabel}
+						</button>
+						{#if proposing && proposalPipeline}
+							<button
+								class="btn"
+								disabled={cancelling}
+								aria-label="Cancel the proposal"
+								title={cancelling ? "Stopping…" : "Stop making this proposal"}
+								onclick={cancelProposal}
+							>
+								<X size={13} />
+							</button>
+						{/if}
+					</div>
 				{/if}
 				{#if shownHere && selectedRoi}
 					<button
