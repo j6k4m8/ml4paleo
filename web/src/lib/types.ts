@@ -4,6 +4,7 @@ export interface User {
 	id: string;
 	username: string;
 	email: string | null;
+	email_verified: boolean;
 	is_admin: boolean;
 	status: string;
 }
@@ -12,6 +13,8 @@ export interface Session {
 	user: User;
 	csrf_token: string;
 	required_steps: string[];
+	/** Whether the account has starter limits until its email is confirmed. */
+	starter_limits: boolean;
 }
 
 export interface Project {

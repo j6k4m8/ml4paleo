@@ -8,12 +8,20 @@
 
 	type Override = Partial<Record<"storage_gb" | "trained_models", number | null>>;
 
+	interface SiteSettings {
+		signup_mode: "open" | "invite";
+		require_email: boolean;
+		unconfirmed_quota: { storage_gb: number | null; trained_models: number | null };
+	}
+
 	interface Account {
 		id: string;
 		username: string;
 		email: string | null;
+		email_confirmed: boolean;
 		is_admin: boolean;
-		status: "active" | "unverified" | "disabled";
+		status: "active" | "disabled";
+		starter_limits: boolean;
 		created_at: string;
 		last_login_at: string | null;
 		storage_bytes_used: number;
@@ -26,6 +34,7 @@
 	interface QuotaRequest {
 		id: string;
 		username: string;
+		email_confirmed: boolean;
 		message: string;
 		created_at: string;
 		quota_override: Override;
@@ -58,6 +67,8 @@
 	const LISTED = 100;
 
 	let signupMode = $state<"open" | "invite">("open");
+	let requireEmail = $state(true);
+	let starter = $state<SiteSettings["unconfirmed_quota"]>({ storage_gb: 1, trained_models: 1 });
 	let emailOn = $state(false);
 	let inviteEmail = $state("");
 	let inviteUrl = $state("");
@@ -95,7 +106,10 @@
 
 	async function load() {
 		await run(async () => {
-			signupMode = (await api<{ signup_mode: "open" | "invite" }>("/api/admin/settings")).signup_mode;
+			const site = await api<SiteSettings>("/api/admin/settings");
+			signupMode = site.signup_mode;
+			requireEmail = site.require_email;
+			starter = site.unconfirmed_quota;
 			emailOn = (await api<{ email_enabled: boolean }>("/api/auth/config")).email_enabled;
 			const [open, listed] = await Promise.all([
 				api<QuotaRequest[]>("/api/admin/quota-requests"),
@@ -195,6 +209,28 @@
 							<option value="invite">People with an invite link</option>
 						</select>
 					</label>
+					<label class="flex items-start gap-2">
+						<input
+							type="checkbox"
+							class="mt-0.5"
+							bind:checked={requireEmail}
+							onchange={() =>
+								run(() => api("/api/admin/settings", { method: "PUT", body: { require_email: requireEmail } }), "Saved.")}
+						/>
+						<span>
+							Ask for an email address
+							<span class="block text-2xs text-ink-dim">
+								Until it's confirmed, an account has starter limits: {limitOf(starter.storage_gb, (n) => `${n} GB`)} of storage
+								and {limitOf(starter.trained_models, String)}
+								{starter.trained_models === 1 ? "trained model" : "trained models"}, unless you set its limits.
+							</span>
+						</span>
+					</label>
+					{#if requireEmail && !emailOn}
+						<p class="text-2xs text-warn">
+							Mail isn't set up, so people can't confirm their addresses themselves. Confirm them under Accounts.
+						</p>
+					{/if}
 					<form
 						class="flex items-end gap-2"
 						onsubmit={(event) => {
@@ -233,6 +269,7 @@
 						<div class="flex flex-col gap-2 rounded-sm border border-edge bg-field p-2">
 							<div class="flex items-center gap-2">
 								<span class="font-medium">{request.username}</span>
+								{#if !request.email_confirmed}<span class="text-2xs text-warn">email not confirmed</span>{/if}
 								<span class="text-2xs text-ink-dim">{when(request.created_at)}</span>
 							</div>
 							<p class="whitespace-pre-wrap">{request.message}</p>
@@ -315,9 +352,15 @@
 											{account.username}
 											{#if account.is_admin}<span class="text-2xs text-accent-hover">admin</span>{/if}
 										</div>
-										<div class="text-2xs text-ink-dim">{account.email ?? "no email"}</div>
+										<div class="text-2xs text-ink-dim">
+											{account.email ?? "no email"}
+											{#if account.email && !account.email_confirmed}<span class="text-warn">· not confirmed</span>{/if}
+										</div>
 									</td>
-									<td class="py-1.5 pr-3" class:text-danger={account.status === "disabled"}>{account.status}</td>
+									<td class="py-1.5 pr-3">
+										<span class:text-danger={account.status === "disabled"}>{account.status}</span>
+										{#if account.starter_limits}<div class="text-2xs text-warn">starter limits</div>{/if}
+									</td>
 									<td class="py-1.5 pr-3 font-mono text-2xs">
 										{gb(account.storage_bytes_used)} / {limitOf(account.storage_bytes_limit, gb)}
 										{#if "storage_gb" in account.quota_override}<span class="font-sans text-ink-dim"> (set)</span>{/if}
@@ -341,6 +384,22 @@
 											>
 												Limits
 											</button>
+											{#if account.email && !account.email_confirmed}
+												<button
+													class="btn btn-ghost"
+													onclick={() =>
+														confirmed(
+															`Count ${account.email} as confirmed for ${account.username}? Do this only if you know the address is theirs.`,
+															() =>
+																run(async () => {
+																	await api(`/api/admin/users/${account.id}/confirm-email`, { method: "POST" });
+																	await loadAccounts();
+																}, `${account.username}'s address is confirmed.`),
+														)}
+												>
+													Confirm email
+												</button>
+											{/if}
 											{#if account.status === "disabled"}
 												<button
 													class="btn btn-ghost"

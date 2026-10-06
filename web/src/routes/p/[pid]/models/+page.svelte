@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from "$app/state";
-	import { ApiError, api, message } from "#lib/api.ts";
+	import { api, message } from "#lib/api.ts";
 	import type { Pipeline } from "#lib/types.ts";
 	import type { LabelClass } from "#lib/viewer/labels.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
@@ -118,10 +118,7 @@
 			name = "";
 			await refresh();
 		} catch (e) {
-			error =
-				e instanceof ApiError && e.detail === "trained_model_quota_exceeded"
-					? "You keep as many models as your quota allows. Delete one, or ask for more on your account page."
-					: message(e);
+			error = message(e);
 		} finally {
 			busy = false;
 		}

@@ -47,10 +47,18 @@ export async function api<T>(
 }
 
 /** A readable message for an error from `api`. */
+/** What the API's error codes mean, for people. */
+const CODES: Record<string, string> = {
+	storage_quota_exceeded:
+		"That needs more storage than your account has left. Delete something, or see your account page for more.",
+	trained_model_quota_exceeded:
+		"You keep as many trained models as your account allows. Delete one, or see your account page for more.",
+};
+
 export function message(error: unknown): string {
 	if (error instanceof ApiError) {
 		const detail = error.detail;
-		if (typeof detail === "string") return detail;
+		if (typeof detail === "string") return CODES[detail] ?? detail;
 		if (detail && typeof detail === "object" && "message" in detail) {
 			return String((detail as { message: unknown }).message);
 		}
