@@ -516,6 +516,32 @@ def test_deleting_a_model_stops_its_proposals(ada, settings, migrated_database_u
     assert pipeline_status(ada, project, started) == "cancelled"
 
 
+def test_proposals_cut_rois_to_the_image(ada, settings, migrated_database_url):
+    project = labeled_project(ada, settings, migrated_database_url)
+    model = ready_model(ada, migrated_database_url, project)
+    roi = ada.post(
+        f"/api/projects/{project}/rois",
+        json={"bbox": [0, 0, 0, 8, 8, 8], "kind": "cube"},
+    ).json()["id"]
+    url = f"/api/projects/{project}/models/{model['id']}/propose"
+
+    # As if the image had been replaced by a smaller one since.
+    async def move(db, bbox):
+        await db.execute(update(Roi).where(Roi.id == uuid.UUID(roi)).values(bbox=bbox))
+
+    run_db(migrated_database_url, lambda db: move(db, [30, 40, 50, 60, 60, 60]))
+    started = ada.post(url, json={"roi_id": roi}).json()
+
+    async def box(db):
+        return (await db.get(Artifact, uuid.UUID(started["artifact_id"]))).inputs["box"]
+
+    assert run_db(migrated_database_url, box) == [30, 40, 50, 40, 48, 56]
+    run_db(migrated_database_url, lambda db: move(db, [45, 0, 0, 50, 5, 5]))
+    outside = ada.post(url, json={"roi_id": roi})
+    assert outside.status_code == 409
+    assert outside.json()["detail"] == "That ROI is outside the image."
+
+
 def test_prediction_shards_ask_for_the_plugins_gpu(
     ada, settings, migrated_database_url, monkeypatch
 ):

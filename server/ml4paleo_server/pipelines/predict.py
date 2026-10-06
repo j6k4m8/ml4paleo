@@ -20,6 +20,7 @@ grid with only that box filled, which becomes the project's "proposal" head
 for people to look over and accept. A newer proposal stops older ones.
 """
 
+import math
 import uuid
 from collections.abc import Sequence
 
@@ -28,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from ml4paleo.protocol import Tier
+from ml4paleo.segmentation.dataset import clip_box
 from ml4paleo.segmentation.plugin import get_plugin
 from ml4paleo.segmentation.predict import SHARD_ZYX, shard_boxes
 
@@ -207,16 +209,11 @@ async def propose(
     docstring), stopping the project's other proposals still running.
     """
     shape = _shape(image)
-    box = [
-        *(max(0, min(int(roi.bbox[a]), shape[a])) for a in range(3)),
-        *(max(0, min(int(roi.bbox[a + 3]), shape[a])) for a in range(3)),
-    ]
-    voxels = 1
-    for a in range(3):
-        voxels *= max(0, box[a + 3] - box[a])
-    if voxels == 0:
+    clipped = clip_box(roi.bbox, shape)
+    if clipped is None:
         raise ValueError("That ROI is outside the image.")
-    if voxels > MAX_PROPOSAL_VOXELS:
+    box = list(clipped)
+    if math.prod(box[a + 3] - box[a] for a in range(3)) > MAX_PROPOSAL_VOXELS:
         raise ValueError(
             "Proposals are for ROIs up to 256³ voxels; predict the whole image "
             "on the Models page instead."
