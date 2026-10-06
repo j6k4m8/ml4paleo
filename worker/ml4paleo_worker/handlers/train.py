@@ -6,9 +6,10 @@ their blobs), the training set (read; its manifest), and the model artifact
 (write). The plugin writes its files into a scratch directory; they are
 copied into the model artifact, and the artifact's manifest goes last.
 
-Training crops are sized so one, with its halo, fits the job's memory
-budget at the plugin's cost per voxel, and the plugin trains on the job's
-share of the worker's CPUs (`ctx.threads`).
+Training crops are sized so one, with its halo, fits in half the job's
+memory budget at the plugin's cost per voxel (the plugin keeps its samples
+and model in the other half), and the plugin trains on the job's share of
+the worker's CPUs (`ctx.threads`).
 """
 
 import json
@@ -57,7 +58,7 @@ def run(ctx: JobContext) -> dict[str, Any]:
         ],
         class_values=list(manifest["class_values"]),
         window=tuple(manifest["image"]["window"]),  # type: ignore[arg-type]
-        tile=tile_for(ctx.memory_budget_bytes, cost),
+        tile=tile_for(ctx.memory_budget_bytes // 2, cost),
     )
     with tempfile.TemporaryDirectory(prefix="m4p-train-") as scratch:
         out = pathlib.Path(scratch)

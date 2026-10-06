@@ -440,6 +440,8 @@ def test_a_worker_trains_a_random_forest(
     assert status["plugin_version"] == "1"
     assert status["metrics"]["validation_crops"] == 1
     assert status["metrics"]["classes"][str(BONE)]["dice"] > 0.8
+    # The worker's memory budget leaves room for every sample asked for.
+    assert status["metrics"]["samples_per_class_used"] == 2000
 
     async def model_manifest(db):
         trained = await db.get(TrainedModel, uuid.UUID(model["id"]))
