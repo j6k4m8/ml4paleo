@@ -213,6 +213,7 @@ def _wire(delta: ChunkDelta) -> dict[str, Any]:
         "box": list(delta.box),
         "mask": base64.b64encode(delta.mask).decode(),
         "values": base64.b64encode(delta.values or b"").decode(),
+        "only_if": delta.only_if,
     }
 
 
@@ -221,6 +222,8 @@ def labels(ctx: JobContext) -> dict[str, Any]:
     job_id = _job_id(ctx)
     foreground = int(ctx.payload["foreground"])
     z, y, x = ctx.payload["shape_zyx"]
+    # A later try at the import leaves voxels someone labeled since alone.
+    only_if = "unlabeled" if ctx.payload.get("only_unlabeled") else "any"
     placed, _ = annotations(root, job_id, (x, y, z))
     rois = []
     for done, annotation in enumerate(placed, start=1):
@@ -232,7 +235,10 @@ def labels(ctx: JobContext) -> dict[str, Any]:
         values = np.where(mask, foreground, BACKGROUND).astype(np.uint8)[np.newaxis]
         box = annotation.box_zyx
         deltas = split_into_deltas(
-            np.ones(values.shape, dtype=bool), (box[0], box[1], box[2]), values=values
+            np.ones(values.shape, dtype=bool),
+            (box[0], box[1], box[2]),
+            values=values,
+            only_if=only_if,
         )
         try:
             ctx.apply_label_op(

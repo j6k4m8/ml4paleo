@@ -337,10 +337,12 @@ async def follow_ups(
     labels: bool,
     prediction: bool,
     created_by: uuid.UUID,
+    again: bool = False,
 ) -> list[Job]:
     """
     Start the labels and the prediction (as `probe` found them), each as a
-    pipeline of its own, and return their jobs.
+    pipeline of its own, and return their jobs. Labels brought over `again`
+    only fill voxels nobody has labeled, so they keep edits made since.
     """
     assert probe.project_id is not None
     result = probe.result or {}
@@ -358,7 +360,12 @@ async def follow_ups(
             await jobs.enqueue(
                 db,
                 "v1.labels",
-                {"job_id": job_id, "shape_zyx": shape, "foreground": foreground},
+                {
+                    "job_id": job_id,
+                    "shape_zyx": shape,
+                    "foreground": foreground,
+                    "only_unlabeled": again,
+                },
                 **common,
             )
         )
@@ -399,26 +406,28 @@ async def resume(
 ) -> list[Job]:
     """
     Start again whichever parts of the project's import aren't done or
-    running, and return the jobs that start them. Raises `NoRoom` if the
-    prediction won't fit in the owner's storage (the image's own probe checks
-    the image).
+    running, and return the jobs that start them. A prediction is left out
+    if the project has one since (from a model of its own) or it won't fit
+    in the owner's storage (the image's probe checks the image itself).
     """
     assert project.v1_job_id is not None
+    # Running first: the image's finalize commits the image and ends its
+    # pipeline at once, so looking the other way round could miss both.
+    root = aliased(Job)
+    image_running = await db.scalar(
+        select(Job.id)
+        .join(root, root.id == Job.root_id)
+        .where(
+            Job.project_id == project.id,
+            Job.status.in_(UNFINISHED),
+            root.kind == "v1.probe",
+        )
+        .limit(1)
+    )
+    if image_running is not None:
+        return []
     image = await artifacts.head(db, project.id, "image")
     if image is None:
-        root = aliased(Job)
-        image_running = await db.scalar(
-            select(Job.id)
-            .join(root, root.id == Job.root_id)
-            .where(
-                Job.project_id == project.id,
-                Job.status.in_(UNFINISHED),
-                root.kind == "v1.probe",
-            )
-            .limit(1)
-        )
-        if image_running is not None:
-            return []
         probe, _ = await start(db, project, project.v1_job_id, created_by)
         return [probe]
     probe = await db.scalar(
@@ -450,14 +459,29 @@ async def resume(
         return done_or_running is None
 
     labels = bool(result.get("annotations")) and await missing("v1.labels")
-    prediction = bool(result.get("segmentation")) and await missing("v1.prediction")
+    prediction = (
+        bool(result.get("segmentation"))
+        and await missing("v1.prediction")
+        and await artifacts.head(db, project.id, "prediction") is None
+    )
+    if prediction:
+        try:
+            await _check_room(
+                db, settings, project.id, estimate(result)[1], "The segmentation"
+            )
+        except NoRoom:
+            # Its failed pipeline already says why; claiming the job again
+            # once there's room brings it over.
+            prediction = False
     if not (labels or prediction):
         return []
-    if prediction:
-        _, need = estimate(result)
-        await _check_room(db, settings, project.id, need, "This job's segmentation")
     return await follow_ups(
-        db, probe, labels=labels, prediction=prediction, created_by=created_by
+        db,
+        probe,
+        labels=labels,
+        prediction=prediction,
+        created_by=created_by,
+        again=True,
     )
 
 

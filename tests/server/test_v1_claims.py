@@ -188,6 +188,24 @@ def set_room(database_url, gb: float | None) -> None:
     run_db(database_url, set_quota)
 
 
+def paint(browser, project, zyx, value):
+    """Label one voxel, as the annotator would."""
+    [delta] = split_into_deltas(np.ones((1, 1, 1), dtype=bool), zyx, value=value)
+    op = {
+        "client_op_id": str(uuid.uuid4()),
+        "deltas": [
+            {
+                "key": list(delta.key),
+                "box": list(delta.box),
+                "mask": base64.b64encode(delta.mask).decode(),
+                "value": value,
+            }
+        ],
+        "tool": {"name": "brush"},
+    }
+    return browser.post(f"/api/projects/{project}/labels/ops", json=op)
+
+
 def refusing_after(count: int):
     """A labels job whose server refuses every sample after the first `count`."""
 
@@ -407,36 +425,100 @@ def test_claiming_again_brings_over_what_an_import_is_missing(
     assert error is not None and "storage_quota_exceeded" in error
     assert failed["import labels"][0][0] == "failed"
 
-    # Claiming the job again refuses to start a prediction that won't fit...
-    refused = ada.post("/api/v1-jobs/ABC123/claim")
-    assert refused.status_code == 403
-    assert refused.json()["detail"].startswith(
-        "This job's segmentation takes about under 1 MB, and you have 0 MB of "
-        "storage left for it."
-    )
-    # ...and with room, starts both again, and only them...
-    set_room(migrated_database_url, 1)
+    # Meanwhile ada labels a voxel where the second sample goes.
+    classes = f"/api/projects/{project}/labels/classes"
+    bone = ada.post(classes, json={"name": "Bone", "color": "#ffffff"}).json()["value"]
+    assert paint(ada, project, (11, 3, 31), bone).status_code == 201
+
+    # Claiming the job again starts the labels again, but not the prediction
+    # while it won't fit...
     again = ada.post("/api/v1-jobs/ABC123/claim")
     assert again.status_code == 200
-    assert len(again.json()["pipeline_ids"]) == 2
+    assert len(again.json()["pipeline_ids"]) == 1
     done = statuses(
         run_import(migrated_database_url, live_server, ada, project, volume)
     )
     assert done["import"] == [("succeeded", None)]
     assert [status for status, _ in done["import labels"]] == ["failed", "succeeded"]
-    assert [s for s, _ in done["import prediction"]] == ["failed", "succeeded"]
-
-    # ...which bring over what's missing, nothing twice.
+    assert [status for status, _ in done["import prediction"]] == ["failed"]
+    # ...which brings over what's missing, nothing twice, and leaves ada's
+    # label alone.
     assert ada.get(f"/api/projects/{project}/image").json()["artifact_id"] == image
     ops = ada.get(f"/api/projects/{project}/labels/ops").json()
-    assert sorted(op["tool"]["sample"] for op in ops) == [
+    imported = [op for op in ops if op["tool"].get("name") == "v1-import"]
+    assert sorted(op["tool"]["sample"] for op in imported) == [
         "1745400000",
         "1745400100-z07",
     ]
+    labels = label_volume(ada, project)
+    expected = np.zeros_like(labels)
+    for z_index, stamp in ((9, "1745400000"), (11, "1745400100-z07")):
+        y0, y1, x0, x1 = v1_volume.FOREGROUND[stamp]
+        expected[z_index] = BACKGROUND
+        expected[z_index, y0:y1, x0:x1] = 2
+    expected[11, 3, 31] = bone
+    np.testing.assert_array_equal(labels, expected)
     rois = ada.get(f"/api/projects/{project}/rois").json()
     assert sorted(r["bbox"][0] for r in rois) == [9, 11]
+
+    # With room, claiming it again brings over the prediction.
+    set_room(migrated_database_url, 1)
+    again = ada.post("/api/v1-jobs/ABC123/claim")
+    assert len(again.json()["pipeline_ids"]) == 1
+    done = statuses(
+        run_import(migrated_database_url, live_server, ada, project, volume)
+    )
+    assert [s for s, _ in done["import prediction"]] == ["failed", "succeeded"]
     assert ada.get(f"/api/projects/{project}/prediction").json()["class_values"] == [2]
     assert ada.post("/api/v1-jobs/ABC123/claim").json()["pipeline_ids"] == []
+
+
+def test_claiming_again_leaves_a_prediction_made_since(
+    new_browser, settings, migrated_database_url, live_server, volume
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/v1-jobs/ABC123/claim").json()["project_id"]
+    run_import(
+        migrated_database_url,
+        live_server,
+        ada,
+        project,
+        volume,
+        v1_handlers=IMAGE_ONLY,
+        until=image_in,
+    )
+    # The labels come over, but the prediction doesn't fit...
+    set_room(migrated_database_url, None)
+    failed = statuses(
+        run_import(migrated_database_url, live_server, ada, project, volume)
+    )
+    assert failed["import labels"] == [("succeeded", None)]
+    assert failed["import prediction"][0][0] == "failed"
+
+    # ...and ada predicts with a model of her own instead.
+    async def predict(db):
+        artifact = await artifacts.create_staging(
+            db,
+            project_id=uuid.UUID(project),
+            kind="prediction",
+            head_slot="prediction",
+        )
+        artifact.state = "committed"
+        artifact.manifest = {"kind": "prediction", "class_values": [2]}
+        await artifacts.set_head(db, artifact)
+        return str(artifact.id)
+
+    own = run_db(migrated_database_url, predict)
+    set_room(migrated_database_url, 1)
+    again = ada.post("/api/v1-jobs/ABC123/claim")
+    assert again.json() == {"project_id": project, "pipeline_ids": []}
+
+    async def current(db):
+        head = await artifacts.head(db, uuid.UUID(project), "prediction")
+        return str(head.id) if head else None
+
+    assert run_db(migrated_database_url, current) == own
 
 
 def test_an_import_must_fit_beside_the_imports_still_running(
