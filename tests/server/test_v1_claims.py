@@ -8,6 +8,7 @@ segmentation as the prediction. The first claim wins; admins can release.
 import asyncio
 import base64
 import datetime
+import math
 import shutil
 import threading
 import time
@@ -630,7 +631,32 @@ def test_segmentations_must_be_named_as_v1_named_them(volume, tmp_path):
             v1import.prediction(ctx)
 
 
-def test_small_workers_read_a_chunk_at_a_time(volume, tmp_path):
+class Counted:
+    """A zarr array that notes how many of its chunks each read touches."""
+
+    def __init__(self, array, touched: list[int]):
+        self.array = array
+        self.touched = touched
+
+    def __getattr__(self, name):
+        return getattr(self.array, name)
+
+    def __getitem__(self, key):
+        self.touched.append(
+            math.prod(
+                (s.stop - 1) // size - s.start // size + 1
+                for s, size in zip(key, self.array.chunks, strict=True)
+            )
+        )
+        return self.array[key]
+
+
+def test_small_workers_read_a_chunk_at_a_time(volume, tmp_path, monkeypatch):
+    touched: list[int] = []
+    opened = zarr.open_array
+    monkeypatch.setattr(
+        zarr, "open_array", lambda *args, **kw: Counted(opened(*args, **kw), touched)
+    )
     # Room for about one of the fixture's chunks at a time.
     small = 64 * 1024
     image = StorageGrant(url=(tmp_path / "image").as_uri(), access="rw")
@@ -640,6 +666,8 @@ def test_small_workers_read_a_chunk_at_a_time(volume, tmp_path):
         v1import.slab(context(volume, "v1.slab", payload, [image], memory=small))
     stored = np.asarray(OmeImage.open(image).array(0)[0])
     np.testing.assert_array_equal(stored, v1_volume.image().transpose(2, 1, 0))
+    assert len(touched) > 1 and max(touched) == 1
+    touched.clear()
 
     grant = StorageGrant(url=(tmp_path / "prediction").as_uri(), access="rw")
     payload = {
@@ -657,6 +685,7 @@ def test_small_workers_read_a_chunk_at_a_time(volume, tmp_path):
         np.asarray(predicted[:]),  # type: ignore[index]
         np.where(segmented > 0, 2, BACKGROUND),
     )
+    assert len(touched) > 1 and max(touched) == 1
 
 
 def test_a_worker_without_the_volume_leaves_the_import_to_another(tmp_path):
