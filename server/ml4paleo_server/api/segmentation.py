@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import artifacts, audit
-from ..auth.deps import CurrentAuth, DbSession, SettingsDep
+from ..auth.deps import CurrentAuth, DbSession
 from ..db import TrainedModel
 from ..pipelines import compose
 from .gateway import zarr_path
@@ -44,19 +44,20 @@ async def make_segmentation(
     request: Request,
     auth: CurrentAuth,
     db: DbSession,
-    settings: SettingsDep,
 ) -> ComposeStarted:
     prediction = await artifacts.head(db, project.id, "prediction")
     if prediction is None or not prediction.manifest:
         raise HTTPException(status_code=409, detail="Predict with a model first.")
-    root, artifact = await compose.start(
-        db,
-        request.app.state.sessionmaker,
-        settings,
-        prediction=prediction,
-        min_voxels=body.min_voxels,
-        created_by=auth.user.id,
-    )
+    try:
+        root, artifact = await compose.start(
+            db,
+            request.app.state.sessionmaker,
+            prediction=prediction,
+            min_voxels=body.min_voxels,
+            created_by=auth.user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     audit.record(
         db,
         actor_id=auth.user.id,

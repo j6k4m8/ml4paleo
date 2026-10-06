@@ -79,9 +79,13 @@ def _merged(ctx: JobContext) -> tuple[np.ndarray, np.ndarray]:
 
 
 def prepare(ctx: JobContext) -> dict[str, Any]:
+    grant = ctx.grants[2]
     create_prediction(
-        ctx.grants[2], ctx.payload["shape_zyx"], arrays=("class",), kind="segmentation"
+        grant, ctx.payload["shape_zyx"], arrays=("class",), kind="segmentation"
     )
+    # The pinned labels come in the payload, so nothing is written until
+    # the pipeline exists.
+    put_bytes(grant, "inputs.json", json.dumps(ctx.payload["inputs"]).encode())
     return {}
 
 

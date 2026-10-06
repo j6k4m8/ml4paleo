@@ -4,17 +4,18 @@ labels and complete ROIs, and removes specks.
 """
 
 import datetime
-import json
 import threading
 import time
 import tracemalloc
 import uuid
 
 import numpy as np
+import obstore
 import pytest
 import zarr
 from helpers import SECRET_KEY, add_worker, run_db, signup
 from ml4paleo_server import artifacts, labels
+from ml4paleo_server.db import Artifact
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
@@ -23,6 +24,7 @@ from ml4paleo_worker.handlers import HANDLERS
 from ml4paleo_worker.handlers import compose as jobs
 from ml4paleo_worker.main import Worker
 from scipy import ndimage
+from sqlalchemy import select
 
 from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.protocol import JobLease, WorkerCaps
@@ -32,7 +34,7 @@ from ml4paleo.segmentation.predict import (
     open_prediction,
     shard_boxes,
 )
-from ml4paleo.storage import StorageGrant, put_bytes, zarr_store
+from ml4paleo.storage import StorageGrant, object_store, zarr_store
 
 SHAPE = (20, 24, 28)
 BONE, TOOTH = 2, 3
@@ -192,6 +194,41 @@ def test_a_worker_composes_the_final_segmentation(
     assert get_bytes(grant, "inputs.json") is not None
 
 
+def test_a_start_that_fails_leaves_no_files(
+    new_browser, settings, migrated_database_url
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    add_prediction(settings, migrated_database_url, project)
+
+    async def take_prediction(db):
+        # As if garbage collection took it just as composing started.
+        prediction = await artifacts.head(db, uuid.UUID(project), "prediction")
+        prediction.state = "deleting"
+        return prediction.id
+
+    prediction_id = run_db(migrated_database_url, take_prediction)
+    started = ada.post(f"/api/projects/{project}/segmentation", json={})
+    assert started.status_code == 409, started.text
+    assert "can't use them" in started.json()["detail"]
+    files = object_store(project_storage(settings).child(f"projects/{project}"))
+    assert all(
+        meta["path"].startswith(f"artifacts/{prediction_id}/")
+        for batch in obstore.list(files)
+        for meta in batch
+    )
+
+    async def kinds(db):
+        return list(
+            await db.scalars(
+                select(Artifact.kind).where(Artifact.project_id == uuid.UUID(project))
+            )
+        )
+
+    assert "segmentation" not in run_db(migrated_database_url, kinds)
+
+
 class Noisy:
     """
     A final segmentation's jobs over a noisy prediction on local disk: every
@@ -216,11 +253,6 @@ class Noisy:
             StorageGrant(url=f"file://{root}/labels"),
             StorageGrant(url=f"file://{root}/segmentation", access="rw"),
         ]
-        put_bytes(
-            self.grants[2],
-            "inputs.json",
-            json.dumps({"chunks": [], "complete_rois": [], "label_seq": 0}).encode(),
-        )
         self.boxes = shard_boxes(self.shape, SHARD_ZYX)
         assert len(self.boxes) == 4
         self.payload = {
@@ -235,6 +267,8 @@ class Noisy:
     def job(self, kind, shard=None, budget=32 * 1024**2, context=JobContext):
         """A job as a worker would get it, with `budget` bytes to use."""
         payload = dict(self.payload)
+        if kind == "compose.prepare":
+            payload["inputs"] = {"chunks": [], "complete_rois": [], "label_seq": 0}
         if shard is not None:
             payload.update(shard=shard, box=list(self.boxes[shard]))
         return context(
