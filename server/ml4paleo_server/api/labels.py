@@ -28,10 +28,10 @@ import datetime
 import json
 import re
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 import numpy as np
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
@@ -55,6 +55,9 @@ FIRST_CLASS = BACKGROUND + 1
 COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 EVENT_INTERVAL_SECONDS = 1.0
 STREAM_FOR = datetime.timedelta(minutes=30)
+# Op seqs are bigints; larger numbers never name an op.
+MAX_SEQ = 2**63 - 1
+Seq = Annotated[int, Path(ge=1, le=MAX_SEQ)]
 
 
 # --- classes ---------------------------------------------------------------
@@ -261,15 +264,18 @@ async def _allowed_values(db, project_id: uuid.UUID) -> set[int]:
     return {UNLABELED, BACKGROUND, *classes}
 
 
-def _check_values(delta: ChunkDelta, allowed: set[int]) -> None:
-    if delta.value is not None:
-        used = {delta.value}
-    else:
-        used = set(
-            np.unique(unpack_values(delta.values or b"", delta.box_shape)).tolist()
-        )
-    if not used <= allowed:
-        raise ValueError(f"label values {sorted(used - allowed)} are not classes here")
+def _check_values(deltas: list[ChunkDelta], allowed: set[int]) -> None:
+    for delta in deltas:
+        if delta.value is not None:
+            used = {delta.value}
+        else:
+            used = set(
+                np.unique(unpack_values(delta.values or b"", delta.box_shape)).tolist()
+            )
+        if not used <= allowed:
+            raise ValueError(
+                f"label values {sorted(used - allowed)} are not classes here"
+            )
 
 
 @router.post("/ops", status_code=201)
@@ -284,11 +290,13 @@ async def apply_op(
     Apply one edit. Sending the same `client_op_id` again returns the first
     result. A strict edit gets 409 with the chunks that changed meanwhile.
     """
+    # A retry returns the first result, even if a class it used is gone now.
+    if done := await labels.existing(db, project.id, body.client_op_id):
+        return _op_out(done)
     try:
         deltas = [delta.to_delta() for delta in body.deltas]
         allowed = await _allowed_values(db, project.id)
-        for delta in deltas:
-            _check_values(delta, allowed)
+        await run_in_threadpool(_check_values, deltas, allowed)
         result = await labels.apply_edit(
             db,
             settings,
@@ -343,7 +351,7 @@ async def _toggle(seq, body, project, auth, db, settings, live: bool) -> OpOut:
 
 @router.post("/ops/{seq}/undo", status_code=201)
 async def undo(
-    seq: int,
+    seq: Seq,
     body: ToggleIn,
     project: MemberProject,
     auth: CurrentAuth,
@@ -355,7 +363,7 @@ async def undo(
 
 @router.post("/ops/{seq}/redo", status_code=201)
 async def redo(
-    seq: int,
+    seq: Seq,
     body: ToggleIn,
     project: MemberProject,
     auth: CurrentAuth,
@@ -393,14 +401,15 @@ def _history_out(op: LabelOp) -> HistoryOut:
 
 @router.get("/ops")
 async def history(
-    project: MemberProject, db: DbSession, before: int | None = None, limit: int = 100
+    project: MemberProject,
+    db: DbSession,
+    before: Annotated[int | None, Query(ge=1, le=MAX_SEQ)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[HistoryOut]:
     query = select(LabelOp).where(LabelOp.project_id == project.id)
     if before is not None:
         query = query.where(LabelOp.seq < before)
-    ops = (
-        await db.scalars(query.order_by(LabelOp.seq.desc()).limit(min(limit, 500)))
-    ).all()
+    ops = (await db.scalars(query.order_by(LabelOp.seq.desc()).limit(limit))).all()
     return [_history_out(op) for op in ops]
 
 
@@ -423,7 +432,9 @@ async def _changes(db, project_id, after: int) -> list[ChangeOut]:
 
 @router.get("/changes")
 async def changes(
-    project: MemberProject, db: DbSession, after: int = 0
+    project: MemberProject,
+    db: DbSession,
+    after: Annotated[int, Query(ge=0, le=MAX_SEQ)] = 0,
 ) -> list[ChangeOut]:
     """
     Edits, undos, and redos after op `after`, oldest first (at most 200), with
@@ -438,12 +449,16 @@ async def events(
     auth: CurrentAuth,
     db: DbSession,
     request: Request,
-    after: int = 0,
+    after: Annotated[int, Query(ge=0, le=MAX_SEQ)] = 0,
 ) -> StreamingResponse:
     """
     Server-sent events: a `change` event (as in /changes) for each op after
     `after`, as they happen, while the viewer stays signed in and a member.
+    A reconnecting browser resumes after the last event it got.
     """
+    last_event_id = request.headers.get("last-event-id", "")
+    if last_event_id.isdigit() and len(last_event_id) < 20:
+        after = max(after, min(int(last_event_id), MAX_SEQ))
     user_id, session_hash, project_id = (
         auth.user.id,
         auth.session.token_hash,
@@ -496,7 +511,7 @@ async def events(
 # --- the labels as zarr ----------------------------------------------------
 
 ARRAYS = ("class", "source")
-_CHUNK_KEY = re.compile(r"^(class|source)/c/(\d+)/(\d+)/(\d+)$")
+_CHUNK_KEY = re.compile(r"^(class|source)/c/(\d{1,9})/(\d{1,9})/(\d{1,9})$")
 
 
 def _array_metadata(shape: tuple[int, int, int]) -> dict:

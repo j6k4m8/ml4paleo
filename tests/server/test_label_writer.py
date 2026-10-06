@@ -272,16 +272,127 @@ def test_concurrent_edits_of_one_chunk_both_land(
     assert ada.get(url).headers["x-chunk-version"] == "2"
 
 
+def test_ops_commit_in_seq_order(project, settings, migrated_database_url):
+    """
+    An op on other chunks can't commit ahead of an earlier op still in
+    flight, so a reader paging by seq never skips the earlier one.
+    """
+    pid = uuid.UUID(project)
+    mask = np.ones((2, 2, 2), dtype=bool)
+
+    async def scenario():
+        engine = create_engine(migrated_database_url)
+        sessionmaker = create_sessionmaker(engine)
+
+        async def feed() -> list[int]:
+            async with sessionmaker() as db:
+                return [op.seq for op, _ in await labels.changes_since(db, pid, 0)]
+
+        async def apply(db, x):
+            return await labels.apply_edit(
+                db,
+                settings,
+                pid,
+                client_op_id=uuid.uuid4(),
+                deltas=split_into_deltas(mask, (0, 0, x), value=2),
+            )
+
+        try:
+            async with sessionmaker() as a, sessionmaker() as b:
+                first = await apply(a, 0)
+                second = asyncio.create_task(apply(b, 80))
+                await asyncio.sleep(0.3)
+                assert not second.done()
+                assert await feed() == []
+                await a.commit()
+                later = await second
+                await b.commit()
+            assert first.seq < later.seq
+            assert await feed() == [first.seq, later.seq]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_retries_return_the_first_result(
+    project, settings, migrated_database_url
+):
+    pid = uuid.UUID(project)
+    edit_id, undo_id = uuid.uuid4(), uuid.uuid4()
+    deltas = split_into_deltas(np.ones((2, 2, 2), dtype=bool), (0, 0, 0), value=2)
+
+    async def race():
+        engine = create_engine(migrated_database_url)
+        sessionmaker = create_sessionmaker(engine)
+
+        async def twice(call):
+            async def attempt():
+                async with sessionmaker() as db:
+                    result = await call(db)
+                    await asyncio.sleep(0.2)
+                    await db.commit()
+                    return result
+
+            return await asyncio.gather(attempt(), attempt())
+
+        try:
+            edits = await twice(
+                lambda db: labels.apply_edit(
+                    db, settings, pid, client_op_id=edit_id, deltas=deltas
+                )
+            )
+            undos = await twice(
+                lambda db: labels.set_live(
+                    db,
+                    settings,
+                    pid,
+                    target_seq=edits[0].seq,
+                    live=False,
+                    client_op_id=undo_id,
+                )
+            )
+            async with sessionmaker() as db:
+                count = await db.scalar(
+                    select(func.count())
+                    .select_from(LabelOp)
+                    .where(LabelOp.project_id == pid)
+                )
+            return edits, undos, count
+        finally:
+            await engine.dispose()
+
+    edits, undos, count = asyncio.run(race())
+    assert edits[0] == edits[1]
+    assert undos[0] == undos[1]
+    assert count == 2
+
+
+def test_out_of_range_numbers_are_refused(ada, project):
+    base = f"/api/projects/{project}/labels"
+    huge = "9" * 20
+    assert ada.get(f"{base}/ops?limit=-1").status_code == 422
+    assert ada.get(f"{base}/ops?before={huge}").status_code == 422
+    assert ada.get(f"{base}/changes?after={huge}").status_code == 422
+    toggle = {"client_op_id": str(uuid.uuid4())}
+    assert ada.post(f"{base}/ops/{huge}/undo", json=toggle).status_code == 422
+    assert ada.get(f"{base}/zarr/class/c/{huge}/0/0").status_code == 404
+
+
 def test_collaborators_follow_changes_live(ada, project, new_browser):
     bob = new_browser()
     signup(bob, username="bob")
     members = ada.post(f"/api/projects/{project}/members", json={"username": "bob"})
     bob_id = next(m["user_id"] for m in members.json() if m["username"] == "bob")
     watched = []
+    mask = np.ones((2, 2, 2), dtype=bool)
+    seen = edit(ada, project, mask, (0, 0, 0), 3).json()["seq"]
 
     def watch():
         url = f"/api/projects/{project}/labels/events?after=0"
-        with bob.client.stream("GET", url) as response:
+        # As a reconnecting browser sends it: resume after that op.
+        headers = {"Last-Event-ID": str(seen)}
+        with bob.client.stream("GET", url, headers=headers) as response:
             for line in response.iter_lines():
                 if line.startswith("data: "):
                     watched.append(json.loads(line[6:]))
@@ -289,7 +400,7 @@ def test_collaborators_follow_changes_live(ada, project, new_browser):
     watcher = threading.Thread(target=watch)
     watcher.start()
     time.sleep(0.5)
-    seq = edit(ada, project, np.ones((2, 2, 2), dtype=bool), (0, 0, 0), 2).json()["seq"]
+    seq = edit(ada, project, mask, (0, 0, 0), 2).json()["seq"]
     deadline = time.monotonic() + 10
     while not watched and time.monotonic() < deadline:
         time.sleep(0.05)
@@ -297,7 +408,7 @@ def test_collaborators_follow_changes_live(ada, project, new_browser):
     ada.request("DELETE", f"/api/projects/{project}/members/{bob_id}")
     watcher.join(timeout=10)
     assert not watcher.is_alive()
-    assert watched and watched[0]["op"]["seq"] == seq
+    assert [change["op"]["seq"] for change in watched] == [seq]
     assert watched[0]["chunks"][0]["key"] == [0, 0, 0]
 
 
