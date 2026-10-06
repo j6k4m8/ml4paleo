@@ -1,6 +1,7 @@
 /** Who is signed in. Pages read `session.current`; null means signed out. */
 
 import { api } from "./api";
+import { clearOpStorage } from "./labels/opqueue.svelte";
 import type { Session } from "./types";
 
 class SessionState {
@@ -33,6 +34,8 @@ class SessionState {
 
 	async logout(): Promise<void> {
 		await api("/api/auth/logout", { method: "POST" });
+		// Edits that never saved stay with the person who made them.
+		clearOpStorage();
 		this.current = null;
 	}
 }

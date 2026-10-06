@@ -2,8 +2,11 @@
  * Sends label edits, undos, and redos to the server one at a time, in the
  * order they were made. Each carries a `client_op_id`, so a retry after a
  * lost answer applies once. Network failures and server errors retry with
- * backoff; edits not yet sent survive a reload (IndexedDB) and go out when
- * the page opens again.
+ * backoff; ops not yet sent survive a reload (IndexedDB, per user and
+ * project) and go out when the page opens again.
+ *
+ * Undoing an edit that hasn't been sent yet just drops it; redoing it sends
+ * it as a new op.
  */
 
 import { ApiError, api } from "#lib/api.ts";
@@ -17,7 +20,7 @@ export interface OpOut {
 	chunks: { key: Vec3; version: number; sha: string | null }[];
 }
 
-interface QueuedEdit {
+export interface QueuedEdit {
 	kind: "edit";
 	local: string;
 	clientOpId: string;
@@ -26,25 +29,34 @@ interface QueuedEdit {
 	tool: Record<string, unknown>;
 }
 
-interface QueuedToggle {
+export interface QueuedToggle {
 	kind: "undo" | "redo";
 	local: string;
 	clientOpId: string;
 	/** The edit to undo or redo, by local id. */
 	target: string;
+	/** Its seq, once known (so the toggle can be saved across reloads). */
+	seq?: number;
 }
 
 export type Queued = QueuedEdit | QueuedToggle;
 
 export type Outcome =
 	| { op: Queued; result: OpOut }
-	| { op: Queued; error: string; conflict?: Vec3[] };
+	| { op: Queued; error: string; conflict?: Vec3[]; alreadyDone?: boolean }
+	| { op: QueuedEdit; cancelled: true };
 
-/** Where unsent edits wait across reloads. */
+/** Where unsent ops wait across reloads. */
 export interface OpStorage {
-	load(): Promise<QueuedEdit[]>;
-	save(op: QueuedEdit): Promise<void>;
+	load(): Promise<Queued[]>;
+	save(op: Queued): Promise<void>;
 	remove(local: string): Promise<void>;
+}
+
+interface UndoGroup {
+	ops: QueuedEdit[];
+	/** The edits were undone before they were sent, so they were dropped. */
+	dropped?: boolean;
 }
 
 type Send = (path: string, body: unknown) => Promise<OpOut>;
@@ -63,15 +75,19 @@ export class OpQueue {
 	/** How many edits can be undone and redone. */
 	undoable = $state(0);
 	redoable = $state(0);
+	/** Last chance to adjust an edit (for example its base versions) before it goes. */
+	beforeSend: ((op: QueuedEdit) => QueuedEdit) | null = null;
 
 	#queue: Queued[] = [];
+	#inFlight: Queued | null = null;
 	#seqs = new Map<string, number>();
-	#undo: string[][] = [];
-	#redo: string[][] = [];
+	#undo: UndoGroup[] = [];
+	#redo: UndoGroup[] = [];
 	#sending = false;
 	#retryDelay = 0;
 	#timer: ReturnType<typeof setTimeout> | null = null;
 	#listeners = new Set<(outcome: Outcome) => void>();
+	#requeueListeners = new Set<(ops: QueuedEdit[]) => void>();
 	#stopped = false;
 
 	constructor(
@@ -80,10 +96,10 @@ export class OpQueue {
 		private send: Send = defaultSend,
 	) {}
 
-	/** Resume edits a previous page left unsent. */
+	/** Resume ops a previous page left unsent, ahead of anything new. */
 	async start(): Promise<Queued[]> {
 		const saved = (await this.storage?.load().catch(() => [])) ?? [];
-		this.#queue.push(...saved);
+		this.#queue.unshift(...saved);
 		this.#changed();
 		return saved;
 	}
@@ -92,6 +108,7 @@ export class OpQueue {
 		this.#stopped = true;
 		if (this.#timer) clearTimeout(this.#timer);
 		this.#listeners.clear();
+		this.#requeueListeners.clear();
 	}
 
 	onOutcome(listener: (outcome: Outcome) => void): () => void {
@@ -99,9 +116,15 @@ export class OpQueue {
 		return () => this.#listeners.delete(listener);
 	}
 
+	/** Edits queued again by a redo of edits that were dropped unsent. */
+	onRequeue(listener: (ops: QueuedEdit[]) => void): () => void {
+		this.#requeueListeners.add(listener);
+		return () => this.#requeueListeners.delete(listener);
+	}
+
 	/**
-	 * Queue an edit; returns its ops' local ids (more than one when it
-	 * touches more chunks than one op may carry; undo treats them as one).
+	 * Queue an edit; returns its ops (more than one when it touches more
+	 * chunks than one op may carry; undo treats them as one).
 	 */
 	edit(deltas: DeltaIn[], options: { strict?: boolean; tool?: Record<string, unknown> } = {}): QueuedEdit[] {
 		const ops: QueuedEdit[] = [];
@@ -116,33 +139,70 @@ export class OpQueue {
 			});
 		}
 		if (ops.length === 0) return ops;
-		for (const op of ops) {
-			this.#queue.push(op);
-			this.storage?.save(op).catch(() => {});
-		}
-		this.#undo.push(ops.map((op) => op.local));
+		this.#enqueue(ops);
+		this.#undo.push({ ops });
 		this.#redo = [];
 		this.#changed();
 		return ops;
 	}
 
 	undo(): boolean {
-		return this.#toggle(this.#undo, this.#redo, "undo");
+		const group = this.#undo.pop();
+		if (!group) return false;
+		const waiting = group.ops.every((op) => this.#queue.includes(op) && op !== this.#inFlight);
+		if (waiting) {
+			// Never sent: drop the edits instead of undoing them.
+			this.#queue = this.#queue.filter((op) => !group.ops.includes(op as QueuedEdit));
+			for (const op of group.ops) {
+				this.storage?.remove(op.local).catch(() => {});
+				this.#emit({ op, cancelled: true });
+			}
+			this.#redo.push({ ops: group.ops, dropped: true });
+		} else {
+			this.#toggle(group, "undo");
+			this.#redo.push(group);
+		}
+		this.#changed();
+		return true;
 	}
 
 	redo(): boolean {
-		return this.#toggle(this.#redo, this.#undo, "redo");
-	}
-
-	#toggle(from: string[][], to: string[][], kind: "undo" | "redo"): boolean {
-		const group = from.pop();
+		const group = this.#redo.pop();
 		if (!group) return false;
-		to.push(group);
-		// Undo a multi-op edit last part first.
-		const order = kind === "undo" ? [...group].reverse() : group;
-		for (const target of order) this.#queue.push({ kind, local: newId(), clientOpId: newId(), target });
+		if (group.dropped) {
+			const ops = group.ops.map((op) => ({ ...op, local: newId(), clientOpId: newId() }));
+			this.#enqueue(ops);
+			for (const listener of this.#requeueListeners) listener(ops);
+			this.#undo.push({ ops });
+		} else {
+			this.#toggle(group, "redo");
+			this.#undo.push(group);
+		}
 		this.#changed();
 		return true;
+	}
+
+	#enqueue(ops: Queued[]): void {
+		for (const op of ops) {
+			this.#queue.push(op);
+			this.storage?.save(op).catch(() => {});
+		}
+	}
+
+	#toggle(group: UndoGroup, kind: "undo" | "redo"): void {
+		// Undo a multi-op edit last part first.
+		const order = kind === "undo" ? [...group.ops].reverse() : group.ops;
+		for (const target of order) {
+			const seq = this.#seqs.get(target.local);
+			const op: QueuedToggle = { kind, local: newId(), clientOpId: newId(), target: target.local, seq };
+			this.#queue.push(op);
+			// Without a seq a reloaded page couldn't tell which edit it means.
+			if (seq !== undefined) this.storage?.save(op).catch(() => {});
+		}
+	}
+
+	#emit(outcome: Outcome): void {
+		for (const listener of this.#listeners) listener(outcome);
 	}
 
 	#changed(): void {
@@ -166,7 +226,9 @@ export class OpQueue {
 		try {
 			while (this.#queue.length > 0 && !this.#stopped) {
 				const op = this.#queue[0]!;
+				this.#inFlight = op;
 				const outcome = await this.#sendOne(op);
+				this.#inFlight = null;
 				if (outcome === "retry") {
 					this.#retryDelay = Math.min(30_000, Math.max(1000, this.#retryDelay * 2));
 					this.#sending = false;
@@ -176,11 +238,12 @@ export class OpQueue {
 				this.#retryDelay = 0;
 				this.offline = false;
 				this.#queue.shift();
-				if (op.kind === "edit") this.storage?.remove(op.local).catch(() => {});
+				this.storage?.remove(op.local).catch(() => {});
 				this.pending = this.#queue.length;
-				for (const listener of this.#listeners) listener(outcome);
+				this.#emit(outcome);
 			}
 		} finally {
+			this.#inFlight = null;
 			this.#sending = false;
 		}
 	}
@@ -190,15 +253,16 @@ export class OpQueue {
 		try {
 			let result: OpOut;
 			if (op.kind === "edit") {
+				const ready = this.beforeSend ? this.beforeSend(op) : op;
 				result = await this.send(`${base}/ops`, {
-					client_op_id: op.clientOpId,
-					deltas: op.deltas,
-					strict: op.strict,
-					tool: op.tool,
+					client_op_id: ready.clientOpId,
+					deltas: ready.deltas,
+					strict: ready.strict,
+					tool: ready.tool,
 				});
 				this.#seqs.set(op.local, result.seq);
 			} else {
-				const seq = this.#seqs.get(op.target);
+				const seq = op.seq ?? this.#seqs.get(op.target);
 				// The edit never applied, so there is nothing to undo or redo.
 				if (seq === undefined) return { op, error: "That edit didn't save." };
 				result = await this.send(`${base}/ops/${seq}/${op.kind}`, { client_op_id: op.clientOpId });
@@ -222,20 +286,27 @@ export class OpQueue {
 			}
 			const error = typeof detail === "string" ? detail : `HTTP ${e.status}`;
 			if (op.kind === "edit") this.error = error;
-			return { op, error };
+			return { op, error, alreadyDone: op.kind !== "edit" && e.status === 409 };
 		}
 	}
 }
 
-/** Unsent edits in IndexedDB, per project; null where IndexedDB doesn't work. */
-export function indexedDbStorage(projectId: string): OpStorage | null {
+const DATABASE = "m4p-label-ops";
+
+/**
+ * Unsent ops in IndexedDB, for one user in one project; null where
+ * IndexedDB doesn't work.
+ */
+export function indexedDbStorage(userId: string, projectId: string): OpStorage | null {
 	if (typeof indexedDB === "undefined") return null;
+	const owner = `${userId}/${projectId}`;
 	const open = () =>
 		new Promise<IDBDatabase>((resolve, reject) => {
-			const request = indexedDB.open("m4p-label-ops", 1);
+			const request = indexedDB.open(DATABASE, 2);
 			request.onupgradeneeded = () => {
-				const store = request.result.createObjectStore("ops", { keyPath: "local" });
-				store.createIndex("project", "project");
+				const db = request.result;
+				if (db.objectStoreNames.contains("ops")) db.deleteObjectStore("ops");
+				db.createObjectStore("ops", { keyPath: "local" }).createIndex("owner", "owner");
 			};
 			request.onsuccess = () => resolve(request.result);
 			request.onerror = () => reject(request.error);
@@ -248,18 +319,28 @@ export function indexedDbStorage(projectId: string): OpStorage | null {
 			request.onerror = () => reject(request.error);
 		}).finally(() => db.close());
 	};
+	let counter = 0;
 	return {
 		async load() {
-			const rows = await run("readonly", (store) => store.index("project").getAll(projectId));
-			return (rows as (QueuedEdit & { project: string; at: number })[])
+			const rows = await run("readonly", (store) => store.index("owner").getAll(owner));
+			return (rows as (Queued & { owner: string; at: number })[])
 				.sort((a, b) => a.at - b.at)
-				.map(({ project: _project, at: _at, ...op }) => op);
+				.map(({ owner: _owner, at: _at, ...op }) => op as Queued);
 		},
 		async save(op) {
-			await run("readwrite", (store) => store.put({ ...op, project: projectId, at: Date.now() + Math.random() / 1000 }));
+			await run("readwrite", (store) => store.put({ ...op, owner, at: Date.now() * 1000 + (counter++ % 1000) }));
 		},
 		async remove(local) {
 			await run("readwrite", (store) => store.delete(local));
 		},
 	};
+}
+
+/** Forget every unsent op in this browser (on sign-out). */
+export function clearOpStorage(): void {
+	try {
+		indexedDB?.deleteDatabase(DATABASE);
+	} catch {
+		// Nothing to clear.
+	}
 }
