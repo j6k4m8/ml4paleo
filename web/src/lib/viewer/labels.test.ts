@@ -27,6 +27,11 @@ const delta = (value: number) => ({
 	only_if: "any",
 });
 
+/** The first voxel of a cached label chunk. */
+function first(layer: LabelLayer, id: string): number | undefined {
+	return (layer.store.get(id)?.data as Uint8Array | undefined)?.[0];
+}
+
 async function loaded(layer: LabelLayer, id: string) {
 	layer.store.want("view", new Set([id]));
 	return layer.store.request(id);
@@ -39,12 +44,12 @@ describe("LabelLayer", () => {
 		const layer = new LabelLayer("p", pool, [2, 2, 2]);
 		await loaded(layer, "0/0/0");
 		layer.applyLocal("op", [delta(5)]);
-		expect(layer.store.get("0/0/0")?.data[0]).toBe(5);
+		expect(first(layer, "0/0/0")).toBe(5);
 		// Someone else's change arrives first; our edit stays on top.
 		server.set("0/0/0", { value: 2, version: 4 });
 		layer.reload(["0/0/0"]);
 		await new Promise((r) => setTimeout(r, 0));
-		expect(layer.store.get("0/0/0")?.data[0]).toBe(5);
+		expect(first(layer, "0/0/0")).toBe(5);
 		expect(layer.store.get("0/0/0")?.version).toBe(4);
 	});
 
@@ -84,6 +89,6 @@ describe("LabelLayer", () => {
 		layer.applyLocal("op", [delta(9)]);
 		layer.settle("op", null);
 		await new Promise((r) => setTimeout(r, 0));
-		expect(layer.store.get("0/0/0")?.data[0]).toBe(0);
+		expect(first(layer, "0/0/0")).toBe(0);
 	});
 });
