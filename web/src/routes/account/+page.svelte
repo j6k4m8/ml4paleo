@@ -12,6 +12,18 @@
 	let totpError = $state("");
 
 	const steps = $derived(session.current?.required_steps ?? []);
+	let resent = $state(false);
+	let resendError = $state("");
+
+	async function resend() {
+		resendError = "";
+		try {
+			await api("/api/auth/verify-email/resend", { method: "POST" });
+			resent = true;
+		} catch (e) {
+			resendError = message(e);
+		}
+	}
 
 	async function changePassword(event: SubmitEvent) {
 		event.preventDefault();
@@ -51,6 +63,19 @@
 <h1>Account</h1>
 {#if steps.length > 0}
 	<p>Finish these steps to use ml4paleo.</p>
+{/if}
+
+{#if steps.includes("verify_email")}
+	<section>
+		<h2>Email</h2>
+		<p>Open the link we sent to {session.current?.user.email} to confirm it's yours.</p>
+		{#if resent}
+			<p>Sent another one.</p>
+		{:else}
+			<button class="secondary" onclick={resend}>Send the link again</button>
+		{/if}
+		{#if resendError}<p class="error" role="alert">{resendError}</p>{/if}
+	</section>
 {/if}
 
 <section>
