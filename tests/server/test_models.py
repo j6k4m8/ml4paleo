@@ -19,6 +19,7 @@ from ml4paleo_server.db import (
     Artifact,
     Job,
     Project,
+    Roi,
     TrainedModel,
     create_engine,
     create_sessionmaker,
@@ -146,6 +147,40 @@ def test_training_sets_pin_labels_and_rois(ada, settings, migrated_database_url)
         changed["id"],
         again["id"],
         model["id"],
+    ]
+
+
+def test_training_sets_cut_rois_to_the_image(ada, settings, migrated_database_url):
+    project = make_project(ada)
+    add_image(settings, migrated_database_url, project)
+    add_class(ada, project)
+    paint(settings, migrated_database_url, project, (5, 5, 5), np.ones((1, 3, 3)), BONE)
+    rois = f"/api/projects/{project}/rois"
+    for bbox in ([0, 0, 0, 8, 8, 8], [8, 8, 8, 16, 16, 16]):
+        ada.post(rois, json={"bbox": bbox, "kind": "cube"})
+    first, second = (roi["id"] for roi in ada.get(rois).json())
+
+    # As if the image had been replaced by a smaller one since.
+    async def move(db):
+        for roi_id, bbox in (
+            (first, [30, 40, 50, 60, 60, 60]),
+            (second, [45, 0, 0, 50, 5, 5]),
+        ):
+            await db.execute(
+                update(Roi).where(Roi.id == uuid.UUID(roi_id)).values(bbox=bbox)
+            )
+
+    run_db(migrated_database_url, move)
+    model = ada.post(f"/api/projects/{project}/models", json={}).json()
+    raw = get_bytes(
+        project_storage(settings).child(
+            training_path(uuid.UUID(project), model["training_set"]["id"])
+        ),
+        "manifest.json",
+    )
+    assert raw is not None
+    assert json.loads(raw)["rois"] == [
+        {"bbox": [30, 40, 50, 40, 48, 56], "status": "open", "split": "train"}
     ]
 
 

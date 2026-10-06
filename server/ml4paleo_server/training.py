@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.concurrency import run_in_threadpool
 
+from ml4paleo.segmentation.dataset import clip_box
 from ml4paleo.storage import put_bytes
 
 from . import artifacts
@@ -102,9 +103,13 @@ async def read_snapshot(
             "shape_czyx": image.manifest["shape_czyx"],
             "window": image.manifest.get("window") or [0, 1],
         }
+        # ROIs are cut to the image as it is now (a new image may be smaller
+        # than the one they were drawn on), and ROIs left empty are dropped.
+        _, *shape_zyx = image.manifest["shape_czyx"]
         roi_info = [
-            {"bbox": list(roi.bbox), "status": roi.status, "split": roi.split}
+            {"bbox": list(bbox), "status": roi.status, "split": roi.split}
             for roi in rois
+            if (bbox := clip_box(roi.bbox, shape_zyx)) is not None
         ]
         await db.rollback()
     if not classes:
