@@ -593,7 +593,7 @@
 						</div>
 					{/if}
 				{:else}
-					<div class="grid place-items-center bg-pasteboard text-ink-faint">
+					<div class="col-span-full row-span-full grid place-items-center bg-pasteboard text-ink-faint">
 						{#if error}<ImageOff size={20} />{:else}<LoaderCircle size={20} class="animate-spin" />{/if}
 					</div>
 				{/if}
