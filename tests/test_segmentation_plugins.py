@@ -478,23 +478,42 @@ def test_predictions_cover_shards(tmp_path):
     assert np.asarray(group["uncertainty"][:]).max() <= 255
 
 
-# 1 byte: blocks of MIN_BLOCK, each written as it's done. 32 MiB: blocks of
-# 18 into outputs for the whole box, written once. 1 GB: the box in one block.
-@pytest.mark.parametrize("budget", [1, 2**25, 10**9])
-def test_predicting_block_by_block_matches_the_box_at_once(tmp_path, forest, budget):
-    from ml4paleo.segmentation.predict import predict_box
+# 1 byte and 1.5 MB: the box's outputs would take more than a quarter of
+# the budget, so they're written a layer of MIN_BLOCK blocks at a time.
+# 32 MiB: they're kept whole and written once, with several blocks. 1 GB:
+# the box is one block.
+@pytest.mark.parametrize(
+    ("budget", "whole"), [(1, False), (1_500_000, False), (2**25, True), (10**9, True)]
+)
+def test_predicting_block_by_block_matches_the_box_at_once(
+    tmp_path, monkeypatch, forest, budget, whole
+):
+    from ml4paleo.segmentation import predict
 
     image, _ = synthetic()
     # At the image's edges on some sides only.
     box = (8, 0, 30, 80, 70, 90)
+    reads = Reads(image)
+    written = []
+    write_box = predict.write_box
+
+    def counted(group, at, *arrays):
+        written.append(at)
+        write_box(group, at, *arrays)
+
+    monkeypatch.setattr(predict, "write_box", counted)
     group = new_prediction(tmp_path / "prediction")
-    predict_box(forest, image, box, WINDOW, [BONE], group, budget)
+    predict.predict_box(forest, reads, box, WINDOW, [BONE], group, budget)
     classes, uncertainty = predict_at_once(forest, image, box)
     region = tuple(slice(box[a], box[a + 3]) for a in range(3))
     np.testing.assert_array_equal(group["class"][region], classes)
     np.testing.assert_array_equal(group["uncertainty"][region], uncertainty)
     assert not np.asarray(group["class"][:8]).any()
     assert not np.asarray(group["class"][:, :, :30]).any()
+    side = predict.MIN_BLOCK
+    layers = [(z, 0, 30, min(z + side, 80), 70, 90) for z in range(8, 80, side)]
+    assert written == ([box] if whole else layers)
+    assert (len(reads.shapes) == 1) == (budget == 10**9)
 
 
 def test_prediction_blocks_fit_the_memory_budget():

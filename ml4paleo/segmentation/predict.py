@@ -133,40 +133,44 @@ def predict_box(
     `out`, block by block. Each block is read with the predictor's halo;
     where the image ends, its edge voxels are repeated.
 
-    Blocks and the box's outputs share half the memory budget, and the
-    model keeps the other half, as in training. When the box's outputs take
-    at most half of that share, they are kept in memory and written once;
-    otherwise each block's are written as soon as it's predicted, which
-    reads and rewrites the shard every time.
+    Blocks and the outputs they go into share half the memory budget, and
+    the model keeps the other half, as in training. When the box's outputs
+    take at most half of that share, they are kept for the whole box and
+    written once. Otherwise blocks get half the share, and outputs are kept
+    for one layer of blocks at a time and written as each layer is done
+    (each of those writes reads and rewrites the shard, so a layer at a
+    time keeps them few).
     """
     size = tuple(box[a + 3] - box[a] for a in range(3))
     share = memory_budget_bytes // 2
+    channels = int(image.shape[0])
     output_bytes = len(ARRAYS) * math.prod(size)
-    outputs = (
-        (np.zeros(size, dtype=np.uint8), np.zeros(size, dtype=np.uint8))
-        if output_bytes <= share // 2
-        else None
-    )
-    side = block_for(
-        share - output_bytes if outputs is not None else share,
-        int(image.shape[0]),
-        predictor,
-    )
-    pieces = list(tiles(box, side))
-    for done, piece in enumerate(pieces):
-        classes, uncertainty = _predict(predictor, image, piece, window, class_values)
-        if outputs is None:
-            write_box(out, piece, classes, uncertainty)
-        else:
+    if output_bytes <= share // 2:
+        side = block_for(share - output_bytes, channels, predictor)
+        depth = size[0]
+    else:
+        side = depth = block_for(share // 2, channels, predictor)
+    layers = [
+        (z, box[1], box[2], min(z + depth, box[3]), box[4], box[5])
+        for z in range(box[0], box[3], depth)
+    ]
+    count = math.prod(math.ceil(n / side) for n in size)
+    done = 0
+    for layer in layers:
+        shape = tuple(layer[a + 3] - layer[a] for a in range(3))
+        classes = np.zeros(shape, dtype=np.uint8)
+        uncertainty = np.zeros(shape, dtype=np.uint8)
+        for piece in tiles(layer, side):
             at = tuple(
-                slice(piece[a] - box[a], piece[a + 3] - box[a]) for a in range(3)
+                slice(piece[a] - layer[a], piece[a + 3] - layer[a]) for a in range(3)
             )
-            outputs[0][at] = classes
-            outputs[1][at] = uncertainty
-        if progress:
-            progress((done + 1) / len(pieces))
-    if outputs is not None:
-        write_box(out, box, *outputs)
+            classes[at], uncertainty[at] = _predict(
+                predictor, image, piece, window, class_values
+            )
+            done += 1
+            if progress:
+                progress(done / count)
+        write_box(out, layer, classes, uncertainty)
 
 
 def write_box(
