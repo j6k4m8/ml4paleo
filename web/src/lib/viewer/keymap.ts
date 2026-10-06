@@ -20,14 +20,15 @@ export interface Binding {
 }
 
 export const KEYMAP: Binding[] = [
-	{ action: "slice-next", keys: [".", "ArrowUp"], label: "Next slice (with Shift: 10)" },
-	{ action: "slice-previous", keys: [",", "ArrowDown"], label: "Previous slice (with Shift: 10)" },
+	// With Shift, "." and "," arrive as ">" and "<" (on US keyboards).
+	{ action: "slice-next", keys: [".", ">", "ArrowUp"], label: "Next slice (with Shift: 10)" },
+	{ action: "slice-previous", keys: [",", "<", "ArrowDown"], label: "Previous slice (with Shift: 10)" },
 	{ action: "zoom-in", keys: ["=", "+"], label: "Zoom in" },
 	{ action: "zoom-out", keys: ["-", "_"], label: "Zoom out" },
 	{ action: "fit", keys: ["0"], label: "Fit the image" },
 	{ action: "layout", keys: ["l"], label: "Next layout (four views, XY, XZ, YZ)" },
 	{ action: "labels", keys: ["v"], label: "Show or hide labels" },
-	{ action: "help", keys: ["?"], label: "Show or hide these keys" },
+	{ action: "help", keys: ["?"], label: "Show or hide these keys (Esc closes)" },
 ];
 
 /** What the mouse does, for the help overlay. */

@@ -29,6 +29,7 @@ export class ChunkStore {
 	#running = 0;
 	#pinned = new Set<string>();
 	#wanted = new Map<string, Set<string>>();
+	#protected = new Map<string, Set<string>>();
 
 	constructor(
 		private load: Loader,
@@ -68,17 +69,19 @@ export class ChunkStore {
 
 	/**
 	 * Say which chunks `owner` (for example one of several views sharing
-	 * this store) needs now; loads no owner needs are cancelled.
+	 * this store) needs now; loads no owner needs are cancelled. Of those,
+	 * the `shown` ones (by default all) are never evicted, even over budget.
 	 */
-	want(owner: string, ids: Set<string>): void {
+	want(owner: string, ids: Set<string>, shown: Set<string> = ids): void {
 		this.#wanted.set(owner, ids);
+		this.#protected.set(owner, shown);
 		const union = new Set<string>();
 		for (const set of this.#wanted.values()) for (const id of set) union.add(id);
 		this.keepOnly(union);
 	}
 
-	#isWanted(id: string): boolean {
-		for (const set of this.#wanted.values()) if (set.has(id)) return true;
+	#isShown(id: string): boolean {
+		for (const set of this.#protected.values()) if (set.has(id)) return true;
 		return false;
 	}
 
@@ -163,7 +166,7 @@ export class ChunkStore {
 	#evict(): void {
 		for (const [id, chunk] of this.#cache) {
 			if (this.#bytes <= this.maxBytes) return;
-			if (this.#pinned.has(id) || this.#isWanted(id)) continue;
+			if (this.#pinned.has(id) || this.#isShown(id)) continue;
 			this.#cache.delete(id);
 			this.#bytes -= chunk.data.byteLength;
 		}

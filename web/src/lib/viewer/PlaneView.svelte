@@ -37,8 +37,12 @@
 	} = $props();
 
 	// Labels are full resolution only until the label pyramid exists, so
-	// zoomed far out they'd need too many chunks (each is 256 KiB).
-	const MAX_LABEL_TILES = 256;
+	// zoomed far out they'd need too many chunks (each is 256 KiB; three
+	// views share a 128 MiB cache).
+	const MAX_LABEL_TILES = 128;
+	// More image chunks than this in view, and the view uses a coarser level
+	// (each chunk is 64³ voxels, so this bounds memory on big screens).
+	const MAX_IMAGE_TILES = 400;
 	const AXIS_NAMES = ["z", "y", "x"];
 
 	let canvas: HTMLCanvasElement;
@@ -48,6 +52,7 @@
 	let error = $state("");
 	let labelsHidden = $state(false);
 	let frame = 0;
+	let destroyed = false;
 
 	const slice = $derived(Math.floor(viewer.position[plane.normal]));
 
@@ -108,10 +113,12 @@
 	});
 
 	onDestroy(() => {
+		destroyed = true;
 		cancelAnimationFrame(frame);
 		images.want(plane.name, new Set());
 		labels?.store.want(plane.name, new Set());
 		renderer?.destroy();
+		renderer = undefined;
 	});
 
 	// New label colors, and chunks someone else just edited.
@@ -127,11 +134,12 @@
 
 	$effect(() => {
 		// Redraw whenever anything the view shows changes.
-		void [viewer.position, viewer.zoom, viewer.window, viewer.opacity, viewer.showLabels, width, height, labels];
+		void [viewer.position, viewer.zoom, viewer.window[0], viewer.window[1], viewer.opacity, viewer.showLabels, width, height, labels];
 		schedule();
 	});
 
 	function schedule() {
+		if (destroyed) return;
 		cancelAnimationFrame(frame);
 		frame = requestAnimationFrame(render);
 	}
@@ -142,17 +150,24 @@
 	}
 
 	function render() {
-		if (!renderer || levels.length === 0 || width === 0) return;
+		if (destroyed || !renderer || levels.length === 0 || width === 0) return;
 		const current = view();
 		const coarsest = levels[levels.length - 1]!;
-		const chosen = chooseLevel(levels, current);
+		let chosen = chooseLevel(levels, current);
+		while (chosen !== coarsest && visibleTiles(chosen, current, 0).length > MAX_IMAGE_TILES) {
+			chosen = levels[chosen.index + 1]!;
+		}
 		const layers = (coarsest === chosen ? [chosen] : [coarsest, chosen]).map((level) => ({
 			level,
 			slice: sliceIndex(level, current),
 			tiles: visibleTiles(level, current),
 		}));
 		const imageIds = new Set(layers.flatMap(({ tiles }) => tiles.map(tileId)));
-		images.want(plane.name, imageIds);
+		// Tiles just outside the view load ahead but may be evicted.
+		const shownIds = new Set(
+			layers.flatMap(({ level }) => visibleTiles(level, current, 0).map(tileId)),
+		);
+		images.want(plane.name, imageIds, shownIds);
 		renderer.reserve(imageIds.size, MAX_LABEL_TILES);
 		for (const { slice, tiles } of layers) {
 			for (const key of tiles) loadImage(key, slice);
@@ -268,7 +283,8 @@
 			viewer.moveTo(point);
 			return;
 		}
-		wheelSteps += delta / 40;
+		// About one slice per mouse wheel notch; trackpads add up.
+		wheelSteps += delta / 100;
 		const steps = Math.trunc(wheelSteps);
 		if (steps !== 0) {
 			wheelSteps -= steps;
@@ -287,6 +303,7 @@
 		onpointerup={pointerUp}
 		onpointercancel={() => (press = null)}
 		onpointerenter={() => onhover(plane)}
+		onfocus={() => onhover(plane)}
 		onwheel={wheel}
 	></canvas>
 	<div class="crosshair u axis-{plane.u}" aria-hidden="true"></div>

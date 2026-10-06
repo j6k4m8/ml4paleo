@@ -174,7 +174,8 @@ export class PlaneRenderer {
 		private plane: Plane,
 		private extent: Vec3,
 	) {
-		const gl = canvas.getContext("webgl2", { antialias: false, premultipliedAlpha: false });
+		// No alpha channel: labels blend over the image, never with the page.
+		const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, premultipliedAlpha: false });
 		if (!gl) throw new Error("This browser doesn't support WebGL2");
 		this.#gl = gl;
 		this.#image = this.#link(IMAGE);
@@ -355,6 +356,8 @@ export class PlaneRenderer {
 		this.#imageTextures.clear();
 		this.#labelTextures.clear();
 		this.#gl.deleteTexture(this.#palette);
+		// Give the GPU context back now rather than at garbage collection.
+		this.#gl.getExtension("WEBGL_lose_context")?.loseContext();
 		this.#gl.deleteProgram(this.#image);
 		this.#gl.deleteProgram(this.#labels);
 	}
