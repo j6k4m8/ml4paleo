@@ -2,15 +2,16 @@
 Meshes of the final segmentation, one per class, into a "meshes" artifact
 that becomes the project's "meshes" head.
 
-    mesh.block x N -> mesh.join x K -> mesh.finalize
+    mesh.block x N -> noop -> mesh.join x K -> mesh.finalize
 
-Each `mesh.block` meshes one 256³ block (with one voxel of overlap), in
-sub-boxes when its surface is too large to mesh at once, and writes each
-class's pieces under `scratch/`; each `mesh.join` welds one class's pieces
-as it streams them into `<value>.stl`, `.obj`, and `.glb`, and sums them up
-in `<value>.json`; `mesh.finalize` writes `mesh_info.json` (axis order,
-units, voxel size, files per class), cleans up `scratch/`, and writes the
-manifest.
+Each `mesh.block` meshes one 256³ block (with one coarse voxel of overlap),
+in sub-boxes when its surface is too large to mesh at once, and writes each
+class's pieces under `scratch/`; a `noop` waits for every block, so each
+join waits on one job instead of all N; each `mesh.join` welds one class's
+pieces as it streams them into `<value>.stl`, `.obj`, and `.glb`, and sums
+them up in `<value>.json`; `mesh.finalize` writes `mesh_info.json` (axis
+order, units, voxel size, files per class), cleans up `scratch/`, and writes
+the manifest.
 """
 
 import uuid
@@ -56,6 +57,8 @@ async def start(
     created_by: uuid.UUID,
 ) -> tuple[Job, Artifact]:
     assert segmentation.manifest is not None
+    # Blocks must start on coarse voxels.
+    assert BLOCK % downsample == 0
     shape = [int(n) for n in segmentation.manifest["shape_zyx"]]
     image = await source_image(db, segmentation)
     manifest = (image.manifest if image is not None else None) or {}
@@ -105,13 +108,24 @@ async def start(
         first = first or job
         blocks.append(job)
     assert first is not None
+    # Needs no storage; it only gathers the blocks.
+    barrier = await jobs.enqueue(
+        db,
+        "noop",
+        {"seconds": 0},
+        project_id=segmentation.project_id,
+        created_by=created_by,
+        pipeline=first,
+        depends_on=blocks,
+        weight=0,
+    )
     joins = [
         await jobs.enqueue(
             db,
             "mesh.join",
             {**payload, "value": c["value"], "name": c["name"]},
             pipeline=first,
-            depends_on=blocks,
+            depends_on=[barrier],
             weight=WEIGHTS["joins"] / max(1, len(classes)),
             **common,
         )
@@ -122,7 +136,7 @@ async def start(
         "mesh.finalize",
         {**payload, "classes": classes},
         pipeline=first,
-        depends_on=joins or blocks,
+        depends_on=joins or [barrier],
         weight=WEIGHTS["finalize"],
         **common,
     )

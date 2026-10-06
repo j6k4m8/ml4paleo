@@ -203,7 +203,8 @@ def test_a_worker_meshes_each_class(
         client.close()
     assert pipeline["status"] == "succeeded", pipeline
     assert pipeline["kind"] == "meshes"
-    assert pipeline["jobs"] == 8 + 3 + 1  # blocks, a join per class, finalize
+    # Blocks, the step that waits for them all, a join per class, finalize.
+    assert pipeline["jobs"] == 8 + 1 + 3 + 1
 
     meshes = ada.get(base).json()
     assert meshes["artifact_id"] == started.json()["artifact_id"]
