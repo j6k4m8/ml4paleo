@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
 	aspectOf,
+	boxOnPlane,
 	CHUNK,
 	chooseLevel,
 	type Level,
 	PLANES,
+	tileCrosses,
 	tileId,
 	type View,
 	visibleTiles,
@@ -121,5 +123,38 @@ describe("windowed", () => {
 		expect(windowed(-5, 0, 100)).toBe(0);
 		expect(windowed(500, 0, 100)).toBe(1);
 		expect(windowed(3, 3, 3)).toBe(1);
+	});
+});
+
+describe("boxOnPlane", () => {
+	// z 10..20, y 20..40, x 30..60
+	const box = [10, 20, 30, 20, 40, 60];
+
+	it("gives the rectangle a box covers on the planes it crosses", () => {
+		expect(boxOnPlane(box, PLANES.xy, 10)).toEqual([30, 20, 60, 40]);
+		expect(boxOnPlane(box, PLANES.xz, 39)).toEqual([30, 10, 60, 20]);
+		expect(boxOnPlane(box, PLANES.yz, 45)).toEqual([10, 20, 20, 40]);
+	});
+
+	it("is null on the planes it misses", () => {
+		expect(boxOnPlane(box, PLANES.xy, 9)).toBeNull();
+		expect(boxOnPlane(box, PLANES.xy, 20)).toBeNull();
+		expect(boxOnPlane(box, PLANES.yz, 60)).toBeNull();
+	});
+});
+
+describe("tileCrosses", () => {
+	const key = (cz: number, cy: number, cx: number) => ({ level: 0, cz, cy, cx });
+
+	it("finds the chunks a rectangle overlaps", () => {
+		// x 30..70, y 20..40 on an XY plane: chunks x 0 and 1, y 0.
+		const rect: [number, number, number, number] = [30, 20, CHUNK + 6, 40];
+		expect(tileCrosses(key(3, 0, 0), PLANES.xy, rect)).toBe(true);
+		expect(tileCrosses(key(3, 0, 1), PLANES.xy, rect)).toBe(true);
+		expect(tileCrosses(key(3, 0, 2), PLANES.xy, rect)).toBe(false);
+		expect(tileCrosses(key(3, 1, 0), PLANES.xy, rect)).toBe(false);
+		// On a YZ plane u is z: z 30..70 reaches chunks z 0 and 1.
+		expect(tileCrosses(key(1, 0, 5), PLANES.yz, rect)).toBe(true);
+		expect(tileCrosses(key(2, 0, 5), PLANES.yz, rect)).toBe(false);
 	});
 });

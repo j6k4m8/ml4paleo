@@ -376,7 +376,14 @@ def test_a_prediction_of_a_replaced_image_is_hidden(
     artifact = add_prediction(migrated_database_url, project)
     prediction = ada.get(f"/api/projects/{project}/prediction").json()
     assert prediction["artifact_id"] == artifact
+    image = ada.get(f"/api/projects/{project}/image").json()["artifact_id"]
+    assert prediction["image_artifact_id"] == image
     assert prediction["shape_zyx"] == list(SHAPE)
+    started, committed = (
+        datetime.datetime.fromisoformat(prediction[f"{at}_at"])
+        for at in ("started", "committed")
+    )
+    assert started <= committed
     # A new image leaves the prediction in place, but it no longer fits.
     add_image(settings, migrated_database_url, project)
     assert ada.get(f"/api/projects/{project}/prediction").status_code == 404
@@ -409,6 +416,17 @@ def ready_model(browser, database_url, project: str, window=None) -> dict:
 
 def predict(browser, project: str, model: dict):
     return browser.post(f"/api/projects/{project}/models/{model['id']}/predict")
+
+
+def propose(browser, project: str, model: dict, bbox=(0, 0, 0, 16, 16, 16)):
+    """Draw an ROI and propose a prediction for it."""
+    roi = browser.post(
+        f"/api/projects/{project}/rois", json={"bbox": list(bbox), "kind": "cube"}
+    ).json()
+    return browser.post(
+        f"/api/projects/{project}/models/{model['id']}/propose",
+        json={"roi_id": roi["id"]},
+    )
 
 
 def windows(database_url, started: dict):
@@ -469,11 +487,14 @@ def test_a_running_prediction_isnt_started_again(ada, settings, migrated_databas
     assert again.json()["detail"] == "A prediction with this model is already running."
     started = first.json()["pipeline_id"]
     assert pipeline_status(ada, project, started) == "waiting"
-    # The pipelines say which model they're for.
+    # The pipelines say which model they're for, and who started them.
+    me = ada.get("/api/auth/session").json()["user"]["id"]
     listed = ada.get(f"/api/projects/{project}/pipelines").json()
-    assert [(p["id"], p["model_id"]) for p in listed if p["kind"] == "prediction"] == [
-        (started, model["id"])
-    ]
+    assert [
+        (p["id"], p["model_id"], p["created_by"])
+        for p in listed
+        if p["kind"] == "prediction"
+    ] == [(started, model["id"], me)]
     # A new image is a new prediction, and the old one stops.
     add_image(settings, migrated_database_url, project)
     assert predict(ada, project, model).status_code == 202
@@ -489,6 +510,102 @@ def test_deleting_a_model_stops_its_predictions(ada, settings, migrated_database
     assert pipeline_status(ada, project, started) == "waiting"
     assert ada.request("DELETE", f"{base}/{model['id']}").status_code == 204
     assert pipeline_status(ada, project, started) == "cancelled"
+
+
+def test_deleting_a_model_stops_its_proposals(ada, settings, migrated_database_url):
+    project = labeled_project(ada, settings, migrated_database_url)
+    model, other = (ready_model(ada, migrated_database_url, project) for _ in "ab")
+    proposed = propose(ada, project, model)
+    assert proposed.status_code == 202, proposed.text
+    started = proposed.json()["pipeline_id"]
+    base = f"/api/projects/{project}/models"
+    assert ada.request("DELETE", f"{base}/{other['id']}").status_code == 204
+    assert pipeline_status(ada, project, started) == "waiting"
+    # So it can't finish later and become the proposal of a deleted model.
+    assert ada.request("DELETE", f"{base}/{model['id']}").status_code == 204
+    assert pipeline_status(ada, project, started) == "cancelled"
+
+
+def made(database_url, started: dict) -> None:
+    """Finish a proposal as its job would: commit it, which moves its head."""
+
+    async def commit(db):
+        artifact = await db.get(Artifact, uuid.UUID(started["artifact_id"]))
+        artifact.state = "committed"
+        artifact.manifest = {"class_values": [BONE], "shape_zyx": list(SHAPE)}
+        await artifacts.set_head(db, artifact)
+        await db.execute(
+            update(Job)
+            .where(Job.id == uuid.UUID(started["pipeline_id"]))
+            .values(status="succeeded")
+        )
+
+    run_db(database_url, commit)
+
+
+def test_each_person_has_their_own_proposal(
+    ada, new_browser, settings, migrated_database_url
+):
+    project = labeled_project(ada, settings, migrated_database_url)
+    bob = new_browser()
+    signup(bob, username="bob")
+    ada.post(f"/api/projects/{project}/members", json={"username": "bob"})
+    model = ready_model(ada, migrated_database_url, project)
+    first = propose(ada, project, model).json()
+    theirs = propose(bob, project, model, bbox=(8, 8, 8, 24, 24, 24)).json()
+    # Bob's proposal leaves Ada's running; her next one stops only hers.
+    assert pipeline_status(ada, project, first["pipeline_id"]) == "waiting"
+    second = propose(ada, project, model).json()
+    assert pipeline_status(ada, project, first["pipeline_id"]) == "cancelled"
+    assert pipeline_status(ada, project, theirs["pipeline_id"]) == "waiting"
+
+    url = f"/api/projects/{project}/proposal"
+    assert ada.get(url).status_code == 404
+    made(migrated_database_url, theirs)
+    assert ada.get(url).status_code == 404
+    assert bob.get(url).json()["artifact_id"] == theirs["artifact_id"]
+    made(migrated_database_url, second)
+    assert ada.get(url).json()["artifact_id"] == second["artifact_id"]
+    assert bob.get(url).json()["artifact_id"] == theirs["artifact_id"]
+    # Ada's newer proposal replaces her own, not Bob's.
+    third = propose(ada, project, model).json()
+    made(migrated_database_url, third)
+    assert ada.get(url).json()["artifact_id"] == third["artifact_id"]
+    assert bob.get(url).json()["artifact_id"] == theirs["artifact_id"]
+
+    async def states(db):
+        return [
+            (await db.get(Artifact, uuid.UUID(started["artifact_id"]))).state
+            for started in (second, theirs)
+        ]
+
+    assert run_db(migrated_database_url, states) == ["superseded", "committed"]
+
+
+def test_proposals_cut_rois_to_the_image(ada, settings, migrated_database_url):
+    project = labeled_project(ada, settings, migrated_database_url)
+    model = ready_model(ada, migrated_database_url, project)
+    roi = ada.post(
+        f"/api/projects/{project}/rois",
+        json={"bbox": [0, 0, 0, 8, 8, 8], "kind": "cube"},
+    ).json()["id"]
+    url = f"/api/projects/{project}/models/{model['id']}/propose"
+
+    # As if the image had been replaced by a smaller one since.
+    async def move(db, bbox):
+        await db.execute(update(Roi).where(Roi.id == uuid.UUID(roi)).values(bbox=bbox))
+
+    run_db(migrated_database_url, lambda db: move(db, [30, 40, 50, 60, 60, 60]))
+    started = ada.post(url, json={"roi_id": roi}).json()
+
+    async def box(db):
+        return (await db.get(Artifact, uuid.UUID(started["artifact_id"]))).inputs["box"]
+
+    assert run_db(migrated_database_url, box) == [30, 40, 50, 40, 48, 56]
+    run_db(migrated_database_url, lambda db: move(db, [45, 0, 0, 50, 5, 5]))
+    outside = ada.post(url, json={"roi_id": roi})
+    assert outside.status_code == 409
+    assert outside.json()["detail"] == "That ROI is outside the image."
 
 
 def test_prediction_shards_ask_for_the_plugins_gpu(
@@ -636,10 +753,27 @@ def test_a_worker_trains_a_random_forest(
         ).json()
         assert pipeline["status"] == "succeeded", pipeline
         assert pipeline["kind"] == "prediction"
+
+        # A proposal predicts just one ROI, on demand.
+        assert ada.get(f"/api/projects/{project}/proposal").status_code == 404
+        proposed = ada.post(
+            f"/api/projects/{project}/models/{model['id']}/propose",
+            json={"roi_id": roi["id"]},
+        )
+        assert proposed.status_code == 202, proposed.text
+        proposal_pipeline = wait(
+            f"/api/projects/{project}/pipelines/{proposed.json()['pipeline_id']}",
+            lambda r: r.json()["status"] in ("succeeded", "failed", "cancelled"),
+        ).json()
+        assert proposal_pipeline["status"] == "succeeded", proposal_pipeline
+        assert proposal_pipeline["kind"] == "proposal"
     finally:
         worker.stop()
         thread.join(timeout=30)
         client.close()
+    proposal = ada.get(f"/api/projects/{project}/proposal").json()
+    assert proposal["roi_id"] == roi["id"]
+    assert proposal["box"] == list(val)
     prediction = ada.get(f"/api/projects/{project}/prediction").json()
     assert prediction["model_id"] == model["id"]
     assert prediction["class_values"] == [BONE]
@@ -660,6 +794,21 @@ def test_a_worker_trains_a_random_forest(
     )
     predicted = np.asarray(group["class"][:])
     assert ((predicted == BONE) == truth).mean() > 0.95
+    # The proposal holds the same prediction inside its ROI, and nothing else.
+    proposed_classes = np.asarray(
+        zarr.open_group(
+            store=zarr_store(
+                project_storage(settings).child(
+                    f"projects/{project}/artifacts/{proposal['artifact_id']}"
+                )
+            ),
+            mode="r",
+        )["class"][:]
+    )
+    inside = tuple(slice(val[a], val[a + 3]) for a in range(3))
+    np.testing.assert_array_equal(proposed_classes[inside], predicted[inside])
+    proposed_classes[inside] = 0
+    assert not proposed_classes.any()
 
     async def model_manifest(db):
         trained = await db.get(TrainedModel, uuid.UUID(model["id"]))

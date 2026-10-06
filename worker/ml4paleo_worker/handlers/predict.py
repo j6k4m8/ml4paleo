@@ -87,6 +87,27 @@ def shard(ctx: JobContext) -> dict[str, Any]:
     return {"box": list(box)}
 
 
+def region(ctx: JobContext) -> dict[str, Any]:
+    """
+    A proposal: one box (an ROI) predicted into arrays of the image's size,
+    then the manifest, all in one job.
+    """
+    create_prediction(ctx.grants[2], ctx.payload["shape_zyx"])
+    shard(ctx)
+    write_manifest(
+        ctx.grants[2],
+        {
+            "kind": "prediction",
+            "model_id": ctx.payload["model_id"],
+            "class_values": ctx.payload["class_values"],
+            "shape_zyx": ctx.payload["shape_zyx"],
+            "window": ctx.payload["window"],
+            "box": ctx.payload["box"],
+        },
+    )
+    return {"box": ctx.payload["box"]}
+
+
 def finalize(ctx: JobContext) -> dict[str, Any]:
     write_manifest(
         ctx.grants[2],
