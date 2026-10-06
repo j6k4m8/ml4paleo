@@ -377,6 +377,11 @@ def test_a_prediction_of_a_replaced_image_is_hidden(
     prediction = ada.get(f"/api/projects/{project}/prediction").json()
     assert prediction["artifact_id"] == artifact
     assert prediction["shape_zyx"] == list(SHAPE)
+    started, committed = (
+        datetime.datetime.fromisoformat(prediction[f"{at}_at"])
+        for at in ("started", "committed")
+    )
+    assert started <= committed
     # A new image leaves the prediction in place, but it no longer fits.
     add_image(settings, migrated_database_url, project)
     assert ada.get(f"/api/projects/{project}/prediction").status_code == 404

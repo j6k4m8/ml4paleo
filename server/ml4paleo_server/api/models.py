@@ -354,6 +354,8 @@ class PredictionOut(BaseModel):
     # The prediction's zarr group (arrays `class` and `uncertainty`), through
     # the data gateway.
     zarr_url: str
+    # When it was asked for, and when it was done.
+    started_at: datetime.datetime
     committed_at: datetime.datetime
 
 
@@ -421,6 +423,7 @@ async def _prediction_out(db, project_id: uuid.UUID, head: Artifact, out, **extr
         class_values=list(head.manifest.get("class_values", [])),
         shape_zyx=list(head.manifest.get("shape_zyx", [])),
         zarr_url=zarr_path(project_id, head.id),
+        started_at=head.created_at,
         committed_at=head.state_changed_at,
         **extra,
     )

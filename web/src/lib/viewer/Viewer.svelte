@@ -78,8 +78,8 @@
 	let images: ChunkStore | null = $state(null);
 	let labels: LabelLayer | null = $state(null);
 	let prediction: Prediction | null = $state.raw(null);
-	// A proposal (one ROI predicted on demand) newer than the prediction,
-	// shown in its box in place of the prediction there.
+	// Your proposal (one ROI predicted on demand), if asked for after the
+	// prediction, shown in its box in place of the prediction there.
 	let proposal: Prediction | null = $state.raw(null);
 	// The model "Propose here" uses: the newest ready one.
 	let proposer: { id: string; name: string } | null = $state(null);
@@ -315,6 +315,8 @@
 		model_id: string | null;
 		model_name: string | null;
 		shape_zyx: number[];
+		// When it was asked for, and when it was done.
+		started_at: string;
 		committed_at: string;
 		box?: Box;
 	}
@@ -333,8 +335,8 @@
 	let loads = 0;
 
 	/**
-	 * Load the prediction, and the proposal if it's newer, for the prediction
-	 * layer; and find the model "Propose here" uses.
+	 * Load the prediction, and your proposal if it was asked for after it, for
+	 * the prediction layer; and find the model "Propose here" uses.
 	 */
 	async function loadPrediction(signal: AbortSignal) {
 		const load = ++loads;
@@ -361,10 +363,11 @@
 			const newer = fits(proposed);
 			const image: Box = [0, 0, 0, ...viewer.shape];
 			prediction = show(prediction, current && { ...current, box: image }, "prediction");
-			// A proposal older than the prediction is out of date.
+			// A proposal asked for before the prediction is out of date; one asked
+			// for after it shows, even if the prediction was done later.
 			proposal = show(
 				proposal,
-				newer?.box && (!current || Date.parse(newer.committed_at) > Date.parse(current.committed_at)) ? newer : null,
+				newer?.box && (!current || Date.parse(newer.started_at) > Date.parse(current.started_at)) ? newer : null,
 				"proposal",
 			);
 		} catch (e) {
