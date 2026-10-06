@@ -383,6 +383,18 @@
 		}
 	}
 
+	/**
+	 * Clicking a button in here leaves focus where it was, so Space still pans
+	 * rather than pressing the button again. Tab still reaches the buttons.
+	 */
+	function keepFocus(node: HTMLElement) {
+		const down = (event: MouseEvent) => {
+			if ((event.target as Element).closest("button")) event.preventDefault();
+		};
+		node.addEventListener("mousedown", down);
+		return () => node.removeEventListener("mousedown", down);
+	}
+
 	/** Focus the keys dialog while it's open, and give focus back to whatever had it. */
 	function holdFocus(dialog: HTMLElement) {
 		const opener = document.activeElement;
@@ -455,7 +467,7 @@
 
 <div class="flex h-full flex-col bg-chrome text-ink">
 	<!-- Options bar: the active tool's settings, scrolling sideways when they don't fit. -->
-	<div class="flex h-9 shrink-0 items-center border-b border-edge bg-panel">
+	<div class="flex h-9 shrink-0 items-center border-b border-edge bg-panel" {@attach keepFocus}>
 		<div class="flex min-w-0 flex-1 items-center gap-3 self-stretch overflow-x-auto px-3 whitespace-nowrap">
 			<span class="flex shrink-0 items-center gap-1.5 font-medium">
 				{#each TOOLS as entry (entry.tool)}
@@ -518,6 +530,7 @@
 			role="toolbar"
 			aria-label="Tools"
 			aria-orientation="vertical"
+			{@attach keepFocus}
 		>
 			{#each TOOLS as entry (entry.tool)}
 				<ToolButton
@@ -604,6 +617,7 @@
 		<aside
 			class="{dockOpen ? 'flex' : 'hidden'} absolute inset-y-0 right-0 z-20 w-64 shrink-0 flex-col overflow-y-auto border-l border-edge bg-panel shadow-2xl shadow-black/50 md:static md:flex md:shadow-none"
 			aria-label="Panels"
+			{@attach keepFocus}
 		>
 			<Panel title="Info">
 				<div class="grid grid-cols-[1rem_1fr] gap-x-1 gap-y-0.5 font-mono text-2xs">
