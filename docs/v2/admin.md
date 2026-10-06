@@ -20,9 +20,12 @@ default (see [install.md](install.md)), or the limits you set for it under
 mailed to them, and can reset forgotten passwords themselves. Without it,
 confirm addresses you know are right under **Accounts** → **Confirm email**.
 Turning off **Ask for an email address** makes the address optional and
-lifts everyone's starter limits. Admins never have starter limits. People
-can add or change their address on their account page; a new one needs
-confirming again.
+lifts everyone's starter limits. The setting covers accounts made before it
+too, so turning it on for a site that already has accounts puts every one
+whose address isn't confirmed (or that has none) on starter limits; confirm
+their addresses or set their limits first. Admins never have starter
+limits. People can add or change their address on their account page; a
+new one needs confirming again.
 
 ## Storage and models
 
