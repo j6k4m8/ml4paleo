@@ -1,11 +1,14 @@
 """
 Meshes, end to end: a worker meshes the final segmentation block by block
-into one closed surface per class, in the scan's units, as STL, OBJ, and GLB.
+into one closed surface per class, in the scan's units, as STL, OBJ, and GLB;
+and the mesh jobs fail for good, saying what to change, when they can't work.
 """
 
+import json
 import struct
 import threading
 import time
+import types
 import uuid
 
 import numpy as np
@@ -16,13 +19,15 @@ from ml4paleo_server.pipelines import mesh as mesh_pipeline
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
+from ml4paleo_worker.context import PermanentError
 from ml4paleo_worker.handlers import HANDLERS
+from ml4paleo_worker.handlers import mesh as mesh_jobs
 from ml4paleo_worker.main import Worker
 
-from ml4paleo.meshing.blocks import join, mesh_block
+from ml4paleo.meshing.blocks import mesh_block, mesh_blocks
 from ml4paleo.protocol import WorkerCaps
 from ml4paleo.segmentation.predict import create_prediction
-from ml4paleo.storage import get_bytes
+from ml4paleo.storage import StorageGrant, get_bytes
 
 pytest.importorskip("zmesh")
 
@@ -181,17 +186,17 @@ def test_a_worker_meshes_each_class(
 
     # The joined blocks match meshing the whole volume at once.
     volume = segmented()
-    for value in (BONE, TOOTH):
+    for entry in info["classes"]:
+        value = entry["value"]
         raw = ada.get(meshes["files_url"] + f"{value}.stl")
         assert raw.status_code == 200
         vertices, faces = read_stl(raw.content)
         assert closed(faces)
-        whole = mesh_block(volume, (0, 0, 0, *SHAPE), SHAPE, [value])[value]
-        expected_vertices, expected_faces = join(
-            [whole], list(reversed(VOXEL_SIZE_ZYX))
-        )
+        assert len(faces) == entry["triangles"]
+        ((_, whole),) = mesh_block(volume, (0, 0, 0, *SHAPE), SHAPE, [value])
         assert signed_volume(vertices, faces) == pytest.approx(
-            signed_volume(expected_vertices, expected_faces), rel=1e-5
+            signed_volume(whole.vertices * list(reversed(VOXEL_SIZE_ZYX)), whole.faces),
+            rel=1e-5,
         )
     # In millimeters, (x, y, z), from the voxels' outer corners.
     vertices, _ = read_stl(ada.get(meshes["files_url"] + "2.stl").content)
@@ -207,6 +212,67 @@ def test_a_worker_meshes_each_class(
     grant = project_storage(settings).child(
         f"projects/{project}/artifacts/{meshes['artifact_id']}"
     )
-    assert get_bytes(grant, "scratch/0.npz") is None
+    assert get_bytes(grant, "scratch/0.json") is None
+    assert get_bytes(grant, f"scratch/0/{BONE}.npz") is None
     assert get_bytes(grant, "mesh_info.json") is not None
+    assert json.loads(get_bytes(grant, f"{CLAW}.json") or b"")["triangles"] == 0
     assert ada.get(meshes["files_url"] + "4.stl").status_code == 404
+
+
+def porous(tmp_path, side: int) -> dict:
+    """
+    A class of random voxels, as porous as a class can be, and the payload
+    of meshing it as one block.
+    """
+    volume = np.where(np.random.default_rng(0).random((side,) * 3) < 0.5, BONE, 1)
+    grant = StorageGrant(url=f"file://{tmp_path}/segmentation", access="rw")
+    group = create_prediction(
+        grant, volume.shape, arrays=("class",), kind="segmentation"
+    )
+    group["class"][:] = volume.astype(np.uint8)  # type: ignore[index]
+    return {
+        "shape_zyx": [side] * 3,
+        "values": [BONE],
+        "downsample": 1,
+        "method": "any",
+        "simplify": 0.0,
+        "blocks": 1,
+        "block_size": side,
+        "block": 0,
+        "box": [0, 0, 0, side, side, side],
+        "voxel_size_xyz": [1.0, 1.0, 1.0],
+        "unit": "voxels",
+        "value": BONE,
+        "name": "bone",
+    }
+
+
+def job(tmp_path, payload: dict, budget: int = 3 * 2**30):
+    return types.SimpleNamespace(
+        payload=payload,
+        grants=[
+            StorageGrant(url=f"file://{tmp_path}/segmentation"),
+            StorageGrant(url=f"file://{tmp_path}/meshes", access="rw"),
+        ],
+        memory_budget_bytes=budget,
+        check=lambda: None,
+        progress=lambda *args: None,
+    )
+
+
+def test_a_join_refuses_files_too_large_to_store(tmp_path, monkeypatch):
+    payload = porous(tmp_path, 32)
+    mesh_jobs.block(job(tmp_path, payload))
+    monkeypatch.setattr(mesh_jobs, "MAX_FILE_BYTES", 10_000)
+    with pytest.raises(PermanentError, match="coarser resolution or simplify more"):
+        mesh_jobs.join_class(job(tmp_path, payload))
+
+
+def test_a_join_fails_for_good_without_a_block(tmp_path):
+    payload = porous(tmp_path, 32)
+    boxes = mesh_blocks(payload["shape_zyx"], 16)
+    payload = {**payload, "block_size": 16, "blocks": len(boxes)}
+    for index, box in enumerate(boxes[:-1]):
+        mesh_jobs.block(job(tmp_path, {**payload, "block": index, "box": list(box)}))
+    with pytest.raises(PermanentError, match=f"Block {len(boxes) - 1}'s summary"):
+        mesh_jobs.join_class(job(tmp_path, payload))

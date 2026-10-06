@@ -5,10 +5,11 @@ that becomes the project's "meshes" head.
     mesh.block x N -> mesh.join x K -> mesh.finalize
 
 Each `mesh.block` meshes one 256³ block (with one voxel of overlap) and
-writes its pieces under `scratch/`; each `mesh.join` welds one class's
-pieces and writes `<value>.stl`, `.obj`, and `.glb`; `mesh.finalize` writes
-`mesh_info.json` (axis order, units, voxel size, files per class), cleans up
-`scratch/`, and writes the manifest.
+writes each class's pieces under `scratch/`; each `mesh.join` welds one
+class's pieces as it streams them into `<value>.stl`, `.obj`, and `.glb`,
+and sums them up in `<value>.json`; `mesh.finalize` writes `mesh_info.json`
+(axis order, units, voxel size, files per class), cleans up `scratch/`, and
+writes the manifest.
 """
 
 import uuid
@@ -65,6 +66,7 @@ async def start(
         "method": method,
         "simplify": simplify,
         "blocks": len(boxes),
+        "block_size": BLOCK,
         # Physical size of a voxel, (x, y, z); voxels if the scan didn't say.
         "voxel_size_xyz": list(reversed(voxel_size)) if voxel_size else [1.0, 1.0, 1.0],
         "unit": image.manifest.get("unit") if voxel_size else "voxels",
@@ -87,7 +89,7 @@ async def start(
         await jobs.enqueue(
             db,
             "mesh.join",
-            {**payload, "value": c["value"]},
+            {**payload, "value": c["value"], "name": c["name"]},
             pipeline=first,
             depends_on=blocks,
             weight=WEIGHTS["joins"] / max(1, len(classes)),

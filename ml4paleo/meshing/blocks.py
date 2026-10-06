@@ -1,13 +1,16 @@
 """
 Meshes of a segmentation, made block by block and joined per class.
 
-Each block is meshed with one extra voxel (at mesh resolution) on its high
-sides, so neighboring blocks' surfaces meet without gaps or overlaps, and
-with a plane of nothing beyond the volume's own faces, so surfaces close
-there. Vertices come out in (x, y, z) order, in level-0 voxel units (voxel
-corners: voxel i spans [i, i + 1)), with triangles wound so normals point
-out; `join` welds the blocks' pieces into one mesh per class and scales it
-to physical units.
+Each block is meshed with one extra coarse voxel (a voxel at mesh
+resolution) on its high sides, so neighboring blocks' surfaces meet without
+gaps or overlaps, and with a plane of nothing beyond the volume's own faces,
+so surfaces close there. Vertices come out in (x, y, z) order, in level-0
+voxel units (voxel corners: voxel i spans [i, i + 1)), with triangles wound
+so normals point out.
+
+Each piece marks its vertices on the planes it shares with other blocks
+(its seams), and `Join` welds those while it streams a class's pieces into
+STL, OBJ, and GLB files, so no whole class is ever held in memory.
 
 Downsampling (#22, #24) meshes at 1/d resolution, keeping a coarse voxel if
 any of its fine voxels is the class ("any", which keeps thin structures) or
@@ -16,14 +19,46 @@ if most are ("majority", smoother).
 
 import itertools
 import json
+import shutil
 import struct
-from collections.abc import Sequence
-from typing import Literal
+import zipfile
+from collections.abc import Iterator, Sequence
+from pathlib import Path
+from typing import IO, Literal, NamedTuple
 
 import numpy as np
 
 Box = tuple[int, int, int, int, int, int]
 Method = Literal["any", "majority"]
+
+# Triangles handled at once while joining, and OBJ lines formatted at once:
+# about 10 MB of arrays or strings.
+CHUNK = 1 << 16
+LINES = 1 << 16
+
+_STL_HEADER = b"ml4paleo mesh".ljust(80, b" ")
+_STL_RECORD = np.dtype(
+    [("normal", "<f4", 3), ("points", "<f4", (3, 3)), ("attribute", "<u2")]
+)
+
+
+class TooDetailed(ValueError):
+    """
+    A mesh too large to write as one file.
+    """
+
+
+class Piece(NamedTuple):
+    """
+    Part of one class's surface, from one block.
+    """
+
+    # float32 (x, y, z), level-0 voxel corners
+    vertices: np.ndarray
+    # int32 triangles, wound so normals point out
+    faces: np.ndarray
+    # Which vertices lie on a plane shared with another piece.
+    seam: np.ndarray
 
 
 def mesh_blocks(shape_zyx: Sequence[int], block: int) -> list[Box]:
@@ -76,159 +111,301 @@ def mesh_block(
     downsample: int = 1,
     method: Method = "any",
     max_error: float = 0.0,
-) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+) -> Iterator[tuple[int, Piece]]:
     """
-    Mesh one block. `classes` holds the region `read_box` names. Returns,
-    per class value present, (vertices, faces): float32 (x, y, z) level-0
-    voxel coordinates and int32 triangles.
+    Mesh one block. `classes` holds the region `read_box` names. Yields
+    each class value present with its piece of the surface.
 
     With `max_error` above 0, surfaces are simplified as far as they can be
     without moving more than that many (meshed, so coarse) voxels. Vertices
-    on the block's faces stay put, so blocks still join.
+    on seams stay put, so pieces still join.
     """
-    from zmesh import Mesher  # pyright: ignore[reportAttributeAccessIssue]
-
     d = downsample
+    assert all(box[a] % d == 0 for a in range(3)), "Blocks start on coarse voxels"
     lo = [box[a] // d for a in range(3)]
-    out: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    hi = [lo[a] + -(-(box[a + 3] - box[a]) // d) for a in range(3)]
+    end = [-(-int(n) // d) for n in shape_zyx]
+    # A plane of nothing beyond the volume's faces closes surfaces there;
+    # anywhere else, the block keeps the next coarse voxel, where the next
+    # block starts.
+    before = [1 if lo[a] == 0 else 0 for a in range(3)]
+    after = [1 if hi[a] >= end[a] else 0 for a in range(3)]
     for value in values:
         mask = _downsample(classes == value, d, method)
         if not mask.any():
             continue
-        # A plane of nothing beyond the volume's faces closes surfaces there.
-        before = [1 if box[a] == 0 else 0 for a in range(3)]
-        after = [1 if box[a + 3] + d >= shape_zyx[a] else 0 for a in range(3)]
-        # Without an extra voxel inside the volume (its last block), keep
-        # only the block's own coarse voxels plus the closing plane.
-        own = [
-            -(-(box[a + 3] - box[a]) // d) + (0 if after[a] else 1) for a in range(3)
-        ]
-        mask = mask[tuple(slice(0, n) for n in own)]
-        padded = np.pad(mask.astype(np.uint8), list(zip(before, after, strict=True)))
-        mesher = Mesher((1, 1, 1))
-        mesher.mesh(padded, close=False)
-        if 1 not in mesher.ids():
-            continue
-        mesh = mesher.get(
-            1,
-            normals=False,
-            reduction_factor=100 if max_error > 0 else 0,
-            max_error=max_error or None,
-        )
-        mesher.clear()
-        if len(mesh.faces) == 0:
-            continue
-        # zmesh centers voxel i at i, so its faces sit half a voxel before
-        # the corners we count from.
-        zyx = mesh.vertices.astype(np.float64) + 0.5 - np.array(before) + np.array(lo)
-        vertices = (zyx[:, ::-1] * d).astype(np.float32)
-        # Reversing the axes mirrors the mesh; reverse the winding to match.
-        out[int(value)] = (vertices, mesh.faces[:, ::-1].astype(np.int32))
-    return out
+        region = mask[tuple(slice(0, hi[a] - lo[a] + 1 - after[a]) for a in range(3))]
+        padded = np.pad(region.astype(np.uint8), list(zip(before, after, strict=True)))
+        piece = _mesh(padded, lo, hi, end, d, max_error)
+        if piece is not None:
+            yield int(value), piece
 
 
-def join(
-    pieces: Sequence[tuple[np.ndarray, np.ndarray]], voxel_size_xyz: Sequence[float]
-) -> tuple[np.ndarray, np.ndarray]:
-    """One mesh from blocks' pieces: shared vertices welded, scaled to physical units."""
-    if not pieces:
-        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.int32)
-    vertices = np.concatenate([v for v, _ in pieces])
-    offsets = np.cumsum([0] + [len(v) for v, _ in pieces[:-1]])
-    faces = np.concatenate([f + o for (_, f), o in zip(pieces, offsets, strict=True)])
-    # Pieces meet on shared planes, with identical vertices there.
-    unique, inverse = np.unique(np.round(vertices, 4), axis=0, return_inverse=True)
-    faces = inverse.reshape(-1)[faces]
-    keep = (
-        (faces[:, 0] != faces[:, 1])
-        & (faces[:, 1] != faces[:, 2])
-        & (faces[:, 0] != faces[:, 2])
+def _mesh(
+    padded: np.ndarray,
+    lo: Sequence[int],
+    hi: Sequence[int],
+    end: Sequence[int],
+    d: int,
+    max_error: float,
+) -> Piece | None:
+    from zmesh import Mesher  # pyright: ignore[reportAttributeAccessIssue]
+
+    mesher = Mesher((1, 1, 1))
+    mesher.mesh(padded, close=False)
+    if 1 not in mesher.ids():
+        return None
+    mesh = mesher.get(
+        1,
+        normals=False,
+        reduction_factor=100 if max_error > 0 else 0,
+        max_error=max_error or None,
     )
-    scaled = (unique * np.asarray(voxel_size_xyz, dtype=np.float64)).astype(np.float32)
-    return scaled, faces[keep].astype(np.int32)
+    mesher.clear()
+    if len(mesh.faces) == 0:
+        return None
+    before = [1 if lo[a] == 0 else 0 for a in range(3)]
+    # zmesh centers voxel i at i, so its faces sit half a voxel before the
+    # corners we count from.
+    zyx = mesh.vertices.astype(np.float64) + 0.5 - np.array(before) + np.array(lo)
+    # Pieces meet on the planes through the centers of their first coarse
+    # voxels and of the next ones past their ends.
+    seam = np.zeros(len(zyx), dtype=bool)
+    for a in range(3):
+        if lo[a] > 0:
+            seam |= zyx[:, a] == lo[a] + 0.5
+        if hi[a] < end[a]:
+            seam |= zyx[:, a] == hi[a] + 0.5
+    vertices = (zyx[:, ::-1] * d).astype(np.float32)
+    # Reversing the axes mirrors the mesh; reverse the winding to match.
+    return Piece(vertices, mesh.faces[:, ::-1].astype(np.int32), seam)
 
 
-def to_stl(vertices: np.ndarray, faces: np.ndarray) -> bytes:
-    """A binary STL."""
-    triangles = vertices[faces]
+class PieceWriter:
+    """
+    Pieces written one at a time into one .npz file (`v<i>`, `f<i>`, and
+    `s<i>` for piece i), so a block never holds them all.
+    """
+
+    def __init__(self, path: Path):
+        self._zip = zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, allowZip64=True)
+        self.pieces = 0
+
+    def __enter__(self) -> "PieceWriter":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._zip.close()
+
+    def add(self, piece: Piece) -> None:
+        for name, array in zip("vfs", piece, strict=True):
+            with self._zip.open(f"{name}{self.pieces}.npy", "w", force_zip64=True) as f:
+                np.lib.format.write_array(f, np.ascontiguousarray(array))
+        self.pieces += 1
+
+
+def read_pieces(file: IO[bytes]) -> Iterator[Piece]:
+    """The pieces a `PieceWriter` wrote, one at a time."""
+    with np.load(file) as saved:
+        for i in range(len(saved.files) // 3):
+            yield Piece(saved[f"v{i}"], saved[f"f{i}"], saved[f"s{i}"])
+
+
+class Join:
+    """
+    One class's mesh, welded from its pieces as they come. The binary STL
+    is written as it goes, and the vertices and triangles go to files that
+    `write_obj` and `write_glb` read back, so memory holds one piece and the
+    seam vertices still waiting for a neighbor, never the whole mesh.
+
+    Add pieces block by block, in the order `mesh_blocks` gives, and call
+    `block_done` after each block: seam vertices no later block can share
+    are forgotten then. Vertices are scaled to physical units. Triangles
+    that welding collapses are dropped.
+    """
+
+    def __init__(
+        self,
+        directory: Path,
+        shape_zyx: Sequence[int],
+        block: int,
+        voxel_size_xyz: Sequence[float],
+    ):
+        self.directory = Path(directory)
+        self.stl_path = self.directory / "mesh.stl"
+        self._stl = self.stl_path.open("w+b")
+        self._stl.write(_STL_HEADER + struct.pack("<I", 0))
+        self._positions = (self.directory / "positions.bin").open("w+b")
+        self._indices = (self.directory / "indices.bin").open("w+b")
+        self._scale = np.asarray(voxel_size_xyz, dtype=np.float64)
+        self._block = block
+        self._grid = [-(-int(n) // block) for n in shape_zyx]
+        # Per block, the seam vertices it is the last to reach: their bytes
+        # as float32 (x, y, z), and their index in the mesh.
+        self._seams: dict[int, dict[bytes, int]] = {}
+        self.pending = 0
+        self.vertices = 0
+        self.triangles = 0
+        self.low = np.full(3, np.inf)
+        self.high = np.full(3, -np.inf)
+
+    def __enter__(self) -> "Join":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        for file in (self._stl, self._positions, self._indices):
+            file.close()
+
+    def _last_blocks(self, xyz: np.ndarray) -> list[int]:
+        """The last block, in order, that each vertex is in."""
+        zyx = np.minimum(xyz[:, ::-1] // self._block, np.array(self._grid) - 1)
+        z, y, x = zyx.astype(np.int64).T
+        return ((z * self._grid[1] + y) * self._grid[2] + x).tolist()
+
+    def add(self, piece: Piece) -> None:
+        vertices, faces, seam = piece
+        index = np.empty(len(vertices), dtype=np.int64)
+        plain = np.flatnonzero(~seam)
+        index[plain] = self.vertices + np.arange(len(plain))
+        count = self.vertices + len(plain)
+        shared = np.flatnonzero(seam)
+        keys = np.ascontiguousarray(vertices[shared], dtype="<f4").tobytes()
+        added = []
+        for n, (i, last) in enumerate(
+            zip(shared.tolist(), self._last_blocks(vertices[shared]), strict=True)
+        ):
+            known = self._seams.setdefault(last, {})
+            key = keys[12 * n : 12 * n + 12]
+            if (j := known.get(key)) is None:
+                j = known[key] = count
+                count += 1
+                added.append(i)
+            index[i] = j
+        self.pending += len(added)
+        physical = (vertices * self._scale).astype("<f4")
+        fresh = physical[np.concatenate([plain, np.array(added, dtype=np.int64)])]
+        if len(fresh):
+            self._positions.write(fresh)
+            self.low = np.minimum(self.low, fresh.min(axis=0))
+            self.high = np.maximum(self.high, fresh.max(axis=0))
+        self.vertices = count
+        for first in range(0, len(faces), CHUNK):
+            local = faces[first : first + CHUNK]
+            joined = index[local]
+            keep = (
+                (joined[:, 0] != joined[:, 1])
+                & (joined[:, 1] != joined[:, 2])
+                & (joined[:, 0] != joined[:, 2])
+            )
+            self._indices.write(joined[keep].astype("<u4"))
+            self._stl.write(_stl_records(physical[local[keep]]))
+            self.triangles += int(keep.sum())
+
+    def block_done(self, block: int) -> None:
+        self.pending -= len(self._seams.pop(block, {}))
+
+    def finish(self) -> Path:
+        """Finish the STL and return its path."""
+        self._stl.seek(80)
+        self._stl.write(struct.pack("<I", self.triangles))
+        for file in (self._stl, self._positions, self._indices):
+            file.flush()
+        return self.stl_path
+
+    def _rows(self, file: IO[bytes], dtype: str) -> Iterator[np.ndarray]:
+        file.seek(0)
+        while chunk := file.read(LINES * 12):
+            yield np.frombuffer(chunk, dtype=dtype).reshape(-1, 3)
+
+    def write_obj(self, path: Path) -> Path:
+        with path.open("w", encoding="ascii", newline="\n") as out:
+            for rows in self._rows(self._positions, "<f4"):
+                out.write(
+                    "".join(f"v {x:.9g} {y:.9g} {z:.9g}\n" for x, y, z in rows.tolist())
+                )
+            for rows in self._rows(self._indices, "<u4"):
+                out.write(
+                    "".join(
+                        f"f {a} {b} {c}\n"
+                        for a, b, c in (rows.astype(np.int64) + 1).tolist()
+                    )
+                )
+        return path
+
+    def write_glb(self, path: Path) -> Path:
+        """A binary glTF 2.0 file with one mesh."""
+        positions, indices = 12 * self.vertices, 12 * self.triangles
+        gltf = {
+            "asset": {"version": "2.0", "generator": "ml4paleo"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0}],
+            "meshes": [
+                {
+                    "primitives": [
+                        {"attributes": {"POSITION": 0}, "indices": 1, "mode": 4}
+                    ]
+                }
+            ],
+            "accessors": [
+                {
+                    "bufferView": 0,
+                    "componentType": 5126,
+                    "count": self.vertices,
+                    "type": "VEC3",
+                    "min": [float(v) for v in self.low] if self.vertices else [0, 0, 0],
+                    "max": [float(v) for v in self.high]
+                    if self.vertices
+                    else [0, 0, 0],
+                },
+                {
+                    "bufferView": 1,
+                    "componentType": 5125,
+                    "count": 3 * self.triangles,
+                    "type": "SCALAR",
+                },
+            ],
+            "bufferViews": [
+                {
+                    "buffer": 0,
+                    "byteOffset": 0,
+                    "byteLength": positions,
+                    "target": 34962,
+                },
+                {
+                    "buffer": 0,
+                    "byteOffset": positions,
+                    "byteLength": indices,
+                    "target": 34963,
+                },
+            ],
+            "buffers": [{"byteLength": positions + indices}],
+        }
+        text = json.dumps(gltf, separators=(",", ":")).encode()
+        text += b" " * (-len(text) % 4)
+        # Both buffers are whole float32 and uint32 values, so 4-byte aligned.
+        total = 12 + 8 + len(text) + 8 + positions + indices
+        if total >= 2**32:
+            raise TooDetailed(
+                f"A GLB file holds at most 4 GiB; this one is {total} bytes"
+            )
+        with path.open("wb") as out:
+            out.write(struct.pack("<4sII", b"glTF", 2, total))
+            out.write(struct.pack("<I4s", len(text), b"JSON") + text)
+            out.write(struct.pack("<I4s", positions + indices, b"BIN\0"))
+            for file in (self._positions, self._indices):
+                file.seek(0)
+                shutil.copyfileobj(file, out, 1024 * 1024)
+        return path
+
+
+def _stl_records(triangles: np.ndarray) -> np.ndarray:
     normals = np.cross(
         triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
     )
     lengths = np.linalg.norm(normals, axis=1, keepdims=True)
     normals = np.divide(normals, lengths, out=np.zeros_like(normals), where=lengths > 0)
-    record = np.dtype(
-        [("normal", "<f4", 3), ("points", "<f4", (3, 3)), ("attribute", "<u2")]
-    )
-    data = np.zeros(len(faces), dtype=record)
-    data["normal"] = normals
-    data["points"] = triangles
-    header = b"ml4paleo mesh".ljust(80, b" ")
-    return header + struct.pack("<I", len(faces)) + data.tobytes()
-
-
-def to_obj(vertices: np.ndarray, faces: np.ndarray) -> bytes:
-    lines = [f"v {x:.6g} {y:.6g} {z:.6g}" for x, y, z in vertices]
-    lines += [f"f {a + 1} {b + 1} {c + 1}" for a, b, c in faces]
-    return ("\n".join(lines) + "\n").encode()
-
-
-def to_glb(vertices: np.ndarray, faces: np.ndarray) -> bytes:
-    """A binary glTF 2.0 file with one mesh."""
-    positions = np.ascontiguousarray(vertices, dtype="<f4").tobytes()
-    indices = np.ascontiguousarray(faces, dtype="<u4").tobytes()
-    gltf = {
-        "asset": {"version": "2.0", "generator": "ml4paleo"},
-        "scene": 0,
-        "scenes": [{"nodes": [0]}],
-        "nodes": [{"mesh": 0}],
-        "meshes": [
-            {"primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "mode": 4}]}
-        ],
-        "accessors": [
-            {
-                "bufferView": 0,
-                "componentType": 5126,
-                "count": int(len(vertices)),
-                "type": "VEC3",
-                "min": [float(v) for v in vertices.min(axis=0)]
-                if len(vertices)
-                else [0, 0, 0],
-                "max": [float(v) for v in vertices.max(axis=0)]
-                if len(vertices)
-                else [0, 0, 0],
-            },
-            {
-                "bufferView": 1,
-                "componentType": 5125,
-                "count": int(faces.size),
-                "type": "SCALAR",
-            },
-        ],
-        "bufferViews": [
-            {
-                "buffer": 0,
-                "byteOffset": 0,
-                "byteLength": len(positions),
-                "target": 34962,
-            },
-            {
-                "buffer": 0,
-                "byteOffset": len(positions),
-                "byteLength": len(indices),
-                "target": 34963,
-            },
-        ],
-        "buffers": [{"byteLength": len(positions) + len(indices)}],
-    }
-    text = json.dumps(gltf, separators=(",", ":")).encode()
-    text += b" " * (-len(text) % 4)
-    binary = positions + indices
-    binary += b"\0" * (-len(binary) % 4)
-    total = 12 + 8 + len(text) + 8 + len(binary)
-    return (
-        struct.pack("<4sII", b"glTF", 2, total)
-        + struct.pack("<I4s", len(text), b"JSON")
-        + text
-        + struct.pack("<I4s", len(binary), b"BIN\0")
-        + binary
-    )
+    records = np.zeros(len(triangles), dtype=_STL_RECORD)
+    records["normal"] = normals
+    records["points"] = triangles
+    return records
