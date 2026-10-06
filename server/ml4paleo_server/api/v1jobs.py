@@ -193,7 +193,9 @@ async def release(
     """
     job_id = _job_id(job_id)
     await _lock(db, job_id)
-    project = await db.scalar(select(Project).where(Project.v1_job_id == job_id))
+    project = await db.scalar(
+        select(Project).where(Project.v1_job_id == job_id, Project.deleted_at.is_(None))
+    )
     if project is None:
         raise HTTPException(status_code=404, detail="Nobody has claimed that job.")
     # Pipelines before the project: completing a job locks the job, then its
@@ -206,9 +208,10 @@ async def release(
     )
     for root_id in running.all():
         await jobs.cancel_pipeline(db, root_id)
-    project.v1_job_id = None
-    if project.deleted_at is None:
-        project.deleted_at = datetime.datetime.now(datetime.UTC)
+    # Leave v1_job_id (a key) for the next claim to clear: changing a key here
+    # would wait for jobs that are adding rows to the project, which can be
+    # waiting for the jobs this just locked.
+    project.deleted_at = datetime.datetime.now(datetime.UTC)
     audit.record(
         db,
         actor_id=auth.user.id,

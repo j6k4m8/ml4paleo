@@ -372,6 +372,39 @@ def test_releasing_a_job_stops_its_import(new_browser, settings, migrated_databa
     assert beat.json()["cancel"] is True
 
 
+def test_releasing_doesnt_wait_for_rows_that_refer_to_the_project(
+    new_browser, settings, migrated_database_url
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/v1-jobs/ABC123/claim").json()["project_id"]
+    admin, _ = make_admin(new_browser, migrated_database_url)
+
+    async def scenario():
+        engine = create_engine(migrated_database_url)
+        try:
+            async with create_sessionmaker(engine)() as finishing:
+                # As a finishing job adds its artifact's head: a row that refers
+                # to the project, until that job commits (which may wait for
+                # the pipeline jobs the release locks).
+                await artifacts.create_staging(
+                    finishing, project_id=uuid.UUID(project), kind="image"
+                )
+                releasing = asyncio.get_running_loop().run_in_executor(
+                    None, lambda: admin.post("/api/v1-jobs/ABC123/release")
+                )
+                released = await asyncio.wait_for(releasing, 10)
+        finally:
+            await engine.dispose()
+        return released.status_code
+
+    assert asyncio.run(scenario()) == 204
+    # The next claim lets go of the deleted project's job.
+    bob = new_browser()
+    signup(bob, username="bob")
+    assert bob.post("/api/v1-jobs/ABC123/claim").status_code == 201
+
+
 def test_claims_are_limited_and_need_a_v1_volume(
     new_browser, settings, migrated_database_url
 ):
