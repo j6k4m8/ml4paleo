@@ -307,9 +307,10 @@ class Join:
 
     Add pieces block by block, in the order `mesh_blocks` gives, and call
     `block_done` after each block: seam vertices no later block can share
-    are forgotten then. Vertices are scaled to physical units, after those
-    of coarse voxels cut by the scan's far faces are moved back onto them.
-    Triangles that welding collapses are dropped.
+    are forgotten then. Vertices are scaled to physical units, after the
+    surface inside coarse voxels cut by the scan's far faces is squeezed
+    into their part inside the scan, so it ends at the faces without
+    flattening or folding. Triangles that welding collapses are dropped.
     """
 
     def __init__(
@@ -318,6 +319,7 @@ class Join:
         shape_zyx: Sequence[int],
         block: int,
         voxel_size_xyz: Sequence[float],
+        downsample: int = 1,
     ):
         self.directory = Path(directory)
         self.stl_path = self.directory / "mesh.stl"
@@ -325,7 +327,11 @@ class Join:
         self._stl.write(_STL_HEADER + struct.pack("<I", 0))
         self._positions = (self.directory / "positions.bin").open("w+b")
         self._indices = (self.directory / "indices.bin").open("w+b")
-        self._extent_xyz = np.array(shape_zyx[::-1], dtype=np.float64)
+        extent = np.array(shape_zyx[::-1], dtype=np.float64)
+        # Where each axis's last coarse voxel starts, and how much of it is
+        # inside the scan (all of it unless the scan ends partway through).
+        self._last_start = (np.ceil(extent / downsample) - 1) * downsample
+        self._inside = (extent - self._last_start) / downsample
         self._scale = np.asarray(voxel_size_xyz, dtype=np.float64)
         self._block = block
         self._grid = [-(-int(n) // block) for n in shape_zyx]
@@ -371,7 +377,11 @@ class Join:
                 added.append(i)
             index[i] = j
         self.pending += len(added)
-        physical = np.minimum(vertices, self._extent_xyz)
+        physical = np.where(
+            vertices > self._last_start,
+            self._last_start + (vertices - self._last_start) * self._inside,
+            vertices,
+        )
         physical *= self._scale
         physical = physical.astype("<f4")
         fresh = physical[np.concatenate([plain, np.array(added, dtype=np.int64)])]

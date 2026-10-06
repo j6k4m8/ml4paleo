@@ -37,11 +37,11 @@ def read_glb(raw: bytes) -> tuple[np.ndarray, np.ndarray, dict]:
     return vertices, faces.astype(np.int64), gltf
 
 
-def join(per_block, shape, block, voxel_size=(1.0, 1.0, 1.0)):
+def join(per_block, shape, block, downsample=1):
     """Join each block's pieces, blocks in order: (vertices, faces), or None."""
     with (
         tempfile.TemporaryDirectory() as tmp,
-        Join(Path(tmp), shape, block, voxel_size) as joined,
+        Join(Path(tmp), shape, block, (1.0, 1.0, 1.0), downsample) as joined,
     ):
         for index, pieces in enumerate(per_block):
             for piece in pieces:
@@ -71,7 +71,7 @@ def mesh_volume(
         for value in values:
             per_class[value].append(found[value])
     meshes = {
-        value: join(per_block, volume.shape, block)
+        value: join(per_block, volume.shape, block, downsample)
         for value, per_block in per_class.items()
     }
     return {value: mesh for value, mesh in meshes.items() if mesh is not None}
@@ -212,6 +212,17 @@ def test_coarse_voxels_cut_by_the_scan_end_at_its_faces(method):
     assert edges_shared_twice(f)
     assert v.min(axis=0).tolist() == [0, 0, 0]
     assert v.max(axis=0).tolist() == [22, 21, 20]
+    # Their surfaces are squeezed inside the scan, not flattened onto its
+    # faces, so no triangle loses its area.
+    for downsample in (2, 4, 8):
+        meshes = mesh_volume(blobs((17, 23, 31)), 16, [2, 3], downsample, method)
+        for v, f in meshes.values():
+            corners = v[f].astype(np.float64)
+            normals = np.cross(
+                corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
+            )
+            assert np.linalg.norm(normals, axis=1).min() > 0
+            assert (v.max(axis=0) <= [31, 23, 17]).all()
 
 
 def test_downsampling_keeps_thin_parts_with_any():

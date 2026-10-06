@@ -137,6 +137,7 @@ def join_class(ctx: JobContext) -> dict[str, Any]:
             ctx.payload["shape_zyx"],
             int(ctx.payload["block_size"]),
             ctx.payload["voxel_size_xyz"],
+            int(ctx.payload["downsample"]),
         ) as join,
     ):
         for index, counts in enumerate(found):
