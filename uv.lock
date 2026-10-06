@@ -2008,13 +2008,13 @@ version = "0.2.0.dev0"
 source = { editable = "worker" }
 dependencies = [
     { name = "httpx2" },
-    { name = "ml4paleo", extra = ["dicom", "rf"] },
+    { name = "ml4paleo", extra = ["dicom", "mesh", "rf"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx2", specifier = ">=2.13" },
-    { name = "ml4paleo", extras = ["dicom", "rf"], editable = "." },
+    { name = "ml4paleo", extras = ["dicom", "mesh", "rf"], editable = "." },
 ]
 
 [[package]]
