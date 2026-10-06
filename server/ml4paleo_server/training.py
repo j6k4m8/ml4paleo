@@ -135,6 +135,10 @@ async def snapshot(
     manifest, label_seq = await read_snapshot(sessionmaker, project_id)
     set_id = manifest_id(manifest)
     grant = project_storage(settings).child(training_path(project_id, set_id))
+    # If training is refused after all (another training took the owner's
+    # last model slot since the API checked), this manifest stays behind.
+    # Nothing collects those yet; they're small, and the same labels reuse
+    # them.
     await run_in_threadpool(put_bytes, grant, MANIFEST, _canonical(manifest))
     rois = manifest["rois"]
     summary = {

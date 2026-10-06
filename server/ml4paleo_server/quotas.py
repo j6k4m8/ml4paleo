@@ -82,6 +82,18 @@ async def reserve_trained_model(
         raise HTTPException(status_code=403, detail="trained_model_quota_exceeded")
 
 
+async def check_trained_model(
+    db: AsyncSession, settings: Settings, owner: User
+) -> None:
+    """
+    Raise 403 if `owner` already keeps as many trained models as allowed.
+    This only looks: `reserve_trained_model` is what counts one more.
+    """
+    limit = limits_for(owner, settings).trained_models
+    if limit is not None and (await usage_for(db, owner.id)).trained_models >= limit:
+        raise HTTPException(status_code=403, detail="trained_model_quota_exceeded")
+
+
 async def release_trained_model(
     db: AsyncSession, owner_id: uuid.UUID, count: int = 1
 ) -> None:

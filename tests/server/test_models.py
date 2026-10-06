@@ -10,6 +10,7 @@ import time
 import uuid
 
 import numpy as np
+import obstore
 import pytest
 from helpers import SECRET_KEY, add_worker, run_db, signup
 from ml4paleo_server import artifacts, labels
@@ -33,7 +34,7 @@ from sqlalchemy import update
 from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.ome import OmeImage
 from ml4paleo.protocol import WorkerCaps
-from ml4paleo.storage import get_bytes
+from ml4paleo.storage import get_bytes, object_store
 
 SHAPE = (40, 48, 56)
 BONE = 2
@@ -161,9 +162,17 @@ def test_model_slots_follow_training_and_deletion(
     paint(limited, migrated_database_url, project, (5, 5, 5), np.ones((1, 3, 3)), BONE)
     base = f"/api/projects/{project}/models"
     first = ada.post(base, json={}).json()
+    # New labels would make a new training set, but none is stored for a
+    # training that can't start.
+    paint(limited, migrated_database_url, project, (9, 9, 9), np.ones((1, 2, 2)), 1)
     second = ada.post(base, json={})
     assert second.status_code == 403
     assert second.json()["detail"] == "trained_model_quota_exceeded"
+    stored = object_store(
+        project_storage(limited).child(f"projects/{project}/training")
+    )
+    manifests = [item["path"] for batch in obstore.list(stored) for item in batch]
+    assert manifests == [f"{first['training_set']['id']}/manifest.json"]
 
     # A failed training gives its slot back.
     async def fail(db):

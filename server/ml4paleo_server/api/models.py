@@ -24,9 +24,9 @@ from sqlalchemy import select
 
 from ml4paleo.segmentation.plugin import get_plugin, plugins
 
-from .. import audit, jobs, training
+from .. import audit, jobs, quotas, training
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
-from ..db import Artifact, Job, Project, TrainedModel, TrainingSet
+from ..db import Artifact, Job, Project, TrainedModel, TrainingSet, User
 from ..pipelines import train
 from .projects import MemberProject
 
@@ -152,6 +152,15 @@ async def train_model(
         raise HTTPException(
             status_code=422, detail=exc.errors(include_url=False)
         ) from None
+    # Look for a free model slot before pinning a training set, so a refused
+    # training stores nothing; `train.start` reserves the slot. Commit the
+    # slots of failed trainings at once, so the owner's usage row isn't
+    # locked while the snapshot is taken.
+    owner = await db.get(User, project.owner_id)
+    assert owner is not None
+    await train.release_failed_slots(db, owner.id)
+    await db.commit()
+    await quotas.check_trained_model(db, settings, owner)
     try:
         training_set = await training.snapshot(
             db, request.app.state.sessionmaker, settings, project.id
