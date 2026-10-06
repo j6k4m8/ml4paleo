@@ -11,6 +11,7 @@
 	import LoaderCircle from "@lucide/svelte/icons/loader-circle";
 	import Lock from "@lucide/svelte/icons/lock";
 	import Maximize2 from "@lucide/svelte/icons/maximize-2";
+	import PanelRight from "@lucide/svelte/icons/panel-right";
 	import Pentagon from "@lucide/svelte/icons/pentagon";
 	import Redo2 from "@lucide/svelte/icons/redo-2";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
@@ -63,6 +64,8 @@
 	let hovered: Plane = PLANES.xy;
 	let notice = $state("");
 	let classesOpen = $state(true);
+	// On narrow screens the dock floats over the views until closed.
+	let dockOpen = $state(false);
 	const queue = new OpQueue(project, indexedDbStorage(session.current?.user.id ?? "", project));
 	// Strict edits compare against the chunk versions current when they're
 	// sent, after this page's earlier edits have landed; if any version is
@@ -415,7 +418,7 @@
 
 <div class="flex h-full flex-col bg-chrome text-ink">
 	<!-- Options bar: the active tool's settings. -->
-	<div class="flex h-9 shrink-0 items-center gap-3 border-b border-edge bg-panel px-3">
+	<div class="flex h-9 shrink-0 items-center gap-3 overflow-x-auto border-b border-edge bg-panel px-3 whitespace-nowrap">
 		<span class="flex items-center gap-1.5 font-medium">
 			{#each TOOLS as entry (entry.tool)}
 				{#if entry.tool === viewer.tool}<entry.icon size={14} class="text-ink-dim" />{entry.label}{/if}
@@ -457,10 +460,18 @@
 			</div>
 			<button class="btn" onclick={fit} title="Fit the image (0)"><Maximize2 size={12} /> Fit</button>
 		{/if}
-		<span class="ml-auto truncate text-2xs text-ink-faint">{hint}</span>
+		<span class="ml-auto hidden truncate text-2xs text-ink-faint lg:inline">{hint}</span>
+		<button
+			class="btn btn-ghost ml-auto md:hidden"
+			aria-label="Panels"
+			aria-expanded={dockOpen}
+			onclick={() => (dockOpen = !dockOpen)}
+		>
+			<PanelRight size={14} />
+		</button>
 	</div>
 
-	<div class="flex min-h-0 flex-1">
+	<div class="relative flex min-h-0 flex-1">
 		<!-- Tools -->
 		<nav class="flex w-11 shrink-0 flex-col items-center gap-0.5 border-r border-edge bg-panel py-1.5" aria-label="Tools">
 			{#each TOOLS as entry (entry.tool)}
@@ -534,7 +545,10 @@
 		</div>
 
 		<!-- Dock -->
-		<aside class="flex w-64 shrink-0 flex-col overflow-y-auto border-l border-edge bg-panel" aria-label="Panels">
+		<aside
+			class="{dockOpen ? 'flex' : 'hidden'} absolute inset-y-0 right-0 z-20 w-64 shrink-0 flex-col overflow-y-auto border-l border-edge bg-panel shadow-2xl shadow-black/50 md:static md:flex md:shadow-none"
+			aria-label="Panels"
+		>
 			<Panel title="Info">
 				<div class="grid grid-cols-[1rem_1fr] gap-x-1 gap-y-0.5 font-mono text-2xs">
 					<span class="text-axis-x">X</span><span>{voxel(2)}</span>
@@ -651,7 +665,7 @@
 			<span class="text-axis-y">y</span>{Math.floor(viewer.position[1])}
 			<span class="text-axis-z">z</span>{Math.floor(viewer.position[0])}
 		</span>
-		<span>{LAYOUT_NAMES[viewer.layout]}</span>
+		<span class="hidden sm:inline">{LAYOUT_NAMES[viewer.layout]}</span>
 		<span class="ml-auto flex items-center gap-1.5 font-sans {saveState === 'error' ? 'text-danger' : saveState === 'offline' ? 'text-warn' : ''}" role="status">
 			{#if saveState === "saved"}<Check size={12} class="text-ok" />{:else if saveState === "saving"}<LoaderCircle size={12} class="animate-spin" />{:else}<CloudOff size={12} />{/if}
 			{status}
