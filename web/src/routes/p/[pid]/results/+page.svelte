@@ -23,7 +23,8 @@
 		artifact_id: string;
 		model_name: string | null;
 		min_voxels: number;
-		label_seq: number;
+		// When the newest label edit it includes was made.
+		labels_as_of: string | null;
 		committed_at: string;
 	}
 
@@ -176,7 +177,11 @@
 		try {
 			await api(url, { body });
 		} catch (e) {
-			fail(message(e));
+			fail(
+				e instanceof ApiError && e.detail === "storage_quota_exceeded"
+					? "The project's owner has used all their storage. Free some up, or ask for more."
+					: message(e),
+			);
 		}
 		await refresh();
 		starting = false;
@@ -231,10 +236,14 @@
 		return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 	}
 
+	// Letters, with their combining marks, and digits in any script, so names
+	// that aren't in Latin letters still say something. Files also carry the
+	// class's value, which is unique.
 	const slug = (text: string) =>
 		text
+			.normalize("NFC")
 			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/[^\p{L}\p{M}\p{N}]+/gu, "-")
 			.replace(/^-|-$/g, "") || "mesh";
 </script>
 
@@ -283,8 +292,12 @@
 					<div class="flex flex-col gap-0.5">
 						<span>Made {new Date(segmentation.committed_at).toLocaleString()}</span>
 						<span class="text-2xs text-ink-dim">
-							from {segmentation.model_name ?? "a deleted model"} · specks under {segmentation.min_voxels} voxels removed · labels up
-							to edit {segmentation.label_seq}
+							from {segmentation.model_name ?? "a deleted model"} · specks under {segmentation.min_voxels} voxels removed ·
+							{#if segmentation.labels_as_of}
+								labels as of {new Date(segmentation.labels_as_of).toLocaleString()}
+							{:else}
+								no labels
+							{/if}
 						</span>
 					</div>
 				</div>
@@ -322,7 +335,7 @@
 								<a
 									class="btn btn-ghost hover:no-underline"
 									href={meshes.files_url + mesh.files[format]}
-									download="{slug(projectName)}-{slug(mesh.name)}.{format}"
+									download="{slug(projectName)}-{mesh.value}-{slug(mesh.name)}.{format}"
 								>
 									<Download size={13} />
 									{label}

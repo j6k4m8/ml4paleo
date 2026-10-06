@@ -1,37 +1,84 @@
 """
 Block meshing: exact surfaces in (x, y, z) voxel corners, outward normals,
-and watertight joins across blocks.
+and watertight joins across blocks and the sub-boxes that porous blocks are
+meshed in, streamed into STL, OBJ, and GLB files.
 """
 
 import json
 import struct
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from ml4paleo.meshing import blocks
 from ml4paleo.meshing.blocks import (
-    join,
+    Join,
+    Piece,
+    PieceWriter,
+    TooDetailed,
     mesh_block,
     mesh_blocks,
     read_box,
-    to_glb,
-    to_obj,
-    to_stl,
+    read_pieces,
 )
 
 pytest.importorskip("zmesh")
 
 
-def mesh_volume(volume, block, values, downsample=1, method="any", max_error=0.0):
-    pieces: dict[int, list] = {}
+def read_glb(raw: bytes) -> tuple[np.ndarray, np.ndarray, dict]:
+    (size,) = struct.unpack_from("<I", raw, 12)
+    gltf = json.loads(raw[20 : 20 + size])
+    count = gltf["accessors"][0]["count"]
+    binary = raw[28 + size :]
+    vertices = np.frombuffer(binary[: 12 * count], dtype="<f4").reshape(-1, 3)
+    faces = np.frombuffer(binary[12 * count :], dtype="<u4").reshape(-1, 3)
+    return vertices, faces.astype(np.int64), gltf
+
+
+def join(per_block, shape, block, downsample=1):
+    """Join each block's pieces, blocks in order: (vertices, faces), or None."""
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        Join(Path(tmp), shape, block, (1.0, 1.0, 1.0), downsample) as joined,
+    ):
+        for index, pieces in enumerate(per_block):
+            for piece in pieces:
+                joined.add(piece)
+            joined.block_done(index)
+        assert joined.pending == 0  # every seam vertex met its neighbors
+        joined.finish()
+        if not joined.triangles:
+            return None
+        glb = joined.write_glb(Path(tmp) / "mesh.glb", None).read_bytes()
+    vertices, faces, _ = read_glb(glb)
+    return vertices, faces
+
+
+def mesh_volume(
+    volume, block, values, downsample=1, method="any", max_error=0.0, max_faces=None
+):
+    per_class: dict[int, list] = {value: [] for value in values}
     for box in mesh_blocks(volume.shape, block):
         rb = read_box(box, volume.shape, downsample)
         region = volume[rb[0] : rb[3], rb[1] : rb[4], rb[2] : rb[5]]
+        found: dict[int, list] = {value: [] for value in values}
         for value, piece in mesh_block(
-            region, box, volume.shape, values, downsample, method, max_error
-        ).items():
-            pieces.setdefault(value, []).append(piece)
-    return {value: join(found, (1.0, 1.0, 1.0)) for value, found in pieces.items()}
+            region, box, volume.shape, values, downsample, method, max_error, max_faces
+        ):
+            found[value].append(piece)
+        for value in values:
+            per_class[value].append(found[value])
+    meshes = {
+        value: join(per_block, volume.shape, block, downsample)
+        for value, per_block in per_class.items()
+    }
+    return {value: mesh for value, mesh in meshes.items() if mesh is not None}
+
+
+def mesh_whole(volume, values, downsample=1, method="any"):
+    return mesh_volume(volume, max(volume.shape), values, downsample, method)
 
 
 def signed_volume(vertices, faces):
@@ -45,11 +92,31 @@ def signed_volume(vertices, faces):
 
 
 def edges_shared_twice(faces):
-    edges = np.sort(
-        np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1
-    )
-    _, counts = np.unique(edges, axis=0, return_counts=True)
-    return (counts == 2).all()
+    """Closed, and consistently wound: each edge once each way."""
+    directed = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    _, counts = np.unique(directed, axis=0, return_counts=True)
+    _, undirected = np.unique(np.sort(directed, axis=1), axis=0, return_counts=True)
+    return (counts == 1).all() and (undirected == 2).all()
+
+
+def triangles(vertices, faces):
+    """The corners and triangles, whatever order the vertices came in."""
+    corners, inverse = np.unique(vertices, axis=0, return_inverse=True)
+    faces = inverse.reshape(-1)[faces]
+    # Start each triangle at its lowest corner, keeping its winding.
+    turn = (faces.argmin(axis=1)[:, None] + np.arange(3)) % 3
+    faces = np.take_along_axis(faces, turn, axis=1)
+    return corners, faces[np.lexsort(faces.T[::-1])]
+
+
+def blobs(shape, seed=0, sigma=1.5):
+    from scipy import ndimage
+
+    noise = ndimage.gaussian_filter(np.random.default_rng(seed).random(shape), sigma)
+    volume = np.ones(shape, dtype=np.uint8)
+    volume[noise > np.quantile(noise, 0.45)] = 2
+    volume[noise > np.quantile(noise, 0.7)] = 3
+    return volume
 
 
 def test_a_box_meshes_to_its_voxel_faces_in_xyz():
@@ -73,16 +140,60 @@ def test_blocks_join_into_one_closed_surface():
     )
 
 
+@pytest.mark.parametrize("shape", [(17, 23, 31), (20, 20, 20), (33, 18, 40)])
+@pytest.mark.parametrize("downsample", [1, 2, 4, 8])
+@pytest.mark.parametrize("method", ["any", "majority"])
+def test_blocks_of_odd_volumes_mesh_like_the_whole(shape, downsample, method):
+    # The last blocks are short, or only part of a coarse voxel deep.
+    volume = blobs(shape)
+    blocked = mesh_volume(volume, 16, [2, 3], downsample, method)
+    whole = mesh_whole(volume, [2, 3], downsample, method)
+    assert blocked.keys() == whole.keys()
+    for value, (v, f) in blocked.items():
+        assert edges_shared_twice(f)
+        got, expected = triangles(v, f), triangles(*whole[value])
+        assert all(np.array_equal(a, b) for a, b in zip(got, expected, strict=True))
+
+
+def test_porous_blocks_mesh_in_sub_boxes_that_join(monkeypatch):
+    volume = blobs((70, 50, 90), seed=1, sigma=2.0)
+    largest = []
+    mesh = blocks._mesh
+
+    def measured(padded, *args):
+        largest.append(blocks._faces(padded))
+        return mesh(padded, *args)
+
+    monkeypatch.setattr(blocks, "_mesh", measured)
+    split = mesh_volume(volume, 64, [2, 3], max_faces=5000)
+    assert len(largest) > 4 * len(mesh_blocks(volume.shape, 64))
+    assert max(largest) <= 5000
+    whole = mesh_whole(volume, [2, 3])
+    for value, (v, f) in split.items():
+        assert edges_shared_twice(f)
+        got, expected = triangles(v, f), triangles(*whole[value])
+        assert all(np.array_equal(a, b) for a, b in zip(got, expected, strict=True))
+
+
+def test_too_much_surface_for_the_smallest_sub_boxes_is_refused():
+    noise = np.random.default_rng(0).random((32, 32, 32)) < 0.5
+    with pytest.raises(TooDetailed):
+        mesh_volume(noise.astype(np.uint8) * 2, 32, [2], max_faces=1000)
+
+
 def test_simplified_blocks_still_join():
     rng = np.random.default_rng(0)
     z, y, x = np.indices((40, 44, 48))
     ball = (z - 20) ** 2 + (y - 22) ** 2 + (x - 24) ** 2 <= 15**2
     rough = np.where(ball ^ (rng.random(ball.shape) < 0.02), 2, 1).astype(np.uint8)
     full_v, full_f = mesh_volume(rough, 16, [2])[2]
-    v, f = mesh_volume(rough, 16, [2], max_error=2)[2]
-    assert edges_shared_twice(f)
-    assert len(f) < 0.6 * len(full_f)
-    assert signed_volume(v, f) == pytest.approx(signed_volume(full_v, full_f), rel=0.02)
+    for max_faces in (None, 2000):
+        v, f = mesh_volume(rough, 32, [2], max_error=2, max_faces=max_faces)[2]
+        assert edges_shared_twice(f)
+        assert len(f) < 0.6 * len(full_f)
+        assert signed_volume(v, f) == pytest.approx(
+            signed_volume(full_v, full_f), rel=0.02
+        )
 
 
 def test_objects_touching_the_volume_edges_are_closed():
@@ -90,6 +201,28 @@ def test_objects_touching_the_volume_edges_are_closed():
     v, f = mesh_volume(volume, 4, [2])[2]
     assert edges_shared_twice(f)
     assert v.min(axis=0).tolist() == [0, 0, 0] and v.max(axis=0).tolist() == [8, 8, 8]
+
+
+@pytest.mark.parametrize("method", ["any", "majority"])
+def test_coarse_voxels_cut_by_the_scan_end_at_its_faces(method):
+    # 20 isn't a multiple of 8, so the last coarse voxels are partly outside
+    # the scan; for "majority" only the voxels inside count.
+    volume = np.full((20, 21, 22), 2, dtype=np.uint8)
+    v, f = mesh_volume(volume, 16, [2], downsample=8, method=method)[2]
+    assert edges_shared_twice(f)
+    assert v.min(axis=0).tolist() == [0, 0, 0]
+    assert v.max(axis=0).tolist() == [22, 21, 20]
+    # Their surfaces are squeezed inside the scan, not flattened onto its
+    # faces, so no triangle loses its area.
+    for downsample in (2, 4, 8):
+        meshes = mesh_volume(blobs((17, 23, 31)), 16, [2, 3], downsample, method)
+        for v, f in meshes.values():
+            corners = v[f].astype(np.float64)
+            normals = np.cross(
+                corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
+            )
+            assert np.linalg.norm(normals, axis=1).min() > 0
+            assert (v.max(axis=0) <= [31, 23, 17]).all()
 
 
 def test_downsampling_keeps_thin_parts_with_any():
@@ -101,15 +234,52 @@ def test_downsampling_keeps_thin_parts_with_any():
     assert edges_shared_twice(f)
 
 
-def test_file_formats():
-    vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float32)
-    faces = np.array([[0, 1, 2]], dtype=np.int32)
-    stl = to_stl(vertices, faces)
+def test_pieces_round_trip_through_a_file(tmp_path):
+    volume = blobs((20, 20, 20))
+    box = (0, 0, 0, 16, 16, 16)
+    rb = read_box(box, volume.shape, 1)
+    region = volume[rb[0] : rb[3], rb[1] : rb[4], rb[2] : rb[5]]
+    pieces = [piece for _, piece in mesh_block(region, box, volume.shape, [2, 3])]
+    with PieceWriter(tmp_path / "pieces.npz") as writer:
+        for piece in pieces:
+            writer.add(piece)
+    with (tmp_path / "pieces.npz").open("rb") as file:
+        read = list(read_pieces(file))
+    assert len(read) == len(pieces) == 2
+    for got, sent in zip(read, pieces, strict=True):
+        assert all(np.array_equal(a, b) for a, b in zip(got, sent, strict=True))
+        assert got.seam.any()  # the block meets its neighbors on its high sides
+
+
+def test_welding_drops_triangles_it_collapses(tmp_path):
+    vertices = np.array(
+        [[0, 0, 8.5], [0, 0, 8.5], [1, 0, 8], [0, 1, 8]], dtype=np.float32
+    )
+    faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+    seam = np.array([True, True, False, False])
+    with Join(tmp_path, (16, 16, 16), 8, (1.0, 1.0, 1.0)) as joined:
+        joined.add(Piece(vertices, faces, seam))
+        joined.finish()
+    assert (joined.vertices, joined.triangles) == (3, 1)
+
+
+def test_file_formats(tmp_path):
+    vertices = np.array([[0, 0, 0], [1234.5679, 0, 0], [0, 1, 0]], dtype=np.float32)
+    piece = Piece(vertices, np.array([[0, 1, 2]], dtype=np.int32), np.zeros(3, bool))
+    with Join(tmp_path, (10, 10, 2000), 256, (1.0, 1.0, 1.0)) as joined:
+        joined.add(piece)
+        stl = joined.finish().read_bytes()
+        obj = joined.write_obj(tmp_path / "mesh.obj").read_text().splitlines()
+        glb = joined.write_glb(tmp_path / "mesh.glb", "millimeter").read_bytes()
+        voxels = joined.write_glb(tmp_path / "voxels.glb", "voxels").read_bytes()
     assert len(stl) == 84 + 50 and struct.unpack("<I", stl[80:84])[0] == 1
-    assert to_obj(vertices, faces).decode().splitlines()[-1] == "f 1 2 3"
-    glb = to_glb(vertices, faces)
+    assert obj[1] == "v 1234.56787 0 0"  # float32 exactly, not 1234.57
+    assert obj[-1] == "f 1 2 3"
     magic, version, length = struct.unpack("<4sII", glb[:12])
     assert (magic, version, length) == (b"glTF", 2, len(glb))
-    size = struct.unpack("<I", glb[12:16])[0]
-    gltf = json.loads(glb[20 : 20 + size])
-    assert gltf["accessors"][0]["count"] == 3
+    got, faces, gltf = read_glb(glb)
+    assert np.array_equal(got, vertices) and faces.tolist() == [[0, 1, 2]]
+    assert gltf["accessors"][0]["max"] == [float(np.float32(1234.5679)), 1, 0]
+    # Vertices stay in millimeters; glTF scales the scene to meters.
+    assert gltf["nodes"] == [{"mesh": 0, "scale": [0.001, 0.001, 0.001]}]
+    assert read_glb(voxels)[2]["nodes"] == [{"mesh": 0}]

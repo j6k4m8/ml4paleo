@@ -6,14 +6,16 @@ success commits.
 
 A model holds one of the project owner's trained-model slots from the
 moment training starts; a failed or cancelled training gives it back (see
-`release_failed_slots`), as does deleting the model.
+`release_failed_slots`), as does deleting the model or its project. Slots
+are only ever given back through `release_slots`, which clears `holds_slot`
+and counts what it cleared in one UPDATE, so no slot is given back twice.
 """
 
 import uuid
 from typing import Any
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ml4paleo.segmentation.plugin import SegmentationPlugin
@@ -24,6 +26,7 @@ from ..settings import Settings
 from ..training import training_path
 
 FAILED_JOB = ("failed", "cancelled")
+RUNNING_JOB = ("blocked", "queued", "leased")
 
 
 def model_status(
@@ -38,26 +41,67 @@ def model_status(
     return "training"
 
 
-async def release_failed_slots(db: AsyncSession, project_id: uuid.UUID) -> None:
+async def release_slots(
+    db: AsyncSession, owner_id: uuid.UUID, *conditions: ColumnElement[bool]
+) -> int:
     """
-    Give back the trained-model slots of the project's trainings that failed.
+    Give back the trained-model slots that models matching `conditions` (all
+    in projects `owner_id` owns) hold, and say how many that was.
+
+    The UPDATE only takes rows that still hold a slot, and locks them, so of
+    two transactions releasing the same model only one gets it back.
     """
-    rows = (
-        await db.execute(
-            select(TrainedModel, Project.owner_id)
-            .join(Project, Project.id == TrainedModel.project_id)
-            .outerjoin(Job, Job.id == TrainedModel.job_id)
-            .where(
-                TrainedModel.project_id == project_id,
-                TrainedModel.holds_slot,
-                (Job.status.in_(FAILED_JOB)) | (TrainedModel.job_id.is_(None)),
-            )
-            .with_for_update(of=TrainedModel)
+    released = (
+        await db.scalars(
+            update(TrainedModel)
+            .where(TrainedModel.holds_slot, *conditions)
+            .values(holds_slot=False)
+            .returning(TrainedModel.id)
         )
     ).all()
-    for model, owner_id in rows:
-        model.holds_slot = False
-        await quotas.release_trained_model(db, owner_id)
+    if released:
+        await quotas.release_trained_model(db, owner_id, len(released))
+    return len(released)
+
+
+async def release_failed_slots(
+    db: AsyncSession, owner_id: uuid.UUID, project_id: uuid.UUID | None = None
+) -> None:
+    """
+    Give back the trained-model slots of the owner's trainings that failed,
+    in all of their projects, or only in `project_id`.
+    """
+    failed = (
+        select(TrainedModel.id)
+        .join(Project, Project.id == TrainedModel.project_id)
+        .outerjoin(Job, Job.id == TrainedModel.job_id)
+        .where(
+            Project.owner_id == owner_id,
+            (Job.status.in_(FAILED_JOB)) | (TrainedModel.job_id.is_(None)),
+        )
+    )
+    if project_id is not None:
+        failed = failed.where(TrainedModel.project_id == project_id)
+    await release_slots(db, owner_id, TrainedModel.id.in_(failed))
+
+
+async def stop_project(db: AsyncSession, project: Project) -> None:
+    """
+    For a project being deleted: cancel everything of it still running
+    (trainings, predictions, and the rest, which would otherwise run to the
+    end only to be refused) and give back the trained-model slots its models
+    hold.
+    """
+    roots = (
+        await db.scalars(
+            select(Job.root_id).where(
+                Job.project_id == project.id, Job.status.in_(RUNNING_JOB)
+            )
+        )
+    ).all()
+    for root_id in sorted(set(roots)):
+        await jobs.cancel_pipeline(db, root_id)
+    await release_slots(db, project.owner_id, TrainedModel.project_id == project.id)
 
 
 async def start(
@@ -73,7 +117,8 @@ async def start(
 ) -> tuple[Job, TrainedModel]:
     owner = await db.get(User, project.owner_id)
     assert owner is not None
-    await release_failed_slots(db, project.id)
+    # Failed trainings anywhere in the owner's projects free their slots.
+    await release_failed_slots(db, owner.id)
     await quotas.reserve_trained_model(db, settings, owner)
     image = await db.get(Artifact, uuid.UUID(training_set.summary["image_artifact_id"]))
     assert image is not None
@@ -129,7 +174,7 @@ def check_result(result: dict[str, Any]) -> None:
         raise ValueError("plugin_version must be a string")
 
 
-async def after_train(db: AsyncSession, job: Job) -> None:
+async def after_train(db: AsyncSession, settings: Settings, job: Job) -> None:
     model = await db.scalar(select(TrainedModel).where(TrainedModel.job_id == job.id))
     if model is None:
         return

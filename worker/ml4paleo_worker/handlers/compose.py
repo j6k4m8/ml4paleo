@@ -4,7 +4,9 @@ Final segmentation jobs (see the server's `pipelines/compose.py`).
 Grants, in order: the prediction artifact (read), the project's labels
 (read; their blobs), and the segmentation artifact (write), which holds the
 pinned labels (`inputs.json`) and, while the pipeline runs, each shard's
-piece summary under `scratch/`.
+pieces under `scratch/`: `<n>.npz`, its seam pieces, for `cc.merge`;
+`<n>.local.npz`, which of its pieces `cc.block` found to be specks; and
+`<n>.joined.npz`, which of its seam pieces `cc.merge` found to be specks.
 """
 
 import io
@@ -14,11 +16,17 @@ from typing import Any
 import numpy as np
 
 from ml4paleo.segmentation.compose import (
+    Progress,
+    TooLarge,
     apply_shard,
     find_specks,
     label_shard,
+    npz,
+    seams,
     shard_grid,
     shard_inputs,
+    shard_specks,
+    slab_depth,
 )
 from ml4paleo.segmentation.dataset import BlobLabels
 from ml4paleo.segmentation.predict import create_prediction, open_prediction
@@ -32,6 +40,8 @@ from ml4paleo.storage import (
 
 from ..context import JobContext, PermanentError
 
+SCRATCH = ("npz", "local.npz", "joined.npz")
+
 
 def _inputs(grant: StorageGrant) -> dict[str, Any]:
     raw = get_bytes(grant, "inputs.json")
@@ -40,75 +50,138 @@ def _inputs(grant: StorageGrant) -> dict[str, Any]:
     return json.loads(raw)
 
 
+def _box(ctx: JobContext) -> tuple[int, int, int, int, int, int]:
+    return tuple(int(n) for n in ctx.payload["box"])  # type: ignore[return-value]
+
+
+def _progress(ctx: JobContext, start: float, end: float) -> Progress:
+    """Report a step's progress as `start` to `end` of the job's, and stop if asked."""
+
+    def report(fraction: float) -> None:
+        ctx.progress(start + (end - start) * fraction)
+        ctx.check()
+
+    return report
+
+
 def _merged(ctx: JobContext) -> tuple[np.ndarray, np.ndarray]:
     prediction_grant, labels_grant, segmentation_grant = ctx.grants
     inputs = _inputs(segmentation_grant)
     labels = BlobLabels(
         labels_grant, {(cz, cy, cx): sha for cz, cy, cx, sha in inputs["chunks"]}
     )
-    box = tuple(int(n) for n in ctx.payload["box"])
     return shard_inputs(
         open_prediction(prediction_grant)["class"],  # type: ignore[arg-type]
         labels,
-        box,  # type: ignore[arg-type]
+        _box(ctx),
         [tuple(roi) for roi in inputs["complete_rois"]],  # type: ignore[misc]
     )
 
 
 def prepare(ctx: JobContext) -> dict[str, Any]:
+    grant = ctx.grants[2]
     create_prediction(
-        ctx.grants[2], ctx.payload["shape_zyx"], arrays=("class",), kind="segmentation"
+        grant, ctx.payload["shape_zyx"], arrays=("class",), kind="segmentation"
     )
+    # The pinned labels come in the payload, so nothing is written until
+    # the pipeline exists.
+    put_bytes(grant, "inputs.json", json.dumps(ctx.payload["inputs"]).encode())
     return {}
 
 
 def block(ctx: JobContext) -> dict[str, Any]:
     merged, labeled = _merged(ctx)
     ctx.check()
+    try:
+        pieces = label_shard(
+            merged,
+            labeled,
+            int(ctx.payload["min_voxels"]),
+            seams(_box(ctx), ctx.payload["shape_zyx"]),
+            slab=slab_depth(ctx.memory_budget_bytes, merged.shape),
+            budget_bytes=ctx.memory_budget_bytes,
+            progress=_progress(ctx, 0.1, 0.9),
+        )
+    except TooLarge as exc:
+        raise PermanentError(str(exc)) from exc
+    del merged, labeled
+    grant, shard = ctx.grants[2], ctx.payload["shard"]
+    put_bytes(grant, f"scratch/{shard}.npz", pieces.summary)
     put_bytes(
-        ctx.grants[2],
-        f"scratch/{ctx.payload['shard']}.npz",
-        label_shard(merged, labeled),
+        grant,
+        f"scratch/{shard}.local.npz",
+        npz(specks=pieces.specks, seam_ids=pieces.seam_ids),
     )
-    return {}
+    return {
+        "specks": int(pieces.specks.sum()),
+        "seam_pieces": len(pieces.seam_ids),
+    }
 
 
 def merge(ctx: JobContext) -> dict[str, Any]:
-    grant = ctx.grants[2]
-    summaries = []
-    for index in range(int(ctx.payload["shards"])):
-        summary = get_bytes(grant, f"scratch/{index}.npz")
-        if summary is None:
-            raise PermanentError(f"Shard {index}'s piece summary is missing.")
-        summaries.append(summary)
-    remove = find_specks(
-        summaries, shard_grid(ctx.payload["shape_zyx"]), int(ctx.payload["min_voxels"])
-    )
-    for index, ids in enumerate(remove):
-        buffer = io.BytesIO()
-        np.save(buffer, ids)
-        put_bytes(grant, f"scratch/{index}.remove.npy", buffer.getvalue())
-    return {"specks": int(sum(len(ids) for ids in remove))}
+    grant, shards = ctx.grants[2], int(ctx.payload["shards"])
+    reading, writing = _progress(ctx, 0, 0.8), _progress(ctx, 0.8, 1)
+
+    def summaries():
+        for index in range(shards):
+            summary = get_bytes(grant, f"scratch/{index}.npz")
+            if summary is None:
+                raise PermanentError(f"Shard {index}'s piece summary is missing.")
+            yield summary
+            reading((index + 1) / shards)
+
+    try:
+        joined = find_specks(
+            summaries(),
+            shard_grid(ctx.payload["shape_zyx"]),
+            int(ctx.payload["min_voxels"]),
+            budget_bytes=ctx.memory_budget_bytes,
+        )
+    except TooLarge as exc:
+        raise PermanentError(str(exc)) from exc
+    for index, specks in enumerate(joined.specks):
+        put_bytes(grant, f"scratch/{index}.joined.npz", npz(specks=specks))
+        writing((index + 1) / shards)
+    return {
+        "specks": int(sum(specks.sum() for specks in joined.specks)),
+        "pairs": joined.pairs,
+    }
 
 
 def apply(ctx: JobContext) -> dict[str, Any]:
-    grant = ctx.grants[2]
-    raw = get_bytes(grant, f"scratch/{ctx.payload['shard']}.remove.npy")
-    if raw is None:
+    grant, shard = ctx.grants[2], ctx.payload["shard"]
+    local = get_bytes(grant, f"scratch/{shard}.local.npz")
+    joined = get_bytes(grant, f"scratch/{shard}.joined.npz")
+    if local is None or joined is None:
         raise PermanentError("The list of specks to remove is missing.")
-    merged, _ = _merged(ctx)
-    final = apply_shard(merged, np.load(io.BytesIO(raw)))
-    box = tuple(int(n) for n in ctx.payload["box"])
+    with np.load(io.BytesIO(local)) as found, np.load(io.BytesIO(joined)) as seam:
+        specks = shard_specks(found["specks"], found["seam_ids"], seam["specks"])
+    del local, joined
+    # Only the classes: which voxels people labeled isn't needed here.
+    merged = _merged(ctx)[0]
+    try:
+        final = apply_shard(
+            merged,
+            specks,
+            slab=slab_depth(ctx.memory_budget_bytes, merged.shape),
+            budget_bytes=ctx.memory_budget_bytes,
+            progress=_progress(ctx, 0.1, 0.9),
+        )
+    except TooLarge as exc:
+        raise PermanentError(str(exc)) from exc
+    box = _box(ctx)
     region = tuple(slice(box[a], box[a + 3]) for a in range(3))
     open_prediction(grant)["class"][region] = final  # type: ignore[index]
     return {}
 
 
 def finalize(ctx: JobContext) -> dict[str, Any]:
-    grant = ctx.grants[2]
-    for index in range(int(ctx.payload["shards"])):
-        delete_object(grant, f"scratch/{index}.npz")
-        delete_object(grant, f"scratch/{index}.remove.npy")
+    grant, shards = ctx.grants[2], int(ctx.payload["shards"])
+    deleting = _progress(ctx, 0, 0.9)
+    for index in range(shards):
+        for name in SCRATCH:
+            delete_object(grant, f"scratch/{index}.{name}")
+        deleting((index + 1) / shards)
     write_manifest(
         grant,
         {

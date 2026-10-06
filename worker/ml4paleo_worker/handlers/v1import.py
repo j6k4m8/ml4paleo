@@ -1,7 +1,7 @@
 """
 v1 import jobs (see the server's `pipelines/v1import.py`). They run on
 workers started with `--v1-volume`, which can read the v1 app's volume
-folder (`ml4paleo.v1import`).
+folder (`ml4paleo.v1import`) and run no other jobs.
 
     v1.probe        check the job, create the empty image, and count what to
                     bring over
@@ -16,7 +16,9 @@ through the server's label writer).
 """
 
 import base64
+import math
 import uuid
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -29,25 +31,87 @@ from ml4paleo.ome import OmeImage, write_from_provider
 from ml4paleo.segmentation.predict import create_prediction
 from ml4paleo.storage import write_manifest
 from ml4paleo.v1import import (
+    SEGMENTATION_NAME,
+    UNCONVERTED,
     annotations,
     image_path,
     read_jobs,
     segmentation,
     status,
 )
+from ml4paleo.volume_providers.volume_provider import VolumeProvider
 from ml4paleo.volume_providers.zarrvp import ZarrVolumeProvider
 
 from ..context import JobContext, PermanentError
 
-# v1 segmentations are this deep per read (their chunks are 256³ or 64³).
-PREDICTION_READ_DEPTH = 64
+# A slab job reads at least this much of the image at once.
+MIN_READ_BYTES = 16 * 1024**2
+
+Box = list[tuple[int, int]]
+
+
+def _pieces(box: Box, chunks: Sequence[int], most: int) -> Iterator[Box]:
+    """
+    Split a box ((start, stop) per axis) at chunk boundaries until each piece
+    touches at most `most` chunks, halving its most-chunked side first.
+    """
+    counts = [
+        (stop - 1) // size - start // size + 1
+        for (start, stop), size in zip(box, chunks, strict=True)
+    ]
+    if math.prod(counts) <= most or max(counts) == 1:
+        yield box
+        return
+    axis = counts.index(max(counts))
+    start, stop = box[axis]
+    middle = (start // chunks[axis] + counts[axis] // 2) * chunks[axis]
+    for side in ((start, middle), (middle, stop)):
+        yield from _pieces([*box[:axis], side, *box[axis + 1 :]], chunks, most)
+
+
+def _chunks_at_once(ctx: JobContext, array: zarr.Array) -> int:
+    """
+    How many of a v1 array's chunks one read may touch. Reading decodes each
+    whole (zarr decodes several at once) and copies it out, which takes about
+    four times a chunk each; that gets a third of the job's memory.
+    """
+    chunk = math.prod(array.chunks) * array.dtype.itemsize
+    return max(1, ctx.memory_budget_bytes // 3 // (4 * chunk))
+
+
+class _FewChunks(VolumeProvider):
+    """A v1 image, read at most a few of its chunks at a time."""
+
+    def __init__(self, array: zarr.Array, most: int):
+        self.array = array
+        self.most = most
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        x, y, z = self.array.shape
+        return x, y, z
+
+    @property
+    def dtype(self) -> np.dtype:
+        return np.dtype(self.array.dtype)
+
+    def __getitem__(self, key) -> np.ndarray:
+        box = [s.indices(n)[:2] for s, n in zip(key, self.shape, strict=True)]
+        out = np.empty([stop - start for start, stop in box], dtype=self.dtype)
+        for piece in _pieces(box, self.array.chunks, self.most):
+            into = tuple(
+                slice(a - start, b - start)
+                for (a, b), (start, _) in zip(piece, box, strict=True)
+            )
+            out[into] = self.array[tuple(slice(a, b) for a, b in piece)]
+        return out
 
 
 def _root(ctx: JobContext) -> Path:
     if ctx.v1_volume is None:
-        raise PermanentError(
-            "This worker has no v1 volume (start it with --v1-volume)."
-        )
+        # The worker is set up wrong, not the job: another try may get a
+        # worker with the volume.
+        raise RuntimeError("This worker has no v1 volume (start it with --v1-volume).")
     return ctx.v1_volume
 
 
@@ -62,6 +126,9 @@ def probe(ctx: JobContext) -> dict[str, Any]:
     root = _root(ctx)
     job_id = ctx.payload["job_id"]
     record = _record(root, job_id)
+    if status(record) in UNCONVERTED:
+        # Its array, if any, is partial.
+        raise PermanentError("This v1 job never finished converting its upload.")
     path = image_path(root, job_id)
     if not (path / ".zarray").is_file():
         raise PermanentError("This v1 job has no converted image to import.")
@@ -73,7 +140,7 @@ def probe(ctx: JobContext) -> dict[str, Any]:
         ctx.grants[0],
         shape_czyx=(1, z, y, x),
         dtype=np.dtype(provider.dtype),
-        # v1 recorded voxel sizes (in mm) for DICOM scans only.
+        # v1 recorded voxel sizes (in mm) only for DICOM scans, from #76 on.
         voxel_size_zyx=tuple(reversed(voxel)) if voxel else None,
         unit="millimeter" if voxel else None,
         name=str(record.get("name") or job_id),
@@ -112,9 +179,18 @@ def slab(ctx: JobContext) -> dict[str, Any]:
         ctx.progress(done / total)
         ctx.check()
 
-    provider = ZarrVolumeProvider(image_path(root, ctx.payload["job_id"]))
+    source = ZarrVolumeProvider(image_path(root, ctx.payload["job_id"])).zarr
+    most = _chunks_at_once(ctx, source)
+    chunk = math.prod(source.chunks) * source.dtype.itemsize
+    # The rest of the job's memory goes to what's read, which is held about
+    # three times over while it's written.
+    read = max(MIN_READ_BYTES, (ctx.memory_budget_bytes - 4 * most * chunk) // 3)
     write_from_provider(
-        provider, OmeImage.open(ctx.grants[0]), z_range=(z0, z1), progress=progress
+        _FewChunks(source, most),
+        OmeImage.open(ctx.grants[0]),
+        z_range=(z0, z1),
+        max_read_bytes=read,
+        progress=progress,
     )
     return {"z_range": [z0, z1]}
 
@@ -171,12 +247,15 @@ def labels(ctx: JobContext) -> dict[str, Any]:
 
 def prediction(ctx: JobContext) -> dict[str, Any]:
     """
-    v1 segmentations hold 255 where the model found the foreground and 0
-    elsewhere; the prediction holds the foreground class and background.
+    v1 segmentations hold 0 for background and anything else (usually 255)
+    where the model found the foreground; the prediction holds background and
+    the foreground class.
     """
     root = _root(ctx)
     job_id = ctx.payload["job_id"]
     name = ctx.payload["segmentation"]
+    if not (isinstance(name, str) and SEGMENTATION_NAME.fullmatch(name)):
+        raise PermanentError(f"{name!r} isn't a v1 segmentation's name.")
     foreground = int(ctx.payload["foreground"])
     source = zarr.open_array(str(root / "segmented" / job_id / name), mode="r")
     shape = [int(n) for n in ctx.payload["shape_zyx"]]
@@ -190,17 +269,24 @@ def prediction(ctx: JobContext) -> dict[str, Any]:
         for y0 in range(0, shape[1], shard[1])
         for x0 in range(0, shape[2], shard[2])
     ]
-    # Shard by shard, so each is written once, read a few slices at a time.
+    most = _chunks_at_once(ctx, source)
+    chunk_x, chunk_y, chunk_z = source.chunks
+    # Shard by shard, so each is written once. Each read is a source chunk
+    # deep, so each source chunk is decoded once, and a few chunks wide.
     for done, (z0, y0, x0) in enumerate(boxes, start=1):
         z1, y1, x1 = (
             min(o + s, n) for o, s, n in zip((z0, y0, x0), shard, shape, strict=True)
         )
         out = np.empty((z1 - z0, y1 - y0, x1 - x0), dtype=np.uint8)
-        for zz in range(z0, z1, PREDICTION_READ_DEPTH):
-            top = min(zz + PREDICTION_READ_DEPTH, z1)
-            block = np.asarray(source[x0:x1, y0:y1, zz:top]).transpose(2, 1, 0)
-            out[zz - z0 : top - z0] = np.where(block > 0, foreground, BACKGROUND)
-            ctx.check()
+        for [(za, zb)] in _pieces([(z0, z1)], [chunk_z], 1):
+            for (xa, xb), (ya, yb) in _pieces(
+                [(x0, x1), (y0, y1)], [chunk_x, chunk_y], most
+            ):
+                found = np.asarray(source[xa:xb, ya:yb, za:zb]) > 0
+                part = out[za - z0 : zb - z0, ya - y0 : yb - y0, xa - x0 : xb - x0]
+                part[...] = BACKGROUND
+                part[found.transpose(2, 1, 0)] = foreground
+                ctx.check()
         classes[z0:z1, y0:y1, x0:x1] = out
         ctx.progress(done / len(boxes))
     write_manifest(

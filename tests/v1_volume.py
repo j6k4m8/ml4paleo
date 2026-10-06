@@ -4,11 +4,12 @@ tests. Jobs:
 
 - `ABC123`: converted (x, y, z) = (40, 30, 20) uint16 with a voxel size, two
   placed annotation samples (one from a multi-slice polygon submit), one too
-  old to place, a model whose sidecar names its segmentation, and a newer
-  segmentation no sidecar names (an unfinished run).
+  old to place, a model whose sidecar (from v1's segment runner) names its
+  segmentation, and a newer segmentation no sidecar names (an unfinished run).
 - `FEED01`: converted, annotated after segmenting, with no sidecars naming
   segmentations, so nothing counts as finished.
 - `DEAD00`: uploaded but never converted.
+- `DEAD01`: its conversion failed partway, leaving part of an array.
 """
 
 import json
@@ -56,6 +57,23 @@ def _array(path: Path, data: np.ndarray, chunks, attrs=None) -> None:
     array[:] = data
     if attrs:
         array.attrs.update(attrs)
+
+
+def runner_sidecar(model_id: str, segmented: bool = True) -> dict:
+    """
+    A model's sidecar as v1's segment runner wrote it: on training, then
+    naming the segmentation once segmenting succeeded.
+    """
+    sidecar = {
+        "model_id": model_id,
+        "job_id": "ABC123",
+        "annotation_count": 2,
+        "training_samples": [{"sample_id": "1745400000"}],
+        "metrics": {"train_foreground_dice": 0.9},
+    }
+    if segmented:
+        sidecar["segmentation_id"] = f"{model_id}.zarr"
+    return sidecar
 
 
 def _sample(folder: Path, stamp: str, local_z: int | None, foreground, meta=True):
@@ -115,12 +133,17 @@ def make(root: Path) -> Path:
         "ABC123": record("ABC123", "MESHED", "Burrow"),
         "FEED01": record("FEED01", "ANNOTATED", ""),
         "DEAD00": record("DEAD00", "UPLOADED", "Never converted"),
+        "DEAD01": record("DEAD01", "CONVERT_ERROR", "Failed conversion"),
     }
     root.mkdir(parents=True, exist_ok=True)
     (root / "jobs.json").write_text(json.dumps(jobs, indent=4))
     attrs = {"voxel_size_xyz_mm": list(VOXEL_SIZE_XYZ_MM)}
     for job_id in ("ABC123", "FEED01"):
         _array(root / "chunks" / job_id, image(), (16, 16, 8), attrs)
+    # Its conversion failed after writing the first slab.
+    partial = np.zeros(SHAPE_XYZ, dtype=np.uint16)
+    partial[:, :, :8] = image()[:, :, :8]
+    _array(root / "chunks" / "DEAD01", partial, (16, 16, 8))
 
     training = root / "training" / "ABC123"
     training.mkdir(parents=True)
@@ -140,9 +163,7 @@ def make(root: Path) -> Path:
     (models / "1745400050.json").write_text(
         json.dumps({"rf_kwargs": {}, "model_class": "RandomForest3DSegmenter"})
     )
-    (models / "1745400150.json").write_text(
-        json.dumps({"model_id": "1745400150", "segmentation_id": "1745400150.zarr"})
-    )
+    (models / "1745400150.json").write_text(json.dumps(runner_sidecar("1745400150")))
     segmented = root / "segmented" / "ABC123"
     _array(segmented / "1745400150.zarr", segmentation(), (16, 16, 16))
     _array(

@@ -42,6 +42,8 @@ export interface Pipeline {
 	jobs: number;
 	created_at: string;
 	error: string | null;
+	/** The model a training or prediction is for. */
+	model_id: string | null;
 }
 
 export interface ImageManifest {

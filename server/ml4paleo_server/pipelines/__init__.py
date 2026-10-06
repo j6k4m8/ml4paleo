@@ -9,6 +9,7 @@ success, so they are never lost). Each pipeline kind lives in its own module.
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import Job
+from ..settings import Settings
 from . import compose, export, ingest, mesh, predict, train, v1import
 
 # What people call a pipeline, by the kind of its first job.
@@ -47,9 +48,12 @@ def check_result(job: Job, result: dict) -> None:
         check(result)
 
 
-async def after_success(db: AsyncSession, job: Job) -> None:
+async def after_success(db: AsyncSession, settings: Settings, job: Job) -> None:
+    """
+    Continue a job's pipeline. Raise `jobs.Rejected` to fail the job instead.
+    """
     if continuation := _CONTINUATIONS.get(job.kind):
-        await continuation(db, job)
+        await continuation(db, settings, job)
 
 
 __all__ = [

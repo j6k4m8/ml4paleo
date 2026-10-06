@@ -4,23 +4,36 @@
 #   M4P_V1_VOLUME=/home/ubuntu/ml4paleo-webapp-volume \
 #     docker compose -f compose.yml -f compose.v1.yml up -d
 #
-# The API reads jobs.json to check claims, and worker-v1 (the only worker that
-# sees the folder) imports what people claim. Signed in, people claim a job by
-# visiting its old link (/job/<id>) or from /import; the first claim wins, and
-# admins can release a job someone else claimed.
+# The API reads only jobs.json, to check claims, and worker-v1 (the only
+# worker that sees the folder) imports what people claim. Signed in, people
+# claim a job by visiting its old link (/job/<id>) or from /import; the first
+# claim wins, and admins can release a job someone else claimed. /import
+# lists the jobs each browser opened in v1, which only v1's own origin can
+# read: serve v2 at exactly v1's scheme, host, and port.
+#
+# v1 saves jobs.json by replacing the file, and the API's mount keeps showing
+# the file it started with: if v1 is still running, restart the API
+# (`docker compose restart api`) to pick up its newer jobs.
 
 services:
   api:
     environment:
       M4P_V1__VOLUME_PATH: /v1
     volumes:
-      - ${M4P_V1_VOLUME:?set M4P_V1_VOLUME to the v1 volume folder}:/v1:ro
+      - ${M4P_V1_VOLUME:?set M4P_V1_VOLUME to the v1 volume folder}/jobs.json:/v1/jobs.json:ro
 
+  caddy:
+    networks: [v1-jobs]
+
+  # worker-v1 can read every v1 job's files, so it runs only the import's own
+  # jobs (worker-cpu runs the pyramid and finalize jobs), and its network has
+  # nothing on it but Caddy: no internet, and no other workers. (Caddy's
+  # public site answers there too, as it does on the jobs network.)
   worker-v1:
     image: ml4paleo-worker:local
     restart: unless-stopped
     init: true
-    networks: [jobs]
+    networks: [v1-jobs]
     command:
       - ml4paleo-worker
       - --server=http://caddy:8080
@@ -38,3 +51,8 @@ services:
     depends_on:
       caddy:
         condition: service_started
+
+networks:
+  # Caddy and worker-v1 only.
+  v1-jobs:
+    internal: true

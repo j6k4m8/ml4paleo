@@ -9,6 +9,7 @@ sizes, which the API uses to serve them as one file.
 import contextlib
 import json
 import re
+import unicodedata
 from collections.abc import Iterator
 from typing import Any
 
@@ -65,6 +66,9 @@ def files(ctx: JobContext) -> dict[str, Any]:
     )
     meshes = ctx.payload["source"] == "meshes"
     names, info = _mesh_names(source) if meshes else ({}, None)
+    if meshes:
+        # Only the meshes and their info, not what the joins left for finalize.
+        listed = [item for item in listed if item[0] in names or item[0] == MESH_INFO]
     folder = ctx.payload["folder"]
     total = sum(size for _, size in listed) or 1
     done = 0
@@ -96,8 +100,7 @@ def _mesh_names(source: StorageGrant) -> tuple[dict[str, str], bytes]:
     names: dict[str, str] = {}
     taken: set[str] = set()
     for entry in info.get("classes", []):
-        base = re.sub(r"[^a-z0-9]+", "-", str(entry["name"]).lower()).strip("-")
-        stem = base or "class"
+        stem = _stem(str(entry["name"])) or "class"
         if stem in taken:
             stem = f"{stem}-{entry['value']}"
         # Even "bone-3" might be some other class's name already.
@@ -110,6 +113,17 @@ def _mesh_names(source: StorageGrant) -> tuple[dict[str, str], bytes]:
             files[extension] = names[key]
         entry["files"] = files
     return names, json.dumps(info, indent=2).encode()
+
+
+def _stem(name: str) -> str:
+    """
+    A class name as a file name: letters (with their combining marks) and
+    digits in any script, as the Results page names downloads; the rest
+    become dashes.
+    """
+    text = unicodedata.normalize("NFC", name).lower()
+    kept = "".join(c if unicodedata.category(c)[0] in "LMN" else "-" for c in text)
+    return re.sub(r"-+", "-", kept).strip("-")
 
 
 def images(ctx: JobContext) -> dict[str, Any]:

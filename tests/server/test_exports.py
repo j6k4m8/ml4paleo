@@ -109,6 +109,8 @@ def add_heads(settings, database_url, project: str):
         files = {"stl": "2.stl", "obj": "2.obj", "glb": "2.glb"}
         for extension, key in files.items():
             put_bytes(grant(head), key, f"a {extension} mesh".encode())
+        # What a join leaves for finalize, which isn't exported.
+        put_bytes(grant(head), "2.json", b"{}")
         info = {
             "axis_order": "xyz",
             "classes": [
@@ -408,6 +410,7 @@ def test_mesh_names_never_collide(tmp_path):
         ("Class 7", 4),
         ("???", 7),
         ("", 8),
+        ("हड्डी", 9),
     ]
     info = {
         "classes": [
@@ -417,6 +420,8 @@ def test_mesh_names_never_collide(tmp_path):
     put_bytes(grant, "mesh_info.json", json.dumps(info).encode())
     names, rewritten = _mesh_names(grant)
     assert len(set(names.values())) == len(classes)
+    # Names in other scripts keep their letters and marks.
+    assert names["9.stl"] == "हड्डी.stl"
     files = [c["files"]["stl"] for c in json.loads(rewritten)["classes"]]
     assert files == [names[f"{v}.stl"] for _, v in classes]
 
