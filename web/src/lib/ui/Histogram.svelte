@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { handleAt } from "#lib/ui/histogram.ts";
+
 	let {
 		counts,
 		edges,
@@ -38,8 +40,7 @@
 	};
 
 	function down(event: PointerEvent) {
-		const value = valueAt(event.clientX);
-		dragging = Math.abs(value - window[0]) <= Math.abs(value - window[1]) ? 0 : 1;
+		dragging = handleAt(valueAt(event.clientX), window);
 		svg.setPointerCapture(event.pointerId);
 		move(event);
 	}
@@ -59,6 +60,7 @@
 	onpointerdown={down}
 	onpointermove={move}
 	onpointerup={() => (dragging = null)}
+	onpointercancel={() => (dragging = null)}
 >
 	<rect width={WIDTH} height={HEIGHT} fill="var(--color-field)" />
 	<rect x={x(window[0])} width={Math.max(0, x(window[1]) - x(window[0]))} height={HEIGHT} fill="var(--color-accent-soft)" opacity="0.6" />
