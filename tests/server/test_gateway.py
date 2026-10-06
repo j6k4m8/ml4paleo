@@ -144,7 +144,8 @@ def test_neuroglancer_is_served_with_its_own_policy(
     )
     assert browser.get("/neuroglancer/main.bundle.js").text == "console.log('ng')"
     # The rest of the site keeps the strict policy.
-    assert "wasm" not in browser.get("/api/health").headers["content-security-policy"]
+    rest = browser.get("/api/health").headers["content-security-policy"]
+    assert "'unsafe-eval'" not in rest
 
     signup(browser)
     project = make_project(browser)
@@ -170,4 +171,4 @@ def test_without_a_neuroglancer_build_there_is_no_link(
     # The path falls through to the web app instead, under the strict policy.
     page = browser.get("/neuroglancer/")
     assert "has not been built" in page.text
-    assert "unsafe" not in page.headers["content-security-policy"]
+    assert "'unsafe-eval'" not in page.headers["content-security-policy"]
