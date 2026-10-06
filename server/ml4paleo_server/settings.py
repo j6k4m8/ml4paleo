@@ -116,8 +116,9 @@ class UnconfirmedQuotaSettings(QuotaSettings):
 
 class V1Settings(BaseModel):
     """
-    Importing jobs from the ml4paleo v1 app this one replaced. People claim
-    a job by visiting its old link (`/job/<id>`) signed in.
+    Importing jobs from the ml4paleo v1 app this one replaced. Signed in,
+    people import a job from its old link (`/job/<id>`, which asks first) or
+    the import page.
     """
 
     # A folder with v1's jobs.json (the API reads nothing else of v1's),
@@ -128,9 +129,12 @@ class V1Settings(BaseModel):
     # only six hex digits, so this keeps people from guessing other people's
     # jobs.
     claims_per_hour: int = Field(default=30, ge=1)
-    # Claims of ids that aren't v1 jobs, from everyone, per hour. Past this,
-    # nobody can claim until the hour is up.
-    failed_claims_per_hour: int = Field(default=100, ge=1)
+    # Of those, how many may be ids that aren't v1 jobs (people mistype a
+    # few; guessing misses nearly every time).
+    misses_per_hour: int = Field(default=5, ge=1)
+    # Misses from everyone per hour. Past this, nobody can claim until the
+    # hour is up; reaching it takes dozens of addresses.
+    site_misses_per_hour: int = Field(default=200, ge=1)
 
 
 class Settings(BaseSettings):

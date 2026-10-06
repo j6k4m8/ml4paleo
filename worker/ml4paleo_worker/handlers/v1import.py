@@ -31,6 +31,7 @@ from ml4paleo.ome import OmeImage, write_from_provider
 from ml4paleo.segmentation.predict import create_prediction
 from ml4paleo.storage import write_manifest
 from ml4paleo.v1import import (
+    JOB_ID,
     SEGMENTATION_NAME,
     UNCONVERTED,
     annotations,
@@ -46,6 +47,8 @@ from ..context import JobContext, PermanentError
 
 # A slab job reads at least this much of the image at once.
 MIN_READ_BYTES = 16 * 1024**2
+# The namespace of the label edits' ids, one per v1 job and sample.
+SAMPLE_OPS = uuid.UUID("2bf25a04-4522-4724-907e-b2b2dd0a9691")
 
 Box = list[tuple[int, int]]
 
@@ -115,6 +118,14 @@ def _root(ctx: JobContext) -> Path:
     return ctx.v1_volume
 
 
+def _job_id(ctx: JobContext) -> str:
+    """The job's v1 job id, which names folders in the volume."""
+    job_id = ctx.payload["job_id"]
+    if not (isinstance(job_id, str) and JOB_ID.fullmatch(job_id)):
+        raise PermanentError(f"{job_id!r} isn't a v1 job id.")
+    return job_id
+
+
 def _record(root: Path, job_id: str) -> dict[str, Any]:
     record = read_jobs(root).get(job_id)
     if record is None:
@@ -124,7 +135,7 @@ def _record(root: Path, job_id: str) -> dict[str, Any]:
 
 def probe(ctx: JobContext) -> dict[str, Any]:
     root = _root(ctx)
-    job_id = ctx.payload["job_id"]
+    job_id = _job_id(ctx)
     record = _record(root, job_id)
     if status(record) in UNCONVERTED:
         # Its array, if any, is partial.
@@ -179,7 +190,7 @@ def slab(ctx: JobContext) -> dict[str, Any]:
         ctx.progress(done / total)
         ctx.check()
 
-    source = ZarrVolumeProvider(image_path(root, ctx.payload["job_id"])).zarr
+    source = ZarrVolumeProvider(image_path(root, _job_id(ctx))).zarr
     most = _chunks_at_once(ctx, source)
     chunk = math.prod(source.chunks) * source.dtype.itemsize
     # The rest of the job's memory goes to what's read, which is held about
@@ -202,14 +213,17 @@ def _wire(delta: ChunkDelta) -> dict[str, Any]:
         "box": list(delta.box),
         "mask": base64.b64encode(delta.mask).decode(),
         "values": base64.b64encode(delta.values or b"").decode(),
+        "only_if": delta.only_if,
     }
 
 
 def labels(ctx: JobContext) -> dict[str, Any]:
     root = _root(ctx)
-    job_id = ctx.payload["job_id"]
+    job_id = _job_id(ctx)
     foreground = int(ctx.payload["foreground"])
     z, y, x = ctx.payload["shape_zyx"]
+    # A later try at the import leaves voxels someone labeled since alone.
+    only_if = "unlabeled" if ctx.payload.get("only_unlabeled") else "any"
     placed, _ = annotations(root, job_id, (x, y, z))
     rois = []
     for done, annotation in enumerate(placed, start=1):
@@ -221,13 +235,19 @@ def labels(ctx: JobContext) -> dict[str, Any]:
         values = np.where(mask, foreground, BACKGROUND).astype(np.uint8)[np.newaxis]
         box = annotation.box_zyx
         deltas = split_into_deltas(
-            np.ones(values.shape, dtype=bool), (box[0], box[1], box[2]), values=values
+            np.ones(values.shape, dtype=bool),
+            (box[0], box[1], box[2]),
+            values=values,
+            only_if=only_if,
         )
         try:
             ctx.apply_label_op(
                 {
-                    # The same id on a retry, so each sample lands once.
-                    "client_op_id": str(uuid.uuid5(ctx.job_id, annotation.stamp)),
+                    # Named by the v1 job and sample, so each sample lands once
+                    # however often the labels are brought over.
+                    "client_op_id": str(
+                        uuid.uuid5(SAMPLE_OPS, f"{job_id}/{annotation.stamp}")
+                    ),
                     "deltas": [_wire(delta) for delta in deltas],
                     "tool": {
                         "name": "v1-import",
@@ -252,7 +272,7 @@ def prediction(ctx: JobContext) -> dict[str, Any]:
     the foreground class.
     """
     root = _root(ctx)
-    job_id = ctx.payload["job_id"]
+    job_id = _job_id(ctx)
     name = ctx.payload["segmentation"]
     if not (isinstance(name, str) and SEGMENTATION_NAME.fullmatch(name)):
         raise PermanentError(f"{name!r} isn't a v1 segmentation's name.")

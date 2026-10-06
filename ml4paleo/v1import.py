@@ -31,7 +31,9 @@ import numpy as np
 JOB_ID = re.compile(r"[0-9A-F]{6}")
 JOBS_FILE = "jobs.json"
 # A segmentation's folder: the time its model was trained.
-SEGMENTATION_NAME = re.compile(r"\d+\.zarr")
+SEGMENTATION_NAME = re.compile(r"[0-9]+\.zarr")
+# Sample metadata past this isn't a position in any scan.
+MAX_COORDINATE = 2**31
 # Statuses of jobs whose upload never became an image (as v1's job page
 # decides whether it can be annotated); v1 never used "pending".
 UNCONVERTED = {"pending", "uploading", "uploaded", "converting", "convert_error"}
@@ -187,25 +189,36 @@ def annotations(
     return placed, skipped
 
 
+def _numbers(values: Any, count: int = 3) -> list[int]:
+    """
+    Whole numbers from sample metadata, read with int() as v1 read them.
+    Anything else, or anything infinite or too large to be a position in a
+    scan, raises.
+    """
+    numbers = [int(v) for v in values]
+    if len(numbers) != count or any(abs(n) >= MAX_COORDINATE for n in numbers):
+        raise ValueError("not a position in a scan")
+    return numbers
+
+
 def _place(
     meta_path: Path, mask: Path, stamp: str, shape_xyz: tuple[int, int, int]
 ) -> Annotation | None:
     try:
         meta = json.loads(meta_path.read_text())
-        origin = [int(v) for v in meta["cutout_origin_xyz"]]
-        cutout = [int(v) for v in meta["cutout_shape_xyz"]]
-        padding = [int(v) for v in meta.get("padding_before_xyz", [0, 0, 0])]
-        requested = [int(v) for v in meta.get("requested_shape_xyz", [0, 0, 1])]
-    except (OSError, ValueError, KeyError, TypeError):
+        origin = _numbers(meta["cutout_origin_xyz"])
+        cutout = _numbers(meta["cutout_shape_xyz"])
+        padding = _numbers(meta.get("padding_before_xyz", [0, 0, 0]))
+        requested = _numbers(meta.get("requested_shape_xyz", [0, 0, 1]))
+        # As v1's `annotation_sample_metadata_for_z` does: the labeled slice
+        # is the sample's local z (its middle one by default), which is
+        # padding if it falls outside the cutout.
+        depth = max(1, requested[2])
+        [local] = _numbers([meta.get("annotated_local_z_index", depth // 2)], 1)
+    except (OSError, ValueError, KeyError, TypeError, ArithmeticError):
+        # int() raises OverflowError for an infinity (JSON's 1e400).
         return None
-    if not all(len(v) == 3 for v in (origin, cutout, padding, requested)):
-        return None
-    # As v1's `annotation_sample_metadata_for_z` does: the labeled slice is
-    # the sample's local z (its middle one by default), which is padding if
-    # it falls outside the cutout.
-    depth = max(1, requested[2])
-    local = meta.get("annotated_local_z_index", depth // 2)
-    local = min(max(int(local), 0), depth - 1) if isinstance(local, int) else depth // 2
+    local = min(max(local, 0), depth - 1)
     if not 0 <= local - padding[2] < cutout[2]:
         return None
     z = origin[2] + local - padding[2]

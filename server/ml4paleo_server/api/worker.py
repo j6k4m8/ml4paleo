@@ -217,12 +217,17 @@ async def label_op(
     """
     Apply a label edit to the job's project, as the annotator's edits are
     applied, for the kinds of job that bring in labels. The job stays locked
-    until the edit commits, so an edit can't land after its job has finished.
+    until the edit commits, so an edit can't land after its job has finished
+    or once it's cancelled (for example when its project is released).
     """
     try:
         job = await jobs.leased_job(db, job_id, worker, body.lease_token)
     except jobs.LeaseLost:
         raise _lease_lost() from None
+    if job.cancel_requested:
+        raise HTTPException(
+            status_code=409, detail="job_cancelled: discard this job's output."
+        )
     source = LABEL_WRITERS.get(job.kind)
     if source is None or job.project_id is None:
         raise HTTPException(status_code=403, detail="This job can't write labels.")
