@@ -16,6 +16,7 @@
 	import PanelRight from "@lucide/svelte/icons/panel-right";
 	import Pentagon from "@lucide/svelte/icons/pentagon";
 	import Redo2 from "@lucide/svelte/icons/redo-2";
+	import Sparkles from "@lucide/svelte/icons/sparkles";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
 	import Undo2 from "@lucide/svelte/icons/undo-2";
 	import X from "@lucide/svelte/icons/x";
@@ -23,9 +24,9 @@
 	import Histogram from "#lib/ui/Histogram.svelte";
 	import Panel from "#lib/ui/Panel.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
-	import { ApiError, api } from "#lib/api.ts";
+	import { ApiError, api, message } from "#lib/api.ts";
 	import { session } from "#lib/session.svelte.ts";
-	import type { ProjectImage } from "#lib/types.ts";
+	import type { Pipeline, ProjectImage } from "#lib/types.ts";
 	import { acceptParts, MAX_ACCEPT_VOXELS, readBox } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
@@ -63,6 +64,12 @@
 	let prediction: ChunkStore | null = $state(null);
 	let predictionModel = $state("");
 	let predictionArtifact = "";
+	// Which the prediction layer shows: the whole image's prediction, or a
+	// proposal (one ROI predicted on demand), whichever is newer.
+	let predictionKind = $state<"prediction" | "proposal">("prediction");
+	// The model "Propose here" uses: the prediction's, else the newest ready one.
+	let proposer: { id: string; name: string } | null = $state(null);
+	let proposing = $state(false);
 	let segmentation: ChunkStore | null = $state(null);
 	let classes: LabelClass[] = $state([]);
 	let error = $state("");
@@ -100,22 +107,7 @@
 			});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
-			api<{ artifact_id: string; zarr_url: string; model_name: string | null; shape_zyx: number[] }>(
-				`/api/projects/${project}/prediction`,
-			).then(
-				(found) => {
-					if (!pool || controller.signal.aborted) return;
-					// A prediction of another image (one that replaced this since) wouldn't line up.
-					if (found.shape_zyx.join() !== viewer.shape.join()) return;
-					// Predictions never change once made, so their chunks cache like the image's.
-					prediction = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
-					predictionModel = found.model_name ?? "a model";
-					predictionArtifact = found.artifact_id;
-				},
-				(e: unknown) => {
-					if (!(e instanceof ApiError && e.status === 404)) error = e instanceof Error ? e.message : String(e);
-				},
-			);
+			void loadPrediction(controller.signal);
 			api<{ zarr_url: string }>(`/api/projects/${project}/segmentation`).then(
 				(found) => {
 					if (!pool || controller.signal.aborted) return;
@@ -285,6 +277,94 @@
 		if (zooms.length > 0) viewer.zoom = Math.min(64, Math.max(1 / 512, 0.85 * Math.min(...zooms)));
 	}
 
+	interface Predicted {
+		artifact_id: string;
+		zarr_url: string;
+		model_id: string | null;
+		model_name: string | null;
+		shape_zyx: number[];
+		committed_at: string;
+	}
+
+	/** Show the newer of the prediction and the proposal in the prediction layer. */
+	async function loadPrediction(signal?: AbortSignal) {
+		const get = (slot: string) =>
+			api<Predicted>(`/api/projects/${project}/${slot}`).catch((e: unknown) => {
+				if (e instanceof ApiError && e.status === 404) return null;
+				throw e;
+			});
+		try {
+			const [whole, proposed] = await Promise.all([get("prediction"), get("proposal")]);
+			const models = await api<{ id: string; name: string; status: string }[]>(`/api/projects/${project}/models`);
+			const ready = models.filter((m) => m.status === "ready");
+			proposer = ready.find((m) => m.id === whole?.model_id) ?? ready[0] ?? null;
+			if (!pool || signal?.aborted) return;
+			// One of another image (one that replaced this since) wouldn't line up.
+			const fits = (found: Predicted | null) => (found && found.shape_zyx.join() === viewer.shape.join() ? found : null);
+			const [kind, found] = [
+				["prediction", fits(whole)] as const,
+				["proposal", fits(proposed)] as const,
+			]
+				.filter(([, f]) => f !== null)
+				.sort(([, a], [, b]) => (b?.committed_at ?? "").localeCompare(a?.committed_at ?? ""))[0] ?? ["prediction", null];
+			if (!found || found.artifact_id === predictionArtifact) return;
+			// Predictions never change once made, so their chunks cache like the image's.
+			prediction = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
+			predictionModel = found.model_name ?? "a model";
+			predictionArtifact = found.artifact_id;
+			predictionKind = kind;
+		} catch (e) {
+			error = message(e);
+		}
+	}
+
+	/** Wait for a pipeline to end; throw with its error if it didn't succeed. */
+	function finished(id: string): Promise<void> {
+		return new Promise((resolve, reject) => {
+			const source = new EventSource(`/api/projects/${project}/pipelines/${id}/events`);
+			let ended = false;
+			const end = async () => {
+				if (ended) return;
+				ended = true;
+				source.close();
+				try {
+					const final = await api<Pipeline>(`/api/projects/${project}/pipelines/${id}`);
+					if (final.status === "succeeded") resolve();
+					else reject(new Error(final.error ?? `The proposal ${final.status}.`));
+				} catch (e) {
+					reject(e);
+				}
+			};
+			source.addEventListener("status", (event) => {
+				const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
+				if (update.status !== "waiting" && update.status !== "running") void end();
+			});
+			// The server answers 204 for a pipeline that has ended, which closes the stream.
+			source.addEventListener("error", () => {
+				if (source.readyState === EventSource.CLOSED) void end();
+			});
+		});
+	}
+
+	/** Predict just this ROI with the proposer, and show the result to accept. */
+	async function propose(roi: Roi) {
+		if (!proposer || proposing) return;
+		proposing = true;
+		notice = "";
+		try {
+			const started = await api<{ pipeline_id: string }>(`/api/projects/${project}/models/${proposer.id}/propose`, {
+				body: { roi_id: roi.id },
+			});
+			await finished(started.pipeline_id);
+			await loadPrediction();
+			viewer.showPrediction = true;
+		} catch (e) {
+			notice = message(e);
+		} finally {
+			proposing = false;
+		}
+	}
+
 	const openRois = $derived(rois.items.filter((r) => r.status === "open"));
 	const selectedRoi = $derived(rois.items.find((r) => r.id === viewer.selectedRoi) ?? null);
 	let accepting = $state(false);
@@ -312,9 +392,9 @@
 			const parts = acceptParts(values, roi.bbox as [number, number, number, number, number, number]);
 			const ops = queue.editMany(parts, { accept: { prediction: predictionArtifact, roi: roi.id } });
 			for (const op of ops) labels.applyLocal(op.local, op.deltas);
-			if (ops.length === 0) notice = "The prediction has nothing in that ROI.";
+			if (ops.length === 0) notice = `The ${predictionKind} has nothing in that ROI.`;
 		} catch (e) {
-			notice = `Couldn't read the prediction: ${e instanceof Error ? e.message : String(e)}`;
+			notice = `Couldn't read the ${predictionKind}: ${e instanceof Error ? e.message : String(e)}`;
 		} finally {
 			accepting = false;
 		}
@@ -712,7 +792,9 @@
 								<button class="text-ink-dim hover:text-ink" aria-label="{viewer.showPrediction ? 'Hide' : 'Show'} prediction" title="Show or hide (M)" onclick={() => (viewer.showPrediction = !viewer.showPrediction)}>
 									{#if viewer.showPrediction}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
 								</button>
-								<span class="flex-1 truncate">Prediction <span class="text-ink-faint">· {predictionModel}</span></span>
+								<span class="flex-1 truncate">
+									{predictionKind === "proposal" ? "Proposal" : "Prediction"} <span class="text-ink-faint">· {predictionModel}</span>
+								</span>
 								<span class="font-mono text-2xs text-ink-dim">{Math.round(viewer.predictionOpacity * 100)}%</span>
 							</div>
 							<input type="range" min="0" max="1" step="0.05" bind:value={viewer.predictionOpacity} aria-label="Prediction opacity" />
@@ -786,15 +868,26 @@
 						<li class="px-2.5 text-ink-dim">Draw one with the ROI tool (R).</li>
 					{/each}
 				</ul>
+				{#if proposer && selectedRoi}
+					<button
+						class="btn"
+						disabled={proposing}
+						title="Predict just this ROI with {proposer.name}, ahead of other work"
+						onclick={() => selectedRoi && propose(selectedRoi)}
+					>
+						<Sparkles size={13} />
+						{proposing ? "Proposing…" : "Propose here"}
+					</button>
+				{/if}
 				{#if prediction && selectedRoi}
 					<button
 						class="btn"
 						disabled={accepting}
-						title="Fill the selected ROI's unlabeled voxels with the prediction (A)"
+						title="Fill the selected ROI's unlabeled voxels with the {predictionKind} (A)"
 						onclick={() => selectedRoi && acceptPrediction(selectedRoi)}
 					>
 						<CheckCheck size={13} />
-						{accepting ? "Accepting…" : "Accept prediction here"}
+						{accepting ? "Accepting…" : `Accept ${predictionKind} here`}
 					</button>
 				{/if}
 				<a href="/p/{project}/rois" class="self-start text-2xs">Open the ROI gallery</a>
