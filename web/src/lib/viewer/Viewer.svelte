@@ -513,7 +513,12 @@
 
 	<div class="relative flex min-h-0 flex-1">
 		<!-- Tools -->
-		<nav class="flex w-11 shrink-0 flex-col items-center gap-0.5 border-r border-edge bg-panel py-1.5" aria-label="Tools">
+		<div
+			class="flex w-11 shrink-0 flex-col items-center gap-0.5 border-r border-edge bg-panel py-1.5"
+			role="toolbar"
+			aria-label="Tools"
+			aria-orientation="vertical"
+		>
 			{#each TOOLS as entry (entry.tool)}
 				<ToolButton
 					icon={entry.icon}
@@ -538,7 +543,7 @@
 			<div class="mt-auto">
 				<ToolButton icon={Keyboard} label="Keys" shortcut="?" active={viewer.help} onclick={() => (viewer.help = !viewer.help)} />
 			</div>
-		</nav>
+		</div>
 
 		<!-- Document -->
 		<div class="relative flex min-w-0 flex-1 flex-col">
