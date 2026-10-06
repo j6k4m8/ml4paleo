@@ -39,12 +39,6 @@
 		}
 	}
 
-	async function claimAll() {
-		for (const job of jobs) {
-			if (!outcomes[job.id]?.project_id) await claim(job);
-		}
-	}
-
 	function add(event: SubmitEvent) {
 		event.preventDefault();
 		const id = parseJobId(pasted);
@@ -55,8 +49,6 @@
 		pasted = "";
 		claim(job);
 	}
-
-	const busy = $derived(Object.values(outcomes).some((o) => o.busy));
 </script>
 
 <div class="mx-auto flex max-w-3xl flex-col gap-4 p-6">
@@ -77,17 +69,16 @@
 	{#if pasteError}<p class="error" role="alert">{pasteError}</p>{/if}
 
 	<section class="panel">
-		<div class="panel-title flex items-center">
-			<h2>Jobs this browser opened</h2>
-			{#if jobs.length > 1}
-				<button class="btn btn-ghost ml-auto normal-case" disabled={busy} onclick={claimAll}>Import all</button>
-			{/if}
-		</div>
+		<h2 class="panel-title">Jobs this browser opened</h2>
 		{#if jobs.length === 0}
 			<p class="p-3 text-ink-dim">
 				This browser has no v1 jobs saved. Open a job's old link, or paste its id above.
 			</p>
 		{:else}
+			<p class="px-3 pt-3 text-ink-dim">
+				v1 saved every job a browser opened, so this list can include jobs other people shared with you. Import only
+				your own.
+			</p>
 			<ul class="flex flex-col divide-y divide-edge">
 				{#each jobs as job (job.id)}
 					{@const outcome = outcomes[job.id]}
