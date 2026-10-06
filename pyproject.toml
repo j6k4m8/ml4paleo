@@ -65,5 +65,5 @@ select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
 testpaths = ["tests"]
 
 [tool.pyright]
-include = ["server", "worker", "ml4paleo/storage", "ml4paleo/blocks.py", "ml4paleo/ome.py", "ml4paleo/labels"]
+include = ["server", "worker", "ml4paleo/storage", "ml4paleo/blocks.py", "ml4paleo/ome.py", "ml4paleo/labels", "ml4paleo/protocol.py"]
 pythonVersion = "3.12"

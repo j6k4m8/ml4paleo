@@ -56,10 +56,31 @@ JSON
 write_secret smtp_password ""
 # The first admin account's password. It must be changed at first sign-in.
 write_secret initial_admin_password "$(random 24)"
+# The token the local workers (worker-cpu, worker-gpu) share.
+write_secret worker_token "m4pw_$(random 43)"
 
 # Containers run as their own users, and compose mounts these files as-is, so
 # they must be readable. The secrets directory itself stays private (0700).
 chmod 0644 secrets/*
+
+# Run the GPU worker too if this machine has an NVIDIA GPU that Docker can use
+# (that needs the NVIDIA Container Toolkit).
+profiles=
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+    if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q nvidia; then
+        profiles=gpu
+    else
+        echo "Found an NVIDIA GPU, but Docker can't use it. Install the NVIDIA" \
+            "Container Toolkit, then set COMPOSE_PROFILES=gpu in .env." >&2
+    fi
+fi
+if [ -n "$profiles" ]; then
+    if [ ! -f .env ]; then
+        echo "Found an NVIDIA GPU; the GPU worker will run too."
+    elif ! grep -q '^COMPOSE_PROFILES=.*gpu' .env; then
+        echo "Found an NVIDIA GPU. To run the GPU worker, set COMPOSE_PROFILES=gpu in .env."
+    fi
+fi
 
 if [ ! -f .env ]; then
     cat > .env <<ENV
@@ -73,6 +94,10 @@ M4P_SMTP__HOST=
 M4P_SMTP__PORT=587
 M4P_SMTP__USERNAME=
 M4P_SMTP__FROM_ADDRESS=ml4paleo <no-reply@$domain>
+# "gpu" also runs worker-gpu (set automatically when an NVIDIA GPU was found).
+COMPOSE_PROFILES=$profiles
+# How many jobs the CPU worker runs at once.
+M4P_CPU_WORKER_SLOTS=1
 ENV
     echo "Created .env for https://$domain"
 fi

@@ -2002,11 +2002,15 @@ name = "ml4paleo-worker"
 version = "0.2.0.dev0"
 source = { editable = "worker" }
 dependencies = [
+    { name = "httpx2" },
     { name = "ml4paleo" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "ml4paleo", editable = "." }]
+requires-dist = [
+    { name = "httpx2", specifier = ">=2.13" },
+    { name = "ml4paleo", editable = "." },
+]
 
 [[package]]
 name = "moto"

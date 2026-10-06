@@ -1,9 +1,10 @@
 """
 The housekeeper: one background process for periodic upkeep.
 
-It sends queued email and deletes expired sessions, used or expired tokens,
-stale rate-limit counters, and mail that failed for good. Later build steps
-add job lease reaping and storage garbage collection here.
+It takes jobs back from workers that stopped responding, sends queued
+email, and deletes expired sessions, used or expired tokens, stale rate-limit
+counters, and mail that failed for good. Later build steps add storage
+garbage collection here.
 """
 
 import asyncio
@@ -23,6 +24,7 @@ from .db import (
     create_sessionmaker,
 )
 from .email import send_pending
+from .jobs import reap_one, sweep
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -60,9 +62,30 @@ async def prune(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
         await db.commit()
 
 
+async def reap_jobs(sessionmaker: async_sessionmaker[AsyncSession]) -> int:
+    """
+    Take back expired leases, one job per transaction, then run the queue's
+    safety nets. Returns how many leases expired.
+    """
+    expired = 0
+    while True:
+        async with sessionmaker() as db:
+            if not await reap_one(db):
+                break
+            await db.commit()
+        expired += 1
+    async with sessionmaker() as db:
+        await sweep(db)
+        await db.commit()
+    return expired
+
+
 async def run_once(
     sessionmaker: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
+    expired = await reap_jobs(sessionmaker)
+    if expired:
+        log.info("Took back %d jobs from workers that stopped responding", expired)
     sent = await send_pending(sessionmaker, settings)
     if sent:
         log.info("Sent %d queued emails", sent)

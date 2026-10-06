@@ -14,9 +14,13 @@ from sqlalchemy.ext.asyncio import (
 
 from .base import Base, uuid7
 from .models import (
+    JOB_STATUSES,
     AuditEvent,
     AuthToken,
     EmailOutbox,
+    Job,
+    JobAttempt,
+    JobDep,
     Project,
     ProjectMember,
     QuotaRequest,
@@ -25,6 +29,7 @@ from .models import (
     User,
     UserSession,
     UserUsage,
+    Worker,
 )
 
 
@@ -45,10 +50,14 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 
 
 __all__ = [
+    "JOB_STATUSES",
     "AuditEvent",
     "AuthToken",
     "Base",
     "EmailOutbox",
+    "Job",
+    "JobAttempt",
+    "JobDep",
     "Project",
     "ProjectMember",
     "QuotaRequest",
@@ -57,6 +66,7 @@ __all__ = [
     "User",
     "UserSession",
     "UserUsage",
+    "Worker",
     "create_engine",
     "create_sessionmaker",
     "get_session",
