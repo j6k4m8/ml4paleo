@@ -35,7 +35,8 @@
 <div class="mx-auto flex max-w-6xl flex-col gap-4 p-6">
 	<div class="flex items-center gap-3">
 		<h1>Projects</h1>
-		<button class="btn btn-primary ml-auto" onclick={() => (creating = !creating)}>
+		<a class="btn btn-ghost ml-auto hover:no-underline" href="/import">Import from v1</a>
+		<button class="btn btn-primary" onclick={() => (creating = !creating)}>
 			<Plus size={14} /> New project
 		</button>
 	</div>
