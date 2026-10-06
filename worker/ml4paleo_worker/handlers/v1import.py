@@ -1,7 +1,7 @@
 """
 v1 import jobs (see the server's `pipelines/v1import.py`). They run on
 workers started with `--v1-volume`, which can read the v1 app's volume
-folder (`ml4paleo.v1import`).
+folder (`ml4paleo.v1import`) and run no other jobs.
 
     v1.probe        check the job, create the empty image, and count what to
                     bring over

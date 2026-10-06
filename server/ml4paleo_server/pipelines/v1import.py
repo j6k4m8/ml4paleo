@@ -1,7 +1,7 @@
 """
 Importing a v1 job into a new project (see `ml4paleo.v1import` for what v1
-kept). Every job but the pyramid's runs on a worker with the v1 volume
-(label "v1-volume").
+kept). The v1.* jobs run on a worker with the v1 volume (label "v1-volume"),
+which runs nothing else; the pyramid and finalize jobs run on any worker.
 
     v1.probe -> v1.slab x N -> pyramid.level 1 .. L-1 -> artifact.finalize
              -> v1.labels       (if the job has annotation samples to place)

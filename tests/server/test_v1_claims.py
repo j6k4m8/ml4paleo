@@ -15,11 +15,14 @@ import v1_volume
 import zarr
 from helpers import SECRET_KEY, add_worker, bearer, make_admin, run_db, signup
 from ml4paleo_server import jobs
+from ml4paleo_server.db import Job
+from ml4paleo_server.db import Worker as WorkerRow
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
-from ml4paleo_worker.handlers import HANDLERS
+from ml4paleo_worker.handlers import HANDLERS, V1_HANDLERS
 from ml4paleo_worker.main import Worker
+from sqlalchemy import select
 
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX
 from ml4paleo.labels.codec import decode_chunk
@@ -51,17 +54,30 @@ def settings(migrated_database_url, tmp_path, s3_endpoint, s3_bucket, volume):
 
 
 def run_import(database_url, live_server, browser, project, pipeline, volume):
-    token = add_worker(database_url)
-    client = ServerClient(token, base_url=live_server)
-    worker = Worker(
-        client,
-        WorkerCaps(version="test", kinds=sorted(HANDLERS), labels=["v1-volume"]),
-        claim_wait_seconds=0.5,
-        heartbeat_seconds=0.2,
-        v1_volume=volume,
-    )
-    thread = threading.Thread(target=worker.run, kwargs={"max_jobs": None})
-    thread.start()
+    """
+    Run an import as the v1 override does: a worker with the v1 volume for
+    the import's own jobs, and a plain worker for the rest.
+    """
+    workers = [
+        Worker(
+            ServerClient(add_worker(database_url, name=name), base_url=live_server),
+            WorkerCaps(version="test", kinds=sorted(handlers), labels=labels),
+            handlers=handlers,
+            claim_wait_seconds=0.5,
+            heartbeat_seconds=0.2,
+            v1_volume=v1_volume,
+        )
+        for name, handlers, labels, v1_volume in (
+            ("worker-v1", V1_HANDLERS, ["v1-volume"], volume),
+            ("worker-cpu", HANDLERS, [], None),
+        )
+    ]
+    threads = [
+        threading.Thread(target=worker.run, kwargs={"max_jobs": None})
+        for worker in workers
+    ]
+    for thread in threads:
+        thread.start()
     try:
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
@@ -71,9 +87,29 @@ def run_import(database_url, live_server, browser, project, pipeline, volume):
             time.sleep(0.3)
         raise AssertionError("The import never finished")
     finally:
-        worker.stop()
-        thread.join(timeout=30)
-        client.close()
+        for worker in workers:
+            worker.stop()
+        for thread in threads:
+            thread.join(timeout=30)
+        for worker in workers:
+            worker.client.close()
+
+
+def ran_on(database_url, pipeline) -> dict[str, set[str]]:
+    """The workers that ran each kind of job in a pipeline."""
+
+    async def look(db):
+        rows = await db.execute(
+            select(Job.kind, WorkerRow.name)
+            .join(WorkerRow, WorkerRow.id == Job.lease_worker_id)
+            .where(Job.root_id == uuid.UUID(pipeline))
+        )
+        found: dict[str, set[str]] = {}
+        for kind, name in rows:
+            found.setdefault(kind, set()).add(name)
+        return found
+
+    return run_db(database_url, look)
 
 
 def label_volume(browser, project) -> np.ndarray:
@@ -119,6 +155,9 @@ def test_a_worker_imports_a_claimed_v1_job(
     )
     assert pipeline["status"] == "succeeded", pipeline
     assert pipeline["kind"] == "import"
+    # The worker with the v1 volume ran the import's own jobs and no others.
+    for kind, names in ran_on(migrated_database_url, pipeline["id"]).items():
+        assert names == {"worker-v1" if kind.startswith("v1.") else "worker-cpu"}
 
     # The image, in (z, y, x), with v1's voxel size.
     image = ada.get(f"/api/projects/{project}/image").json()

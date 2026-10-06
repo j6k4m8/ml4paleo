@@ -57,7 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         type=pathlib.Path,
         default=os.environ.get("M4PW_V1_VOLUME") or None,
         help="The ml4paleo v1 app's volume folder (with jobs.json), to import "
-        "v1 jobs from. Adds the 'v1-volume' label. Mount it read-only.",
+        "v1 jobs from. Adds the 'v1-volume' label, and the worker then runs "
+        "only the import's jobs. Mount it read-only.",
     )
     parser.add_argument(
         "--allow-http",
@@ -85,13 +86,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     from ml4paleo_worker.caps import detect
     from ml4paleo_worker.client import ServerClient
+    from ml4paleo_worker.handlers import HANDLERS, V1_HANDLERS
     from ml4paleo_worker.main import Worker
 
     labels = [*args.label, *(["v1-volume"] if args.v1_volume else [])]
     if args.v1_volume and not (args.v1_volume / "jobs.json").is_file():
         parser.error(f"{args.v1_volume} has no jobs.json")
+    handlers = V1_HANDLERS if args.v1_volume else HANDLERS
     client = ServerClient(token, args.server.rstrip("/"))
-    worker = Worker(client, detect(labels, args.slots), v1_volume=args.v1_volume)
+    worker = Worker(
+        client,
+        detect(labels, args.slots, kinds=handlers),
+        handlers=handlers,
+        v1_volume=args.v1_volume,
+    )
 
     def stop(signum, frame):
         logging.getLogger(__name__).info("Stopping: giving running jobs back")

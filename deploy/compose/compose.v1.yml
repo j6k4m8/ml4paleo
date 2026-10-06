@@ -16,11 +16,17 @@ services:
     volumes:
       - ${M4P_V1_VOLUME:?set M4P_V1_VOLUME to the v1 volume folder}:/v1:ro
 
+  caddy:
+    networks: [v1-jobs]
+
+  # worker-v1 can read every v1 job's files, so it runs only the import's own
+  # jobs (worker-cpu runs the pyramid and finalize jobs), and it reaches
+  # nothing but Caddy's worker port: no internet, and no other workers.
   worker-v1:
     image: ml4paleo-worker:local
     restart: unless-stopped
     init: true
-    networks: [jobs]
+    networks: [v1-jobs]
     command:
       - ml4paleo-worker
       - --server=http://caddy:8080
@@ -38,3 +44,8 @@ services:
     depends_on:
       caddy:
         condition: service_started
+
+networks:
+  # Caddy and worker-v1 only.
+  v1-jobs:
+    internal: true
