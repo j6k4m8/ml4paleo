@@ -51,6 +51,12 @@ x-worker: &worker
     caddy:
       condition: service_started
 
+# Server settings people put in .env (M4P_QUOTA__STORAGE_GB, M4P_AUTH__...)
+# reach the server through this; the settings above take precedence.
+x-server-env-file: &server-env-file
+  - path: .env
+    required: false
+
 x-server-secrets: &server-secrets
   - database_url
   - secret_key
@@ -170,6 +176,7 @@ services:
     networks: [private]
     init: true
     command: ["ml4paleo-server", "migrate"]
+    env_file: *server-env-file
     environment:
       <<: *server-environment
       # The first admin account gets this password (see secrets/).
@@ -195,6 +202,7 @@ services:
     networks: [public, private]
     init: true
     command: ["ml4paleo-server", "housekeeper"]
+    env_file: *server-env-file
     environment: *server-environment
     secrets: *server-secrets
     depends_on:
@@ -206,6 +214,7 @@ services:
     restart: unless-stopped
     networks: [public, private]
     init: true
+    env_file: *server-env-file
     environment:
       <<: *server-environment
       M4P_API_WORKERS: ${M4P_API_WORKERS:-4}
