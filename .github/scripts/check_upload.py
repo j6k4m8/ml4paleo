@@ -183,6 +183,12 @@ def main(origin: str) -> int:
             problems.append("the gateway didn't serve the image's OME-Zarr metadata")
         if not (image.get("neuroglancer_url") or "").startswith("/neuroglancer/#!"):
             problems.append("there is no Neuroglancer link for the image")
+    # The web app, on any route, with its start script allowed by hash.
+    with opener.open(origin + "/p/" + project + "/annotate") as response:
+        page = response.read()
+        policy = response.headers.get("Content-Security-Policy", "")
+    if b"/_app/immutable/" not in page or "'sha256-" not in policy or "eval" in policy:
+        problems.append("the web app isn't served, or its start script isn't allowed")
     # Neuroglancer itself, with its own content security policy.
     with opener.open(origin + "/neuroglancer/") as response:
         page = response.read()

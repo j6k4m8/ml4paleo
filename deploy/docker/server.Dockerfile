@@ -24,6 +24,15 @@ RUN --mount=type=cache,target=/root/.npm \
     && npm run build -- --no-typecheck --no-lint \
     && test -f dist/client/index.html
 
+# The web app, built to static files.
+FROM node:24-bookworm-slim AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
+COPY web ./
+RUN npm run build && test -f build/index.html
+
 FROM python:3.12-slim-bookworm
 
 # Upgrade first so the image picks up Debian security fixes released after the
@@ -56,11 +65,13 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
     uv sync --locked --package ml4paleo-server --no-editable
 
 COPY --from=neuroglancer /src/dist/client /app/neuroglancer
+COPY --from=web /src/web/build /app/web
 
 RUN useradd --system --uid 10001 --no-create-home ml4paleo
 USER ml4paleo
 ENV PATH="/app/.venv/bin:$PATH" \
-    M4P_NEUROGLANCER_DIR=/app/neuroglancer
+    M4P_NEUROGLANCER_DIR=/app/neuroglancer \
+    M4P_WEB_DIR=/app/web
 
 EXPOSE 8000
 CMD ["ml4paleo-server", "serve", "--host", "0.0.0.0", "--port", "8000"]

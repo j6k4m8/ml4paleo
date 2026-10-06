@@ -7,6 +7,8 @@ eda/
 deploy/compose/secrets/
 deploy/compose/.env
 web/node_modules/
+web/build/
+web/.svelte-kit/
 **/.venv/
 .hypothesis/
 .pytest_cache/

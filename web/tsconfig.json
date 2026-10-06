@@ -1,0 +1,11 @@
+{
+	"extends": "$app/tsconfig",
+	"compilerOptions": {
+		"strict": true,
+		"noUncheckedIndexedAccess": true,
+		"skipLibCheck": true,
+		"sourceMap": true
+	},
+	"include": ["src", "*"],
+	"exclude": ["src/service-worker"]
+}

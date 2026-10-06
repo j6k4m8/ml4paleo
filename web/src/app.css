@@ -1,0 +1,92 @@
+:root {
+	--bg: #f7f6f3;
+	--fg: #1d1c1a;
+	--muted: #6b6862;
+	--line: #d9d6cf;
+	--panel: #ffffff;
+	--accent: #2f6f8f;
+	--danger: #b3261e;
+	color-scheme: light;
+	font-family: system-ui, sans-serif;
+	line-height: 1.45;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #161615;
+		--fg: #ecebe8;
+		--muted: #a19e97;
+		--line: #3a3936;
+		--panel: #1f1f1d;
+		--accent: #7fb6d1;
+		--danger: #f2b8b5;
+		color-scheme: dark;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--fg);
+}
+
+a {
+	color: var(--accent);
+}
+
+input,
+button {
+	font: inherit;
+}
+
+input {
+	padding: 0.4rem 0.5rem;
+	border: 1px solid var(--line);
+	border-radius: 4px;
+	background: var(--panel);
+	color: var(--fg);
+}
+
+button {
+	padding: 0.4rem 0.9rem;
+	border: 1px solid var(--accent);
+	border-radius: 4px;
+	background: var(--accent);
+	color: var(--bg);
+	cursor: pointer;
+}
+
+button.secondary {
+	background: transparent;
+	color: var(--accent);
+}
+
+button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+form.stack {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+	max-width: 22rem;
+}
+
+form.stack label {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+}
+
+.error {
+	color: var(--danger);
+}
+
+.muted {
+	color: var(--muted);
+}

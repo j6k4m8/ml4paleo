@@ -6,8 +6,11 @@ single-page app): existing files are served as-is and any other path gets
 `index.html`, so client-side routes work on reload.
 """
 
+import base64
 import contextlib
+import hashlib
 import pathlib
+import re
 from collections.abc import AsyncIterator
 from urllib.parse import urlsplit
 
@@ -47,18 +50,38 @@ SESSION_CSRF_EXEMPT = {
     "/api/auth/password-reset/confirm",
 }
 
-CONTENT_SECURITY_POLICY = "; ".join(
-    [
-        "default-src 'self'",
-        "img-src 'self' blob: data:",
-        "worker-src 'self' blob:",
-        "connect-src 'self'",
-        "object-src 'none'",
-        "base-uri 'self'",
-        "form-action 'self'",
-        "frame-ancestors 'none'",
-    ]
-)
+_INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.DOTALL)
+
+
+def content_security_policy(web_dir: pathlib.Path | None) -> str:
+    """
+    The policy for everything but Neuroglancer. SvelteKit starts the web app
+    with an inline script in `index.html`, allowed by its hash; nothing else
+    runs inline, and nothing evaluates code (the viewer decodes zstd in plain
+    JavaScript).
+    """
+    scripts = ["'self'"]
+    index = web_dir / "index.html" if web_dir is not None else None
+    if index is not None and index.is_file():
+        for body in _INLINE_SCRIPT.findall(index.read_text(encoding="utf-8")):
+            digest = hashlib.sha256(body.encode()).digest()
+            scripts.append(f"'sha256-{base64.b64encode(digest).decode()}'")
+    return "; ".join(
+        [
+            "default-src 'self'",
+            f"script-src {' '.join(scripts)}",
+            # Svelte renders some style attributes (the route announcer).
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' blob: data:",
+            "worker-src 'self' blob:",
+            "connect-src 'self'",
+            "object-src 'none'",
+            "base-uri 'self'",
+            "form-action 'self'",
+            "frame-ancestors 'none'",
+        ]
+    )
+
 
 PLACEHOLDER_PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>ml4paleo</title></head>
@@ -84,6 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     parts = urlsplit(settings.public_url)
     public_origin = f"{parts.scheme}://{parts.netloc}"
     session_cookie = cookie_name(settings)
+    app_policy = content_security_policy(settings.web_dir)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -142,7 +166,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         policy = (
             NEUROGLANCER_CONTENT_SECURITY_POLICY
             if has_neuroglancer and request.url.path.startswith(NEUROGLANCER_PATH + "/")
-            else CONTENT_SECURITY_POLICY
+            else app_policy
         )
         response.headers.setdefault("Content-Security-Policy", policy)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
