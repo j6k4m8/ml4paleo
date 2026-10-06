@@ -5,6 +5,9 @@
  */
 
 import * as zarr from "zarrita";
+import { useZstd } from "./zstd";
+
+useZstd();
 
 export interface DecodeRequest {
 	type: "load";
@@ -30,7 +33,9 @@ function openLevel(url: string, level: number) {
 	const key = `${url}#${level}`;
 	let array = arrays.get(key);
 	if (!array) {
-		const store = new zarr.FetchStore(url);
+		// Shard indexes are read with suffix ranges, which the gateway serves,
+		// instead of a HEAD request first.
+		const store = new zarr.FetchStore(url, { useSuffixRequest: true });
 		array = zarr.open.v3(zarr.root(store).resolve(String(level)), { kind: "array" });
 		arrays.set(key, array);
 	}

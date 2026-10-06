@@ -28,7 +28,7 @@ export function levelFactors(multiscales: Multiscales): [number, number, number]
 }
 
 export async function loadLevels(url: string, signal?: AbortSignal): Promise<Level[]> {
-	const store = new zarr.FetchStore(absolute(url));
+	const store = new zarr.FetchStore(absolute(url), { useSuffixRequest: true });
 	const group = await zarr.open.v3(zarr.root(store), { kind: "group", signal });
 	const ome = group.attrs.ome as { multiscales?: Multiscales[] } | undefined;
 	const multiscales = ome?.multiscales?.[0];
