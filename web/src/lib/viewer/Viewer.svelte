@@ -483,12 +483,12 @@
 				</label>
 			{/if}
 			{#if viewer.tool === "navigate"}
-				<div class="flex shrink-0 overflow-hidden rounded-sm border border-edge" role="radiogroup" aria-label="Layout">
+				<div class="flex shrink-0 rounded-sm border border-edge" role="group" aria-label="Layout">
 					{#each LAYOUTS as layout (layout)}
 						<button
-							role="radio"
-							aria-checked={viewer.layout === layout}
-							class="flex h-6 items-center gap-1 px-2 {viewer.layout === layout ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
+							aria-pressed={viewer.layout === layout}
+							class="relative flex h-6 items-center gap-1 px-2 first:rounded-l-[3px] last:rounded-r-[3px] focus-visible:z-10
+								{viewer.layout === layout ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
 							onclick={() => (viewer.layout = layout)}
 						>
 							{#if layout === "four"}<LayoutGrid size={12} />{/if}
