@@ -17,7 +17,9 @@ ROIs. Crops come from two places:
   into training.
 
 Images are normalized with the image's display window, the same for every
-crop and at prediction time.
+crop and at prediction time. Every crop has the full halo of context the
+plugin asks for; where the image ends, its edge voxels are repeated, as
+they are at prediction time, so features near the edges match.
 """
 
 import dataclasses
@@ -84,6 +86,15 @@ def normalize(block: np.ndarray, window: tuple[float, float]) -> np.ndarray:
     )
 
 
+def clip_box(box: Sequence[int], shape: Sequence[int]) -> Box | None:
+    """A box cut to an image's (z, y, x) shape, or None if nothing is left."""
+    lo = [min(max(int(box[a]), 0), int(shape[a])) for a in range(3)]
+    hi = [min(max(int(box[a + 3]), 0), int(shape[a])) for a in range(3)]
+    if any(lo[a] >= hi[a] for a in range(3)):
+        return None
+    return (lo[0], lo[1], lo[2], hi[0], hi[1], hi[2])
+
+
 def tiles(box: Box, tile: int) -> Iterator[Box]:
     """Split a box into blocks of at most `tile` voxels a side."""
     starts = [range(box[a], box[a + 3], tile) for a in range(3)]
@@ -111,16 +122,21 @@ class TrainingSet:
     ):
         """
         `image` is the level-0 (c, z, y, x) array; `labeled_chunks` are the
-        keys of label chunks that have any labels.
+        keys of label chunks that have any labels. ROIs are cut to the image.
         """
         self.image = image
         self.labels = labels
         self.labeled_chunks = sorted(set(labeled_chunks))
-        self.rois = [roi for roi in rois if roi.status in ("open", "complete")]
         self.class_values = list(class_values)
         self.window = window
         self.tile = tile
         self.shape: tuple[int, int, int] = tuple(int(n) for n in image.shape[1:4])  # type: ignore[assignment]
+        self.rois = [
+            dataclasses.replace(roi, bbox=bbox)
+            for roi in rois
+            if roi.status in ("open", "complete")
+            and (bbox := clip_box(roi.bbox, self.shape)) is not None
+        ]
 
     @property
     def num_classes(self) -> int:
@@ -148,13 +164,21 @@ class TrainingSet:
     def read_image(
         self, box: Box, halo: int
     ) -> tuple[np.ndarray, tuple[slice, slice, slice]]:
-        """A box of the image with up to `halo` voxels of context, and where the box sits in it."""
+        """
+        A box of the image with `halo` voxels of context on every side, and
+        where the box sits in it. Where the image ends, its edge voxels are
+        repeated.
+        """
         lo = [max(0, box[a] - halo) for a in range(3)]
         hi = [min(self.shape[a], box[a + 3] + halo) for a in range(3)]
         block = np.asarray(
             self.image[(slice(None), *(slice(lo[a], hi[a]) for a in range(3)))]
         )
-        interior = tuple(slice(box[a] - lo[a], box[a + 3] - lo[a]) for a in range(3))
+        padding = [(0, 0)] + [
+            (halo - (box[a] - lo[a]), halo - (hi[a] - box[a + 3])) for a in range(3)
+        ]
+        block = np.pad(block, padding, mode="edge")
+        interior = tuple(slice(halo, halo + box[a + 3] - box[a]) for a in range(3))
         return normalize(block, self.window), interior  # type: ignore[return-value]
 
     def _inside(self, box: Box, rois: Iterable[RoiSpec]) -> np.ndarray:

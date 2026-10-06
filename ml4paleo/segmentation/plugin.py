@@ -43,8 +43,9 @@ class Crop:
     """
 
     # (C, Z, Y, X) float32, normalized to the image's display window, with
-    # whatever context around the targets the image has (up to the halo the
-    # training set was asked for).
+    # the halo the training set was asked for around the targets on every
+    # side (where the image ends, its edge voxels repeated, as at prediction
+    # time).
     image: np.ndarray
     # (Z, Y, X) uint8 targets in the plugin label space.
     targets: np.ndarray

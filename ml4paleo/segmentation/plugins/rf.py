@@ -104,8 +104,8 @@ class RandomForestPredictor:
         self.forest.n_jobs = 1
 
     def predict_block(self, block: np.ndarray) -> np.ndarray:
-        # Callers pad blocks at the image's edges (for example by
-        # reflection), so every block has the full halo.
+        # Callers pad blocks at the image's edges by repeating its edge
+        # voxels, as training crops are, so every block has the full halo.
         h = self.halo
         feats = features(block, self.sigma_max)
         interior = feats[
@@ -191,7 +191,8 @@ class RandomForestPlugin:
         for crop in data.crops("val", halo):
             ctx.check()
             validation_crops += 1
-            sheet.add(self._predict_crop(predictor, crop).argmax(axis=0), crop.targets)
+            # Crops carry the full halo, so they predict like any block.
+            sheet.add(predictor.predict_block(crop.image).argmax(axis=0), crop.targets)
         metrics = sheet.summary(data.class_values) if validation_crops else {}
         metrics["validation_crops"] = validation_crops
         metrics["training_crops"] = crops
@@ -206,17 +207,6 @@ class RandomForestPlugin:
         feats = features(crop.image, sigma_max)[crop.interior]
         known = crop.targets != PLUGIN_IGNORE
         return feats[known], crop.targets[known]
-
-    def _predict_crop(self, predictor: RandomForestPredictor, crop: Crop) -> np.ndarray:
-        # Crops may have less context than the halo at the image's edges, so
-        # compute features on what there is and keep the interior.
-        feats = features(crop.image, predictor.sigma_max)[crop.interior]
-        shape = feats.shape[:3]
-        proba = predictor.forest.predict_proba(feats.reshape(-1, feats.shape[-1]))
-        out = np.zeros((predictor.num_classes, *shape), dtype=np.float32)
-        for column, label in enumerate(predictor.forest.classes_):
-            out[int(label)] = proba[:, column].reshape(shape)
-        return out
 
     def load(
         self, directory: pathlib.Path, device: str = "cpu"

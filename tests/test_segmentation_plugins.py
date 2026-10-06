@@ -83,6 +83,12 @@ def test_crops_follow_roi_status_split_and_free_labels():
     assert free.targets.shape == (64, 64, 26)
     assert int((free.targets != PLUGIN_IGNORE).sum()) == 1
     assert free.targets[5, 5, 70 - 64] == 0
+    # At the image's edges, the crop still has the full halo: edge voxels
+    # repeated, as at prediction time.
+    assert free.image.shape == (1, 72, 72, 34)
+    assert free.interior == (slice(4, 68), slice(4, 68), slice(4, 30))
+    edged = np.pad(image[:, :68, :68, 60:], ((0, 0), (4, 0), (4, 0), (0, 4)), "edge")
+    np.testing.assert_allclose(free.image, (edged - 200.0) / 600.0, rtol=1e-6)
     val = list(data.crops("val", halo=4))
     assert len(val) == 1 and int((val[0].targets == 1).sum()) == 1
     assert (val[0].targets != PLUGIN_IGNORE).all()
@@ -135,6 +141,23 @@ def test_overlapping_training_rois_count_each_voxel_once():
     known = sum(int((c.targets != PLUGIN_IGNORE).sum()) for c in (first, second))
     assert known == 10**3 + 1
     assert sum(int((c.targets == 1).sum()) for c in (first, second)) == 1
+
+
+def test_rois_are_cut_to_the_image():
+    image, _ = synthetic()
+    labels = np.zeros(SHAPE, dtype=np.uint8)
+    labels[75, 65, 85] = BONE
+    rois = [
+        RoiSpec((70, 60, 80, 100, 100, 100), "complete", "train"),
+        RoiSpec((90, 0, 0, 100, 10, 10), "complete", "train"),
+    ]
+    source = DictLabels(labels)
+    data = TrainingSet(image, source, source.chunks, rois, [BONE], (200.0, 800.0))
+    assert [roi.bbox for roi in data.rois] == [(70, 60, 80, 80, 70, 90)]
+    [crop] = data.crops("train", halo=3)
+    assert crop.targets.shape == (10, 10, 10)
+    assert crop.image.shape == (1, 16, 16, 16)
+    assert int((crop.targets == 1).sum()) == 1
 
 
 def test_labels_assemble_across_chunks_and_edges():
