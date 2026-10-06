@@ -578,13 +578,13 @@
 		overflow: hidden;
 	}
 	.plane-0 {
-		--axis-color: #539bf5;
+		--axis-color: var(--color-axis-z);
 	}
 	.plane-1 {
-		--axis-color: #57ab5a;
+		--axis-color: var(--color-axis-y);
 	}
 	.plane-2 {
-		--axis-color: #e5534b;
+		--axis-color: var(--color-axis-x);
 	}
 	canvas {
 		display: block;
@@ -603,14 +603,14 @@
 		stroke-dasharray: 6 3;
 	}
 	.roi-open {
-		stroke: #e3b341;
+		stroke: var(--color-warn);
 	}
 	.roi-complete {
-		stroke: #57ab5a;
+		stroke: var(--color-ok);
 		stroke-dasharray: none;
 	}
 	.roi-skipped {
-		stroke: #768390;
+		stroke: var(--color-ink-faint);
 		stroke-dasharray: 2 3;
 	}
 	.roi-new {
@@ -650,13 +650,13 @@
 		height: 1px;
 	}
 	.axis-0 {
-		background: #539bf5;
+		background: var(--color-axis-z);
 	}
 	.axis-1 {
-		background: #57ab5a;
+		background: var(--color-axis-y);
 	}
 	.axis-2 {
-		background: #e5534b;
+		background: var(--color-axis-x);
 	}
 	.caption {
 		position: absolute;

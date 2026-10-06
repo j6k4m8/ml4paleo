@@ -65,6 +65,6 @@
 	<path d={path} fill="var(--color-ink-dim)" opacity="0.8" />
 	{#each [window[0], window[1]] as value, i (i)}
 		<line x1={x(value)} x2={x(value)} y1="0" y2={HEIGHT} stroke="var(--color-accent-hover)" stroke-width="1" />
-		<path d="M{x(value)},{HEIGHT} l-4,7 h8 z" fill={i === 0 ? "#111" : "#eee"} stroke="var(--color-accent-hover)" stroke-width="0.8" />
+		<path d="M{x(value)},{HEIGHT} l-4,7 h8 z" fill={i === 0 ? "var(--color-edge)" : "var(--color-ink)"} stroke="var(--color-accent-hover)" stroke-width="0.8" />
 	{/each}
 </svg>
