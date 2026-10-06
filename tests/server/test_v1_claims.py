@@ -616,7 +616,10 @@ def test_segmentations_must_be_named_as_v1_named_them(volume, tmp_path):
     }
     check = pipelines.v1import.check_probe_result
     check({**probed, "segmentation": "1745400150.zarr"})
-    for name in ("latest.zarr", "..", "1745400150.zarr/..", "../FEED01/1.zarr"):
+    wrong = ["latest.zarr", "..", "1745400150.zarr/..", "../FEED01/1.zarr"]
+    # Other scripts' digits too (Arabic-Indic 17), which a regex's \d takes.
+    wrong.append("١٧.zarr")
+    for name in wrong:
         with pytest.raises(ValueError, match="segmentation"):
             check({**probed, "segmentation": name})
         payload = {
@@ -686,6 +689,25 @@ def test_small_workers_read_a_chunk_at_a_time(volume, tmp_path, monkeypatch):
         np.where(segmented > 0, 2, BACKGROUND),
     )
     assert len(touched) > 1 and max(touched) == 1
+
+
+def test_import_jobs_take_only_v1_job_ids(volume, tmp_path):
+    image = StorageGrant(url=(tmp_path / "image").as_uri(), access="rw")
+    others = {
+        "v1.probe": {},
+        "v1.slab": {"z_range": [0, 20]},
+        "v1.labels": {"shape_zyx": [20, 30, 40], "foreground": 2},
+        "v1.prediction": {
+            "segmentation": "1745400150.zarr",
+            "shape_zyx": [20, 30, 40],
+            "foreground": 2,
+        },
+    }
+    for job_id in ("../ABC1", "abc123", "ABC123/..", 123):
+        for kind, payload in others.items():
+            ctx = context(volume, kind, {"job_id": job_id, **payload}, [image])
+            with pytest.raises(PermanentError, match="isn't a v1 job id"):
+                V1_HANDLERS[kind](ctx)
 
 
 def test_a_worker_without_the_volume_leaves_the_import_to_another(tmp_path):

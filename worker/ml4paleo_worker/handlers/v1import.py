@@ -31,6 +31,7 @@ from ml4paleo.ome import OmeImage, write_from_provider
 from ml4paleo.segmentation.predict import create_prediction
 from ml4paleo.storage import write_manifest
 from ml4paleo.v1import import (
+    JOB_ID,
     SEGMENTATION_NAME,
     UNCONVERTED,
     annotations,
@@ -115,6 +116,14 @@ def _root(ctx: JobContext) -> Path:
     return ctx.v1_volume
 
 
+def _job_id(ctx: JobContext) -> str:
+    """The job's v1 job id, which names folders in the volume."""
+    job_id = ctx.payload["job_id"]
+    if not (isinstance(job_id, str) and JOB_ID.fullmatch(job_id)):
+        raise PermanentError(f"{job_id!r} isn't a v1 job id.")
+    return job_id
+
+
 def _record(root: Path, job_id: str) -> dict[str, Any]:
     record = read_jobs(root).get(job_id)
     if record is None:
@@ -124,7 +133,7 @@ def _record(root: Path, job_id: str) -> dict[str, Any]:
 
 def probe(ctx: JobContext) -> dict[str, Any]:
     root = _root(ctx)
-    job_id = ctx.payload["job_id"]
+    job_id = _job_id(ctx)
     record = _record(root, job_id)
     if status(record) in UNCONVERTED:
         # Its array, if any, is partial.
@@ -179,7 +188,7 @@ def slab(ctx: JobContext) -> dict[str, Any]:
         ctx.progress(done / total)
         ctx.check()
 
-    source = ZarrVolumeProvider(image_path(root, ctx.payload["job_id"])).zarr
+    source = ZarrVolumeProvider(image_path(root, _job_id(ctx))).zarr
     most = _chunks_at_once(ctx, source)
     chunk = math.prod(source.chunks) * source.dtype.itemsize
     # The rest of the job's memory goes to what's read, which is held about
@@ -207,7 +216,7 @@ def _wire(delta: ChunkDelta) -> dict[str, Any]:
 
 def labels(ctx: JobContext) -> dict[str, Any]:
     root = _root(ctx)
-    job_id = ctx.payload["job_id"]
+    job_id = _job_id(ctx)
     foreground = int(ctx.payload["foreground"])
     z, y, x = ctx.payload["shape_zyx"]
     placed, _ = annotations(root, job_id, (x, y, z))
@@ -252,7 +261,7 @@ def prediction(ctx: JobContext) -> dict[str, Any]:
     the foreground class.
     """
     root = _root(ctx)
-    job_id = ctx.payload["job_id"]
+    job_id = _job_id(ctx)
     name = ctx.payload["segmentation"]
     if not (isinstance(name, str) and SEGMENTATION_NAME.fullmatch(name)):
         raise PermanentError(f"{name!r} isn't a v1 segmentation's name.")

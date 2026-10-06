@@ -31,7 +31,7 @@ import numpy as np
 JOB_ID = re.compile(r"[0-9A-F]{6}")
 JOBS_FILE = "jobs.json"
 # A segmentation's folder: the time its model was trained.
-SEGMENTATION_NAME = re.compile(r"\d+\.zarr")
+SEGMENTATION_NAME = re.compile(r"[0-9]+\.zarr")
 # Sample metadata past this isn't a position in any scan.
 MAX_COORDINATE = 2**31
 # Statuses of jobs whose upload never became an image (as v1's job page
