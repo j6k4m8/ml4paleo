@@ -248,12 +248,18 @@ def test_the_first_claim_wins_until_an_admin_releases_it(
     assert bob.post("/api/v1-jobs/ABCDEF/claim").status_code == 404
     assert bob.post("/api/v1-jobs/DEAD00/claim").status_code == 409
 
-    # Releasing deletes the claimer's project, so the owner can claim it.
+    # Releasing deletes the claimer's project, so the owner can claim it, but
+    # the claimer can't take it back from an old link.
     admin, _ = make_admin(new_browser, migrated_database_url)
     assert bob.post("/api/v1-jobs/ABC123/release").status_code == 403
     assert admin.post("/api/v1-jobs/ABC123/release").status_code == 204
     assert admin.post("/api/v1-jobs/ABC123/release").status_code == 404
     assert [p["name"] for p in ada.get("/api/projects").json()] == []
+    again = ada.post("/api/v1-jobs/ABC123/claim")
+    assert again.status_code == 409
+    assert again.json()["detail"] == (
+        "An admin released this job from your account. If it's yours, ask them."
+    )
     assert bob.post("/api/v1-jobs/ABC123/claim").status_code == 201
 
     # So does deleting your own project.
@@ -261,6 +267,32 @@ def test_the_first_claim_wins_until_an_admin_releases_it(
     assert ada.get(f"/api/projects/{project}").json()["name"] == "v1 job FEED01"
     assert ada.request("DELETE", f"/api/projects/{project}").status_code == 204
     assert bob.post("/api/v1-jobs/FEED01/claim").status_code == 201
+
+
+def test_releasing_a_job_stops_its_import(new_browser, settings, migrated_database_url):
+    ada = new_browser()
+    signup(ada)
+    claimed = ada.post("/api/v1-jobs/ABC123/claim").json()
+    # A worker is probing the job.
+    token = add_worker(migrated_database_url)
+    worker = new_browser()
+    caps = {"version": "test", "kinds": ["v1.probe"], "labels": ["v1-volume"]}
+    worker.post("/api/worker/v1/hello", json={"caps": caps}, headers=bearer(token))
+    lease = worker.post(
+        "/api/worker/v1/claim",
+        json={"caps": caps, "wait_seconds": 0},
+        headers=bearer(token),
+    ).json()["job"]
+    assert lease["job_id"] == claimed["pipeline_id"]
+
+    admin, _ = make_admin(new_browser, migrated_database_url)
+    assert admin.post("/api/v1-jobs/ABC123/release").status_code == 204
+    beat = worker.post(
+        f"/api/worker/v1/jobs/{lease['job_id']}/heartbeat",
+        json={"lease_token": lease["lease_token"]},
+        headers=bearer(token),
+    )
+    assert beat.json()["cancel"] is True
 
 
 def test_claims_are_limited_and_need_a_v1_volume(

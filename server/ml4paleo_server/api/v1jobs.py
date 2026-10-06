@@ -8,8 +8,9 @@ Claiming jobs from the ml4paleo v1 app, which this one replaced (see
 v1 had no accounts: anyone with a job's link could open it. So the first
 person to claim a job gets it, claims are rate-limited (ids are only six hex
 digits), and an admin can release a job someone else claimed. Releasing
-deletes the claimer's project (garbage collection gives its storage back),
-so the job's owner can claim it again.
+stops what runs in the claimer's project and deletes it (garbage collection
+gives its storage back), so the job's owner can claim it again; the account
+it was released from can't.
 """
 
 import datetime
@@ -22,10 +23,11 @@ from starlette.concurrency import run_in_threadpool
 
 from ml4paleo.v1import import UNCONVERTED, normalize_job_id, read_jobs, status
 
-from .. import audit
+from .. import audit, jobs
 from ..auth import ratelimit
 from ..auth.deps import AdminAuth, CurrentAuth, DbSession, EngineDep, SettingsDep
-from ..db import Project, ProjectMember
+from ..db import AuditEvent, Job, Project, ProjectMember
+from ..jobs.queue import FINISHED
 from ..pipelines import v1import
 from ..settings import Settings
 
@@ -33,6 +35,7 @@ router = APIRouter(prefix="/api/v1-jobs", tags=["v1"])
 
 HOUR = datetime.timedelta(hours=1)
 NOT_HERE = "This server has no v1 jobs to import."
+RELEASED = "An admin released this job from your account. If it's yours, ask them."
 
 
 class ClaimOut(BaseModel):
@@ -58,6 +61,21 @@ async def _lock(db: DbSession, job_id: str) -> None:
     await db.execute(
         select(func.pg_advisory_xact_lock(func.hashtextextended(f"m4p_v1:{job_id}", 0)))
     )
+
+
+async def _released(db: DbSession, job_id: str, user_id: uuid.UUID) -> bool:
+    """Whether an admin released the job from a project of this user's."""
+    release = await db.scalar(
+        select(AuditEvent.id)
+        .where(
+            AuditEvent.action == "v1.release",
+            AuditEvent.details.contains(
+                {"v1_job_id": job_id, "owner_id": str(user_id)}
+            ),
+        )
+        .limit(1)
+    )
+    return release is not None
 
 
 @router.post("/{job_id}/claim", status_code=201)
@@ -93,6 +111,8 @@ async def claim(
         )
     # The first claim wins.
     await _lock(db, job_id)
+    if await _released(db, job_id, auth.user.id):
+        raise HTTPException(status_code=409, detail=RELEASED)
     existing = await db.scalar(select(Project).where(Project.v1_job_id == job_id))
     if existing is not None and existing.deleted_at is None:
         if existing.owner_id != auth.user.id:
@@ -134,13 +154,24 @@ async def release(
     db: DbSession,
 ) -> None:
     """
-    Delete the project that claimed a v1 job, so the job can be claimed again.
+    Stop and delete the project that claimed a v1 job, so the job can be
+    claimed again (by anyone but that project's owner).
     """
     job_id = _job_id(job_id)
     await _lock(db, job_id)
     project = await db.scalar(select(Project).where(Project.v1_job_id == job_id))
     if project is None:
         raise HTTPException(status_code=404, detail="Nobody has claimed that job.")
+    # Pipelines before the project: completing a job locks the job, then its
+    # project.
+    running = await db.scalars(
+        select(Job.root_id)
+        .where(Job.project_id == project.id, Job.status.not_in(FINISHED))
+        .distinct()
+        .order_by(Job.root_id)
+    )
+    for root_id in running.all():
+        await jobs.cancel_pipeline(db, root_id)
     project.v1_job_id = None
     if project.deleted_at is None:
         project.deleted_at = datetime.datetime.now(datetime.UTC)
