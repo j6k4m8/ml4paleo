@@ -183,6 +183,35 @@ def test_model_slots_follow_training_and_deletion(
     assert ada.post(base, json={}).status_code == 202
 
 
+def test_deleting_a_project_gives_back_its_model_slots(
+    new_browser, settings, migrated_database_url
+):
+    limited = settings.model_copy(
+        update={"quota": settings.quota.model_copy(update={"trained_models": 1})}
+    )
+    ada = new_browser(limited)
+    signup(ada)
+    first, second = make_project(ada), make_project(ada)
+    for project in (first, second):
+        add_image(limited, migrated_database_url, project)
+        add_class(ada, project)
+        paint(
+            limited, migrated_database_url, project, (5, 5, 5), np.ones((1, 3, 3)), BONE
+        )
+    model = ada.post(f"/api/projects/{first}/models", json={}).json()
+    assert ada.post(f"/api/projects/{second}/models", json={}).status_code == 403
+
+    assert ada.request("DELETE", f"/api/projects/{first}").status_code == 204
+
+    async def job_status(db):
+        job = await db.get(Job, uuid.UUID(model["pipeline_id"]))
+        return job.status
+
+    assert run_db(migrated_database_url, job_status) == "cancelled"
+    assert ada.get("/api/me/quota").json()["trained_models_used"] == 0
+    assert ada.post(f"/api/projects/{second}/models", json={}).status_code == 202
+
+
 def test_a_model_slot_is_given_back_once(ada, settings, migrated_database_url):
     project = make_project(ada)
     add_image(settings, migrated_database_url, project)

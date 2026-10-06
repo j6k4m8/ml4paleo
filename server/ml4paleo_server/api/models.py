@@ -216,7 +216,7 @@ async def delete_model(
     model.deleted_at = datetime.datetime.now(datetime.UTC)
     if model.job_id:
         job = await db.get(Job, model.job_id)
-        if job is not None and job.status in ("blocked", "queued", "leased"):
+        if job is not None and job.status in train.RUNNING_JOB:
             await jobs.cancel_pipeline(db, job.root_id)
     if model.artifact_id:
         artifact = await db.get(Artifact, model.artifact_id)

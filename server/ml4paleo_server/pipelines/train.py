@@ -6,7 +6,8 @@ success commits.
 
 A model holds one of the project owner's trained-model slots from the
 moment training starts; a failed or cancelled training gives it back (see
-`release_failed_slots`), as does deleting the model. Slots are only ever
+`release_failed_slots`), as does deleting the model or its project. Slots
+are only ever
 given back through `release_slots`, which clears `holds_slot` and counts
 what it cleared in one UPDATE, so no slot is given back twice.
 """
@@ -26,6 +27,7 @@ from ..settings import Settings
 from ..training import training_path
 
 FAILED_JOB = ("failed", "cancelled")
+RUNNING_JOB = ("blocked", "queued", "leased")
 
 
 def model_status(
@@ -76,6 +78,23 @@ async def release_failed_slots(db: AsyncSession, project: Project) -> None:
         )
     )
     await release_slots(db, project.owner_id, TrainedModel.id.in_(failed))
+
+
+async def stop_project(db: AsyncSession, project: Project) -> None:
+    """
+    For a project being deleted: cancel its trainings that are still running
+    and give back the trained-model slots its models hold.
+    """
+    roots = (
+        await db.scalars(
+            select(Job.root_id)
+            .join(TrainedModel, TrainedModel.job_id == Job.id)
+            .where(TrainedModel.project_id == project.id, Job.status.in_(RUNNING_JOB))
+        )
+    ).all()
+    for root_id in sorted(set(roots)):
+        await jobs.cancel_pipeline(db, root_id)
+    await release_slots(db, project.owner_id, TrainedModel.project_id == project.id)
 
 
 async def start(
