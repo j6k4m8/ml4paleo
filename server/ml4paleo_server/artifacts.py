@@ -13,9 +13,9 @@ becomes current.
 
 Garbage collection (run by the housekeeper) is the only thing that deletes
 artifact files: failed artifacts after `keep_failed_hours`, replaced ones
-after `keep_superseded_days`, expired ones (caches such as exports), and
-everything in deleted projects. It skips artifacts that a waiting or running
-job may still read.
+after `keep_superseded_days` (replaced proposals after an hour), expired
+ones (caches such as exports), and everything in deleted projects. It skips
+artifacts that a waiting or running job may still read.
 """
 
 import datetime
@@ -45,6 +45,10 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 COLLECT_BATCH = 50
 # Staging artifacts that no job will commit are abandoned after this long.
 ABANDONED_AFTER = datetime.timedelta(hours=48)
+# Replaced proposals (one ROI predicted on demand) are kept only this long:
+# people make many and look at the newest, but accepts from one just
+# replaced may still be on their way.
+KEEP_SUPERSEDED_PROPOSALS = datetime.timedelta(hours=1)
 
 
 def now() -> datetime.datetime:
@@ -288,6 +292,11 @@ def _collectable(settings: Settings):
                         Artifact.state_changed_at
                         < current
                         - datetime.timedelta(days=storage.keep_superseded_days),
+                    ),
+                    and_(
+                        Artifact.state == "superseded",
+                        Artifact.head_slot == "proposal",
+                        Artifact.state_changed_at < current - KEEP_SUPERSEDED_PROPOSALS,
                     ),
                     and_(Artifact.state == "committed", Artifact.expires_at < current),
                 ),

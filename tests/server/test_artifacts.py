@@ -367,6 +367,36 @@ def test_new_heads_supersede_old_ones_and_gc_frees_them(
     assert artifact_row(migrated_database_url, second).state == "committed"
 
 
+def test_replaced_proposals_go_after_an_hour(settings, migrated_database_url):
+    project_id = make_project(migrated_database_url)
+    replaced = {}
+    for slot in ("proposal", "image"):
+        first, job_id = stage(migrated_database_url, project_id, head_slot=slot)
+        finish(settings, migrated_database_url, job_id)
+        _, job_id = stage(migrated_database_url, project_id, head_slot=slot)
+        finish(settings, migrated_database_url, job_id)
+        replaced[slot] = first
+    size = artifact_row(migrated_database_url, replaced["image"]).bytes
+    assert storage_used(migrated_database_url) == 4 * size
+
+    async def collect_after(db, hours):
+        await db.execute(
+            update(Artifact)
+            .where(Artifact.state == "superseded")
+            .values(state_changed_at=artifacts.now() - datetime.timedelta(hours=hours))
+        )
+        await db.commit()
+        return await artifacts.collect_garbage(create_sessionmaker(db.bind), settings)
+
+    # Not at once, so accepts from one just replaced still land...
+    assert run_db(migrated_database_url, lambda db: collect_after(db, 0.5)) == 0
+    # ...but long before other replaced artifacts.
+    assert run_db(migrated_database_url, lambda db: collect_after(db, 2)) == 1
+    assert artifact_row(migrated_database_url, replaced["proposal"]).state == "deleted"
+    assert artifact_row(migrated_database_url, replaced["image"]).state == "superseded"
+    assert storage_used(migrated_database_url) == 3 * size
+
+
 def test_deleting_a_project_deletes_its_artifacts(settings, migrated_database_url):
     project_id = make_project(migrated_database_url)
     artifact_id, job_id = stage(migrated_database_url, project_id)
