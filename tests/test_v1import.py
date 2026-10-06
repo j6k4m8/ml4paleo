@@ -65,6 +65,30 @@ def test_samples_outside_the_volume_are_skipped(root):
     assert annotations(root, "ABC123", v1_volume.SHAPE_XYZ)[1] == 2
 
 
+def test_samples_with_impossible_numbers_are_skipped(root):
+    meta = root / "training" / "ABC123" / "meta1745400000.json"
+    record = json.loads(meta.read_text())
+    # JSON can hold infinities (1e400), NaN, and numbers no scan has.
+    for key, value in (
+        ("cutout_origin_xyz", "[0, 0, 1e400]"),
+        ("cutout_shape_xyz", "[40, 30, NaN]"),
+        ("padding_before_xyz", f"[{10**30}, 0, 0]"),
+        ("requested_shape_xyz", "[512, 512, -Infinity]"),
+        ("annotated_local_z_index", "1e400"),
+        ("annotated_local_z_index", "null"),
+        ("cutout_origin_xyz", "[0, 0]"),
+    ):
+        text = json.dumps({**record, key: "PLACEHOLDER"})
+        meta.write_text(text.replace('"PLACEHOLDER"', value))
+        placed, skipped = annotations(root, "ABC123", v1_volume.SHAPE_XYZ)
+        assert [a.stamp for a in placed] == ["1745400100-z07"], key
+        assert skipped == 2
+    # v1 read these with int(), so a whole number written another way places.
+    meta.write_text(json.dumps({**record, "annotated_local_z_index": "6"}))
+    placed, _ = annotations(root, "ABC123", v1_volume.SHAPE_XYZ)
+    assert placed[0].box_zyx == [10, 0, 0, 11, 30, 40]
+
+
 def test_only_finished_segmentations_count(root):
     jobs = read_jobs(root)
     # The sidecar names this one; the newer one is an unfinished run.
