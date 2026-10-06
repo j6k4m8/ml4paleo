@@ -425,6 +425,30 @@ def test_predictions_normalize_like_the_models_training(
     assert windows(migrated_database_url, started) == ([200, 800],) * 2
 
 
+def pipeline_status(browser, project: str, pipeline_id: str) -> str:
+    return browser.get(f"/api/projects/{project}/pipelines/{pipeline_id}").json()[
+        "status"
+    ]
+
+
+def test_a_new_prediction_cancels_older_ones(ada, settings, migrated_database_url):
+    project = labeled_project(ada, settings, migrated_database_url)
+    first, second = (ready_model(ada, migrated_database_url, project) for _ in "ab")
+    older = predict(ada, project, first).json()["pipeline_id"]
+
+    # Its first job is done, so only its shards and finalize are left.
+    async def prepared(db):
+        await db.execute(
+            update(Job).where(Job.id == uuid.UUID(older)).values(status="succeeded")
+        )
+
+    run_db(migrated_database_url, prepared)
+    assert pipeline_status(ada, project, older) == "running"
+    newer = predict(ada, project, second).json()["pipeline_id"]
+    assert pipeline_status(ada, project, older) == "cancelled"
+    assert pipeline_status(ada, project, newer) == "waiting"
+
+
 def test_missing_label_blobs_fail_training_for_good(tmp_path):
     from ml4paleo_worker.context import JobContext, PermanentError
     from ml4paleo_worker.handlers import train as train_handler

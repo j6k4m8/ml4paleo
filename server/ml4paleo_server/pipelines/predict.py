@@ -8,18 +8,45 @@ prediction artifact that becomes the project's "prediction" head.
 and writes one 512³ shard (they run in parallel, on as many workers as
 there are); `finalize` writes the manifest, so its success commits the
 artifact.
+
+Starting a prediction cancels the project's other predictions that are
+still running, so an older one can't finish later and take the head from
+it.
 """
 
 import uuid
 
+from sqlalchemy import exists, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from ml4paleo.segmentation.predict import SHARD_ZYX, shard_boxes
 
 from .. import artifacts, jobs
-from ..db import Artifact, Job, TrainedModel
+from ..db import Artifact, Job, Project, TrainedModel
+from .train import RUNNING_JOB
 
 WEIGHTS = {"prepare": 1.0, "shards": 95.0, "finalize": 1.0}
+
+
+async def running(
+    db: AsyncSession, project_id: uuid.UUID, model_id: uuid.UUID | None = None
+) -> list[Job]:
+    """
+    The first jobs of a project's prediction pipelines that are still
+    running (any of their jobs is), or only of those with `model_id`.
+    """
+    job = aliased(Job)
+    query = select(Job).where(
+        Job.project_id == project_id,
+        Job.id == Job.root_id,
+        Job.kind == "predict.prepare",
+        not_(Job.cancel_requested),
+        exists().where(job.root_id == Job.id, job.status.in_(RUNNING_JOB)),
+    )
+    if model_id is not None:
+        query = query.where(Job.payload.contains({"model_id": str(model_id)}))
+    return list((await db.scalars(query.order_by(Job.id))).all())
 
 
 async def start(
@@ -34,6 +61,14 @@ async def start(
     )
     if model_artifact is None or model_artifact.state != "committed":
         raise ValueError("That model isn't ready.")
+    # Predictions in a project start one at a time, so each sees the others.
+    await db.scalar(
+        select(Project.id)
+        .where(Project.id == model.project_id)
+        .with_for_update(key_share=True)
+    )
+    for root in await running(db, model.project_id):
+        await jobs.cancel_pipeline(db, root.id)
     assert image.manifest is not None
     _, z, y, x = image.manifest["shape_czyx"]
     shape = (int(z), int(y), int(x))
