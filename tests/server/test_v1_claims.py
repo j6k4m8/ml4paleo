@@ -173,14 +173,16 @@ def ran_on(database_url, project) -> dict[str, set[str]]:
     return run_db(database_url, look)
 
 
-def set_room(database_url, gb: float | None) -> None:
-    """Give ada `gb` of storage (None: just what she uses now)."""
+def set_room(database_url, gb: float | None, more: int = 0) -> None:
+    """
+    Give ada `gb` of storage (None: what she uses now and `more` bytes).
+    """
 
     async def set_quota(db):
         user = await db.scalar(select(User).where(User.username == "ada"))
         if gb is None:
             usage = await db.get(UserUsage, user.id)
-            room = (usage.storage_bytes if usage else 0) / 1024**3
+            room = ((usage.storage_bytes if usage else 0) + more) / 1024**3
         else:
             room = gb
         user.quota_override = {"storage_gb": room}
@@ -560,6 +562,21 @@ def test_an_import_must_fit_beside_the_imports_still_running(
     refused = probe(second)
     assert refused["status"] == "failed"
     assert "storage left for it" in refused["error"]
+    # Once ABC123's image is in, its prediction is still to come.
+    run_import(
+        migrated_database_url,
+        live_server,
+        ada,
+        first,
+        volume,
+        v1_handlers=IMAGE_ONLY,
+        until=image_in,
+    )
+    set_room(migrated_database_url, None, more=55_200 + 10_000)
+    assert ada.post("/api/v1-jobs/FEED01/claim").status_code == 200
+    refused = probe(second)
+    assert refused["status"] == "failed"
+    assert "storage left for it" in refused["error"]
 
 
 def test_the_labels_and_the_prediction_come_over_on_their_own(
@@ -892,9 +909,8 @@ def test_misses_at_once_cant_get_past_the_limit(
     )
     ada = new_browser(limited)
     signup(ada)
-    # Five guesses that miss and one that finds a job, all at once: only two
-    # of them get to look, since any of them might miss.
-    ids = ["000000", "000001", "000002", "000003", "000004", "FEED01"]
+    # Six guesses at once: only two get to look.
+    ids = [f"00000{i}" for i in range(6)]
     start = threading.Barrier(len(ids))
     codes = []
 
@@ -907,7 +923,37 @@ def test_misses_at_once_cant_get_past_the_limit(
         thread.start()
     for thread in guesses:
         thread.join()
-    assert sorted(codes).count(429) == len(ids) - 2
+    assert sorted(codes) == [404, 404, 429, 429, 429, 429]
+
+    async def looked(db):
+        return await db.scalar(
+            select(func.count())
+            .select_from(AuditEvent)
+            .where(AuditEvent.action == "v1.claim.miss")
+        )
+
+    assert run_db(migrated_database_url, looked) == 2
+
+
+def test_the_samples_rois_are_added_once(new_browser, settings, migrated_database_url):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    boxes = [[9, 0, 0, 10, 30, 40], [11, 0, 0, 12, 30, 40]]
+
+    async def twice(db):
+        owner = await db.scalar(select(User.id).where(User.username == "ada"))
+        job = Job(
+            project_id=uuid.UUID(project),
+            created_by=owner,
+            result={"rois": [*boxes, boxes[0]]},
+        )
+        for _ in range(2):
+            await pipelines.v1import.after_labels(db, settings, job)
+
+    run_db(migrated_database_url, twice)
+    rois = ada.get(f"/api/projects/{project}/rois").json()
+    assert sorted(roi["bbox"] for roi in rois) == boxes
 
 
 def test_only_import_jobs_write_labels(new_browser, settings, migrated_database_url):
