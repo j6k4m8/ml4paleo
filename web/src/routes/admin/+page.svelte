@@ -394,7 +394,7 @@
 															`Count ${account.email} as confirmed for ${account.username}? Do this only if you know the address is theirs.`,
 															() =>
 																run(async () => {
-																	await api(`/api/admin/users/${account.id}/confirm-email`, { method: "POST" });
+																	await api(`/api/admin/users/${account.id}/confirm-email`, { body: { email: account.email } });
 																	await loadAccounts();
 																}, `${account.username}'s address is confirmed.`),
 														)}

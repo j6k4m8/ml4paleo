@@ -344,19 +344,34 @@ async def set_user_status(
     await db.commit()
 
 
+class ConfirmEmailIn(BaseModel):
+    # The address the admin is vouching for, as they saw it.
+    email: Email
+
+
 @router.post("/users/{user_id}/confirm-email", status_code=204)
 async def confirm_user_email(
-    user_id: uuid.UUID, request: Request, auth: AdminAuth, db: DbSession
+    user_id: uuid.UUID,
+    body: ConfirmEmailIn,
+    request: Request,
+    auth: AdminAuth,
+    db: DbSession,
 ) -> None:
     """
     Count an account's email address as confirmed, vouching for it (for
     example when email isn't set up, so people can't confirm it themselves).
+    Refused if the account's address isn't the one given, say because it
+    changed since the admin looked.
     """
-    user = await db.get(User, user_id)
+    user = await db.get(User, user_id, with_for_update=True, populate_existing=True)
     if user is None:
         raise HTTPException(status_code=404, detail="No such user.")
     if not user.email:
         raise HTTPException(status_code=409, detail="They have no email address.")
+    if user.email != body.email:
+        raise HTTPException(
+            status_code=409, detail="Their address changed; look again."
+        )
     if user.email_verified_at is None:
         user.email_verified_at = datetime.datetime.now(datetime.UTC)
         audit.record(

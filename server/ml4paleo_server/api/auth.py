@@ -468,12 +468,18 @@ class TokenIn(BaseModel):
 @router.post("/verify-email", status_code=204)
 async def verify_email(body: TokenIn, db: DbSession) -> None:
     used = await _use_token(db, "verify", body.token)
-    user = await db.get(User, used.user_id)
-    if user is None or user.email != used.email:
+    # Only while the account still has the address the link went to, checked
+    # in the same statement, so an address changed meanwhile isn't confirmed.
+    confirmed = await db.scalar(
+        update(User)
+        .where(User.id == used.user_id, User.email == used.email)
+        .values(email_verified_at=datetime.datetime.now(datetime.UTC))
+        .returning(User.id)
+    )
+    if confirmed is None:
         raise HTTPException(
             status_code=400, detail="This link is invalid or has expired."
         )
-    user.email_verified_at = datetime.datetime.now(datetime.UTC)
     await db.commit()
 
 
@@ -569,11 +575,18 @@ async def change_email(
     old address, if it was confirmed, is told about the change.
     """
     await ratelimit.hit(engine, f"email:user:{auth.user.id}", limit=5, window=HOUR)
-    user = auth.user
-    if not await passwords.verify_password(body.current_password, user.password_hash):
+    if not await passwords.verify_password(
+        body.current_password, auth.user.password_hash
+    ):
         raise HTTPException(status_code=403, detail="Your current password is wrong.")
     if body.email is None:
         raise HTTPException(status_code=422, detail="Enter an email address.")
+    # The account as it is now, locked until this commits, so a link for the
+    # old address opened meanwhile can't confirm the new one.
+    user = await db.get(
+        User, auth.user.id, with_for_update=True, populate_existing=True
+    )
+    assert user is not None
     if body.email == user.email:
         raise HTTPException(status_code=422, detail="That's your address already.")
     taken = await db.scalar(select(User.id).where(User.email == body.email))

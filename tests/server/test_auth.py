@@ -22,7 +22,7 @@ from helpers import (
 from ml4paleo_server import email as email_module
 from ml4paleo_server import quotas
 from ml4paleo_server.app import create_app
-from ml4paleo_server.auth import ensure_admin
+from ml4paleo_server.auth import ensure_admin, passwords
 from ml4paleo_server.db import (
     EmailOutbox,
     User,
@@ -332,7 +332,12 @@ def test_admins_set_the_requirement_and_confirm_addresses(
     admin.put(f"/api/admin/users/{ada_id}/quota", json={"trained_models": 5})
     quota = ada.get("/api/me/quota").json()
     assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (GB, 5)
-    confirmed = admin.post(f"/api/admin/users/{ada_id}/confirm-email")
+
+    # Admins confirm the address they saw, not one it changed to since.
+    confirm = f"/api/admin/users/{ada_id}/confirm-email"
+    stale = admin.post(confirm, json={"email": "someone@example.org"})
+    assert stale.status_code == 409
+    confirmed = admin.post(confirm, json={"email": "ada@example.org"})
     assert confirmed.status_code == 204
     quota = ada.get("/api/me/quota").json()
     assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (
@@ -347,9 +352,79 @@ def test_admins_set_the_requirement_and_confirm_addresses(
     assert bob.get("/api/auth/session").json()["starter_limits"] is False
     assert bob.get("/api/me/quota").json()["storage_bytes_limit"] == 10 * GB
     bob_id = bob.get("/api/auth/session").json()["user"]["id"]
-    no_address = admin.post(f"/api/admin/users/{bob_id}/confirm-email")
+    no_address = admin.post(
+        f"/api/admin/users/{bob_id}/confirm-email", json={"email": "bob@example.org"}
+    )
     assert no_address.status_code == 409
-    assert ada.post(f"/api/admin/users/{bob_id}/confirm-email").status_code == 403
+    refused = ada.post(
+        f"/api/admin/users/{bob_id}/confirm-email", json={"email": "bob@example.org"}
+    )
+    assert refused.status_code == 403
+
+    # People without an address can add one (it isn't confirmed by that).
+    added = bob.put(
+        "/api/auth/email",
+        json={"email": "bob@example.org", "current_password": PASSWORD},
+    )
+    assert added.status_code == 200
+    assert added.json()["user"]["email"] == "bob@example.org"
+    assert added.json()["user"]["email_verified"] is False
+    assert outbox(migrated_database_url) == []
+
+
+def test_a_link_for_an_old_address_confirms_nothing(
+    new_browser, smtp_settings, migrated_database_url
+):
+    browser = new_browser(smtp_settings)
+    signup(browser, email="old@example.org")
+    [old_link] = outbox(migrated_database_url)
+    changed = browser.put(
+        "/api/auth/email",
+        json={"email": "new@example.org", "current_password": PASSWORD},
+    )
+    assert changed.status_code == 200
+    # The old address was never confirmed, so it isn't told about the change.
+    [_, new_link] = outbox(migrated_database_url)
+    assert new_link.to_address == "new@example.org"
+    stale = browser.post(
+        "/api/auth/verify-email", json={"token": link_token(old_link.body)}
+    )
+    assert stale.status_code == 400
+    assert browser.get("/api/auth/session").json()["user"]["email_verified"] is False
+    assert (
+        browser.post(
+            "/api/auth/verify-email", json={"token": link_token(new_link.body)}
+        ).status_code
+        == 204
+    )
+
+
+def test_opening_the_old_link_during_a_change_confirms_nothing(
+    new_browser, smtp_settings, migrated_database_url, monkeypatch
+):
+    browser = new_browser(smtp_settings)
+    signup(browser, email="old@example.org")
+    [old_link] = outbox(migrated_database_url)
+    elsewhere = new_browser(smtp_settings)
+    check = passwords.verify_password
+
+    async def opened_meanwhile(password, hashed):
+        # The old address's link is opened while the password is checked.
+        token = link_token(old_link.body)
+        opened = elsewhere.post("/api/auth/verify-email", json={"token": token})
+        assert opened.status_code == 204
+        return await check(password, hashed)
+
+    monkeypatch.setattr(passwords, "verify_password", opened_meanwhile)
+    changed = browser.put(
+        "/api/auth/email",
+        json={"email": "new@example.org", "current_password": PASSWORD},
+    )
+    assert changed.status_code == 200
+    monkeypatch.undo()
+    session = browser.get("/api/auth/session").json()
+    assert session["user"]["email"] == "new@example.org"
+    assert session["user"]["email_verified"] is False
 
 
 def test_people_can_change_their_email(
