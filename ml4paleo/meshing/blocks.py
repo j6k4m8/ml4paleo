@@ -406,10 +406,14 @@ class Join:
         self.pending -= len(self._seams.pop(block, {}))
 
     def finish(self) -> Path:
-        """Finish the STL and return its path."""
+        """
+        Finish the STL and return its path. It's closed, so deleting it
+        once it's stored frees its space before the OBJ and GLB are written.
+        """
         self._stl.seek(80)
         self._stl.write(struct.pack("<I", self.triangles))
-        for file in (self._stl, self._positions, self._indices):
+        self._stl.close()
+        for file in (self._positions, self._indices):
             file.flush()
         return self.stl_path
 
