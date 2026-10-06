@@ -1,0 +1,120 @@
+# Installing ml4paleo v2 on one machine
+
+Everything runs in Docker Compose from `deploy/compose/`: Caddy (HTTPS, the
+only service with published ports), the API (which also serves the web app),
+the housekeeper, Postgres, SeaweedFS (object storage), and the job workers.
+
+## What you need
+
+- A Linux machine with Docker and the Compose plugin. 16 GB of memory and a
+  few CPU cores go a long way; disk for your scans (about the size of the
+  uploads, plus the same again for predictions and exports).
+- A domain name pointing at the machine, with ports 80 and 443 open, so Caddy
+  can get a certificate from Let's Encrypt. To try it out, use `localhost`
+  instead (Caddy then uses its own local certificate authority).
+- Optionally, an NVIDIA GPU with the NVIDIA Container Toolkit, for the GPU
+  worker.
+- Optionally, an SMTP account for email (sign-up verification, password
+  resets, notices about requests for more storage).
+
+## First start
+
+```sh
+git clone https://github.com/j6k4m8/ml4paleo.git
+cd ml4paleo/deploy/compose
+./setup.sh ml4paleo.example.org     # or: ./setup.sh localhost
+docker compose up -d --build
+```
+
+`setup.sh` writes random secrets into `secrets/` and a starter `.env`. It never
+overwrites existing files, so it is safe to run again. If it finds an NVIDIA
+GPU that Docker can use, it turns on the GPU worker (`COMPOSE_PROFILES=gpu`).
+
+Then open `https://ml4paleo.example.org` and sign in as `admin` with the
+password in `secrets/initial_admin_password`. You'll be asked to choose a new
+password and to set up two-factor sign-in with an authenticator app; admins
+can't skip either.
+
+To check that workers pick up jobs:
+
+```sh
+docker compose exec api ml4paleo-server check-workers
+```
+
+## Settings
+
+`.env` holds the settings people usually change:
+
+| Setting | What it does |
+|---|---|
+| `M4P_DOMAIN` | The domain people use. |
+| `M4P_SMTP__HOST`, `__PORT`, `__USERNAME`, `__FROM_ADDRESS` | Outgoing email; leave the host empty to turn email off. The password goes in `secrets/smtp_password`. |
+| `COMPOSE_PROFILES` | `gpu` also runs the GPU worker. |
+| `M4P_CPU_WORKER_SLOTS`, `M4P_CPU_WORKER_MEMORY` | How many jobs the CPU worker runs at once, and its memory limit. Each job sizes itself to its share of the memory. |
+| `M4P_GPU_WORKER_MEMORY` | The GPU worker's memory limit. |
+
+Every server setting is an environment variable starting with `M4P_` (nested
+ones use `__`, such as `M4P_QUOTA__STORAGE_GB`), and any of them can be read
+from a file by adding `_FILE` (which is how the secrets are passed). See
+`server/ml4paleo_server/settings.py` for all of them. The ones most worth
+knowing:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `M4P_QUOTA__STORAGE_GB` | 10 | Storage per account (projects count against their owner). Unset it for no limit. |
+| `M4P_QUOTA__TRAINED_MODELS` | 20 | Trained models each account can keep. |
+| `M4P_AUTH__SIGNUP_MODE` | open | Who can sign up at first: `open`, or `invite` (admins can change it later). |
+| `M4P_AUTH__SESSION_IDLE_DAYS`, `M4P_AUTH__SESSION_MAX_DAYS` | 7, 30 | When sessions end. |
+| `M4P_V1__VOLUME_PATH` | | Where the v1 app's volume is mounted, for importing v1 jobs (see below). |
+
+After changing `.env`, run `docker compose up -d` again.
+
+## Storage
+
+On one machine, scans, labels, models, and results live in SeaweedFS (the
+`seaweedfs-data` volume). Browsers upload straight to it through Caddy, with
+signed URLs for one file part each; nothing else of SeaweedFS is reachable
+from outside. To use AWS S3, Google Cloud Storage (through its S3 API), or
+Cloudflare R2 instead, set `M4P_STORAGE__URL`, `M4P_STORAGE__ENDPOINT`, and
+`M4P_STORAGE__PUBLIC_ENDPOINT` and the access keys for the `api`,
+`housekeeper`, and `migrate` services.
+
+## Backups
+
+The `backup` service dumps the database every night into `deploy/compose/backups`
+and keeps two weeks of dumps. Copy that folder and the `seaweedfs-data` volume
+(or your bucket) off the machine. To restore a dump into a fresh install:
+
+```sh
+docker compose stop api housekeeper
+docker compose exec -T postgres pg_restore -U ml4paleo -d ml4paleo --clean < backups/ml4paleo-YYYYMMDD-HHMMSS.dump
+docker compose start api housekeeper
+```
+
+## Upgrading
+
+```sh
+git pull
+docker compose up -d --build
+```
+
+The `migrate` service upgrades the database before the API starts.
+
+## Importing jobs from ml4paleo v1
+
+v2 replaces the v1 app on the same site, and v1's job links (`/job/<id>`)
+keep working: signed in, visiting one brings that job over into a new project
+(its scan, its placeable annotation samples as labels, and its last
+segmentation as the prediction). People can also import every job their
+browser opened in v1 from the Import page. The first person to import a job
+gets it; admins can release a job claimed by the wrong person.
+
+Mount v1's volume folder (the one with `jobs.json`) read-only with the v1
+override, which also starts a worker that can read it:
+
+```sh
+M4P_V1_VOLUME=/home/ubuntu/ml4paleo-webapp-volume \
+  docker compose -f compose.yml -f compose.v1.yml up -d
+```
+
+Put `M4P_V1_VOLUME` in `.env` to keep it.

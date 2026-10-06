@@ -11,6 +11,18 @@ The web application is contained in [`webapp/`](webapp/), and the Python package
 
 For more details on each of the components, see the READMEs in their respective directories.
 
+## ml4paleo v2
+
+The `v2` branch rebuilds the web app with accounts and sharing, an annotator
+for labeling in three views, trainable models that run on separate workers,
+and storage on local disk or a cloud bucket. Its code is in `server/`,
+`worker/`, `web/`, and `ml4paleo/`.
+
+- [Install it on one machine](docs/v2/install.md)
+- [Run the site](docs/v2/admin.md)
+- [Add workers](docs/v2/workers.md)
+- [How it's built](docs/v2/architecture.md)
+
 ## Citation
 
 If this work is useful to your research, please cite:
