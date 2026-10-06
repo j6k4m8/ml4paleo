@@ -36,6 +36,19 @@ class PluginCaps:
     prompt: bool = False
 
 
+@dataclasses.dataclass(frozen=True)
+class CropCost:
+    """
+    What training holds in memory for one crop, so workers can size crops to
+    their memory.
+    """
+
+    # Voxels of context the plugin asks crops for on every side.
+    halo: int
+    # Bytes held per voxel of a crop (halo included) while training on it.
+    bytes_per_voxel: int
+
+
 @dataclasses.dataclass
 class Crop:
     """
@@ -43,8 +56,9 @@ class Crop:
     """
 
     # (C, Z, Y, X) float32, normalized to the image's display window, with
-    # whatever context around the targets the image has (up to the halo the
-    # training set was asked for).
+    # the halo the training set was asked for around the targets on every
+    # side (where the image ends, its edge voxels repeated, as at prediction
+    # time).
     image: np.ndarray
     # (Z, Y, X) uint8 targets in the plugin label space.
     targets: np.ndarray
@@ -60,6 +74,9 @@ class TrainingData(Protocol):
 
     # The project's class values (2..254), in plugin order 1..K.
     class_values: list[int]
+    # The display window crops are normalized with (low, high); prediction
+    # normalizes with the same one.
+    window: tuple[float, float]
 
     @property
     def num_classes(self) -> int:
@@ -70,6 +87,11 @@ class TrainingData(Protocol):
 
 
 class TrainContext(Protocol):
+    @property
+    def threads(self) -> int:
+        """How many CPU threads the plugin may use at once."""
+        ...
+
     def progress(self, fraction: float, message: str | None = None) -> None: ...
 
     def check(self) -> None:
@@ -114,6 +136,10 @@ class SegmentationPlugin(Protocol):
         out: pathlib.Path,
         ctx: TrainContext,
     ) -> TrainResult: ...
+
+    def crop_cost(self, params: BaseModel, channels: int) -> CropCost:
+        """What training with `params` holds per crop of a `channels` image."""
+        ...
 
     def load(self, directory: pathlib.Path, device: str = "cpu") -> Predictor: ...
 

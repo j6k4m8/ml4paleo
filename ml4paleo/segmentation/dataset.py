@@ -6,16 +6,23 @@ code): the image artifact, the label chunk hashes at one moment, and the
 ROIs. Crops come from two places:
 
 - ROIs that are open or complete, tiled into blocks of at most `tile`
-  voxels a side. Inside a complete ROI, unlabeled voxels are background;
-  elsewhere unlabeled voxels are ignored. Each ROI's train/val split carries
-  over to its crops.
+  voxels a side. Inside a complete ROI of a crop's split, unlabeled voxels
+  are background; elsewhere unlabeled voxels are ignored. Each ROI's
+  train/val split carries over to its crops. ROIs may overlap: training
+  crops ignore every voxel inside a validation ROI, and a voxel inside
+  several ROIs of one split counts once, in the first of them.
 - Labeled chunks outside those ROIs ("free" labels, for example from hand
-  annotating the whole volume), for training only. Voxels inside open or
-  complete ROIs are left to the ROI crops, so validation labels never leak
-  into training.
+  annotating the whole volume), tiled the same way, for training only.
+  Voxels inside open or complete ROIs are left to the ROI crops, so
+  validation labels never leak into training.
+
+Workers choose `tile` from their memory budget and the plugin's crop cost
+(see `tile_for`).
 
 Images are normalized with the image's display window, the same for every
-crop and at prediction time.
+crop and at prediction time. Every crop has the full halo of context the
+plugin asks for; where the image ends, its edge voxels are repeated, as
+they are at prediction time, so features near the edges match.
 """
 
 import dataclasses
@@ -29,7 +36,7 @@ from ml4paleo.labels import LABEL_CHUNK_ZYX, PLUGIN_IGNORE, to_plugin_space
 from ml4paleo.labels.codec import blob_key, decode_chunk
 from ml4paleo.storage import StorageGrant, get_bytes
 
-from .plugin import Crop, Split
+from .plugin import Crop, CropCost, Split
 
 ChunkKey = tuple[int, int, int]
 Box = tuple[int, int, int, int, int, int]
@@ -48,6 +55,12 @@ class LabelSource(Protocol):
         ...
 
 
+class MissingLabels(Exception):
+    """
+    A label blob that a training set pins is gone, so it can never be read.
+    """
+
+
 class BlobLabels:
     """
     Label chunks read from their content-addressed blobs.
@@ -63,7 +76,7 @@ class BlobLabels:
             return None
         data = get_bytes(self.grant, blob_key(sha))
         if data is None:
-            raise RuntimeError(f"Label blob {sha} is missing")
+            raise MissingLabels(f"Label blob {sha} is missing")
         return decode_chunk(data)
 
 
@@ -82,6 +95,15 @@ def normalize(block: np.ndarray, window: tuple[float, float]) -> np.ndarray:
     )
 
 
+def clip_box(box: Sequence[int], shape: Sequence[int]) -> Box | None:
+    """A box cut to an image's (z, y, x) shape, or None if nothing is left."""
+    lo = [min(max(int(box[a]), 0), int(shape[a])) for a in range(3)]
+    hi = [min(max(int(box[a + 3]), 0), int(shape[a])) for a in range(3)]
+    if any(lo[a] >= hi[a] for a in range(3)):
+        return None
+    return (lo[0], lo[1], lo[2], hi[0], hi[1], hi[2])
+
+
 def tiles(box: Box, tile: int) -> Iterator[Box]:
     """Split a box into blocks of at most `tile` voxels a side."""
     starts = [range(box[a], box[a + 3], tile) for a in range(3)]
@@ -94,6 +116,19 @@ def tiles(box: Box, tile: int) -> Iterator[Box]:
             min(y + tile, box[4]),
             min(x + tile, box[5]),
         )
+
+
+def tile_for(
+    memory_budget_bytes: int, cost: CropCost, minimum: int = 32, maximum: int = 256
+) -> int:
+    """
+    The largest tile whose crops, with their halo, fit in a memory budget at
+    `cost`, but at least `minimum` and at most `maximum` voxels a side.
+    """
+    side = round((memory_budget_bytes / cost.bytes_per_voxel) ** (1 / 3))
+    while side > 0 and side**3 * cost.bytes_per_voxel > memory_budget_bytes:
+        side -= 1
+    return max(minimum, min(maximum, side - 2 * cost.halo))
 
 
 class TrainingSet:
@@ -109,16 +144,21 @@ class TrainingSet:
     ):
         """
         `image` is the level-0 (c, z, y, x) array; `labeled_chunks` are the
-        keys of label chunks that have any labels.
+        keys of label chunks that have any labels. ROIs are cut to the image.
         """
         self.image = image
         self.labels = labels
         self.labeled_chunks = sorted(set(labeled_chunks))
-        self.rois = [roi for roi in rois if roi.status in ("open", "complete")]
         self.class_values = list(class_values)
         self.window = window
         self.tile = tile
         self.shape: tuple[int, int, int] = tuple(int(n) for n in image.shape[1:4])  # type: ignore[assignment]
+        self.rois = [
+            dataclasses.replace(roi, bbox=bbox)
+            for roi in rois
+            if roi.status in ("open", "complete")
+            and (bbox := clip_box(roi.bbox, self.shape)) is not None
+        ]
 
     @property
     def num_classes(self) -> int:
@@ -146,19 +186,27 @@ class TrainingSet:
     def read_image(
         self, box: Box, halo: int
     ) -> tuple[np.ndarray, tuple[slice, slice, slice]]:
-        """A box of the image with up to `halo` voxels of context, and where the box sits in it."""
+        """
+        A box of the image with `halo` voxels of context on every side, and
+        where the box sits in it. Where the image ends, its edge voxels are
+        repeated.
+        """
         lo = [max(0, box[a] - halo) for a in range(3)]
         hi = [min(self.shape[a], box[a + 3] + halo) for a in range(3)]
         block = np.asarray(
             self.image[(slice(None), *(slice(lo[a], hi[a]) for a in range(3)))]
         )
-        interior = tuple(slice(box[a] - lo[a], box[a + 3] - lo[a]) for a in range(3))
+        padding = [(0, 0)] + [
+            (halo - (box[a] - lo[a]), halo - (hi[a] - box[a + 3])) for a in range(3)
+        ]
+        block = np.pad(block, padding, mode="edge")
+        interior = tuple(slice(halo, halo + box[a + 3] - box[a]) for a in range(3))
         return normalize(block, self.window), interior  # type: ignore[return-value]
 
-    def _inside_rois(self, box: Box) -> np.ndarray:
-        """Which voxels of a box are inside open or complete ROIs."""
+    def _inside(self, box: Box, rois: Iterable[RoiSpec]) -> np.ndarray:
+        """Which voxels of a box are inside any of `rois`."""
         inside = np.zeros(tuple(box[a + 3] - box[a] for a in range(3)), dtype=bool)
-        for roi in self.rois:
+        for roi in rois:
             lo = [max(box[a], roi.bbox[a]) for a in range(3)]
             hi = [min(box[a + 3], roi.bbox[a + 3]) for a in range(3)]
             if all(a < b for a, b in zip(lo, hi, strict=True)):
@@ -168,15 +216,21 @@ class TrainingSet:
         return inside
 
     def crops(self, split: Split, halo: int) -> Iterator[Crop]:
-        for roi in self.rois:
-            if roi.split != split:
-                continue
+        mine = [roi for roi in self.rois if roi.split == split]
+        complete = [roi for roi in mine if roi.status == "complete"]
+        # Validation ROIs are held out of training wherever they overlap it.
+        held_out = (
+            [roi for roi in self.rois if roi.split == "val"] if split == "train" else []
+        )
+        for index, roi in enumerate(mine):
             for box in tiles(roi.bbox, self.tile):
                 targets = to_plugin_space(
                     self.read_labels(box),
                     self.class_values,
-                    complete=roi.status == "complete",
+                    complete=self._inside(box, complete),
                 )
+                # Voxels of earlier ROIs of this split were counted there.
+                targets[self._inside(box, mine[:index] + held_out)] = PLUGIN_IGNORE
                 if (targets == PLUGIN_IGNORE).all():
                     continue
                 image, interior = self.read_image(box, halo)
@@ -185,7 +239,7 @@ class TrainingSet:
             return
         for key in self.labeled_chunks:
             origin = [k * c for k, c in zip(key, LABEL_CHUNK_ZYX, strict=True)]
-            box: Box = (
+            chunk: Box = (
                 origin[0],
                 origin[1],
                 origin[2],
@@ -193,11 +247,14 @@ class TrainingSet:
                 min(origin[1] + LABEL_CHUNK_ZYX[1], self.shape[1]),
                 min(origin[2] + LABEL_CHUNK_ZYX[2], self.shape[2]),
             )
-            if any(box[a] >= box[a + 3] for a in range(3)):
+            if any(chunk[a] >= chunk[a + 3] for a in range(3)):
                 continue
-            targets = to_plugin_space(self.read_labels(box), self.class_values)
-            targets[self._inside_rois(box)] = PLUGIN_IGNORE
-            if (targets == PLUGIN_IGNORE).all():
-                continue
-            image, interior = self.read_image(box, halo)
-            yield Crop(image=image, targets=targets, interior=interior, split="train")
+            for box in tiles(chunk, self.tile):
+                targets = to_plugin_space(self.read_labels(box), self.class_values)
+                targets[self._inside(box, self.rois)] = PLUGIN_IGNORE
+                if (targets == PLUGIN_IGNORE).all():
+                    continue
+                image, interior = self.read_image(box, halo)
+                yield Crop(
+                    image=image, targets=targets, interior=interior, split="train"
+                )

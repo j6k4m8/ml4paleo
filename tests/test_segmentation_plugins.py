@@ -3,15 +3,17 @@ Segmentation plugins: training sets built from ROIs and sparse labels, and
 the random forest plugin trained and scored on a synthetic volume.
 """
 
+import json
 import subprocess
 import sys
 
+import joblib
 import numpy as np
 import pytest
 
 from ml4paleo.labels import LABEL_CHUNK_ZYX, PLUGIN_IGNORE
-from ml4paleo.segmentation.dataset import RoiSpec, TrainingSet, tiles
-from ml4paleo.segmentation.plugin import get_plugin, plugins
+from ml4paleo.segmentation.dataset import RoiSpec, TrainingSet, tile_for, tiles
+from ml4paleo.segmentation.plugin import CropCost, get_plugin, plugins
 
 SHAPE = (80, 70, 90)  # (z, y, x): edge chunks are partial on every axis
 BONE = 2
@@ -77,15 +79,88 @@ def test_crops_follow_roi_status_split_and_free_labels():
     assert roi_crop.interior == (slice(4, 12), slice(4, 12), slice(4, 12))
     # The open ROI has no labels, so it gives no crop. Of the labeled chunks,
     # (0, 0, 0) only has labels inside the complete and validation ROIs, so
-    # it gives none either; (0, 0, 1) has the free background label.
+    # it gives none either; (0, 0, 1) has the free background label, in the
+    # first of its tiles.
     assert len(train) == 2
     free = train[1]
-    assert free.targets.shape == (64, 64, 26)
+    assert free.targets.shape == (32, 32, 26)
     assert int((free.targets != PLUGIN_IGNORE).sum()) == 1
     assert free.targets[5, 5, 70 - 64] == 0
+    # At the image's edges, the crop still has the full halo: edge voxels
+    # repeated, as at prediction time.
+    assert free.image.shape == (1, 40, 40, 34)
+    assert free.interior == (slice(4, 36), slice(4, 36), slice(4, 30))
+    edged = np.pad(image[:, :36, :36, 60:], ((0, 0), (4, 0), (4, 0), (0, 4)), "edge")
+    np.testing.assert_allclose(free.image, (edged - 200.0) / 600.0, rtol=1e-6)
     val = list(data.crops("val", halo=4))
     assert len(val) == 1 and int((val[0].targets == 1).sum()) == 1
     assert (val[0].targets != PLUGIN_IGNORE).all()
+
+
+def test_validation_rois_are_held_out_where_they_overlap_training():
+    image, _ = synthetic()
+    labels = np.zeros(SHAPE, dtype=np.uint8)
+    labels[10, 10, 10] = BONE  # training only
+    labels[20, 20, 20] = BONE  # in both ROIs
+    labels[28, 28, 28] = BONE  # validation only
+    rois = [
+        RoiSpec((8, 8, 8, 24, 24, 24), "complete", "train"),
+        RoiSpec((16, 16, 16, 32, 32, 32), "open", "val"),
+    ]
+    source = DictLabels(labels)
+    data = TrainingSet(
+        image, source, source.chunks, rois, [BONE], (200.0, 800.0), tile=32
+    )
+    [train] = data.crops("train", halo=2)
+    # The overlap is ignored, labeled or not, though the training ROI is complete.
+    assert (train.targets[8:, 8:, 8:] == PLUGIN_IGNORE).all()
+    assert int((train.targets != PLUGIN_IGNORE).sum()) == 16**3 - 8**3
+    assert int((train.targets == 1).sum()) == 1 and train.targets[2, 2, 2] == 1
+    [val] = data.crops("val", halo=2)
+    assert int((val.targets == 1).sum()) == 2
+    assert int((val.targets != PLUGIN_IGNORE).sum()) == 2
+
+
+def test_overlapping_training_rois_count_each_voxel_once():
+    image, _ = synthetic()
+    labels = np.zeros(SHAPE, dtype=np.uint8)
+    labels[11, 11, 11] = 1  # only in the open ROI
+    labels[17, 17, 17] = BONE  # in both
+    rois = [
+        RoiSpec((10, 10, 10, 20, 20, 20), "open", "train"),
+        RoiSpec((15, 15, 15, 25, 25, 25), "complete", "train"),
+    ]
+    source = DictLabels(labels)
+    data = TrainingSet(
+        image, source, source.chunks, rois, [BONE], (200.0, 800.0), tile=32
+    )
+    first, second = data.crops("train", halo=2)
+    # In the open ROI, the part inside the complete ROI is complete too.
+    assert (first.targets[5:, 5:, 5:] != PLUGIN_IGNORE).all()
+    assert int((first.targets != PLUGIN_IGNORE).sum()) == 5**3 + 1
+    # The complete ROI leaves the overlap to the open ROI, which came first.
+    assert (second.targets[:5, :5, :5] == PLUGIN_IGNORE).all()
+    assert int((second.targets != PLUGIN_IGNORE).sum()) == 10**3 - 5**3
+    known = sum(int((c.targets != PLUGIN_IGNORE).sum()) for c in (first, second))
+    assert known == 10**3 + 1
+    assert sum(int((c.targets == 1).sum()) for c in (first, second)) == 1
+
+
+def test_rois_are_cut_to_the_image():
+    image, _ = synthetic()
+    labels = np.zeros(SHAPE, dtype=np.uint8)
+    labels[75, 65, 85] = BONE
+    rois = [
+        RoiSpec((70, 60, 80, 100, 100, 100), "complete", "train"),
+        RoiSpec((90, 0, 0, 100, 10, 10), "complete", "train"),
+    ]
+    source = DictLabels(labels)
+    data = TrainingSet(image, source, source.chunks, rois, [BONE], (200.0, 800.0))
+    assert [roi.bbox for roi in data.rois] == [(70, 60, 80, 80, 70, 90)]
+    [crop] = data.crops("train", halo=3)
+    assert crop.targets.shape == (10, 10, 10)
+    assert crop.image.shape == (1, 16, 16, 16)
+    assert int((crop.targets == 1).sum()) == 1
 
 
 def test_labels_assemble_across_chunks_and_edges():
@@ -98,6 +173,17 @@ def test_labels_assemble_across_chunks_and_edges():
     assert np.array_equal(data.read_labels(box), labels[58:72, 58:70, 58:90])
 
 
+def test_missing_label_blobs_say_so(tmp_path):
+    from ml4paleo.segmentation.dataset import BlobLabels, MissingLabels
+    from ml4paleo.storage import StorageGrant
+
+    grant = StorageGrant(url=f"file://{tmp_path}", access="r")
+    labels = BlobLabels(grant, {(0, 0, 0): "ab" * 32})
+    assert labels.chunk((0, 0, 1)) is None
+    with pytest.raises(MissingLabels):
+        labels.chunk((0, 0, 0))
+
+
 def test_tiles_cover_a_box_without_overlap():
     box = (0, 5, 10, 70, 37, 11)
     seen = np.zeros((70, 32, 1), dtype=int)
@@ -105,6 +191,37 @@ def test_tiles_cover_a_box_without_overlap():
         assert all(t[a + 3] - t[a] <= 32 for a in range(3))
         seen[t[0] : t[3], t[1] - 5 : t[4] - 5, t[2] - 10 : t[5] - 10] += 1
     assert (seen == 1).all()
+
+
+@pytest.mark.parametrize("sigma_max", [1.0, 2.0, 3.0])
+def test_random_forest_halo_covers_every_feature(sigma_max):
+    from ml4paleo.segmentation.plugins.rf import features, halo_for
+
+    image = np.random.default_rng(0).random((1, 48, 48, 48)).astype(np.float32)
+    whole = features(image, sigma_max)[20:28, 20:28, 20:28]
+    h = halo_for(sigma_max)
+    block = image[:, 20 - h : 28 + h, 20 - h : 28 + h, 20 - h : 28 + h]
+    part = features(block, sigma_max)[h:-h, h:-h, h:-h]
+    np.testing.assert_allclose(part, whole, atol=1e-6)
+
+
+def test_tiles_fit_the_memory_budget():
+    cost = CropCost(halo=10, bytes_per_voxel=100)
+    assert tile_for(100 * 100**3, cost) == 80
+    assert tile_for(100 * 100**3 - 1, cost) == 79
+    assert tile_for(1024, cost) == 32
+    assert tile_for(10**15, cost) == 256
+
+
+@pytest.mark.parametrize(("channels", "sigma_max"), [(1, 1.0), (2, 3.0), (1, 8.0)])
+def test_random_forest_counts_its_features(channels, sigma_max):
+    from ml4paleo.segmentation.plugins.rf import feature_count, features
+
+    image = np.zeros((channels, 8, 8, 8), dtype=np.float32)
+    assert features(image, sigma_max).shape[-1] == feature_count(channels, sigma_max)
+    plugin = get_plugin("rf")()
+    cost = plugin.crop_cost(plugin.Params(sigma_max=sigma_max), channels)
+    assert cost.bytes_per_voxel == 16 * feature_count(channels, sigma_max)
 
 
 def test_random_forest_learns_from_sparse_labels(tmp_path):
@@ -128,6 +245,8 @@ def test_random_forest_learns_from_sparse_labels(tmp_path):
     )
 
     class Ctx:
+        threads = 2
+
         def __init__(self):
             self.fractions = []
 
@@ -140,6 +259,10 @@ def test_random_forest_learns_from_sparse_labels(tmp_path):
     ctx = Ctx()
     result = plugin.train(data, params, tmp_path, ctx)
     assert ctx.fractions[-1] == 1.0
+    # The forest fits on the context's threads, not every core.
+    assert joblib.load(tmp_path / "forest.joblib").n_jobs == 2
+    meta = json.loads((tmp_path / "model.json").read_text())
+    assert meta["window"] == [200.0, 800.0]
     assert set(result.samples) == {0, 1}
     assert result.metrics["validation_crops"] >= 1
     assert result.metrics["classes"][str(BONE)]["dice"] > 0.8
@@ -166,6 +289,8 @@ def test_training_needs_two_classes(tmp_path):
     plugin = get_plugin("rf")()
 
     class Ctx:
+        threads = 1
+
         def progress(self, fraction, message=None):
             pass
 
@@ -181,6 +306,11 @@ def test_plugins_are_listed_and_check_their_params():
     params = get_plugin("rf").Params
     with pytest.raises(ValueError):
         params(n_estimators=0)
+    with pytest.raises(ValueError):
+        params(sigma_max=9.0)
+    for seed in (-1, 2**32):
+        with pytest.raises(ValueError):
+            params(seed=seed)
     with pytest.raises(ValueError, match="No segmentation plugin"):
         get_plugin("nope")
 
