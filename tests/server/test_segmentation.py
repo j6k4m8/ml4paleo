@@ -66,20 +66,25 @@ def predicted() -> np.ndarray:
     return classes
 
 
+async def new_image(db, project: str):
+    image = await artifacts.create_staging(
+        db, project_id=uuid.UUID(project), kind="image", head_slot="image"
+    )
+    image.state = "committed"
+    image.manifest = {"shape_czyx": [1, *SHAPE], "window": [0, 1]}
+    await artifacts.set_head(db, image)
+    return image
+
+
 def add_prediction(settings, database_url, project: str):
     async def create(db):
-        image = await artifacts.create_staging(
-            db, project_id=uuid.UUID(project), kind="image", head_slot="image"
-        )
-        image.state = "committed"
-        image.manifest = {"shape_czyx": [1, *SHAPE], "window": [0, 1]}
-        await artifacts.set_head(db, image)
+        image = await new_image(db, project)
         artifact = await artifacts.create_staging(
             db,
             project_id=uuid.UUID(project),
             kind="prediction",
             head_slot="prediction",
-            inputs={"model_id": None},
+            inputs={"model_id": None, "image_artifact_id": str(image.id)},
         )
         grant = project_storage(settings).child(artifacts.artifact_path(artifact))
         group = create_prediction(grant, SHAPE)
@@ -210,6 +215,22 @@ def test_one_final_segmentation_at_a_time(new_browser, settings, migrated_databa
     cancel = ada.post(f"/api/projects/{project}/pipelines/{pipeline}/cancel")
     assert cancel.status_code == 204
     assert ada.post(base, json={}).status_code == 202
+
+
+def test_a_prediction_from_an_older_image_is_refused(
+    new_browser, settings, migrated_database_url
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    add_prediction(settings, migrated_database_url, project)
+    # A new image replaces the one the prediction was made from.
+    run_db(migrated_database_url, lambda db: new_image(db, project))
+    started = ada.post(f"/api/projects/{project}/segmentation", json={})
+    assert started.status_code == 409
+    assert started.json()["detail"] == (
+        "The prediction is from an older image; predict again."
+    )
 
 
 def test_a_start_that_fails_leaves_no_files(

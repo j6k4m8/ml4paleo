@@ -65,6 +65,12 @@ async def make_segmentation(
     prediction = await artifacts.head(db, project.id, "prediction")
     if prediction is None or not prediction.manifest:
         raise HTTPException(status_code=409, detail="Predict with a model first.")
+    image = await artifacts.head(db, project.id, "image")
+    if image is None or prediction.inputs.get("image_artifact_id") != str(image.id):
+        raise HTTPException(
+            status_code=409,
+            detail="The prediction is from an older image; predict again.",
+        )
     try:
         root, artifact = await compose.start(
             db,
