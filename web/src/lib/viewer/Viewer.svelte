@@ -1,5 +1,27 @@
 <script lang="ts">
+	import Brush from "@lucide/svelte/icons/brush";
+	import Check from "@lucide/svelte/icons/check";
+	import CloudOff from "@lucide/svelte/icons/cloud-off";
+	import Eraser from "@lucide/svelte/icons/eraser";
+	import Eye from "@lucide/svelte/icons/eye";
+	import EyeOff from "@lucide/svelte/icons/eye-off";
+	import Hand from "@lucide/svelte/icons/hand";
+	import ImageOff from "@lucide/svelte/icons/image-off";
+	import Keyboard from "@lucide/svelte/icons/keyboard";
+	import LayoutGrid from "@lucide/svelte/icons/layout-grid";
+	import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+	import Lock from "@lucide/svelte/icons/lock";
+	import Maximize2 from "@lucide/svelte/icons/maximize-2";
+	import PanelRight from "@lucide/svelte/icons/panel-right";
+	import Pentagon from "@lucide/svelte/icons/pentagon";
+	import Redo2 from "@lucide/svelte/icons/redo-2";
+	import SquareDashed from "@lucide/svelte/icons/square-dashed";
+	import Undo2 from "@lucide/svelte/icons/undo-2";
+	import X from "@lucide/svelte/icons/x";
 	import { onDestroy, onMount, untrack } from "svelte";
+	import Histogram from "#lib/ui/Histogram.svelte";
+	import Panel from "#lib/ui/Panel.svelte";
+	import ToolButton from "#lib/ui/ToolButton.svelte";
 	import { ApiError, api } from "#lib/api.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { ProjectImage } from "#lib/types.ts";
@@ -13,10 +35,15 @@
 	import { type LabelClass, LabelLayer } from "./labels";
 	import { imageLoader, labelLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
-	import { type Stroke, ViewerState } from "./state.svelte";
+	import { LAYOUTS, type Stroke, ViewerState } from "./state.svelte";
 	import { aspectOf, type Level, type Plane, PLANES, type Vec3 } from "./tiles";
 
-	let { image, projectId, roi: startRoi = null }: { image: ProjectImage; projectId: string; roi?: string | null } = $props();
+	let {
+		image,
+		projectId,
+		title = "Image",
+		roi: startRoi = null,
+	}: { image: ProjectImage; projectId: string; title?: string; roi?: string | null } = $props();
 
 	const CACHE_BYTES = 512 * 1024 * 1024;
 
@@ -38,6 +65,9 @@
 	let pool: WorkerPool | undefined;
 	let hovered: Plane = PLANES.xy;
 	let notice = $state("");
+	let classesOpen = $state(true);
+	// On narrow screens the dock floats over the views until closed.
+	let dockOpen = $state(false);
 	const queue = new OpQueue(project, indexedDbStorage(session.current?.user.id ?? "", project));
 	// Strict edits compare against the chunk versions current when they're
 	// sent, after this page's earlier edits have landed; if any version is
@@ -355,113 +385,324 @@
 		}
 	}
 
+	/**
+	 * Clicking a button in here leaves focus where it was, so Space still pans
+	 * rather than pressing the button again. Tab still reaches the buttons.
+	 */
+	function keepFocus(node: HTMLElement) {
+		const down = (event: MouseEvent) => {
+			if ((event.target as Element).closest("button")) event.preventDefault();
+		};
+		node.addEventListener("mousedown", down);
+		return () => node.removeEventListener("mousedown", down);
+	}
+
+	/** Focus the keys dialog while it's open, and give focus back to whatever had it. */
+	function holdFocus(dialog: HTMLElement) {
+		const opener = document.activeElement;
+		dialog.focus();
+		return () => {
+			if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+		};
+	}
+
+	function helpKey(event: KeyboardEvent) {
+		// The viewer's keys wait until the dialog closes.
+		event.stopPropagation();
+		if (event.key === "Escape" || event.key === "?") {
+			event.preventDefault();
+			viewer.help = false;
+		} else if (event.key === "Tab") {
+			// Tab cycles through the dialog's controls without leaving it.
+			event.preventDefault();
+			const dialog = event.currentTarget as HTMLElement;
+			const stops = [...dialog.querySelectorAll<HTMLElement>("a[href], button, input, select, textarea")];
+			const at = stops.indexOf(document.activeElement as HTMLElement);
+			stops.at(event.shiftKey ? (at <= 0 ? -1 : at - 1) : (at + 1) % stops.length)?.focus();
+		}
+	}
+
 	function voxel(axis: number): string {
 		const index = Math.floor(viewer.position[axis]!);
 		if (!voxelSize || !unit) return String(index);
 		return `${index} (${(index * voxelSize[axis]!).toFixed(1)} ${unit})`;
 	}
+
+	const TOOLS = [
+		{ tool: "navigate", label: "Navigate", shortcut: "N", icon: Hand },
+		{ tool: "brush", label: "Brush", shortcut: "B", icon: Brush },
+		{ tool: "eraser", label: "Eraser", shortcut: "E", icon: Eraser },
+		{ tool: "polygon", label: "Polygon", shortcut: "P", icon: Pentagon },
+		{ tool: "roi", label: "ROI", shortcut: "R", icon: SquareDashed },
+	] as const;
+
+	const LAYOUT_NAMES = { four: "Four views", xy: "XY", xz: "XZ", yz: "YZ" } as const;
+
+	const activeClass = $derived(classes.find((c) => c.value === viewer.activeClass));
+	const zoomPercent = $derived(Math.round((viewer.zoom / (globalThis.devicePixelRatio || 1)) * 100));
+	const [, imageZ, imageY, imageX] = manifest.shape_czyx;
+	const histogram = manifest.histogram && !Array.isArray(manifest.histogram) ? manifest.histogram : null;
+	const saveState = $derived(queue.error ? "error" : queue.offline ? "offline" : queue.pending > 0 ? "saving" : "saved");
+
+	const hint = $derived(
+		{
+			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · click moves the crosshair",
+			brush: "Drag to paint the active class · [ ] change the size",
+			eraser: "Drag to erase labels · [ ] change the size",
+			polygon: "Click to add points · Enter or double-click fills · Alt+Enter erases the class inside · Esc cancels",
+			roi: "Drag a box on a slice · G goes to the next open ROI · C marks it complete",
+		}[viewer.tool],
+	);
 </script>
 
 <svelte:window onkeydown={key} onkeyup={keyUp} onblur={() => (viewer.panning = false)} />
 
-<div class="viewer layout-{viewer.layout}">
-	<div class="views">
-		{#if images && levels.length > 0}
-			{#each shown as plane (plane.name)}
-				<PlaneView
-					{plane}
-					{viewer}
-					{levels}
-					{images}
-					{labels}
-					{prediction}
-					onhover={(p) => (hovered = p)}
-					onresize={resized}
-					onstroke={stroke}
-					onpolygon={() => closePolygon()}
-					rois={rois.items}
-					onroi={drawRoi}
+{#snippet problem(text: string, dismiss: () => void)}
+	<div
+		class="pointer-events-auto flex w-full max-w-lg items-start gap-2 rounded-sm border border-danger/50 bg-panel px-2.5 py-1.5 text-danger shadow-lg shadow-black/40"
+		role="alert"
+	>
+		<span class="flex-1">{text}</span>
+		<button class="text-ink-dim hover:text-ink" aria-label="Dismiss" onclick={dismiss}><X size={14} /></button>
+	</div>
+{/snippet}
+
+<div class="flex h-full flex-col bg-chrome text-ink">
+	<!-- Options bar: the active tool's settings, scrolling sideways when they don't fit. -->
+	<div class="flex h-9 shrink-0 items-center border-b border-edge bg-panel" {@attach keepFocus}>
+		<div class="flex min-w-0 flex-1 items-center gap-3 self-stretch overflow-x-auto px-3 whitespace-nowrap">
+			<span class="flex shrink-0 items-center gap-1.5 font-medium">
+				{#each TOOLS as entry (entry.tool)}
+					{#if entry.tool === viewer.tool}<entry.icon size={14} class="text-ink-dim" />{entry.label}{/if}
+				{/each}
+			</span>
+			<span class="h-4 w-px shrink-0 bg-line"></span>
+			{#if viewer.tool === "brush" || viewer.tool === "eraser"}
+				<label class="flex shrink-0 items-center gap-2 text-ink-dim">
+					Size
+					<input class="w-28" type="range" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} />
+					<input class="field w-14 font-mono" type="number" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} aria-label="Brush radius" />
+				</label>
+			{/if}
+			{#if viewer.tool === "brush" || viewer.tool === "polygon"}
+				<label class="flex shrink-0 items-center gap-1.5 text-ink-dim">
+					<input type="checkbox" bind:checked={viewer.protectLabels} /> Only unlabeled voxels
+				</label>
+			{/if}
+			{#if viewer.tool === "roi"}
+				<label class="flex shrink-0 items-center gap-2 text-ink-dim">
+					Depth
+					<input class="w-28" type="range" min="1" max="256" step="1" bind:value={viewer.roiDepth} />
+					<span class="w-24 font-mono text-ink">{viewer.roiDepth === 1 ? "slice" : `${viewer.roiDepth} voxels`}</span>
+				</label>
+			{/if}
+			{#if viewer.tool === "navigate"}
+				<div class="flex shrink-0 rounded-sm border border-edge" role="group" aria-label="Layout">
+					{#each LAYOUTS as layout (layout)}
+						<button
+							aria-pressed={viewer.layout === layout}
+							class="relative flex h-6 items-center gap-1 px-2 first:rounded-l-[3px] last:rounded-r-[3px] focus-visible:z-10
+								{viewer.layout === layout ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
+							onclick={() => (viewer.layout = layout)}
+						>
+							{#if layout === "four"}<LayoutGrid size={12} />{/if}
+							{LAYOUT_NAMES[layout]}
+						</button>
+					{/each}
+				</div>
+				<button class="btn shrink-0" onclick={fit} title="Fit the image (0)"><Maximize2 size={12} /> Fit</button>
+			{/if}
+			<span class="ml-auto hidden truncate text-2xs text-ink-faint lg:inline">{hint}</span>
+		</div>
+		<!-- Outside the scrolling part, so it's always in reach. -->
+		<button
+			class="btn btn-ghost mx-1.5 shrink-0 md:hidden"
+			aria-label="Panels"
+			aria-expanded={dockOpen}
+			onclick={() => (dockOpen = !dockOpen)}
+		>
+			<PanelRight size={14} />
+		</button>
+	</div>
+
+	<div class="relative flex min-h-0 flex-1">
+		<!-- Tools -->
+		<div
+			class="flex w-11 shrink-0 flex-col items-center gap-0.5 border-r border-edge bg-panel py-1.5"
+			role="toolbar"
+			aria-label="Tools"
+			aria-orientation="vertical"
+			{@attach keepFocus}
+		>
+			{#each TOOLS as entry (entry.tool)}
+				<ToolButton
+					icon={entry.icon}
+					label={entry.label}
+					shortcut={entry.shortcut}
+					active={viewer.tool === entry.tool}
+					onclick={() => setTool(entry.tool)}
 				/>
 			{/each}
-		{/if}
-		<aside class="panel">
-			<p class="position">
-				<span class="axis-x">x {voxel(2)}</span>
-				<span class="axis-y">y {voxel(1)}</span>
-				<span class="axis-z">z {voxel(0)}</span>
-			</p>
-			<label>
-				Window
-				<span class="pair">
-					<input type="number" step="any" bind:value={viewer.window[0]} aria-label="Window low" />
-					<input type="number" step="any" bind:value={viewer.window[1]} aria-label="Window high" />
-				</span>
-			</label>
-			<label class="row"><input type="checkbox" bind:checked={viewer.showLabels} /> Labels</label>
-			{#if prediction}
-				<label class="row">
-					<input type="checkbox" bind:checked={viewer.showPrediction} /> Prediction by {predictionModel}
-				</label>
-				<label>
-					Prediction opacity
-					<input type="range" min="0" max="1" step="0.05" bind:value={viewer.predictionOpacity} />
-				</label>
-			{/if}
-			<label>
-				Label opacity
-				<input type="range" min="0" max="1" step="0.05" bind:value={viewer.opacity} />
-			</label>
-			<div class="tools" role="radiogroup" aria-label="Tool">
-				{#each [["navigate", "Navigate", "n"], ["brush", "Brush", "b"], ["eraser", "Eraser", "e"], ["polygon", "Polygon", "p"], ["roi", "ROI", "r"]] as [tool, name, shortcut] (tool)}
-					<button
-						class:secondary={viewer.tool !== tool}
-						role="radio"
-						aria-checked={viewer.tool === tool}
-						title="{name} ({shortcut})"
-						onclick={() => setTool(tool as typeof viewer.tool)}>{name}</button
-					>
-				{/each}
+			<span class="my-1.5 h-px w-6 bg-line"></span>
+			<!-- The class brushes and polygons paint, like a foreground color. -->
+			<button
+				class="size-7 rounded-sm border-2 border-ink/80 shadow-[0_0_0_1px_black]"
+				style:background={activeClass?.color ?? "transparent"}
+				title={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "No class to paint"}
+				aria-label={activeClass ? `Active class: ${activeClass.name}` : "No active class"}
+				onclick={() => {
+					classesOpen = true;
+					dockOpen = true;
+				}}
+			></button>
+			<span class="my-1.5 h-px w-6 bg-line"></span>
+			<ToolButton icon={Undo2} label="Undo" shortcut="Ctrl+Z" disabled={queue.undoable === 0} onclick={() => queue.undo()} />
+			<ToolButton icon={Redo2} label="Redo" shortcut="Ctrl+Shift+Z" disabled={queue.redoable === 0} onclick={() => queue.redo()} />
+			<div class="mt-auto">
+				<ToolButton icon={Keyboard} label="Keys" shortcut="?" active={viewer.help} onclick={() => (viewer.help = !viewer.help)} />
 			</div>
-			{#if classes.length > 0}
-				<fieldset class="classes">
-					<legend>Class</legend>
-					{#each classes as label, index (label.value)}
-						<label class="row">
-							<input type="radio" name="class" value={label.value} bind:group={viewer.activeClass} />
-							<span class="swatch" style:background={label.color}></span>
-							{label.name}
-							{#if index < 9}<kbd>{index + 1}</kbd>{/if}
-						</label>
+		</div>
+
+		<!-- Document -->
+		<div class="relative flex min-w-0 flex-1 flex-col">
+			<div class="flex h-7 shrink-0 items-end border-b border-edge bg-chrome px-2">
+				<div class="flex h-6 items-center gap-2 rounded-t-sm bg-pasteboard px-3 shadow-[inset_0_1px_0_var(--color-accent)]">
+					<span class="font-medium">{title}</span>
+					<span class="font-mono text-2xs text-ink-faint">{imageX}×{imageY}×{imageZ} · {manifest.dtype}</span>
+				</div>
+			</div>
+			<!-- What went wrong, over the views, where it shows even with the dock closed. -->
+			{#if error || notice || rois.error}
+				<div class="pointer-events-none absolute inset-x-0 top-8 z-30 flex flex-col items-center gap-1 px-2">
+					{#if error}{@render problem(error, () => (error = ""))}{/if}
+					{#if notice}{@render problem(notice, () => (notice = ""))}{/if}
+					{#if rois.error}{@render problem(rois.error, () => (rois.error = ""))}{/if}
+				</div>
+			{/if}
+			<div
+				class="grid min-h-0 flex-1 gap-px bg-edge
+					{viewer.layout === 'four' ? 'grid-cols-2 grid-rows-2' : 'grid-cols-1 grid-rows-1'}"
+			>
+				{#if images && levels.length > 0}
+					{#each shown as plane (plane.name)}
+						<PlaneView
+							{plane}
+							{viewer}
+							{levels}
+							{images}
+							{labels}
+							{prediction}
+							onhover={(p) => (hovered = p)}
+							onresize={resized}
+							onstroke={stroke}
+							onpolygon={() => closePolygon()}
+							rois={rois.items}
+							onroi={drawRoi}
+						/>
 					{/each}
-				</fieldset>
-			{:else if labels}
-				<p class="muted">Add label classes in the project settings to start labeling.</p>
-			{/if}
-			<label>
-				Brush radius: {viewer.brushRadius} voxels
-				<input type="range" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} />
-			</label>
-			<label class="row"><input type="checkbox" bind:checked={viewer.protectLabels} /> Paint only unlabeled voxels</label>
-			<div class="row history">
-				<button class="secondary" disabled={queue.undoable === 0} onclick={() => queue.undo()} title="Undo (Ctrl+Z)">Undo</button>
-				<button class="secondary" disabled={queue.redoable === 0} onclick={() => queue.redo()} title="Redo (Ctrl+Shift+Z)">Redo</button>
-				<span class="status" class:error={!!queue.error} role="status">{status}</span>
+					{#if viewer.layout === "four"}
+						<div class="flex flex-col justify-center gap-1 bg-pasteboard p-4 font-mono text-2xs text-ink-dim">
+							<span><span class="text-axis-x">x</span> {voxel(2)}</span>
+							<span><span class="text-axis-y">y</span> {voxel(1)}</span>
+							<span><span class="text-axis-z">z</span> {voxel(0)}</span>
+						</div>
+					{/if}
+				{:else}
+					<div class="col-span-full row-span-full grid place-items-center bg-pasteboard text-ink-faint">
+						{#if error}<ImageOff size={20} />{:else}<LoaderCircle size={20} class="animate-spin" />{/if}
+					</div>
+				{/if}
 			</div>
-			{#if notice}<p class="error" role="alert">{notice}</p>{/if}
-			<details class="rois" open>
-				<summary>ROIs · {openRois.length} open of {rois.items.length}</summary>
-				<label>
-					New ROIs: {viewer.roiDepth === 1 ? "one-voxel slices" : `cubes ${viewer.roiDepth} deep`}
-					<input type="range" min="1" max="256" step="1" bind:value={viewer.roiDepth} />
-				</label>
-				<ul>
+		</div>
+
+		<!-- Dock -->
+		<aside
+			class="{dockOpen ? 'flex' : 'hidden'} absolute inset-y-0 right-0 z-20 w-64 shrink-0 flex-col overflow-y-auto border-l border-edge bg-panel shadow-2xl shadow-black/50 md:static md:flex md:shadow-none"
+			aria-label="Panels"
+			{@attach keepFocus}
+		>
+			<Panel title="Info">
+				<div class="grid grid-cols-[1rem_1fr] gap-x-1 gap-y-0.5 font-mono text-2xs">
+					<span class="text-axis-x">X</span><span>{voxel(2)}</span>
+					<span class="text-axis-y">Y</span><span>{voxel(1)}</span>
+					<span class="text-axis-z">Z</span><span>{voxel(0)}</span>
+				</div>
+			</Panel>
+
+			<Panel title="Levels">
+				{#if histogram}
+					<Histogram counts={histogram.counts} edges={histogram.edges} bind:window={viewer.window} />
+				{/if}
+				<div class="grid grid-cols-2 gap-2">
+					<label class="label">Black <input class="field font-mono" type="number" step="any" bind:value={viewer.window[0]} /></label>
+					<label class="label">White <input class="field font-mono" type="number" step="any" bind:value={viewer.window[1]} /></label>
+				</div>
+			</Panel>
+
+			<Panel title="Layers">
+				<ul class="-mx-2.5 -my-2.5 flex flex-col divide-y divide-edge">
+					<li class="flex flex-col gap-1.5 px-2.5 py-2">
+						<div class="flex items-center gap-2">
+							<button class="text-ink-dim hover:text-ink" aria-label="{viewer.showLabels ? 'Hide' : 'Show'} labels" title="Show or hide (V)" onclick={() => (viewer.showLabels = !viewer.showLabels)}>
+								{#if viewer.showLabels}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
+							</button>
+							<span class="flex-1">Labels</span>
+							<span class="font-mono text-2xs text-ink-dim">{Math.round(viewer.opacity * 100)}%</span>
+						</div>
+						<input type="range" min="0" max="1" step="0.05" bind:value={viewer.opacity} aria-label="Label opacity" />
+					</li>
+					{#if prediction}
+						<li class="flex flex-col gap-1.5 px-2.5 py-2">
+							<div class="flex items-center gap-2">
+								<button class="text-ink-dim hover:text-ink" aria-label="{viewer.showPrediction ? 'Hide' : 'Show'} prediction" title="Show or hide (M)" onclick={() => (viewer.showPrediction = !viewer.showPrediction)}>
+									{#if viewer.showPrediction}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
+								</button>
+								<span class="flex-1 truncate">Prediction <span class="text-ink-faint">· {predictionModel}</span></span>
+								<span class="font-mono text-2xs text-ink-dim">{Math.round(viewer.predictionOpacity * 100)}%</span>
+							</div>
+							<input type="range" min="0" max="1" step="0.05" bind:value={viewer.predictionOpacity} aria-label="Prediction opacity" />
+						</li>
+					{/if}
+					<li class="flex items-center gap-2 px-2.5 py-2 text-ink-dim">
+						<Eye size={14} class="opacity-40" />
+						<span class="flex-1">Image</span>
+						<Lock size={12} />
+					</li>
+				</ul>
+			</Panel>
+
+			<Panel title="Classes" bind:open={classesOpen}>
+				{#if classes.length > 0}
+					<ul class="-mx-2.5 -my-1 flex flex-col">
+						{#each classes as label, index (label.value)}
+							<li>
+								<button
+									class="flex w-full items-center gap-2 px-2.5 py-1 text-left {viewer.activeClass === label.value ? 'bg-accent-soft text-ink' : 'hover:bg-raised'}"
+									onclick={() => (viewer.activeClass = label.value)}
+									aria-pressed={viewer.activeClass === label.value}
+								>
+									<span class="size-3 rounded-[2px] shadow-[0_0_0_1px_black]" style:background={label.color}></span>
+									<span class="flex-1">{label.name}</span>
+									{#if index < 9}<span class="kbd">{index + 1}</span>{/if}
+								</button>
+							</li>
+						{/each}
+					</ul>
+				{:else if labels}
+					<p class="text-ink-dim">Add label classes in the project settings to start labeling.</p>
+				{/if}
+			</Panel>
+
+			<Panel title="ROIs · {openRois.length} open">
+				<ul class="-mx-2.5 -my-1 flex max-h-52 flex-col overflow-y-auto">
 					{#each rois.items as roi (roi.id)}
-						<li class:selected={roi.id === viewer.selectedRoi}>
-							<button class="link" onclick={() => goTo(roi)}>
-								<span class="dot dot-{roi.status}"></span>
-								{describe(roi)}
+						<li class="flex items-center gap-1.5 px-2.5 py-0.5 {roi.id === viewer.selectedRoi ? 'bg-accent-soft' : 'hover:bg-raised'}">
+							<button class="flex flex-1 items-center gap-1.5 truncate text-left" onclick={() => goTo(roi)}>
+								<span class="size-1.5 shrink-0 rounded-full {roi.status === 'complete' ? 'bg-ok' : roi.status === 'skipped' ? 'bg-ink-faint' : 'bg-warn'}"></span>
+								<span class="truncate">{describe(roi)}</span>
 							</button>
 							<select
+								class="field !h-5 !w-20 !text-2xs"
 								aria-label="Status of the {describe(roi)} ROI"
 								value={roi.status}
 								onchange={async (e) => {
@@ -474,206 +715,65 @@
 								<option value="skipped">skipped</option>
 							</select>
 						</li>
+					{:else}
+						<li class="px-2.5 text-ink-dim">Draw one with the ROI tool (R).</li>
 					{/each}
 				</ul>
-				{#if rois.error}<p class="error" role="alert">{rois.error}</p>{/if}
-				<p><a href="/p/{project}/rois">All ROIs</a></p>
-			</details>
-			<p class="muted">Press <kbd>?</kbd> for keys.</p>
-			{#if error}<p class="error" role="alert">{error}</p>{/if}
+				<a href="/p/{project}/rois" class="self-start text-2xs">Open the ROI gallery</a>
+			</Panel>
 		</aside>
 	</div>
+
+	<!-- Status bar -->
+	<footer class="flex h-6 shrink-0 items-center gap-4 border-t border-edge bg-chrome px-3 font-mono text-2xs text-ink-dim">
+		<span title="Zoom">{zoomPercent}%</span>
+		<span>
+			<span class="text-axis-x">x</span>{Math.floor(viewer.position[2])}
+			<span class="text-axis-y">y</span>{Math.floor(viewer.position[1])}
+			<span class="text-axis-z">z</span>{Math.floor(viewer.position[0])}
+		</span>
+		<span class="hidden sm:inline">{LAYOUT_NAMES[viewer.layout]}</span>
+		<span class="ml-auto flex items-center gap-1.5 font-sans {saveState === 'error' ? 'text-danger' : saveState === 'offline' ? 'text-warn' : ''}" role="status">
+			{#if saveState === "saved"}<Check size={12} class="text-ok" />{:else if saveState === "saving"}<LoaderCircle size={12} class="animate-spin" />{:else}<CloudOff size={12} />{/if}
+			{status}
+		</span>
+	</footer>
 </div>
 
 {#if viewer.help}
-	<div class="help" role="dialog" aria-modal="true" aria-label="Keys">
-		<table>
-			<tbody>
-				{#each KEYMAP as binding (binding.action)}
-					<tr><td>{#each binding.keys as k, i (k)}{#if i > 0}, {/if}<kbd>{k}</kbd>{/each}</td><td>{binding.label}</td></tr>
-				{/each}
-				{#each MOUSE as [what, does] (what)}
-					<tr><td>{what}</td><td>{does}</td></tr>
-				{/each}
-			</tbody>
-		</table>
-		<!-- svelte-ignore a11y_autofocus -->
-		<button class="secondary" autofocus onclick={() => (viewer.help = false)}>Close</button>
+	<div class="fixed inset-0 z-40 grid place-items-center bg-black/50 p-4" role="presentation" onclick={() => (viewer.help = false)}>
+		<div
+			class="panel max-h-[80vh] w-full max-w-lg overflow-auto shadow-2xl shadow-black/60"
+			role="dialog"
+			aria-modal="true"
+			aria-label="Keys"
+			tabindex="-1"
+			{@attach holdFocus}
+			onclick={(e) => e.stopPropagation()}
+			onkeydown={helpKey}
+		>
+			<div class="panel-title">Keyboard shortcuts</div>
+			<table class="w-full">
+				<tbody>
+					{#each KEYMAP as binding (binding.action)}
+						<tr class="border-b border-edge">
+							<td class="px-3 py-1.5 whitespace-nowrap">
+								{#each binding.keys as k (k)}<span class="kbd mr-1">{k.replace("mod+", "Ctrl+")}</span>{/each}
+							</td>
+							<td class="px-3 py-1.5 text-ink-dim">{binding.label}</td>
+						</tr>
+					{/each}
+					{#each MOUSE as [what, does] (what)}
+						<tr class="border-b border-edge">
+							<td class="px-3 py-1.5">{what}</td>
+							<td class="px-3 py-1.5 text-ink-dim">{does}</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+			<div class="flex justify-end p-2">
+				<button class="btn" onclick={() => (viewer.help = false)}>Close</button>
+			</div>
+		</div>
 	</div>
 {/if}
-
-<style>
-	.viewer {
-		height: 100%;
-		min-height: 0;
-	}
-	.views {
-		display: grid;
-		gap: 4px;
-		height: 100%;
-		grid-template-columns: 1fr 1fr;
-		grid-template-rows: 1fr 1fr;
-	}
-	.layout-xy .views,
-	.layout-xz .views,
-	.layout-yz .views {
-		grid-template-columns: 1fr 16rem;
-		grid-template-rows: 1fr;
-	}
-	.panel {
-		display: flex;
-		flex-direction: column;
-		gap: 0.6rem;
-		padding: 0.5rem;
-		overflow: auto;
-		border: 1px solid var(--line);
-		font-size: 0.9rem;
-	}
-	.panel label {
-		display: flex;
-		flex-direction: column;
-		gap: 0.2rem;
-	}
-	.panel label.row {
-		flex-direction: row;
-		align-items: center;
-		gap: 0.4rem;
-	}
-	.pair {
-		display: flex;
-		gap: 0.3rem;
-	}
-	.pair input {
-		width: 50%;
-		min-width: 0;
-	}
-	.position {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.75rem;
-		margin: 0;
-		font-variant-numeric: tabular-nums;
-	}
-	.axis-x {
-		color: #e5534b;
-	}
-	.axis-y {
-		color: #57ab5a;
-	}
-	.axis-z {
-		color: #539bf5;
-	}
-	.tools {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.25rem;
-	}
-	.tools button {
-		padding: 0.25rem 0.5rem;
-	}
-	.classes {
-		border: 1px solid var(--line);
-		border-radius: 4px;
-		margin: 0;
-		padding: 0.3rem 0.5rem;
-		display: flex;
-		flex-direction: column;
-		gap: 0.2rem;
-	}
-	.classes kbd {
-		margin-left: auto;
-	}
-	.history {
-		display: flex;
-		align-items: center;
-		gap: 0.4rem;
-	}
-	.history button {
-		padding: 0.2rem 0.5rem;
-	}
-	.rois ul {
-		list-style: none;
-		margin: 0.3rem 0;
-		padding: 0;
-		max-height: 12rem;
-		overflow: auto;
-	}
-	.rois li {
-		display: flex;
-		align-items: center;
-		gap: 0.3rem;
-	}
-	.rois li.selected {
-		font-weight: 600;
-	}
-	.rois p {
-		margin: 0.2rem 0;
-	}
-	button.link {
-		background: none;
-		border: none;
-		color: var(--fg);
-		padding: 0;
-		text-align: left;
-		flex: 1;
-		display: flex;
-		align-items: center;
-		gap: 0.3rem;
-	}
-	.dot {
-		width: 0.6rem;
-		height: 0.6rem;
-		border-radius: 50%;
-	}
-	.dot-open {
-		background: #e3b341;
-	}
-	.dot-complete {
-		background: #57ab5a;
-	}
-	.dot-skipped {
-		background: #768390;
-	}
-	.status {
-		margin-left: auto;
-		font-size: 0.85rem;
-	}
-	.swatch {
-		width: 0.8rem;
-		height: 0.8rem;
-		border-radius: 2px;
-	}
-	.help {
-		position: fixed;
-		top: 50%;
-		left: 50%;
-		transform: translate(-50%, -50%);
-		background: var(--panel);
-		border: 1px solid var(--line);
-		border-radius: 6px;
-		padding: 1rem;
-		max-width: calc(100vw - 2rem);
-		z-index: 10;
-	}
-	.help td {
-		padding: 0.2rem 0.75rem 0.2rem 0;
-	}
-	kbd {
-		font-family: ui-monospace, monospace;
-		border: 1px solid var(--line);
-		border-radius: 3px;
-		padding: 0 0.3rem;
-	}
-	.muted {
-		margin: 0;
-	}
-	@media (max-width: 700px) {
-		.views,
-		.layout-xy .views,
-		.layout-xz .views,
-		.layout-yz .views {
-			grid-template-columns: 1fr;
-			grid-template-rows: repeat(auto-fill, minmax(16rem, 1fr));
-		}
-	}
-</style>

@@ -3,6 +3,7 @@
 	import { page } from "$app/state";
 	import { api, message } from "#lib/api.ts";
 	import { session } from "#lib/session.svelte.ts";
+	import Card from "#lib/ui/Card.svelte";
 
 	let username = $state("");
 	let email = $state("");
@@ -34,18 +35,23 @@
 	}
 </script>
 
-<h1>Sign up</h1>
-{#if mode === "invite" && !invite}
-	<p>Signing up needs an invitation. Ask the people who run this site for one.</p>
-{/if}
-<form class="stack" onsubmit={submit}>
-	<label>Username <input bind:value={username} autocomplete="username" required /></label>
-	<label>Email (optional) <input type="email" bind:value={email} autocomplete="email" /></label>
-	<label>
-		Password (at least 12 characters)
-		<input type="password" bind:value={password} autocomplete="new-password" minlength="12" required />
-	</label>
-	{#if error}<p class="error" role="alert">{error}</p>{/if}
-	<button disabled={busy}>Sign up</button>
-	<p class="muted">Have an account? <a href="/login">Sign in</a></p>
-</form>
+<Card title="Create an account">
+	{#if mode === "invite" && !invite}
+		<p class="rounded-sm border border-warn/40 bg-warn/10 p-2 text-warn">
+			Signing up needs an invitation. Ask the people who run this site for one.
+		</p>
+	{/if}
+	<form class="flex flex-col gap-3" onsubmit={submit}>
+		<label class="label">Username <input class="field" bind:value={username} autocomplete="username" required /></label>
+		<label class="label">Email (optional) <input class="field" type="email" bind:value={email} autocomplete="email" /></label>
+		<label class="label">
+			Password (at least 12 characters)
+			<input class="field" type="password" bind:value={password} autocomplete="new-password" minlength="12" required />
+		</label>
+		{#if error}<p class="error" role="alert">{error}</p>{/if}
+		<button class="btn btn-primary h-7" disabled={busy}>Sign up</button>
+	</form>
+	{#snippet footer()}
+		Have an account? <a href="/login">Sign in</a>
+	{/snippet}
+</Card>

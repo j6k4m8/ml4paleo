@@ -2,8 +2,13 @@
 	import { untrack } from "svelte";
 	import { page } from "$app/state";
 	import { ApiError, api, message } from "#lib/api.ts";
-	import type { Pipeline, Project, ProjectImage, Upload } from "#lib/types.ts";
+	import type { Pipeline, Project, ProjectImage, Upload as UploadInfo } from "#lib/types.ts";
+	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
+	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 	import { uploadFile } from "#lib/upload.ts";
+	import Brush from "@lucide/svelte/icons/brush";
+	import ExternalLink from "@lucide/svelte/icons/external-link";
+	import Upload from "@lucide/svelte/icons/upload";
 
 	const pid = $derived(page.params.pid ?? "");
 
@@ -22,6 +27,30 @@
 			.map((p) => p.id)
 			.join(","),
 	);
+
+	let dragging = $state(false);
+	let rejected = $state("");
+
+	$effect(() => {
+		crumbs.set([{ label: "Projects", href: "/projects" }, { label: project?.name ?? "…" }]);
+	});
+
+	/** Take a picked or dropped file, if it's a zip. */
+	function choose(chosen: File | undefined) {
+		if (!chosen || uploading) return;
+		if (!chosen.name.toLowerCase().endsWith(".zip")) {
+			rejected = `${chosen.name} isn't a .zip. Choose a .zip of image slices or DICOM files.`;
+			return;
+		}
+		rejected = "";
+		file = chosen;
+	}
+
+	function dropped(event: DragEvent) {
+		event.preventDefault();
+		dragging = false;
+		choose(event.dataTransfer?.files?.[0]);
+	}
 
 	async function refresh() {
 		try {
@@ -57,8 +86,8 @@
 	});
 
 	/** An unfinished upload of this same file, to resume. */
-	async function unfinished(chosen: File): Promise<Upload | undefined> {
-		const uploads = await api<Upload[]>(`/api/projects/${pid}/uploads`);
+	async function unfinished(chosen: File): Promise<UploadInfo | undefined> {
+		const uploads = await api<UploadInfo[]>(`/api/projects/${pid}/uploads`);
 		return uploads.find((u) => u.state === "uploading" && u.filename === chosen.name && u.size === chosen.size);
 	}
 
@@ -87,75 +116,129 @@
 	}
 </script>
 
+<!-- A file dropped just outside the drop zone shouldn't open in the tab. -->
+<svelte:window
+	ondragover={(e) => {
+		if (e.defaultPrevented || !e.dataTransfer) return;
+		e.preventDefault();
+		e.dataTransfer.dropEffect = "none";
+	}}
+	ondrop={(e) => e.preventDefault()}
+/>
+
+<ProjectTabs {pid} />
+
 {#if project}
-	<h1>{project.name}</h1>
-
-	<section>
-		<h2>Image</h2>
-		{#if image}
-			{@const [, z, y, x] = image.manifest.shape_czyx}
-			<p>{x} × {y} × {z} voxels, {image.manifest.dtype}</p>
-			<p>
-				<a href="/p/{pid}/annotate">Open the annotator</a>
-				· <a href="/p/{pid}/rois">ROIs</a>
-				· <a href="/p/{pid}/models">Models</a>
-				{#if image.neuroglancer_url}
-					· <a href={image.neuroglancer_url} target="_blank" rel="noopener">Open in Neuroglancer</a>
+	<div class="mx-auto grid max-w-6xl gap-4 p-6 lg:grid-cols-[1fr_22rem]">
+		<div class="flex flex-col gap-4">
+			<div class="flex items-center gap-3">
+				<h1 class="text-lg">{project.name}</h1>
+				{#if image}
+					<a class="btn btn-primary ml-auto h-7 hover:no-underline" href="/p/{pid}/annotate">
+						<Brush size={14} /> Open in annotator
+					</a>
 				{/if}
-			</p>
-		{:else}
-			<p class="muted">No image yet. Upload a zip of image slices or DICOM files.</p>
-		{/if}
-		<form class="stack" onsubmit={upload}>
-			<label>
-				{image ? "Replace the image" : "Image archive"}
-				<input
-					type="file"
-					accept=".zip"
-					onchange={(e) => (file = e.currentTarget.files?.[0] ?? null)}
-					disabled={uploading}
-				/>
-			</label>
-			{#if uploading}
-				<progress max="1" value={uploaded}></progress>
-				<span class="muted">Uploading {percent(uploaded)}</span>
-			{/if}
-			<button disabled={!file || uploading}>Upload</button>
-		</form>
-	</section>
+			</div>
 
-	{#if pipelines.length > 0}
-		<section>
-			<h2>Pipelines</h2>
-			<table>
-				<thead><tr><th>Kind</th><th>Status</th><th>Progress</th><th>Started</th></tr></thead>
-				<tbody>
+			<section class="panel">
+				<h2 class="panel-title">Image</h2>
+				<div class="flex flex-col gap-3 p-3">
+					{#if image}
+						{@const [, z, y, x] = image.manifest.shape_czyx}
+						<dl class="grid grid-cols-[8rem_1fr] gap-y-1">
+							<dt class="text-ink-dim">Size</dt>
+							<dd class="font-mono">{x} × {y} × {z} voxels</dd>
+							<dt class="text-ink-dim">Type</dt>
+							<dd class="font-mono">{image.manifest.dtype}</dd>
+							{#if image.manifest.voxel_size_zyx}
+								<dt class="text-ink-dim">Voxel size</dt>
+								<dd class="font-mono">
+									{image.manifest.voxel_size_zyx.slice().reverse().join(" × ")}
+									{image.manifest.unit ?? ""}
+								</dd>
+							{/if}
+						</dl>
+						{#if image.neuroglancer_url}
+							<a class="flex items-center gap-1 self-start" href={image.neuroglancer_url} target="_blank" rel="noopener">
+								Open in Neuroglancer <ExternalLink size={12} />
+							</a>
+						{/if}
+					{:else}
+						<p class="muted">No image yet. Upload a zip of image slices or DICOM files.</p>
+					{/if}
+
+					<form onsubmit={upload} class="flex flex-col gap-2">
+						<!-- Its children ignore the pointer, so dragging over them doesn't count as leaving. -->
+						<label
+							class="flex cursor-pointer flex-col items-center gap-1.5 rounded-sm border border-dashed p-6 text-center transition-colors *:pointer-events-none
+								has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-1 has-[:focus-visible]:outline-accent
+								{dragging ? 'border-accent bg-accent-soft/40' : 'border-line bg-field hover:border-ink-faint'}"
+							ondragover={(e) => {
+								e.preventDefault();
+								dragging = true;
+							}}
+							ondragleave={() => (dragging = false)}
+							ondrop={dropped}
+						>
+							<Upload size={20} class="text-ink-faint" />
+							<span>{file ? file.name : image ? "Drop a new scan here to replace the image" : "Drop a scan here, or click to choose"}</span>
+							<span class="text-2xs text-ink-faint">A .zip of image slices or DICOM files</span>
+							<input
+								class="sr-only"
+								type="file"
+								accept=".zip"
+								onchange={(e) => choose(e.currentTarget.files?.[0])}
+								disabled={uploading}
+							/>
+						</label>
+						{#if rejected}<p class="error" role="alert">{rejected}</p>{/if}
+						{#if uploading}
+							<div class="flex items-center gap-2">
+								<progress class="h-1.5 flex-1" max="1" value={uploaded}></progress>
+								<span class="font-mono text-2xs text-ink-dim">{percent(uploaded)}</span>
+							</div>
+						{/if}
+						<button class="btn btn-primary self-start" disabled={!file || uploading}>Upload and ingest</button>
+					</form>
+				</div>
+			</section>
+		</div>
+
+		<section class="panel self-start">
+			<h2 class="panel-title">Activity</h2>
+			{#if pipelines.length === 0}
+				<p class="muted p-3">Nothing has run yet.</p>
+			{:else}
+				<ul class="divide-y divide-edge">
 					{#each pipelines as pipeline (pipeline.id)}
-						<tr>
-							<td>{pipeline.kind}</td>
-							<td>
-								{pipeline.status}
-								{#if pipeline.error}<span class="error">: {pipeline.error}</span>{/if}
-							</td>
-							<td><progress max="1" value={pipeline.progress}></progress> {percent(pipeline.progress)}</td>
-							<td>{new Date(pipeline.created_at).toLocaleString()}</td>
-						</tr>
+						<li class="flex flex-col gap-1 px-3 py-2">
+							<div class="flex items-center gap-2">
+								<span
+									class="size-1.5 rounded-full {pipeline.status === 'succeeded'
+										? 'bg-ok'
+										: pipeline.status === 'failed'
+											? 'bg-danger'
+											: pipeline.status === 'cancelled'
+												? 'bg-ink-faint'
+												: 'animate-pulse bg-warn'}"
+								></span>
+								<span class="font-medium capitalize">{pipeline.kind}</span>
+								<span class="ml-auto text-2xs text-ink-faint">{new Date(pipeline.created_at).toLocaleString()}</span>
+							</div>
+							{#if pipeline.status === "waiting" || pipeline.status === "running"}
+								<div class="flex items-center gap-2">
+									<progress class="h-1 flex-1" max="1" value={pipeline.progress}></progress>
+									<span class="font-mono text-2xs text-ink-dim">{percent(pipeline.progress)}</span>
+								</div>
+							{:else}
+								<span class="text-2xs text-ink-dim">{pipeline.status}</span>
+							{/if}
+							{#if pipeline.error}<span class="text-2xs text-danger">{pipeline.error}</span>{/if}
+						</li>
 					{/each}
-				</tbody>
-			</table>
+				</ul>
+			{/if}
 		</section>
-	{/if}
+	</div>
 {/if}
-{#if error}<p class="error" role="alert">{error}</p>{/if}
-
-<style>
-	table {
-		border-collapse: collapse;
-	}
-	th,
-	td {
-		text-align: left;
-		padding: 0.25rem 0.75rem 0.25rem 0;
-		border-bottom: 1px solid var(--line);
-	}
-</style>
+{#if error}<p class="error p-6" role="alert">{error}</p>{/if}

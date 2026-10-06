@@ -1,92 +1,147 @@
-:root {
-	--bg: #f7f6f3;
-	--fg: #1d1c1a;
-	--muted: #6b6862;
-	--line: #d9d6cf;
-	--panel: #ffffff;
-	--accent: #2f6f8f;
-	--danger: #b3261e;
-	color-scheme: light;
-	font-family: system-ui, sans-serif;
-	line-height: 1.45;
+@import "tailwindcss";
+
+/*
+ * A dark, dense workspace in the manner of desktop image editors: charcoal
+ * chrome, a gray pasteboard around the image, thin dividers, small type,
+ * and one blue accent for what's selected.
+ */
+
+@theme {
+	--font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	--font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+	--color-chrome: #1f1f1f;
+	--color-panel: #2b2b2b;
+	--color-panel-header: #323232;
+	--color-field: #1a1a1a;
+	--color-raised: #3a3a3a;
+	--color-hover: #444444;
+	--color-pasteboard: #282828;
+	--color-edge: #141414;
+	--color-line: #3c3c3c;
+	--color-ink: #d4d4d4;
+	--color-ink-dim: #a6a6a6;
+	--color-ink-faint: #959595;
+	--color-accent: #2f86e0;
+	--color-accent-hover: #4a98ea;
+	--color-accent-soft: #23466b;
+	/* Darker blues for white text to sit on; the accent is for lines and focus. */
+	--color-accent-fill: #2272c9;
+	--color-accent-fill-hover: #1c64b4;
+	--color-danger: #f47067;
+	--color-ok: #57ab5a;
+	--color-warn: #e3b341;
+	--color-axis-x: #f47067;
+	--color-axis-y: #57ab5a;
+	--color-axis-z: #539bf5;
+
+	--text-2xs: 0.6875rem;
+	--text-2xs--line-height: 1rem;
 }
 
-@media (prefers-color-scheme: dark) {
+@layer base {
 	:root {
-		--bg: #161615;
-		--fg: #ecebe8;
-		--muted: #a19e97;
-		--line: #3a3936;
-		--panel: #1f1f1d;
-		--accent: #7fb6d1;
-		--danger: #f2b8b5;
 		color-scheme: dark;
+	}
+
+	html,
+	body {
+		height: 100%;
+	}
+
+	body {
+		@apply bg-chrome font-sans text-xs text-ink antialiased;
+	}
+
+	a {
+		@apply text-accent-hover hover:underline;
+	}
+
+	::selection {
+		@apply bg-accent-soft;
+	}
+
+	:focus-visible {
+		@apply outline-1 outline-offset-1 outline-accent;
+	}
+
+	h1 {
+		@apply text-base font-semibold text-ink;
+	}
+
+	h2 {
+		@apply text-xs font-semibold tracking-wide text-ink-dim uppercase;
+	}
+
+	input[type="range"] {
+		@apply h-1 accent-accent;
+	}
+
+	input[type="checkbox"],
+	input[type="radio"] {
+		@apply accent-accent;
+	}
+
+	/* Drawn from the theme: some platforms ignore accent-color here (Chrome on macOS paints it green). */
+	progress {
+		@apply appearance-none overflow-hidden rounded-full border-0 bg-field;
+	}
+
+	progress::-webkit-progress-bar {
+		@apply rounded-full bg-field;
+	}
+
+	progress::-webkit-progress-value {
+		@apply rounded-full bg-accent;
+	}
+
+	progress::-moz-progress-bar {
+		@apply rounded-full bg-accent;
 	}
 }
 
-* {
-	box-sizing: border-box;
-}
+@layer components {
+	.btn {
+		@apply inline-flex h-6 cursor-pointer items-center justify-center gap-1.5 rounded-sm border border-line bg-raised px-2.5 text-xs text-ink transition-colors select-none hover:bg-hover disabled:cursor-default disabled:opacity-40 disabled:hover:bg-raised;
+	}
 
-body {
-	margin: 0;
-	background: var(--bg);
-	color: var(--fg);
-}
+	.btn-primary {
+		@apply border-accent-fill bg-accent-fill text-white hover:border-accent-fill-hover hover:bg-accent-fill-hover disabled:hover:border-accent-fill disabled:hover:bg-accent-fill;
+	}
 
-a {
-	color: var(--accent);
-}
+	.btn-ghost {
+		@apply border-transparent bg-transparent text-ink-dim hover:bg-raised hover:text-ink;
+	}
 
-input,
-button {
-	font: inherit;
-}
+	.btn-danger {
+		@apply hover:border-danger hover:bg-danger/5 hover:text-danger;
+	}
 
-input {
-	padding: 0.4rem 0.5rem;
-	border: 1px solid var(--line);
-	border-radius: 4px;
-	background: var(--panel);
-	color: var(--fg);
-}
+	.field {
+		@apply h-6 w-full rounded-sm border border-edge bg-field px-1.5 text-xs text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none;
+	}
 
-button {
-	padding: 0.4rem 0.9rem;
-	border: 1px solid var(--accent);
-	border-radius: 4px;
-	background: var(--accent);
-	color: var(--bg);
-	cursor: pointer;
-}
+	.label {
+		@apply flex flex-col gap-1 text-2xs text-ink-dim;
+	}
 
-button.secondary {
-	background: transparent;
-	color: var(--accent);
-}
+	.panel {
+		@apply rounded-sm border border-edge bg-panel;
+	}
 
-button:disabled {
-	opacity: 0.5;
-	cursor: default;
-}
+	.panel-title {
+		@apply flex h-7 items-center gap-2 border-b border-edge bg-panel-header px-2.5 text-2xs font-semibold tracking-wide text-ink-dim uppercase;
+	}
 
-form.stack {
-	display: flex;
-	flex-direction: column;
-	gap: 0.75rem;
-	max-width: 22rem;
-}
+	.kbd {
+		@apply rounded-sm border border-line bg-field px-1 font-mono text-2xs text-ink-dim;
+	}
 
-form.stack label {
-	display: flex;
-	flex-direction: column;
-	gap: 0.25rem;
-}
+	.error {
+		@apply text-danger;
+	}
 
-.error {
-	color: var(--danger);
-}
-
-.muted {
-	color: var(--muted);
+	.muted {
+		@apply text-ink-dim;
+	}
 }
