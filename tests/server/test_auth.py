@@ -1,6 +1,7 @@
 """
 Accounts and sign-in: signup, login, sessions, CSRF, password changes and
-resets, email verification, admin bootstrap with two-factor, and invites.
+resets, email addresses and their confirmation (with starter limits until
+then), admin bootstrap with two-factor, and invites.
 """
 
 import datetime
@@ -8,6 +9,7 @@ import re
 
 import pyotp
 import pytest
+from fastapi import HTTPException
 from helpers import (
     PASSWORD,
     link_token,
@@ -18,6 +20,7 @@ from helpers import (
     signup,
 )
 from ml4paleo_server import email as email_module
+from ml4paleo_server import quotas
 from ml4paleo_server.app import create_app
 from ml4paleo_server.auth import ensure_admin
 from ml4paleo_server.db import (
@@ -228,11 +231,10 @@ def smtp_settings(settings):
 
 def test_email_verification_flow(new_browser, smtp_settings, migrated_database_url):
     browser = new_browser(smtp_settings)
-    assert signup(browser).status_code == 422  # email is required with SMTP on
     created = signup(browser, email="Ada@Example.org")
     assert created.status_code == 201
-    assert created.json()["required_steps"] == ["verify_email"]
     assert created.json()["user"]["email"] == "ada@example.org"
+    assert created.json()["user"]["email_verified"] is False
 
     [message] = outbox(migrated_database_url)
     assert message.to_address == "ada@example.org"
@@ -241,10 +243,113 @@ def test_email_verification_flow(new_browser, smtp_settings, migrated_database_u
         browser.post("/api/auth/verify-email", json={"token": token}).status_code == 204
     )
     session = browser.get("/api/auth/session").json()
-    assert session["user"]["status"] == "active"
     assert session["user"]["email_verified"]
     again = browser.post("/api/auth/verify-email", json={"token": token})
     assert again.status_code == 400
+
+
+GB = 1024**3
+
+
+def requiring_email(settings):
+    return settings.model_copy(
+        update={"auth": settings.auth.model_copy(update={"require_email": True})}
+    )
+
+
+def test_unconfirmed_accounts_get_starter_limits(
+    new_browser, smtp_settings, migrated_database_url
+):
+    browser = new_browser(requiring_email(smtp_settings))
+    assert new_browser().get("/api/auth/config").json()["require_email"] is False
+    assert browser.get("/api/auth/config").json()["require_email"] is True
+    missing = signup(browser)
+    assert (missing.status_code, missing.json()["detail"]) == (
+        422,
+        "Enter an email address.",
+    )
+    created = signup(browser, email="ada@example.org")
+    assert created.status_code == 201
+    assert created.json()["starter_limits"] is True
+    assert created.json()["required_steps"] == []
+    quota = browser.get("/api/me/quota").json()
+    assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (GB, 1)
+    # Meanwhile they can use the site, and ask for the link again.
+    assert browser.post("/api/projects", json={"name": "Trial"}).status_code == 201
+    assert browser.post("/api/auth/verify-email/resend").status_code == 202
+    _, again = outbox(migrated_database_url)
+    assert again.to_address == "ada@example.org"
+
+    token = link_token(again.body)
+    assert (
+        browser.post("/api/auth/verify-email", json={"token": token}).status_code == 204
+    )
+    assert browser.get("/api/auth/session").json()["starter_limits"] is False
+    quota = browser.get("/api/me/quota").json()
+    assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (
+        10 * GB,
+        20,
+    )
+    # Nothing more to confirm.
+    assert browser.post("/api/auth/verify-email/resend").status_code == 202
+    assert len(outbox(migrated_database_url)) == 2
+
+
+def test_starter_limits_hold_reservations(settings, migrated_database_url):
+    required = requiring_email(settings)
+
+    async def reserve(db):
+        user = User(username="ada", email="ada@example.org")
+        db.add(user)
+        await db.flush()
+        with pytest.raises(HTTPException):
+            await quotas.reserve_storage(db, required, user, 2 * GB)
+        user.email_verified_at = datetime.datetime.now(datetime.UTC)
+        await quotas.reserve_storage(db, required, user, 2 * GB)
+        return (await quotas.usage_for(db, user.id)).storage_bytes
+
+    assert run_db(migrated_database_url, reserve) == 2 * GB
+
+
+def test_admins_set_the_requirement_and_confirm_addresses(
+    new_browser, settings, migrated_database_url
+):
+    required = requiring_email(settings)
+    admin, _ = make_admin(lambda: new_browser(required), migrated_database_url)
+    # Admins never have starter limits.
+    assert admin.get("/api/auth/session").json()["starter_limits"] is False
+    shown = admin.get("/api/admin/settings").json()
+    assert shown["require_email"] is True
+    assert shown["unconfirmed_quota"]["storage_gb"] == 1
+    ada = new_browser(required)
+    signup(ada, email="ada@example.org")
+    ada_id = ada.get("/api/auth/session").json()["user"]["id"]
+    [listed] = admin.get("/api/admin/users?q=ada").json()
+    assert (listed["email_confirmed"], listed["starter_limits"]) == (False, True)
+    assert listed["storage_bytes_limit"] == GB
+
+    # A limit an admin sets still applies.
+    admin.put(f"/api/admin/users/{ada_id}/quota", json={"trained_models": 5})
+    quota = ada.get("/api/me/quota").json()
+    assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (GB, 5)
+    confirmed = admin.post(f"/api/admin/users/{ada_id}/confirm-email")
+    assert confirmed.status_code == 204
+    quota = ada.get("/api/me/quota").json()
+    assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (
+        10 * GB,
+        5,
+    )
+
+    changed = admin.put("/api/admin/settings", json={"require_email": False}).json()
+    assert (changed["signup_mode"], changed["require_email"]) == ("open", False)
+    bob = new_browser(required)
+    assert signup(bob, username="bob").status_code == 201
+    assert bob.get("/api/auth/session").json()["starter_limits"] is False
+    assert bob.get("/api/me/quota").json()["storage_bytes_limit"] == 10 * GB
+    bob_id = bob.get("/api/auth/session").json()["user"]["id"]
+    no_address = admin.post(f"/api/admin/users/{bob_id}/confirm-email")
+    assert no_address.status_code == 409
+    assert ada.post(f"/api/admin/users/{bob_id}/confirm-email").status_code == 403
 
 
 def test_password_reset_flow(new_browser, smtp_settings, migrated_database_url):

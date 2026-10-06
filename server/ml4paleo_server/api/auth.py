@@ -1,6 +1,6 @@
 """
-Sign-up, sign-in, sessions, password changes and resets, email
-verification, and two-factor setup.
+Sign-up, sign-in, sessions, password changes and resets, email addresses
+and their confirmation, and two-factor setup.
 """
 
 import datetime
@@ -24,8 +24,9 @@ from ..auth.sessions import (
 from ..auth.tokens import csrf_token, new_token, token_hash
 from ..db import AuthToken, User
 from ..email import queue_email
+from ..quotas import has_starter_limits
 from ..settings import Settings
-from ..site_settings import get_signup_mode
+from ..site_settings import get_require_email, get_signup_mode
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -103,20 +104,26 @@ class SessionOut(BaseModel):
     csrf_token: str
     # Steps the user must finish before using the app.
     required_steps: list[str]
+    # Whether the account has the starter limits until its email address is
+    # confirmed (see `quotas`).
+    starter_limits: bool
 
 
-def _session_out(settings: Settings, user: User, token: str) -> SessionOut:
+async def _session_out(
+    db: DbSession, settings: Settings, user: User, token: str
+) -> SessionOut:
     steps = []
     if user.must_change_password:
         steps.append("change_password")
     if user.is_admin and user.totp_secret_enc is None:
         steps.append("set_up_two_factor")
-    if user.status == "unverified":
-        steps.append("verify_email")
     return SessionOut(
         user=UserOut.of(user),
         csrf_token=csrf_token(settings.secret_key.get_secret_value(), token),
         required_steps=steps,
+        starter_limits=has_starter_limits(
+            user, require_email=await get_require_email(db, settings)
+        ),
     )
 
 
@@ -170,11 +177,24 @@ async def _use_token(db: DbSession, kind: str, token: str) -> AuthToken:
     return used
 
 
-def _queue_verification(db: DbSession, settings: Settings, user: User, token: str):
+async def _send_confirmation(db: DbSession, settings: Settings, user: User) -> None:
+    """
+    Email a link that confirms the user's address, if it needs confirming
+    and email is set up.
+    """
+    if (
+        not user.email
+        or user.email_verified_at is not None
+        or not settings.smtp.enabled
+    ):
+        return
+    token = await _issue_token(
+        db, "verify", VERIFY_TOKEN_LIFETIME, user_id=user.id, email=user.email
+    )
     queue_email(
         db,
         settings,
-        user.email or "",
+        user.email,
         "Confirm your ml4paleo email address",
         f"Hi {user.username},\n\nConfirm your email address by opening this link:\n\n"
         f"{settings.public_url}/verify-email?token={token}\n\n"
@@ -184,6 +204,8 @@ def _queue_verification(db: DbSession, settings: Settings, user: User, token: st
 
 class ConfigOut(BaseModel):
     signup_mode: str
+    # Whether signing up needs an email address.
+    require_email: bool
     email_enabled: bool
     password_min_length: int
 
@@ -192,6 +214,7 @@ class ConfigOut(BaseModel):
 async def auth_config(db: DbSession, settings: SettingsDep) -> ConfigOut:
     return ConfigOut(
         signup_mode=await get_signup_mode(db, settings),
+        require_email=await get_require_email(db, settings),
         email_enabled=settings.smtp.enabled,
         password_min_length=settings.auth.password_min_length,
     )
@@ -223,7 +246,7 @@ async def signup(
         if not body.invite:
             raise HTTPException(status_code=403, detail="Sign-up needs an invite link.")
         invite = await _use_token(db, "invite", body.invite)
-    if settings.smtp.enabled and body.email is None:
+    if body.email is None and await get_require_email(db, settings):
         raise HTTPException(status_code=422, detail="Enter an email address.")
     taken = await db.scalar(
         select(User.id).where(
@@ -238,25 +261,19 @@ async def signup(
     user = User(username=body.username, email=body.email)
     _check_password(settings, body.password, user)
     user.password_hash = await passwords.hash_password(body.password)
-    # An address counts as verified only when ml4paleo has emailed it: a
-    # verification link, or an admin's invite addressed to it. Without SMTP,
-    # addresses stay unverified, so password resets never go to them.
+    # An address counts as confirmed only when ml4paleo has emailed it (a
+    # confirmation link, or an admin's invite addressed to it) or an admin
+    # vouches for it. Password resets only go to confirmed addresses.
     invited_email = invite is not None and invite.email and invite.email == body.email
     if invited_email:
         user.email_verified_at = datetime.datetime.now(datetime.UTC)
-    elif settings.smtp.enabled:
-        user.status = "unverified"
     db.add(user)
     await db.flush()
-    if user.status == "unverified":
-        token = await _issue_token(
-            db, "verify", VERIFY_TOKEN_LIFETIME, user_id=user.id, email=user.email
-        )
-        _queue_verification(db, settings, user, token)
+    await _send_confirmation(db, settings, user)
     session_token = await create_session(db, settings, user, request)
     await db.commit()
     set_session_cookie(response, settings, session_token)
-    return _session_out(settings, user, session_token)
+    return await _session_out(db, settings, user, session_token)
 
 
 class LoginIn(BaseModel):
@@ -329,7 +346,7 @@ async def login(
     session_token = await create_session(db, settings, user, request)
     await db.commit()
     set_session_cookie(response, settings, session_token)
-    return _session_out(settings, user, session_token)
+    return await _session_out(db, settings, user, session_token)
 
 
 @router.post("/logout", status_code=204)
@@ -346,8 +363,10 @@ async def logout(
 
 
 @router.get("/session")
-async def current_session(auth: SetupAuth, settings: SettingsDep) -> SessionOut:
-    return _session_out(settings, auth.user, auth.token)
+async def current_session(
+    auth: SetupAuth, db: DbSession, settings: SettingsDep
+) -> SessionOut:
+    return await _session_out(db, settings, auth.user, auth.token)
 
 
 class PasswordChangeIn(BaseModel):
@@ -447,8 +466,6 @@ async def verify_email(body: TokenIn, db: DbSession) -> None:
             status_code=400, detail="This link is invalid or has expired."
         )
     user.email_verified_at = datetime.datetime.now(datetime.UTC)
-    if user.status == "unverified":
-        user.status = "active"
     await db.commit()
 
 
@@ -519,11 +536,8 @@ async def confirm_password_reset(
 async def resend_verification(
     auth: SetupAuth, db: DbSession, engine: EngineDep, settings: SettingsDep
 ) -> None:
-    if auth.user.status != "unverified" or not auth.user.email:
+    if not auth.user.email or auth.user.email_verified_at is not None:
         return
     await ratelimit.hit(engine, f"verify:user:{auth.user.id}", limit=3, window=HOUR)
-    token = await _issue_token(
-        db, "verify", VERIFY_TOKEN_LIFETIME, user_id=auth.user.id, email=auth.user.email
-    )
-    _queue_verification(db, settings, auth.user, token)
+    await _send_confirmation(db, settings, auth.user)
     await db.commit()

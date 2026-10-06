@@ -54,7 +54,7 @@ class User(TimestampMixin, Base):
     )
     password_hash: Mapped[str | None] = mapped_column(String(255))
     is_admin: Mapped[bool] = mapped_column(default=False, server_default=false())
-    # "active", "unverified" (waiting for email verification), or "disabled".
+    # "active" or "disabled".
     status: Mapped[str] = mapped_column(String(16), default="active")
     must_change_password: Mapped[bool] = mapped_column(
         default=False, server_default=false()
@@ -74,9 +74,7 @@ class User(TimestampMixin, Base):
     )
 
     __table_args__ = (
-        CheckConstraint(
-            "status IN ('active', 'unverified', 'disabled')", name="status"
-        ),
+        CheckConstraint("status IN ('active', 'disabled')", name="status"),
     )
 
 

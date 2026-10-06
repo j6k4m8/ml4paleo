@@ -63,8 +63,6 @@ async def current_auth(auth: Annotated[Auth, Depends(setup_auth)]) -> Auth:
         raise HTTPException(status_code=403, detail="password_change_required")
     if auth.user.is_admin and auth.user.totp_secret_enc is None:
         raise HTTPException(status_code=403, detail="two_factor_required")
-    if auth.user.status == "unverified":
-        raise HTTPException(status_code=403, detail="email_verification_required")
     return auth
 
 

@@ -99,6 +99,15 @@ def migrated_database_url(database_url):
     return database_url
 
 
+@pytest.fixture(autouse=True)
+def optional_email(monkeypatch):
+    """
+    Most tests sign up without an email address, so they run with sign-up not
+    asking for one; test_auth covers asking.
+    """
+    monkeypatch.setenv("M4P_AUTH__REQUIRE_EMAIL", "false")
+
+
 @pytest.fixture
 def settings(migrated_database_url, tmp_path):
     return Settings(
