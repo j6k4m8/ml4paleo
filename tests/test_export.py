@@ -98,7 +98,8 @@ def test_channels_get_folders_and_slabs_fit_the_budget():
     # Two 1000² uint16 channels are 4 MB per z: 64 fit in 1 GiB, 2 in 20 MB.
     assert slab_depth((2, 100, 1000, 1000), 2, 64, 1024**3) == 64
     assert slab_depth((2, 100, 1000, 1000), 2, 64, 20 * 1024**2) == 2
-    assert slab_depth((2, 100, 1000, 1000), 2, 64, 1) == 1
+    # Not even one z of both channels fits: read a channel at a time.
+    assert slab_depth((2, 100, 1000, 1000), 2, 64, 1) == 0
     image = np.arange(2 * 3 * 2 * 2).reshape(2, 3, 2, 2)
     planes = list(slices(image, depth=2))
     assert [(c, z) for c, z, _ in planes] == [
@@ -110,3 +111,35 @@ def test_channels_get_folders_and_slabs_fit_the_budget():
         (1, 2),
     ]
     np.testing.assert_array_equal(planes[3][2], image[1, 1])
+
+
+def test_one_plane_at_a_time_when_a_whole_z_doesnt_fit():
+    image = np.arange(2 * 3 * 2 * 2).reshape(2, 3, 2, 2)
+    planes = list(slices(image, depth=0))
+    assert [(c, z) for c, z, _ in planes] == [
+        (0, 0),
+        (1, 0),
+        (0, 1),
+        (1, 1),
+        (0, 2),
+        (1, 2),
+    ]
+    np.testing.assert_array_equal(planes[3][2], image[1, 1])
+
+
+def test_parts_hold_one_part_however_big_the_write():
+    stored: dict[int, bytes] = {}
+    out = Parts(stored.__setitem__, part_bytes=1000)
+    data = bytes(range(256)) * 20  # 5120 bytes in one write
+    assert out.write(data) == len(data)
+    assert out.finish() == [1000] * 5 + [120]
+    assert b"".join(stored[i] for i in range(6)) == data
+
+
+def test_an_aborted_archive_writes_nothing_more():
+    stored: dict[int, bytes] = {}
+    out = Parts(stored.__setitem__, part_bytes=1000)
+    out.write(b"x" * 1500)
+    out.abort()
+    out.write(b"y" * 5000)
+    assert list(stored) == [0]
