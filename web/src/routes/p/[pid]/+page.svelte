@@ -1,7 +1,8 @@
 <script lang="ts">
+	import { untrack } from "svelte";
 	import { page } from "$app/state";
 	import { ApiError, api, message } from "#lib/api.ts";
-	import type { Pipeline, Project, ProjectImage } from "#lib/types.ts";
+	import type { Pipeline, Project, ProjectImage, Upload } from "#lib/types.ts";
 	import { uploadFile } from "#lib/upload.ts";
 
 	const pid = $derived(page.params.pid ?? "");
@@ -14,7 +15,13 @@
 	let uploading = $state(false);
 	let uploaded = $state(0);
 
-	const running = $derived(pipelines.filter((p) => p.status === "waiting" || p.status === "running"));
+	// Only which pipelines run, so status updates don't reopen the streams.
+	const running = $derived(
+		pipelines
+			.filter((p) => p.status === "waiting" || p.status === "running")
+			.map((p) => p.id)
+			.join(","),
+	);
 
 	async function refresh() {
 		try {
@@ -33,20 +40,27 @@
 		if (pid) refresh();
 	});
 
-	// Follow each running pipeline until it finishes.
+	// Follow each running pipeline until it finishes. The browser reconnects
+	// dropped streams; the server ends them (204) once the pipeline is done.
 	$effect(() => {
-		const sources = running.map((pipeline) => {
-			const source = new EventSource(`/api/projects/${pid}/pipelines/${pipeline.id}/events`);
+		const ids = running ? running.split(",") : [];
+		const sources = ids.map((id) => {
+			const source = new EventSource(`/api/projects/${untrack(() => pid)}/pipelines/${id}/events`);
 			source.addEventListener("status", (event) => {
 				const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
-				pipelines = pipelines.map((p) => (p.id === update.id ? update : p));
+				pipelines = untrack(() => pipelines).map((p) => (p.id === update.id ? update : p));
 				if (update.status === "succeeded") refresh();
 			});
-			source.onerror = () => source.close();
 			return source;
 		});
 		return () => sources.forEach((source) => source.close());
 	});
+
+	/** An unfinished upload of this same file, to resume. */
+	async function unfinished(chosen: File): Promise<Upload | undefined> {
+		const uploads = await api<Upload[]>(`/api/projects/${pid}/uploads`);
+		return uploads.find((u) => u.state === "uploading" && u.filename === chosen.name && u.size === chosen.size);
+	}
 
 	async function upload(event: SubmitEvent) {
 		event.preventDefault();
@@ -54,7 +68,8 @@
 		uploading = true;
 		error = "";
 		try {
-			const done = await uploadFile(pid, file, (fraction) => (uploaded = fraction));
+			const existing = await unfinished(file);
+			const done = await uploadFile(pid, file, (fraction) => (uploaded = fraction), existing);
 			const pipeline = await api<Pipeline>(`/api/projects/${pid}/ingest`, {
 				body: { upload_id: done.id },
 			});

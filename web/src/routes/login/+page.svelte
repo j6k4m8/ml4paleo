@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
-	import { ApiError, message } from "#lib/api.ts";
+	import { ApiError, api, message } from "#lib/api.ts";
+	import { safeNext } from "#lib/navigation.ts";
 	import { session } from "#lib/session.svelte.ts";
 
 	let username = $state("");
@@ -11,11 +12,14 @@
 	let error = $state("");
 	let busy = $state(false);
 
-	function next(): string {
-		const target = page.url.searchParams.get("next") ?? "";
-		// Only paths on this site.
-		return target.startsWith("/") && !target.startsWith("//") ? target : "/projects";
-	}
+	let emailEnabled = $state(false);
+
+	$effect(() => {
+		api<{ email_enabled: boolean }>("/api/auth/config").then(
+			(config) => (emailEnabled = config.email_enabled),
+			() => {},
+		);
+	});
 
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
@@ -23,7 +27,7 @@
 		error = "";
 		try {
 			await session.login(username, password, needsCode ? code : undefined);
-			goto(next());
+			await goto(safeNext(page.url.searchParams.get("next"), page.url.origin));
 		} catch (e) {
 			if (e instanceof ApiError && e.detail === "totp_required") needsCode = true;
 			else error = message(e);
@@ -48,5 +52,8 @@
 	{/if}
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
 	<button disabled={busy}>Sign in</button>
-	<p class="muted">No account? <a href="/signup">Sign up</a></p>
+	<p class="muted">
+		No account? <a href="/signup">Sign up</a>
+		{#if emailEnabled}· <a href="/reset-password">Forgot your password?</a>{/if}
+	</p>
 </form>

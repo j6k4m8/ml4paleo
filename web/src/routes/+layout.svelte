@@ -6,7 +6,9 @@
 
 	let { children } = $props();
 
-	const PUBLIC = ["/login", "/signup"];
+	const PUBLIC = ["/login", "/signup", "/verify-email", "/reset-password"];
+	// Pages that help finish the required account steps.
+	const SETUP = ["/account", "/verify-email"];
 
 	$effect(() => {
 		if (!session.loaded) {
@@ -16,9 +18,9 @@
 		const path = page.url.pathname;
 		const steps = session.current?.required_steps ?? [];
 		if (!session.current && !PUBLIC.includes(path)) {
-			goto(`/login?next=${encodeURIComponent(path)}`, { replaceState: true });
-		} else if (session.current && steps.length > 0 && path !== "/account") {
-			goto("/account", { replaceState: true });
+			goto(`/login?next=${encodeURIComponent(path + page.url.search)}`, { replace: true });
+		} else if (session.current && steps.length > 0 && !SETUP.includes(path)) {
+			goto("/account", { replace: true });
 		}
 	});
 
