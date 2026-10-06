@@ -94,6 +94,6 @@ async def request_more(
                 f"ml4paleo: {auth.user.username} asked for more space",
                 f"{auth.user.username} asked for higher limits:\n\n"
                 f"{quota_request.message}\n\n"
-                f"Review it at {settings.public_url}/admin/quota-requests\n",
+                f"Review it at {settings.public_url}/admin\n",
             )
     await db.commit()
