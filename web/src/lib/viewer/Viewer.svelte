@@ -60,6 +60,7 @@
 	let labels: LabelLayer | null = $state(null);
 	let prediction: ChunkStore | null = $state(null);
 	let predictionModel = $state("");
+	let predictionArtifact = "";
 	let classes: LabelClass[] = $state([]);
 	let error = $state("");
 	let pool: WorkerPool | undefined;
@@ -96,12 +97,13 @@
 			});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
-			api<{ zarr_url: string; model_name: string | null }>(`/api/projects/${project}/prediction`).then(
+			api<{ artifact_id: string; zarr_url: string; model_name: string | null }>(`/api/projects/${project}/prediction`).then(
 				(found) => {
 					if (!pool || controller.signal.aborted) return;
 					// Predictions never change once made, so their chunks cache like the image's.
 					prediction = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
 					predictionModel = found.model_name ?? "a model";
+					predictionArtifact = found.artifact_id;
 				},
 				(e: unknown) => {
 					if (!(e instanceof ApiError && e.status === 404)) error = e instanceof Error ? e.message : String(e);
@@ -290,10 +292,7 @@
 				return store.request(id).finally(() => store.want(`accept:${id}`, new Set()));
 			}, roi.bbox as [number, number, number, number, number, number]);
 			const parts = acceptParts(values, roi.bbox as [number, number, number, number, number, number]);
-			const ops = queue.editMany(parts, {
-				source: "model_verified",
-				tool: { name: "accept-prediction", roi: roi.id, model: predictionModel },
-			});
+			const ops = queue.editMany(parts, { accept: { prediction: predictionArtifact, roi: roi.id } });
 			for (const op of ops) labels.applyLocal(op.local, op.deltas);
 			if (ops.length === 0) notice = "The prediction has nothing in that ROI.";
 		} catch (e) {
