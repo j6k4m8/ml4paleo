@@ -148,6 +148,21 @@
 		if (viewer.tool !== "roi") rectangle = null;
 	});
 
+	// A layer that now shows another store (a proposal in place of the
+	// prediction, say) has other contents: forget the old one's textures.
+	let shownStores: Record<string, ChunkStore | null | undefined> = {};
+	$effect(() => {
+		const stores = { "prediction/": prediction, "segmentation/": segmentation };
+		for (const [prefix, store] of Object.entries(stores)) {
+			if (prefix in shownStores && shownStores[prefix] !== store) {
+				shownStores[prefix]?.want(plane.name, new Set());
+				renderer?.dropOverlay(prefix);
+				schedule();
+			}
+		}
+		shownStores = stores;
+	});
+
 	// New label colors, and chunks someone else just edited.
 	$effect(() => {
 		if (!labels) return;

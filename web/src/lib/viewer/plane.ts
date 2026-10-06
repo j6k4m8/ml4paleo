@@ -291,6 +291,11 @@ export class PlaneRenderer {
 		this.#labelTextures.deletePrefix(`${id}@`);
 	}
 
+	/** Forget every slice of an overlay layer (its textures' `prefix`). */
+	dropOverlay(prefix: string): void {
+		this.#labelTextures.deletePrefix(prefix);
+	}
+
 	/**
 	 * Draw the view: for each image layer (coarsest first), the tiles on the
 	 * GPU, so finer tiles cover coarser ones as they arrive; then each overlay
