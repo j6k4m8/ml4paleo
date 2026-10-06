@@ -16,6 +16,10 @@ describe("roiBox", () => {
 		expect(roiBox(PLANES.xz, 5, [[-10, -10], [400, 400]], 500, shape)).toEqual([0, 0, 0, 100, 200, 300]);
 	});
 
+	it("rounds fractional corners outward", () => {
+		expect(roiBox(PLANES.xy, 40, [[10.3, 20.7], [12.9, 22.1]], 1, shape)).toEqual([40, 20, 10, 41, 23, 13]);
+	});
+
 	it("refuses empty rectangles", () => {
 		expect(roiBox(PLANES.xy, 40, [[5, 5], [5, 9]], 1, shape)).toBeNull();
 	});

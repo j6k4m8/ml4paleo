@@ -16,12 +16,18 @@ const MAX_LABEL_EXTENT = 256;
 
 useZstd();
 
-const stores = new Map<string, zarr.FetchStore>();
-function store(url: string): zarr.FetchStore {
-	let found = stores.get(url);
+type OpenArray = zarr.Array<zarr.DataType, zarr.FetchStore>;
+const arrays = new Map<string, Promise<OpenArray>>();
+
+/** Each array's metadata is read once for all thumbnails. */
+function openArray(url: string, path: string): Promise<OpenArray> {
+	const key = `${url}#${path}`;
+	let found = arrays.get(key);
 	if (!found) {
-		found = new zarr.FetchStore(absolute(url), { useSuffixRequest: true });
-		stores.set(url, found);
+		const store = new zarr.FetchStore(absolute(url), { useSuffixRequest: true });
+		found = zarr.open.v3(zarr.root(store).resolve(path), { kind: "array" });
+		found.catch(() => arrays.delete(key));
+		arrays.set(key, found);
 	}
 	return found;
 }
@@ -32,11 +38,14 @@ export function thumbnailPlane(bbox: Box): Plane {
 	return normal === 0 ? PLANES.xy : normal === 1 ? PLANES.xz : PLANES.yz;
 }
 
-/** The coarsest level that still shows the ROI at least TARGET voxels across. */
+/**
+ * The coarsest level that still shows the ROI at least TARGET voxels along
+ * its longer side (the thumbnail is square, so the shorter side shrinks).
+ */
 export function thumbnailLevel(levels: Level[], bbox: Box, plane: Plane): Level {
 	let best = levels[0]!;
 	for (const level of levels) {
-		const across = Math.min(
+		const across = Math.max(
 			(bbox[plane.u + 3]! - bbox[plane.u]!) / level.scale[plane.u],
 			(bbox[plane.v + 3]! - bbox[plane.v]!) / level.scale[plane.v],
 		);
@@ -55,7 +64,8 @@ async function readPlane(
 	plane: Plane,
 	signal?: AbortSignal,
 ): Promise<{ data: ArrayLike<number>; width: number; height: number }> {
-	const array = await zarr.open.v3(zarr.root(store(url)).resolve(path), { kind: "array", signal });
+	const array = await openArray(url, path);
+	signal?.throwIfAborted();
 	const selection: (number | zarr.Slice)[] = [];
 	const lo = [0, 0, 0];
 	const hi = [0, 0, 0];

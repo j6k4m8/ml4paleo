@@ -3,7 +3,7 @@
  * training. Marking one complete says its unlabeled voxels are background.
  */
 
-import { api } from "#lib/api.ts";
+import { ApiError, api, message } from "#lib/api.ts";
 import type { Vec3 } from "./viewer/tiles";
 
 export type RoiStatus = "open" | "complete" | "skipped";
@@ -21,8 +21,12 @@ export interface Roi {
 	created_at: string;
 }
 
+// How often to pick up ROIs collaborators added, changed, or deleted.
+const REFRESH_MS = 30_000;
+
 export class RoiList {
 	items = $state<Roi[]>([]);
+	loaded = $state(false);
 	error = $state("");
 
 	constructor(private projectId: string) {}
@@ -32,7 +36,35 @@ export class RoiList {
 	}
 
 	async load(): Promise<void> {
-		this.items = await api<Roi[]>(this.#base);
+		try {
+			this.items = await api<Roi[]>(this.#base);
+			this.error = "";
+		} catch (e) {
+			this.error = message(e);
+		} finally {
+			this.loaded = true;
+		}
+	}
+
+	/** Reload while the page is visible, and when it comes back into view. */
+	keepFresh(): () => void {
+		const reload = () => {
+			if (document.visibilityState === "visible") void this.load();
+		};
+		const timer = setInterval(reload, REFRESH_MS);
+		document.addEventListener("visibilitychange", reload);
+		window.addEventListener("focus", reload);
+		return () => {
+			clearInterval(timer);
+			document.removeEventListener("visibilitychange", reload);
+			window.removeEventListener("focus", reload);
+		};
+	}
+
+	/** Note a failure; an ROI someone else deleted leaves the list. */
+	#failed(e: unknown, id?: string): void {
+		if (id && e instanceof ApiError && e.status === 404) this.items = this.items.filter((r) => r.id !== id);
+		this.error = message(e);
 	}
 
 	async add(bbox: Box, kind: Roi["kind"]): Promise<Roi | null> {
@@ -42,18 +74,21 @@ export class RoiList {
 			this.error = "";
 			return roi;
 		} catch (e) {
-			this.error = e instanceof Error ? e.message : String(e);
+			this.#failed(e);
 			return null;
 		}
 	}
 
-	async update(id: string, change: Partial<Pick<Roi, "status" | "split">>): Promise<void> {
+	/** Change an ROI; returns whether the server took the change. */
+	async update(id: string, change: Partial<Pick<Roi, "status" | "split">>): Promise<boolean> {
 		try {
 			const roi = await api<Roi>(`${this.#base}/${id}`, { method: "PATCH", body: change });
 			this.items = this.items.map((r) => (r.id === id ? roi : r));
 			this.error = "";
+			return true;
 		} catch (e) {
-			this.error = e instanceof Error ? e.message : String(e);
+			this.#failed(e, id);
+			return false;
 		}
 	}
 
@@ -63,9 +98,20 @@ export class RoiList {
 			this.items = this.items.filter((r) => r.id !== id);
 			this.error = "";
 		} catch (e) {
-			this.error = e instanceof Error ? e.message : String(e);
+			this.#failed(e, id);
 		}
 	}
+}
+
+/** A short description of an ROI, such as "slice 40 × 30 × 1". */
+export function describe(roi: Pick<Roi, "kind" | "bbox">): string {
+	const [z0, y0, x0, z1, y1, x1] = roi.bbox;
+	return `${roi.kind} ${x1 - x0} × ${y1 - y0} × ${z1 - z0}`;
+}
+
+/** Set a status or split select back to what the server has, after a refused change. */
+export function revert(select: HTMLSelectElement, value: string): void {
+	select.value = value;
 }
 
 /** The thin axis of a slice ROI (or z for a cube). */

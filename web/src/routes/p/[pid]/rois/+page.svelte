@@ -1,7 +1,8 @@
 <script lang="ts">
+	import { untrack } from "svelte";
 	import { page } from "$app/state";
 	import { ApiError, api, message } from "#lib/api.ts";
-	import { type Roi, RoiList } from "#lib/rois.svelte.ts";
+	import { describe, revert, type Roi, RoiList } from "#lib/rois.svelte.ts";
 	import { drawThumbnail } from "#lib/thumbnail.ts";
 	import type { ProjectImage } from "#lib/types.ts";
 	import { loadLevels } from "#lib/viewer/image.ts";
@@ -23,6 +24,7 @@
 	$effect(() => {
 		const list = new RoiList(pid);
 		rois = list;
+		const stopRefreshing = list.keepFresh();
 		const controller = new AbortController();
 		(async () => {
 			try {
@@ -35,7 +37,10 @@
 				if (!(e instanceof ApiError && e.status === 404)) error = message(e);
 			}
 		})();
-		return () => controller.abort();
+		return () => {
+			controller.abort();
+			stopRefreshing();
+		};
 	});
 
 	/** Draw a thumbnail once its card is on screen. */
@@ -53,18 +58,16 @@
 				colors,
 				opacity: 0.5,
 				signal: controller.signal,
-			}).catch(() => canvas.classList.add("failed"));
+			}).catch(() => {
+				canvas.classList.add("failed");
+				canvas.title = "No preview";
+			});
 		});
 		observer.observe(canvas);
 		return () => {
 			observer.disconnect();
 			controller.abort();
 		};
-	}
-
-	function size(roi: Roi): string {
-		const [z0, y0, x0, z1, y1, x1] = roi.bbox;
-		return `${x1 - x0} × ${y1 - y0} × ${z1 - z0}`;
 	}
 
 	async function remove(roi: Roi) {
@@ -86,7 +89,7 @@
 	{/each}
 </div>
 
-{#if rois && rois.items.length === 0}
+{#if rois?.loaded && rois.items.length === 0}
 	<p class="muted">No ROIs yet. In the annotator, pick the ROI tool (<kbd>r</kbd>) and drag a box.</p>
 {/if}
 
@@ -94,28 +97,35 @@
 	{#each shown as roi (roi.id)}
 		<li class="card status-{roi.status}">
 			{#key levels.length}
-				<a href="/p/{pid}/annotate?roi={roi.id}" aria-label="Open this ROI in the annotator">
-					<canvas {@attach (canvas) => thumbnail(canvas, roi)}></canvas>
+				<a href="/p/{pid}/annotate?roi={roi.id}" aria-label="Open the {describe(roi)} ROI in the annotator">
+					<!-- Drawn once per card; a status change doesn't redraw it. -->
+					<canvas {@attach (canvas) => untrack(() => thumbnail(canvas, roi))}></canvas>
 				</a>
 			{/key}
 			<div class="meta">
 				<strong>{roi.kind}</strong>
-				<span class="muted">{size(roi)}</span>
+				<span class="muted">{describe(roi).slice(roi.kind.length + 1)}</span>
 			</div>
 			<div class="actions">
 				<select
-					aria-label="Status"
+					aria-label="Status of the {describe(roi)} ROI"
 					value={roi.status}
-					onchange={(e) => rois?.update(roi.id, { status: e.currentTarget.value as Roi["status"] })}
+					onchange={async (e) => {
+						const select = e.currentTarget;
+						if (!(await rois?.update(roi.id, { status: select.value as Roi["status"] }))) revert(select, roi.status);
+					}}
 				>
 					<option value="open">open</option>
 					<option value="complete">complete</option>
 					<option value="skipped">skipped</option>
 				</select>
 				<select
-					aria-label="Split"
+					aria-label="Split of the {describe(roi)} ROI"
 					value={roi.split}
-					onchange={(e) => rois?.update(roi.id, { split: e.currentTarget.value as Roi["split"] })}
+					onchange={async (e) => {
+						const select = e.currentTarget;
+						if (!(await rois?.update(roi.id, { split: select.value as Roi["split"] }))) revert(select, roi.split);
+					}}
 				>
 					<option value="train">train</option>
 					<option value="val">validation</option>
@@ -160,6 +170,9 @@
 	}
 	.status-skipped {
 		--status: #768390;
+	}
+	canvas:global(.failed) {
+		opacity: 0.3;
 	}
 	canvas {
 		display: block;
