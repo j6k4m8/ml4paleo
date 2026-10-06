@@ -6,28 +6,48 @@ with specks removed (see `ml4paleo.segmentation.compose`), into a
     compose.prepare -> cc.block x N -> cc.merge -> cc.apply x N -> compose.finalize
 
 The labels and complete ROIs are pinned when the pipeline starts: their
-chunk hashes go into the artifact as `inputs.json`, so edits made while it
-runs don't change the result.
+chunk hashes go to `compose.prepare` in its payload, and it writes them into
+the artifact as `inputs.json`, so edits made while the pipeline runs don't
+change the result, and a start that never commits leaves no files behind.
+
+A project makes one final segmentation at a time (`running`).
 """
 
-import json
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from starlette.concurrency import run_in_threadpool
+from sqlalchemy.orm import aliased
 
 from ml4paleo.segmentation.predict import SHARD_ZYX, shard_boxes
-from ml4paleo.storage import put_bytes
 
 from .. import artifacts, jobs
 from ..db import Artifact, Job, LabelChunk, LabelOp, Roi
-from ..settings import Settings
-from ..storage import project_storage
+from ..jobs.queue import FINISHED
 
-INPUTS = "inputs.json"
 WEIGHTS = {"prepare": 1.0, "blocks": 45.0, "merge": 4.0, "apply": 45.0, "finalize": 1.0}
+
+_step = aliased(Job)
+
+
+async def running(db: AsyncSession, project_id: uuid.UUID) -> uuid.UUID | None:
+    """The project's final segmentation pipeline still waiting or running, if any."""
+    roots = await db.scalars(
+        select(Job.id)
+        .where(
+            Job.project_id == project_id,
+            Job.id == Job.root_id,
+            Job.kind == "compose.prepare",
+            exists().where(_step.root_id == Job.id, _step.status.not_in(FINISHED)),
+        )
+        .order_by(Job.created_at.desc())
+    )
+    for root_id in roots.all():
+        status = await jobs.pipeline_status(db, root_id)
+        if status.status in ("waiting", "running"):
+            return root_id
+    return None
 
 
 async def pinned_labels(
@@ -70,12 +90,15 @@ async def pinned_labels(
 async def start(
     db: AsyncSession,
     sessionmaker: async_sessionmaker[AsyncSession],
-    settings: Settings,
     *,
     prediction: Artifact,
     min_voxels: int,
     created_by: uuid.UUID,
 ) -> tuple[Job, Artifact]:
+    """
+    Start a final segmentation; the caller commits. Raises ValueError if
+    jobs can't be given the prediction (for example it is being deleted).
+    """
     assert prediction.manifest is not None
     shape = [int(n) for n in prediction.manifest["shape_zyx"]]
     inputs = await pinned_labels(sessionmaker, prediction.project_id)
@@ -91,8 +114,6 @@ async def start(
             "label_seq": inputs["label_seq"],
         },
     )
-    grant = project_storage(settings).child(artifacts.artifact_path(segmentation))
-    await run_in_threadpool(put_bytes, grant, INPUTS, json.dumps(inputs).encode())
     grants = [
         artifacts.grant_for(prediction, "r"),
         # The label root; blob keys start with "blobs/".
@@ -110,8 +131,14 @@ async def start(
         "model_id": prediction.inputs.get("model_id"),
         "prediction_artifact_id": str(prediction.id),
     }
+    # The pinned labels (about 80 bytes a labeled chunk) go to the first job
+    # only, which writes them out for the others.
     prepare = await jobs.enqueue(
-        db, "compose.prepare", payload, weight=WEIGHTS["prepare"], **common
+        db,
+        "compose.prepare",
+        {**payload, "inputs": inputs},
+        weight=WEIGHTS["prepare"],
+        **common,
     )
     boxes = shard_boxes(shape, SHARD_ZYX)
     blocks = [

@@ -39,3 +39,7 @@ HANDLERS: dict[str, Handler] = {
     "v1.labels": v1import.labels,
     "v1.prediction": v1import.prediction,
 }
+
+# A worker with the v1 volume can read every v1 job's files, so it runs the
+# import's own jobs and nothing that parses people's uploads.
+V1_HANDLERS = {kind: run for kind, run in HANDLERS.items() if kind.startswith("v1.")}

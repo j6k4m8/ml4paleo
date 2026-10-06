@@ -162,3 +162,7 @@ override, which also starts a worker that can read it. Put both lines in
 M4P_V1_VOLUME=/home/ubuntu/ml4paleo-webapp-volume
 COMPOSE_FILE=compose.yml:compose.v1.yml
 ```
+
+The API sees `jobs.json` as it was when the API started, since v1 saves it by
+replacing the file. If v1 is still running, run `docker compose restart api`
+to pick up the jobs made since.

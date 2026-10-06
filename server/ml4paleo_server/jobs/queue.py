@@ -334,12 +334,14 @@ async def leased_job(
     db: AsyncSession, job_id: uuid.UUID, worker: Worker, lease_token: str
 ) -> Job:
     """
-    Lock a job (key share, so it can't finish until the caller's transaction
-    ends) and check that `worker` holds its lease with `lease_token`.
+    Lock a job (FOR NO KEY UPDATE, so it can't finish until the caller's
+    transaction ends) and check that `worker` holds its lease with
+    `lease_token`.
     """
     job = await db.scalar(
         select(Job)
         .where(Job.id == job_id)
+        # key_share alone is FOR NO KEY UPDATE (with read=True, FOR KEY SHARE).
         .with_for_update(key_share=True)
         # Bulk updates (like cancel_pipeline) don't refresh loaded jobs.
         .execution_options(populate_existing=True)
@@ -426,10 +428,10 @@ async def complete(
     Mark a job succeeded and queue the jobs that were waiting only for it.
 
     `check` runs first, in the same transaction (the server commits the job's
-    artifacts there); if it raises `Rejected`, the attempt fails instead and
-    the exception propagates. `after` runs once the job is succeeded (the
-    server adds the pipeline's next jobs there); a repeated report of the same
-    success runs neither.
+    artifacts there), and `after` once the job is succeeded (the server adds
+    the pipeline's next jobs there). If either raises `Rejected`, everything
+    they did is undone, the attempt fails instead, and the exception
+    propagates. A repeated report of the same success runs neither.
 
     Reporting the same success twice is harmless. Raises `JobCancelled` if the
     job was cancelled while it ran.
@@ -445,22 +447,22 @@ async def complete(
     if job.cancel_requested:
         await _finish(db, job, "cancelled", outcome="cancelled")
         raise JobCancelled
-    if check is not None:
-        try:
-            # A savepoint, so a rejection undoes everything the check did
-            # (for example quota reserved for an earlier artifact).
-            async with db.begin_nested():
+    try:
+        # A savepoint, so a rejection undoes everything before it (for
+        # example quota reserved for an earlier artifact, or the success).
+        async with db.begin_nested():
+            if check is not None:
                 await check(job)
-        except Rejected as exc:
-            await db.refresh(job)
-            await _end_attempt(db, job, error=str(exc), retryable=exc.retryable)
-            raise
-    job.result = result
-    job.progress = 1
-    await _finish(db, job, "succeeded", outcome="succeeded")
-    await _unblock_children(db, job.id)
-    if after is not None:
-        await after(job)
+            job.result = result
+            job.progress = 1
+            await _finish(db, job, "succeeded", outcome="succeeded")
+            await _unblock_children(db, job.id)
+            if after is not None:
+                await after(job)
+    except Rejected as exc:
+        await db.refresh(job)
+        await _end_attempt(db, job, error=str(exc), retryable=exc.retryable)
+        raise
     return job
 
 

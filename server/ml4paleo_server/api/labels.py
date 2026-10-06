@@ -114,7 +114,8 @@ async def add_class(
     """
     Add a class. It gets the next value never used in this project.
     """
-    # Lock the project so two new classes can't take the same value.
+    # Lock the project (FOR NO KEY UPDATE, which conflicts with itself) so two
+    # new classes, or this and the v1 import's, can't take the same value.
     await db.scalar(
         select(Project.id)
         .where(Project.id == project.id)

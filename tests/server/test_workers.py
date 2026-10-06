@@ -18,6 +18,7 @@ from ml4paleo_server.db import Worker as WorkerRow
 from ml4paleo_server.jobs.workers import ensure_local_worker, new_worker_token
 from ml4paleo_worker import caps as worker_caps
 from ml4paleo_worker import cli as worker_cli
+from ml4paleo_worker import main as worker_main
 from ml4paleo_worker.client import LeaseLost, ServerClient, Unauthorized
 from ml4paleo_worker.context import PermanentError
 from ml4paleo_worker.handlers import HANDLERS
@@ -357,6 +358,40 @@ def test_the_worker_cli_refuses_to_send_its_token_in_the_clear(tmp_path):
         assert exit_info.value.code == 2
 
 
+def test_a_worker_with_the_v1_volume_runs_only_the_import(monkeypatch, tmp_path):
+    token_file = tmp_path / "token"
+    token_file.write_text(new_worker_token())
+    volume = tmp_path / "v1"
+    volume.mkdir()
+    (volume / "jobs.json").write_text("{}")
+    started = []
+
+    class Started:
+        unauthorized = False
+
+        def __init__(self, client, caps, *, handlers, v1_volume):
+            started.append((caps, handlers, v1_volume))
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(worker_main, "Worker", Started)
+    monkeypatch.setattr(worker_cli.signal, "signal", lambda *args: None)
+    argv = ["--server", "https://ml4paleo.example.org", "--token-file", str(token_file)]
+    assert worker_cli.main(argv) == 0
+    assert worker_cli.main([*argv, "--v1-volume", str(volume)]) == 0
+    (caps, handlers, unset), (v1_caps, v1_handlers, v1_volume) = started
+    assert caps.kinds == sorted(HANDLERS) and handlers == HANDLERS
+    assert unset is None and "v1-volume" not in caps.labels
+    assert v1_caps.kinds == ["v1.labels", "v1.prediction", "v1.probe", "v1.slab"]
+    assert sorted(v1_handlers) == v1_caps.kinds
+    assert v1_volume == volume and "v1-volume" in v1_caps.labels
+    # The label alone would take import jobs it can't run.
+    with pytest.raises(SystemExit) as exit_info:
+        worker_cli.main([*argv, "--label", "v1-volume"])
+    assert exit_info.value.code == 2
+
+
 def test_gpus_are_detected_from_nvidia_smi(monkeypatch):
     class Done:
         stdout = "24564\n16384\n"
@@ -385,7 +420,13 @@ def test_memory_comes_from_the_container_limit(monkeypatch, tmp_path):
     assert worker_caps.detect().memory_gb == 2.0
 
 
-def test_each_slot_gets_a_share_of_memory():
-    caps = CAPS.model_copy(update={"memory_gb": 8.0, "slots": 2})
+def test_each_slot_gets_a_share_of_memory_and_cpus():
+    caps = CAPS.model_copy(update={"memory_gb": 8.0, "cpus": 7, "slots": 2})
     worker = Worker(ServerClient("m4pw_x", http=object()), caps)  # type: ignore[arg-type]
     assert worker.memory_budget_bytes() == 3 * 1024**3
+    assert worker.threads() == 3
+    one = Worker(
+        ServerClient("m4pw_x", http=object()),  # type: ignore[arg-type]
+        caps.model_copy(update={"cpus": 1}),
+    )
+    assert one.threads() == 1

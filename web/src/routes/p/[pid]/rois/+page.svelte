@@ -94,15 +94,16 @@
 <div class="mx-auto flex max-w-6xl flex-col gap-4 p-6">
 	<div class="flex flex-wrap items-center gap-3">
 		<h1>ROIs</h1>
-		<div class="ml-auto flex overflow-hidden rounded-sm border border-edge" role="radiogroup" aria-label="Show">
+		<div class="ml-auto flex rounded-sm border border-edge" role="radiogroup" aria-label="Show">
 			{#each ["all", "open", "complete", "skipped"] as option (option)}
 				<label
-					class="flex cursor-pointer items-center gap-1.5 px-2.5 py-1 capitalize
-						{filter === option ? 'bg-accent text-white' : 'bg-panel text-ink-dim hover:bg-raised hover:text-ink'}"
+					class="relative flex cursor-pointer items-center gap-1.5 px-2.5 py-1 capitalize first:rounded-l-[3px] last:rounded-r-[3px]
+						has-[:focus-visible]:z-10 has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-1 has-[:focus-visible]:outline-accent
+						{filter === option ? 'bg-accent-fill text-white' : 'bg-panel text-ink-dim hover:bg-raised hover:text-ink'}"
 				>
 					<input class="sr-only" type="radio" name="filter" value={option} bind:group={filter} />
 					{option}
-					<span class="font-mono text-2xs opacity-70">
+					<span class="font-mono text-2xs">
 						{option === "all" ? (rois?.items.length ?? 0) : (rois?.items.filter((r) => r.status === option).length ?? 0)}
 					</span>
 				</label>
@@ -137,9 +138,10 @@
 						<span class="font-medium capitalize">{roi.kind}</span>
 						<span class="font-mono text-2xs text-ink-dim">{describe(roi).slice(roi.kind.length + 1)}</span>
 					</div>
-					<div class="grid grid-cols-2 gap-1">
+					<!-- Side by side when both fit, else one under the other. -->
+					<div class="flex flex-wrap gap-1">
 						<select
-							class="field"
+							class="field w-auto flex-1"
 							aria-label="Status of the {describe(roi)} ROI"
 							value={roi.status}
 							onchange={async (e) => {
@@ -152,7 +154,7 @@
 							<option value="skipped">skipped</option>
 						</select>
 						<select
-							class="field"
+							class="field w-auto flex-1"
 							aria-label="Split of the {describe(roi)} ROI"
 							value={roi.split}
 							onchange={async (e) => {

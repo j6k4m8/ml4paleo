@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import artifacts, jobs
 from ..db import Artifact, Job, Upload
+from ..settings import Settings
 from ..uploads import upload_path
 
 # How much of the pipeline's progress bar each part is.
@@ -92,7 +93,7 @@ def check_volume(result: dict) -> None:
         raise ValueError("slabs must cover the whole depth")
 
 
-async def after_probe(db: AsyncSession, probe: Job) -> None:
+async def after_probe(db: AsyncSession, settings: Settings, probe: Job) -> None:
     result = probe.result or {}
     image_grant = probe.grants[:1]
     depth = result["shape_zyx"][0]

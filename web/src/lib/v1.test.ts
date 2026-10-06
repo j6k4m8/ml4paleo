@@ -8,8 +8,32 @@ describe("parseJobId", () => {
 		expect(parseJobId("https://ml4paleo.example/job/ab12cd/annotate?x=1")).toBe("AB12CD");
 	});
 
+	it("takes v1's other job pages", () => {
+		for (const path of [
+			"/job/annotate/ab12cd",
+			"/job/annotate-v2/AB12CD",
+			"/job/AB12CD/annotations",
+			"/job/AB12CD/annotations/img1745400000.png",
+			"/job/ab12cd/models?metric=train_foreground_dice",
+			"/job/AB12CD/download#zip",
+		]) {
+			expect(parseJobId(`https://ml4paleo.example${path}`)).toBe("AB12CD");
+			expect(parseJobId(path)).toBe("AB12CD");
+		}
+	});
+
 	it("refuses anything else", () => {
-		for (const text of ["", "AB12C", "AB12CDE", "XY12CD", "https://ml4paleo.example/p/AB12CD"]) {
+		for (const text of [
+			"",
+			"AB12C",
+			"AB12CDE",
+			"XY12CD",
+			"https://ml4paleo.example/p/AB12CD",
+			"/job/annotate",
+			"/job/annotate/AB12C",
+			"/job/annotate-v3/AB12CD",
+			"/job/annotate/annotate/AB12CD",
+		]) {
 			expect(parseJobId(text)).toBeNull();
 		}
 	});

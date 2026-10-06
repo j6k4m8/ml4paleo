@@ -6,30 +6,39 @@ v1 (the Flask app in `webapp/`) kept everything under one folder:
     jobs.json                         {job id: record}
     chunks/<JOB>/                     the image: a zarr v2 array, (x, y, z)
     training/<JOB>/img<ts>.png        annotation samples: an 8-bit view,
-                   seg<ts>.png        its mask (red 255 is foreground),
+                   seg<ts>.png        its mask (red above 0 is foreground),
                    meta<ts>.json      and where it came from (April 2026 on)
     models/<JOB>/<ts>.model, .json    random forests and their sidecars
-    segmented/<JOB>/<ts>.zarr/        segmentations: zarr v2, (x, y, z), 0 or 255
+    segmented/<JOB>/<ts>.zarr/        segmentations: zarr v2, (x, y, z), 0 for
+                                      background and anything else (usually
+                                      255) for foreground
 
 Job ids are six uppercase hex digits. Each annotation sample is a fully
-labeled 512² XY slice of a random cutout: red 255 is foreground and
-everything else background. Only samples with metadata can be placed in the
-volume; older ones are skipped. PNG rows are y and columns x.
+labeled 512² XY slice of a random cutout: red above 0 is foreground (v1
+trained on any red) and everything else background. Only samples with
+metadata can be placed in the volume; older ones are skipped. PNG rows are
+y and columns x.
 """
 
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import numpy as np
 
 JOB_ID = re.compile(r"[0-9A-F]{6}")
 JOBS_FILE = "jobs.json"
+# A segmentation's folder: the time its model was trained.
+SEGMENTATION_NAME = re.compile(r"\d+\.zarr")
+# Statuses of jobs whose upload never became an image (as v1's job page
+# decides whether it can be annotated); v1 never used "pending".
+UNCONVERTED = {"pending", "uploading", "uploaded", "converting", "convert_error"}
 # Statuses that mean the newest segmentation finished. v1 also sets
 # "annotated" whenever someone annotates, even after segmenting, so this is
-# only a fallback for jobs whose models predate sidecars naming their output.
+# only a fallback for jobs without sidecars from v1's segment runner (older
+# ones, or ones migrated with v1's button) that name their output.
 SEGMENTED = {"segmented", "meshing_queued", "meshing", "meshed", "mesh_error"}
 
 
@@ -67,16 +76,35 @@ def _is_array(path: Path) -> bool:
     return (path / ".zarray").is_file()
 
 
+def _is_segmentation(name: Any, folder: Path) -> TypeGuard[str]:
+    return (
+        isinstance(name, str)
+        and SEGMENTATION_NAME.fullmatch(name) is not None
+        and _is_array(folder / name)
+    )
+
+
 def _stamp(name: str) -> int:
     digits = name.split(".")[0].split("-")[0]
     return int(digits) if digits.isdigit() else -1
 
 
+def _from_segment_runner(meta: dict[str, Any]) -> bool:
+    """
+    Whether v1's segment runner wrote a model's sidecar: it names the run's
+    segmentation only once segmenting succeeds. v1's "migrate metadata"
+    button names one whenever its folder exists, finished or not.
+    """
+    return "legacy_metadata_migrated_at" not in meta and (
+        "training_samples" in meta or "metrics" in meta
+    )
+
+
 def segmentation(root: Path, job_id: str, record: dict[str, Any]) -> str | None:
     """
-    The name of the newest segmentation known to be complete: one a model's
-    sidecar names (v1 writes that once segmenting succeeds), else the newest
-    one if the job's status says segmenting finished. None if there's none.
+    The name of the newest segmentation known to be complete: one a sidecar
+    from v1's segment runner names, else the newest one if the job's status
+    says segmenting finished. None if there's none.
     """
     folder = root / "segmented" / job_id
     named = []
@@ -85,12 +113,14 @@ def segmentation(root: Path, job_id: str, record: dict[str, Any]) -> str | None:
             meta = json.loads(sidecar.read_text())
         except (OSError, ValueError):
             continue
-        name = meta.get("segmentation_id") if isinstance(meta, dict) else None
-        if isinstance(name, str) and "/" not in name and _is_array(folder / name):
+        if not (isinstance(meta, dict) and _from_segment_runner(meta)):
+            continue
+        name = meta.get("segmentation_id")
+        if _is_segmentation(name, folder):
             named.append(name)
     if named:
         return max(named, key=_stamp)
-    found = [p.name for p in folder.glob("*.zarr") if _is_array(p)]
+    found = [p.name for p in folder.glob("*.zarr") if _is_segmentation(p.name, folder)]
     if found and status(record) in SEGMENTED:
         return max(found, key=_stamp)
     return None
