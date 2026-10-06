@@ -25,6 +25,7 @@
 	import Panel from "#lib/ui/Panel.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
 	import { ApiError, api, message } from "#lib/api.ts";
+	import { unfinished } from "#lib/pipelines.ts";
 	import { whileVisible } from "#lib/refresh.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
@@ -109,6 +110,14 @@
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
 			void loadPrediction(controller.signal);
+			// A proposal still being made (asked for before a reload, say) shows when it's done.
+			api<Pipeline[]>(`/api/projects/${project}/pipelines`, { signal: controller.signal }).then(
+				(pipelines) => {
+					const latest = pipelines.find((p) => p.kind === "proposal");
+					if (latest && unfinished(latest) && !proposing) void follow(latest.id);
+				},
+				() => {},
+			);
 			api<{ zarr_url: string }>(`/api/projects/${project}/segmentation`).then(
 				(found) => {
 					if (!pool || controller.signal.aborted) return;
@@ -362,51 +371,69 @@
 		return [proposal, prediction].find((layer) => layer && within(roi.bbox, layer.box)) ?? null;
 	}
 
-	/** Wait for a pipeline to end; throw with its error if it didn't succeed. */
-	function finished(id: string): Promise<void> {
+	/**
+	 * Follow a pipeline until it ends, and give its final state. Stops
+	 * following, and rejects, when `signal` aborts.
+	 */
+	function finished(id: string, signal: AbortSignal): Promise<Pipeline> {
 		return new Promise((resolve, reject) => {
+			if (signal.aborted) return reject(signal.reason);
 			const source = new EventSource(`/api/projects/${project}/pipelines/${id}/events`);
 			let ended = false;
-			const end = async () => {
-				if (ended) return;
+			/** Stop following; false if that already happened. */
+			const stop = () => {
+				if (ended) return false;
 				ended = true;
 				source.close();
-				try {
-					const final = await api<Pipeline>(`/api/projects/${project}/pipelines/${id}`);
-					if (final.status === "succeeded") resolve();
-					else reject(new Error(final.error ?? `The proposal ${final.status}.`));
-				} catch (e) {
-					reject(e);
-				}
+				signal.removeEventListener("abort", aborted);
+				return true;
 			};
+			const aborted = () => {
+				if (stop()) reject(signal.reason);
+			};
+			signal.addEventListener("abort", aborted);
 			source.addEventListener("status", (event) => {
 				const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
-				if (update.status !== "waiting" && update.status !== "running") void end();
+				if (!unfinished(update) && stop()) resolve(update);
 			});
 			// The server answers 204 for a pipeline that has ended, which closes the stream.
 			source.addEventListener("error", () => {
-				if (source.readyState === EventSource.CLOSED) void end();
+				if (source.readyState !== EventSource.CLOSED || !stop()) return;
+				api<Pipeline>(`/api/projects/${project}/pipelines/${id}`, { signal }).then(resolve, reject);
 			});
 		});
 	}
 
-	/** Predict just this ROI with the proposer, and show the result to accept. */
-	async function propose(roi: Roi) {
-		if (!proposer || proposing) return;
+	/**
+	 * Wait for a proposal (its pipeline, or a request that gives it) to be
+	 * made, and then show it.
+	 */
+	async function follow(pipeline: string | Promise<string>) {
 		proposing = true;
-		notice = "";
 		try {
-			const started = await api<{ pipeline_id: string }>(`/api/projects/${project}/models/${proposer.id}/propose`, {
-				body: { roi_id: roi.id },
-			});
-			await finished(started.pipeline_id);
+			const final = await finished(await pipeline, controller.signal);
+			if (final.status !== "succeeded") {
+				notice = final.error ?? `The proposal ${final.status}.`;
+				return;
+			}
 			await loadPrediction(controller.signal);
 			viewer.showPrediction = true;
 		} catch (e) {
-			notice = message(e);
+			if (!controller.signal.aborted) notice = message(e);
 		} finally {
 			proposing = false;
 		}
+	}
+
+	/** Predict just this ROI with the proposer, and show the result to accept. */
+	function propose(roi: Roi) {
+		if (!proposer || proposing) return;
+		notice = "";
+		const started = api<{ pipeline_id: string }>(`/api/projects/${project}/models/${proposer.id}/propose`, {
+			body: { roi_id: roi.id },
+			signal: controller.signal,
+		});
+		void follow(started.then((s) => s.pipeline_id));
 	}
 
 	const openRois = $derived(rois.items.filter((r) => r.status === "open"));
