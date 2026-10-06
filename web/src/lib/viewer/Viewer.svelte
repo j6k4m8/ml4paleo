@@ -48,6 +48,7 @@
 			const layer = new LabelLayer(project, pool, viewer.shape);
 			await layer.start();
 			if (controller.signal.aborted) return layer.stop();
+			layer.onStopped = () => (error = "Live label updates stopped. Reload the page to see others' edits.");
 			labels = layer;
 			classes = layer.classes;
 			viewer.activeClass ??= classes[0]?.value ?? null;
@@ -173,7 +174,17 @@
 		if (event.key === " ") viewer.panning = false;
 	}
 
+	/** The view that slice keys step: the only one, or the one last pointed at. */
+	function activePlane(): Plane {
+		return viewer.layout === "four" ? hovered : PLANES[viewer.layout];
+	}
+
 	function key(event: KeyboardEvent) {
+		if (viewer.help && event.key === "Escape") {
+			viewer.help = false;
+			event.preventDefault();
+			return;
+		}
 		if (event.key === " " && !(event.target instanceof HTMLInputElement)) {
 			viewer.panning = true;
 			event.preventDefault();
@@ -216,9 +227,9 @@
 				queue.redo();
 				return;
 			case "slice-next":
-				return viewer.step(hovered.normal, step);
+				return viewer.step(activePlane().normal, step);
 			case "slice-previous":
-				return viewer.step(hovered.normal, -step);
+				return viewer.step(activePlane().normal, -step);
 			case "zoom-in":
 				viewer.autoFit = false;
 				return viewer.zoomBy(1.25);
@@ -327,7 +338,7 @@
 </div>
 
 {#if viewer.help}
-	<div class="help" role="dialog" aria-label="Keys">
+	<div class="help" role="dialog" aria-modal="true" aria-label="Keys">
 		<table>
 			<tbody>
 				{#each KEYMAP as binding (binding.action)}
@@ -338,7 +349,8 @@
 				{/each}
 			</tbody>
 		</table>
-		<button class="secondary" onclick={() => (viewer.help = false)}>Close</button>
+		<!-- svelte-ignore a11y_autofocus -->
+		<button class="secondary" autofocus onclick={() => (viewer.help = false)}>Close</button>
 	</div>
 {/if}
 

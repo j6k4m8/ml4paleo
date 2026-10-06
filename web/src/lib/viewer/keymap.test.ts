@@ -13,7 +13,7 @@ describe("keymap", () => {
 
 	it("maps presses to actions", () => {
 		expect(actionFor(press("ArrowUp"))).toBe("slice-next");
-		expect(actionFor(press(">", { shiftKey: true }))).toBeUndefined();
+		expect(actionFor(press(">", { shiftKey: true }))).toBe("slice-next");
 		expect(actionFor(press("L", { shiftKey: true }))).toBe("layout");
 		expect(actionFor(press("?", { shiftKey: true }))).toBe("help");
 	});

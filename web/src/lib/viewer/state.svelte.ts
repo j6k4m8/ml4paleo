@@ -30,7 +30,8 @@ interface Preferences {
 
 function loadPreferences(): Partial<Preferences> {
 	try {
-		return JSON.parse(localStorage.getItem(PREFERENCES) ?? "{}") as Partial<Preferences>;
+		const saved: unknown = JSON.parse(localStorage.getItem(PREFERENCES) ?? "{}");
+		return saved && typeof saved === "object" ? (saved as Partial<Preferences>) : {};
 	} catch {
 		return {};
 	}
