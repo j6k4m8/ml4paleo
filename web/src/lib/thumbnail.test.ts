@@ -20,6 +20,8 @@ describe("thumbnails", () => {
 		const level = (box: [number, number, number, number, number, number]) =>
 			thumbnailLevel(levels, box, thumbnailPlane(box)).index;
 		expect(level([0, 0, 0, 1, 64, 64])).toBe(0);
+		// Long and thin: sized by the long side.
+		expect(level([0, 0, 0, 1, 20, 800])).toBe(2);
 		expect(level([0, 0, 0, 1, 200, 200])).toBe(1);
 		expect(level([0, 0, 0, 1, 400, 400])).toBe(2);
 	});

@@ -135,6 +135,11 @@
 		renderer = undefined;
 	});
 
+	// Switching tools (Esc, a key) drops an ROI being drawn.
+	$effect(() => {
+		if (viewer.tool !== "roi") rectangle = null;
+	});
+
 	// New label colors, and chunks someone else just edited.
 	$effect(() => {
 		if (!labels) return;
@@ -322,6 +327,7 @@
 		if (press && event.pointerId !== press.pointer) return;
 		cursor = offset(event).map((d, i) => (d + (i === 0 ? width : height) / 2) / ratio()) as [number, number];
 		if (rectangle) {
+			if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) >= 3) press.moved = true;
 			rectangle = { ...rectangle, to: planePoint(event) };
 			return;
 		}
@@ -352,7 +358,8 @@
 		if (rectangle) {
 			const { from, to } = rectangle;
 			rectangle = null;
-			onroi(plane, slice, [from, to]);
+			// A click without a drag isn't an ROI.
+			if (press?.moved) onroi(plane, slice, [from, to]);
 		} else if (stroke) {
 			const { last: _last, ...finished } = stroke;
 			stroke = null;
@@ -388,7 +395,7 @@
 			viewer.moveTo(point);
 			return;
 		}
-		if (stroke) return;
+		if (stroke || rectangle) return;
 		// About one slice per mouse wheel notch; trackpads add up.
 		wheelSteps += delta / 100;
 		const steps = Math.trunc(wheelSteps);
@@ -582,6 +589,7 @@
 	}
 	.roi-skipped {
 		stroke: #768390;
+		stroke-dasharray: 2 3;
 	}
 	.roi-new {
 		stroke: #fff;
