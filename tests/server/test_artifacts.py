@@ -368,7 +368,7 @@ def test_new_heads_supersede_old_ones_and_gc_frees_them(
     assert artifact_row(migrated_database_url, second).state == "committed"
 
 
-def test_replaced_proposals_go_after_an_hour(settings, migrated_database_url):
+def test_replaced_proposals_go_after_two_days(settings, migrated_database_url):
     project_id = make_project(migrated_database_url)
     # Each person's proposals replace each other in a slot of their own.
     ada, bob = (artifacts.proposal_slot(uuid.uuid4()) for _ in "ab")
@@ -391,10 +391,10 @@ def test_replaced_proposals_go_after_an_hour(settings, migrated_database_url):
         await db.commit()
         return await artifacts.collect_garbage(create_sessionmaker(db.bind), settings)
 
-    # Not at once, so accepts from one just replaced still land...
-    assert run_db(migrated_database_url, lambda db: collect_after(db, 0.5)) == 0
+    # Not at once, so accepts from one, queued while offline, still land...
+    assert run_db(migrated_database_url, lambda db: collect_after(db, 47)) == 0
     # ...but long before other replaced artifacts.
-    assert run_db(migrated_database_url, lambda db: collect_after(db, 2)) == 2
+    assert run_db(migrated_database_url, lambda db: collect_after(db, 49)) == 2
     for slot in (ada, bob):
         assert artifact_row(migrated_database_url, replaced[slot]).state == "deleted"
     assert artifact_row(migrated_database_url, replaced["image"]).state == "superseded"

@@ -13,9 +13,9 @@ becomes current.
 
 Garbage collection (run by the housekeeper) is the only thing that deletes
 artifact files: failed artifacts after `keep_failed_hours`, replaced ones
-after `keep_superseded_days` (replaced proposals after an hour), expired
-ones (caches such as exports), and everything in deleted projects. It skips
-artifacts that a waiting or running job may still read.
+after `keep_superseded_days` (replaced proposals sooner, after two days),
+expired ones (caches such as exports), and everything in deleted projects.
+It skips artifacts that a waiting or running job may still read.
 """
 
 import base64
@@ -46,10 +46,11 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 COLLECT_BATCH = 50
 # Staging artifacts that no job will commit are abandoned after this long.
 ABANDONED_AFTER = datetime.timedelta(hours=48)
-# Replaced proposals (one ROI predicted on demand) are kept only this long:
-# people make many and look at the newest, but accepts from one just
-# replaced may still be on their way.
-KEEP_SUPERSEDED_PROPOSALS = datetime.timedelta(hours=1)
+# Replaced proposals (one ROI predicted on demand) are kept only this long,
+# since people make many and look at the newest; but no shorter, since
+# accepts from one may wait in a browser that went offline (an accept from
+# one already deleted is refused, and the browser drops it).
+KEEP_SUPERSEDED_PROPOSALS = ABANDONED_AFTER
 # Each person's newest proposal in a project is a head of its own, in a slot
 # named for them (see `proposal_slot`).
 PROPOSAL_SLOTS = "proposal:"
