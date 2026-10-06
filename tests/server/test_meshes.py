@@ -63,24 +63,43 @@ def segmented() -> np.ndarray:
     return classes
 
 
+async def add_image(db, project: str, voxel_size_zyx, unit):
+    image = await artifacts.create_staging(
+        db, project_id=uuid.UUID(project), kind="image", head_slot="image"
+    )
+    image.state = "committed"
+    image.manifest = {
+        "shape_czyx": [1, *SHAPE],
+        "window": [0, 1],
+        "voxel_size_zyx": list(voxel_size_zyx),
+        "unit": unit,
+    }
+    await artifacts.set_head(db, image)
+    return image
+
+
 def add_segmentation(settings, database_url, project: str):
+    """
+    A final segmentation, predicted from an image that a later upload (with
+    another voxel size) has since replaced.
+    """
+
     async def create(db):
-        image = await artifacts.create_staging(
-            db, project_id=uuid.UUID(project), kind="image", head_slot="image"
+        image = await add_image(db, project, VOXEL_SIZE_ZYX, "millimeter")
+        prediction = await artifacts.create_staging(
+            db,
+            project_id=uuid.UUID(project),
+            kind="prediction",
+            inputs={"image_artifact_id": str(image.id)},
         )
-        image.state = "committed"
-        image.manifest = {
-            "shape_czyx": [1, *SHAPE],
-            "window": [0, 1],
-            "voxel_size_zyx": list(VOXEL_SIZE_ZYX),
-            "unit": "millimeter",
-        }
-        await artifacts.set_head(db, image)
+        prediction.state = "committed"
+        prediction.manifest = {"kind": "prediction", "shape_zyx": list(SHAPE)}
         artifact = await artifacts.create_staging(
             db,
             project_id=uuid.UUID(project),
             kind="segmentation",
             head_slot="segmentation",
+            inputs={"prediction_artifact_id": str(prediction.id)},
         )
         grant = project_storage(settings).child(artifacts.artifact_path(artifact))
         group = create_prediction(grant, SHAPE, arrays=("class",), kind="segmentation")
@@ -88,6 +107,7 @@ def add_segmentation(settings, database_url, project: str):
         artifact.state = "committed"
         artifact.manifest = {"kind": "segmentation", "shape_zyx": list(SHAPE)}
         await artifacts.set_head(db, artifact)
+        await add_image(db, project, (1.0, 1.0, 1.0), "micrometer")
 
     run_db(database_url, create)
 
@@ -187,6 +207,7 @@ def test_a_worker_meshes_each_class(
     assert meshes["segmentation_artifact_id"] == segmentation["artifact_id"]
     info = meshes["info"]
     assert info["axis_order"] == "xyz"
+    # The image the segmentation came from, not the newer one.
     assert info["units"] == "millimeter"
     assert info["voxel_size_xyz"] == list(reversed(VOXEL_SIZE_ZYX))
     # Claw has no voxels, so no mesh.

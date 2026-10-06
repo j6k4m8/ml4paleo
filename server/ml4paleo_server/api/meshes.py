@@ -52,8 +52,7 @@ async def make_meshes(
     db: DbSession,
 ) -> MeshStarted:
     segmentation = await artifacts.head(db, project.id, "segmentation")
-    image = await artifacts.head(db, project.id, "image")
-    if segmentation is None or not segmentation.manifest or image is None:
+    if segmentation is None or not segmentation.manifest:
         raise HTTPException(status_code=409, detail="Make a final segmentation first.")
     classes = [
         {"value": c.value, "name": c.name, "color": c.color}
@@ -70,7 +69,6 @@ async def make_meshes(
     root, artifact = await mesh.start(
         db,
         segmentation=segmentation,
-        image=image,
         classes=classes,
         downsample=body.downsample,
         method=body.method,

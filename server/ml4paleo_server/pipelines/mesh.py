@@ -27,20 +27,39 @@ BLOCK = 256
 WEIGHTS = {"blocks": 80.0, "joins": 18.0, "finalize": 2.0}
 
 
+async def source_image(db: AsyncSession, segmentation: Artifact) -> Artifact | None:
+    """
+    The image the segmentation's prediction was made from, or the project's
+    current image if that one is gone.
+    """
+    image = None
+    prediction_id = (segmentation.inputs or {}).get("prediction_artifact_id")
+    prediction = (
+        await db.get(Artifact, uuid.UUID(prediction_id)) if prediction_id else None
+    )
+    if prediction is not None:
+        image_id = (prediction.inputs or {}).get("image_artifact_id")
+        image = await db.get(Artifact, uuid.UUID(image_id)) if image_id else None
+    if image is None or not image.manifest:
+        image = await artifacts.head(db, segmentation.project_id, "image")
+    return image
+
+
 async def start(
     db: AsyncSession,
     *,
     segmentation: Artifact,
-    image: Artifact,
     classes: list[dict],
     downsample: int,
     method: Literal["any", "majority"],
     simplify: float,
     created_by: uuid.UUID,
 ) -> tuple[Job, Artifact]:
-    assert segmentation.manifest is not None and image.manifest is not None
+    assert segmentation.manifest is not None
     shape = [int(n) for n in segmentation.manifest["shape_zyx"]]
-    voxel_size = image.manifest.get("voxel_size_zyx")
+    image = await source_image(db, segmentation)
+    manifest = (image.manifest if image is not None else None) or {}
+    voxel_size = manifest.get("voxel_size_zyx")
     meshes = await artifacts.create_staging(
         db,
         project_id=segmentation.project_id,
@@ -70,7 +89,7 @@ async def start(
         "block_size": BLOCK,
         # Physical size of a voxel, (x, y, z); voxels if the scan didn't say.
         "voxel_size_xyz": list(reversed(voxel_size)) if voxel_size else [1.0, 1.0, 1.0],
-        "unit": image.manifest.get("unit") if voxel_size else "voxels",
+        "unit": manifest.get("unit") if voxel_size else "voxels",
     }
     first = None
     blocks = []
