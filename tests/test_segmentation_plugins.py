@@ -193,7 +193,8 @@ def test_tiles_cover_a_box_without_overlap():
     assert (seen == 1).all()
 
 
-@pytest.mark.parametrize("sigma_max", [1.0, 2.0, 3.0])
+# 1.1 and 2.6 round down (4.4 and 10.4), so the halo is as small as can be.
+@pytest.mark.parametrize("sigma_max", [1.0, 1.1, 2.0, 2.6, 3.0])
 def test_random_forest_halo_covers_every_feature(sigma_max):
     from ml4paleo.segmentation.plugins.rf import features, halo_for
 
@@ -202,7 +203,7 @@ def test_random_forest_halo_covers_every_feature(sigma_max):
     h = halo_for(sigma_max)
     block = image[:, 20 - h : 28 + h, 20 - h : 28 + h, 20 - h : 28 + h]
     part = features(block, sigma_max)[h:-h, h:-h, h:-h]
-    np.testing.assert_allclose(part, whole, atol=1e-6)
+    np.testing.assert_array_equal(part, whole)
 
 
 def test_tiles_fit_the_memory_budget():
