@@ -6,12 +6,13 @@ Claiming jobs from the ml4paleo v1 app, which this one replaced (see
     POST /api/v1-jobs/{job}/release   (admins) give a job to an account {to}
 
 v1 had no accounts: anyone with a job's link could open it. So the first
-person to claim a job gets it, claims are rate-limited (ids are only six hex
-digits) per account, per address, and for everyone once too many miss, and
-an admin can give a job to the account it belongs to. That stops what runs
-in the project someone else made from it and deletes it (garbage collection
-gives its storage back), and then only that account can claim the job;
-giving it again undoes a mistake.
+person to claim a job gets it; claims are rate-limited, since ids are only
+six hex digits (each account and address may try a few an hour, and fewer
+that miss, and once too many miss from anyone, nobody can claim until the
+hour is up); and an admin can give a job to the account it belongs to. That
+stops what runs in the project someone else made from it and deletes it
+(garbage collection gives its storage back), and then only that account can
+claim the job; giving it again undoes a mistake.
 
 Claims and releases are recorded in the audit log against the job (target
 "v1_job", the job id), where a claim finds the last of them.
@@ -23,6 +24,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.concurrency import run_in_threadpool
 
 from ml4paleo.v1import import UNCONVERTED, normalize_job_id, read_jobs, status
@@ -39,7 +41,7 @@ router = APIRouter(prefix="/api/v1-jobs", tags=["v1"])
 
 HOUR = datetime.timedelta(hours=1)
 # Claims of ids that aren't v1 jobs, from anyone.
-MISSES = "v1-claim:misses"
+SITE_MISSES = "v1-miss:site"
 NOT_HERE = "This server has no v1 jobs to import."
 GIVEN = "An admin gave this job to another account. If it's yours, ask an admin."
 
@@ -75,6 +77,32 @@ async def _lock(db: DbSession, job_id: str) -> None:
     )
 
 
+async def _count_miss(
+    engine: AsyncEngine, limits: list[tuple[str, int]]
+) -> list[tuple[str, datetime.datetime]]:
+    """
+    Count a miss against each key, in order, refusing (with nothing counted)
+    once one is at its limit. Returns what to give back if it's no miss.
+    """
+    counted: list[tuple[str, datetime.datetime]] = []
+    try:
+        for key, limit in limits:
+            counted.append(
+                (key, await ratelimit.take(engine, key, limit=limit, window=HOUR))
+            )
+    except BaseException:
+        await _give_back(engine, counted)
+        raise
+    return counted
+
+
+async def _give_back(
+    engine: AsyncEngine, counted: list[tuple[str, datetime.datetime]]
+) -> None:
+    for key, started in counted:
+        await ratelimit.give_back(engine, key, started)
+
+
 async def _given_to(db: DbSession, job_id: str) -> uuid.UUID | None:
     """The account an admin last gave the job to, unless it's claimed since."""
     last = await db.scalar(
@@ -108,16 +136,30 @@ async def claim(
     failed; a job someone else claimed gets 409.
     """
     root = _volume(settings)
+    job_id = _job_id(job_id)
+    limits = settings.v1
     # Per account and per address, since one address can sign up a few
     # accounts an hour.
-    for key in (f"v1-claim:user:{auth.user.id}", f"v1-claim:ip:{client_key(request)}"):
-        await ratelimit.hit(engine, key, limit=settings.v1.claims_per_hour, window=HOUR)
-    # Guessing ids misses far more often than claiming your own jobs does, so
-    # once too many claims miss, nobody can claim until the hour is up.
-    misses = settings.v1.failed_claims_per_hour
-    await ratelimit.peek(engine, MISSES, limit=misses, window=HOUR)
-    job_id = _job_id(job_id)
-    record = (await run_in_threadpool(read_jobs, root)).get(job_id)
+    keys = (f"user:{auth.user.id}", f"ip:{client_key(request)}")
+    # Count a miss before looking, and give it back if the job is there, so
+    # guesses made at once can't get past the limits. Guessing misses nearly
+    # every time, so once too many miss, from anyone, nobody can claim until
+    # the hour is up; that comes first, and then each one's own misses, so a
+    # claim refused for either counts against nothing else.
+    misses = await _count_miss(
+        engine,
+        [(SITE_MISSES, limits.site_misses_per_hour)]
+        + [(f"v1-miss:{key}", limits.misses_per_hour) for key in keys],
+    )
+    try:
+        for key in keys:
+            await ratelimit.hit(
+                engine, f"v1-claim:{key}", limit=limits.claims_per_hour, window=HOUR
+            )
+        record = (await run_in_threadpool(read_jobs, root)).get(job_id)
+    except BaseException:
+        await _give_back(engine, misses)
+        raise
     if record is None:
         audit.record(
             db,
@@ -128,8 +170,8 @@ async def claim(
             request=request,
         )
         await db.commit()
-        await ratelimit.hit(engine, MISSES, limit=misses, window=HOUR)
         raise HTTPException(status_code=404, detail="There's no v1 job with that id.")
+    await _give_back(engine, misses)
     if status(record) in UNCONVERTED:
         raise HTTPException(
             status_code=409,

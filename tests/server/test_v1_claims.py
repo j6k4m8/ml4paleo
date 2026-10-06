@@ -38,7 +38,7 @@ from ml4paleo_worker.client import ServerClient
 from ml4paleo_worker.context import JobContext, PermanentError
 from ml4paleo_worker.handlers import HANDLERS, V1_HANDLERS, v1import
 from ml4paleo_worker.main import Worker
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX
 from ml4paleo.labels.codec import decode_chunk
@@ -679,48 +679,97 @@ def test_releasing_doesnt_wait_for_rows_that_refer_to_the_project(
 def test_claims_are_limited_and_need_a_v1_volume(
     new_browser, settings, migrated_database_url
 ):
-    limits = {"claims_per_hour": 2, "failed_claims_per_hour": 3}
+    limits = {"claims_per_hour": 2, "misses_per_hour": 2, "site_misses_per_hour": 3}
     limited = settings.model_copy(update={"v1": settings.v1.model_copy(update=limits)})
-    # Per account...
-    ada = new_browser(limited, address="192.0.2.1")
-    signup(ada)
-    assert ada.post("/api/v1-jobs/000000/claim").status_code == 404
-    assert ada.post("/api/v1-jobs/000001/claim").status_code == 404
+
+    def browser(name, address):
+        browser = new_browser(limited, address=address)
+        signup(browser, username=name)
+        return browser
+
+    # Each account, and each address, may try a few claims an hour...
+    ada = browser("ada", "192.0.2.1")
+    assert ada.post("/api/v1-jobs/ABC123/claim").status_code == 201
+    assert ada.post("/api/v1-jobs/ABC123/claim").status_code == 200
     assert ada.post("/api/v1-jobs/ABC123/claim").status_code == 429
-    # ...and per address, whatever account is signed in there.
-    bob = new_browser(limited, address="192.0.2.1")
-    signup(bob, username="bob")
-    assert bob.post("/api/v1-jobs/ABC123/claim").status_code == 429
+    bob = browser("bob", "192.0.2.1")
+    assert bob.post("/api/v1-jobs/FEED01/claim").status_code == 429
+    # ...and fewer that miss: a claim counts as one until it finds its job.
+    carol = browser("carol", "192.0.2.2")
+    assert carol.post("/api/v1-jobs/000000/claim").status_code == 404
+    assert carol.post("/api/v1-jobs/000001/claim").status_code == 404
+    assert carol.post("/api/v1-jobs/FEED01/claim").status_code == 429
+    dan = browser("dan", "192.0.2.2")
+    assert dan.post("/api/v1-jobs/FEED01/claim").status_code == 429
     # Too many misses, from anyone, stop every claim for the hour.
-    carol = new_browser(limited, address="192.0.2.2")
-    signup(carol, username="carol")
-    assert carol.post("/api/v1-jobs/000002/claim").status_code == 404
-    dan = new_browser(limited, address="192.0.2.3")
-    signup(dan, username="dan")
-    stopped = dan.post("/api/v1-jobs/ABC123/claim")
+    erin = browser("erin", "192.0.2.3")
+    assert erin.post("/api/v1-jobs/000002/claim").status_code == 404
+    frank = browser("frank", "192.0.2.4")
+    stopped = frank.post("/api/v1-jobs/FEED01/claim")
     assert stopped.status_code == 429
     assert int(stopped.headers["Retry-After"]) > 3000
 
-    async def misses(db):
-        rows = await db.scalars(
+    async def counted(db):
+        names = dict((await db.execute(select(User.id, User.username))).all())
+        rows = await db.execute(text("SELECT key, count FROM rate_limits"))
+        found = {}
+        for key, count in rows:
+            for user_id, name in names.items():
+                key = key.replace(str(user_id), name)
+            found[key] = count
+        misses = await db.scalars(
             select(AuditEvent).where(AuditEvent.action == "v1.claim.miss")
         )
-        return sorted((e.target_type, e.target_id, e.ip) for e in rows)
+        return found, sorted((e.target_id, e.ip) for e in misses)
 
-    assert run_db(migrated_database_url, misses) == [
-        ("v1_job", "000000", "192.0.2.1"),
-        ("v1_job", "000001", "192.0.2.1"),
-        ("v1_job", "000002", "192.0.2.2"),
+    found, misses = run_db(migrated_database_url, counted)
+    # Only the misses count as misses...
+    assert found["v1-miss:site"] == 3
+    assert found["v1-miss:user:ada"] == found["v1-miss:ip:192.0.2.1"] == 0
+    assert found["v1-miss:user:carol"] == found["v1-miss:ip:192.0.2.2"] == 2
+    # ...and claims refused for misses count as nothing.
+    assert found["v1-claim:user:carol"] == found["v1-claim:ip:192.0.2.2"] == 2
+    assert "v1-claim:user:dan" not in found and "v1-claim:user:frank" not in found
+    assert misses == [
+        ("000000", "192.0.2.2"),
+        ("000001", "192.0.2.2"),
+        ("000002", "192.0.2.3"),
     ]
 
     unset = settings.model_copy(
         update={"v1": settings.v1.model_copy(update={"volume_path": None})}
     )
-    erin = new_browser(unset, address="192.0.2.4")
-    signup(erin, username="erin")
-    missing = erin.post("/api/v1-jobs/ABC123/claim")
+    gus = new_browser(unset, address="192.0.2.5")
+    signup(gus, username="gus")
+    missing = gus.post("/api/v1-jobs/ABC123/claim")
     assert missing.status_code == 404
     assert missing.json()["detail"] == "This server has no v1 jobs to import."
+
+
+def test_misses_at_once_cant_get_past_the_limit(
+    new_browser, settings, migrated_database_url
+):
+    limited = settings.model_copy(
+        update={"v1": settings.v1.model_copy(update={"misses_per_hour": 2})}
+    )
+    ada = new_browser(limited)
+    signup(ada)
+    # Five guesses that miss and one that finds a job, all at once: only two
+    # of them get to look, since any of them might miss.
+    ids = ["000000", "000001", "000002", "000003", "000004", "FEED01"]
+    start = threading.Barrier(len(ids))
+    codes = []
+
+    def guess(job_id):
+        start.wait()
+        codes.append(ada.post(f"/api/v1-jobs/{job_id}/claim").status_code)
+
+    guesses = [threading.Thread(target=guess, args=(job_id,)) for job_id in ids]
+    for thread in guesses:
+        thread.start()
+    for thread in guesses:
+        thread.join()
+    assert sorted(codes).count(429) == len(ids) - 2
 
 
 def test_only_import_jobs_write_labels(new_browser, settings, migrated_database_url):
