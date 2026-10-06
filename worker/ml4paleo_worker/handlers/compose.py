@@ -19,6 +19,7 @@ from ml4paleo.segmentation.compose import (
     label_shard,
     shard_grid,
     shard_inputs,
+    slab_depth,
 )
 from ml4paleo.segmentation.dataset import BlobLabels
 from ml4paleo.segmentation.predict import create_prediction, open_prediction
@@ -68,7 +69,9 @@ def block(ctx: JobContext) -> dict[str, Any]:
     put_bytes(
         ctx.grants[2],
         f"scratch/{ctx.payload['shard']}.npz",
-        label_shard(merged, labeled),
+        label_shard(
+            merged, labeled, slab=slab_depth(ctx.memory_budget_bytes, merged.shape)
+        ),
     )
     return {}
 
@@ -96,8 +99,13 @@ def apply(ctx: JobContext) -> dict[str, Any]:
     raw = get_bytes(grant, f"scratch/{ctx.payload['shard']}.remove.npy")
     if raw is None:
         raise PermanentError("The list of specks to remove is missing.")
-    merged, _ = _merged(ctx)
-    final = apply_shard(merged, np.load(io.BytesIO(raw)))
+    # Only the classes: which voxels people labeled isn't needed here.
+    merged = _merged(ctx)[0]
+    final = apply_shard(
+        merged,
+        np.load(io.BytesIO(raw)),
+        slab=slab_depth(ctx.memory_budget_bytes, merged.shape),
+    )
     box = tuple(int(n) for n in ctx.payload["box"])
     region = tuple(slice(box[a], box[a + 3]) for a in range(3))
     open_prediction(grant)["class"][region] = final  # type: ignore[index]

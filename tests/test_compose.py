@@ -10,7 +10,6 @@ import numpy as np
 from ml4paleo.labels import BACKGROUND
 from ml4paleo.segmentation.compose import (
     apply_shard,
-    complete_mask,
     find_specks,
     label_shard,
     merge,
@@ -25,22 +24,22 @@ def test_labels_overrule_the_prediction_and_complete_rois_are_background():
     prediction = np.full((4, 4, 4), BONE, dtype=np.uint8)
     labels = np.zeros((4, 4, 4), dtype=np.uint8)
     labels[0] = TOOTH
-    complete = complete_mask((0, 0, 0, 4, 4, 4), [(0, 0, 0, 2, 4, 4)])
-    merged = merge(prediction, labels, complete)
+    # The box starts at z 10; the ROI covers its first two planes.
+    merged = merge(prediction, labels, (10, 0, 0, 14, 4, 4), [(8, 0, 0, 12, 9, 9)])
     assert (merged[0] == TOOTH).all()  # labeled, inside the complete ROI
     assert (merged[1] == BACKGROUND).all()  # unlabeled, inside it
     assert (merged[2:] == BONE).all()  # outside: the prediction
 
 
-def compose(volume, labeled, shard, min_voxels):
+def compose(volume, labeled, shard, min_voxels, slab=2):
     """Run the per-shard steps over a whole volume, as the jobs would."""
     boxes = shard_boxes(volume.shape, shard)
     regions = [tuple(slice(b[a], b[a + 3]) for a in range(3)) for b in boxes]
-    summaries = [label_shard(volume[r], labeled[r]) for r in regions]
+    summaries = [label_shard(volume[r], labeled[r], slab=slab) for r in regions]
     remove = find_specks(summaries, shard_grid(volume.shape, shard), min_voxels)
     final = np.empty_like(volume)
     for region, ids in zip(regions, remove, strict=True):
-        final[region] = apply_shard(volume[region], ids)
+        final[region] = apply_shard(volume[region].copy(), ids, slab=slab)
     return final
 
 

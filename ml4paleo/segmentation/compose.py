@@ -23,11 +23,15 @@ by its own job:
 Labeling is deterministic, so `apply_shard` relabels instead of storing
 piece ids. The final segmentation has the prediction's layout: a `class`
 array of stored label values (1 background, 2..254 classes).
+
+A shard's jobs hold its merged classes and one int32 array of piece ids,
+reused for each class in turn; sizes and lookups go a slab of z planes at a
+time, so their int64 copies stay small (`slab_depth`).
 """
 
 import io
 import itertools
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import cast
 
 import numpy as np
@@ -47,6 +51,17 @@ _STRUCTURE = np.array(
     ],
     dtype=bool,
 )
+# A shard's faces, and where each is in a (z, y, x) block.
+_FACES = {
+    "first_z": (0,),
+    "last_z": (-1,),
+    "first_y": (slice(None), 0),
+    "last_y": (slice(None), -1),
+    "first_x": (slice(None), slice(None), 0),
+    "last_x": (slice(None), slice(None), -1),
+}
+# z planes per slab, unless the job's memory budget says otherwise.
+SLAB = 32
 
 
 def shard_grid(
@@ -56,48 +71,66 @@ def shard_grid(
     return tuple(-(-int(n) // int(s)) for n, s in zip(shape_zyx, shard, strict=True))  # type: ignore[return-value]
 
 
+def slab_depth(budget_bytes: int, shape_zyx: Sequence[int] = SHARD_ZYX) -> int:
+    """
+    How many z planes of a block to count at once, so that their int64
+    copies take at most a sixteenth of a job's memory budget.
+    """
+    plane = int(shape_zyx[1]) * int(shape_zyx[2])
+    return max(1, budget_bytes // 16 // (8 * plane))
+
+
+def _slabs(depth: int, slab: int) -> Iterator[slice]:
+    for z in range(0, depth, slab):
+        yield slice(z, z + slab)
+
+
+def npz(**arrays: np.ndarray) -> bytes:
+    """Arrays as the bytes of a compressed `.npz` file."""
+    buffer = io.BytesIO()
+    np.savez_compressed(buffer, **arrays)  # type: ignore[arg-type]
+    return buffer.getvalue()
+
+
 def merge(
-    prediction: np.ndarray, labels: np.ndarray, complete: np.ndarray
+    prediction: np.ndarray, labels: np.ndarray, box: Box, complete_rois: Sequence[Box]
 ) -> np.ndarray:
-    """Labels where people labeled, background in complete ROIs, else the prediction."""
-    merged = np.where(complete, BACKGROUND, prediction).astype(np.uint8)
-    return np.where(labels != UNLABELED, labels, merged).astype(np.uint8)
-
-
-def complete_mask(box: Box, complete_rois: Sequence[Box]) -> np.ndarray:
-    inside = np.zeros(tuple(box[a + 3] - box[a] for a in range(3)), dtype=bool)
+    """
+    Labels where people labeled, background in complete ROIs, else the
+    prediction. Writes into `prediction` (a box of it) and returns it.
+    """
     for roi in complete_rois:
         lo = [max(box[a], roi[a]) for a in range(3)]
         hi = [min(box[a + 3], roi[a + 3]) for a in range(3)]
         if all(a < b for a, b in zip(lo, hi, strict=True)):
-            inside[tuple(slice(lo[a] - box[a], hi[a] - box[a]) for a in range(3))] = (
-                True
-            )
-    return inside
+            inside = tuple(slice(lo[a] - box[a], hi[a] - box[a]) for a in range(3))
+            prediction[inside] = BACKGROUND
+    np.copyto(prediction, labels, where=labels != UNLABELED)
+    return prediction
 
 
-def pieces(merged: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def class_values(merged: np.ndarray, slab: int = SLAB) -> list[int]:
+    """The classes (not background) in a block, in order."""
+    present = np.zeros(256, dtype=bool)
+    for z in _slabs(len(merged), slab):
+        present[np.unique(merged[z])] = True
+    return [int(value) for value in np.flatnonzero(present) if value >= FIRST_CLASS]
+
+
+def label_class(
+    merged: np.ndarray, value: int, mask: np.ndarray, ids: np.ndarray
+) -> int:
     """
-    Label the pieces of every class (not background) in a block: piece ids
-    (0 for none) and each piece's class (index 0 unused).
+    Label the pieces of one class into `ids` (0 elsewhere), using `mask` as
+    scratch; returns how many there are. Pieces are numbered per class,
+    with the classes in order, so piece `n` of a class is `offset + n` in
+    the block, where `offset` counts the pieces of the classes before it.
     """
     from scipy import ndimage
 
-    ids = np.zeros(merged.shape, dtype=np.int32)
-    classes = [0]
-    for value in np.unique(merged):
-        if value < FIRST_CLASS:
-            continue
-        # Without an `output` argument, label returns the array and the count.
-        labeled, count = cast(
-            tuple[np.ndarray, int], ndimage.label(merged == value, structure=_STRUCTURE)
-        )
-        if count == 0:
-            continue
-        offset = len(classes) - 1
-        ids[labeled > 0] = labeled[labeled > 0] + offset
-        classes.extend([int(value)] * count)
-    return ids, np.asarray(classes, dtype=np.uint8)
+    np.equal(merged, value, out=mask)
+    # With an `output` array, label fills it and returns only the count.
+    return cast(int, ndimage.label(mask, structure=_STRUCTURE, output=ids))
 
 
 def read_label_box(labels: LabelSource, box: Box) -> np.ndarray:
@@ -128,36 +161,53 @@ def shard_inputs(
 ) -> tuple[np.ndarray, np.ndarray]:
     """The merged classes of a box, and which of its voxels people labeled."""
     region = tuple(slice(box[a], box[a + 3]) for a in range(3))
-    predicted = np.asarray(prediction[region], dtype=np.uint8)
-    labeled = read_label_box(labels, box)
-    merged = merge(predicted, labeled, complete_mask(box, complete_rois))
-    return merged, labeled != UNLABELED
+    values = read_label_box(labels, box)
+    merged = merge(
+        np.asarray(prediction[region], dtype=np.uint8), values, box, complete_rois
+    )
+    return merged, values != UNLABELED
 
 
-def label_shard(merged: np.ndarray, labeled: np.ndarray) -> bytes:
+def label_shard(
+    merged: np.ndarray,
+    labeled: np.ndarray,
+    slab: int = SLAB,
+) -> bytes:
     """
     The summary `find_specks` needs from one shard, as an `.npz`: each
     piece's size, class, and whether it holds labels, and the piece ids on
     the shard's six faces.
     """
-    ids, classes = pieces(merged)
-    count = len(classes)
-    sizes = np.bincount(ids.ravel(), minlength=count)[:count]
-    held = np.bincount(ids[labeled].ravel(), minlength=count)[:count] > 0
-    buffer = io.BytesIO()
-    np.savez_compressed(
-        buffer,
-        sizes=sizes.astype(np.int64),
-        classes=classes,
-        labeled=held,
-        first_z=ids[0],
-        last_z=ids[-1],
-        first_y=ids[:, 0],
-        last_y=ids[:, -1],
-        first_x=ids[:, :, 0],
-        last_x=ids[:, :, -1],
+    values = class_values(merged, slab)
+    ids = np.empty(merged.shape, dtype=np.int32)
+    mask = np.empty(merged.shape, dtype=bool)
+    faces = {
+        name: np.zeros(ids[at].shape, dtype=np.int32) for name, at in _FACES.items()
+    }
+    sizes = [np.zeros(1, dtype=np.int64)]
+    held = [np.zeros(1, dtype=bool)]
+    classes = [np.zeros(1, dtype=np.uint8)]
+    offset = 0
+    for value in values:
+        count = label_class(merged, value, mask, ids)
+        size = np.zeros(count + 1, dtype=np.int64)
+        hold = np.zeros(count + 1, dtype=bool)
+        for z in _slabs(len(ids), slab):
+            counted = np.bincount(ids[z].ravel())
+            size[: len(counted)] += counted
+            hold[ids[z][labeled[z]]] = True
+        sizes.append(size[1:])
+        held.append(hold[1:])
+        classes.append(np.full(count, value, dtype=np.uint8))
+        for name, at in _FACES.items():
+            np.add(ids[at], offset, out=faces[name], where=ids[at] > 0)
+        offset += count
+    return npz(
+        sizes=np.concatenate(sizes),
+        classes=np.concatenate(classes),
+        labeled=np.concatenate(held),
+        **faces,
     )
-    return buffer.getvalue()
 
 
 def find_specks(
@@ -220,25 +270,51 @@ def find_specks(
     ]
 
 
-def apply_shard(merged: np.ndarray, remove: np.ndarray) -> np.ndarray:
-    """The shard's final classes: its merged classes without the specks."""
+def apply_shard(
+    merged: np.ndarray,
+    remove: np.ndarray,
+    slab: int = SLAB,
+) -> np.ndarray:
+    """
+    The shard's final classes: its merged classes without the specks (piece
+    ids as `label_shard` numbers them). Writes into `merged` and returns it.
+    """
     if len(remove) == 0:
         return merged
-    ids, _ = pieces(merged)
-    final = merged.copy()
-    final[np.isin(ids, remove)] = BACKGROUND
-    return final
+    drop = np.zeros(int(remove.max()) + 1, dtype=bool)
+    drop[remove] = True
+    values = class_values(merged, slab)
+    ids = np.empty(merged.shape, dtype=np.int32)
+    mask = np.empty(merged.shape, dtype=bool)
+    offset = 0
+    for value in values:
+        if offset + 1 >= len(drop):
+            break  # no specks in this class or the ones after it
+        # Turning this class's specks into background leaves the other
+        # classes' pieces as they were.
+        count = label_class(merged, value, mask, ids)
+        table = np.zeros(count + 1, dtype=bool)
+        found = drop[offset + 1 : offset + count + 1]
+        table[1 : len(found) + 1] = found
+        if table.any():
+            for z in _slabs(len(ids), slab):
+                merged[z][table[ids[z]]] = BACKGROUND
+        offset += count
+    return merged
 
 
 __all__ = [
+    "SLAB",
     "apply_shard",
-    "complete_mask",
+    "class_values",
     "find_specks",
+    "label_class",
     "label_shard",
     "merge",
-    "pieces",
+    "npz",
     "read_label_box",
     "shard_boxes",
     "shard_grid",
     "shard_inputs",
+    "slab_depth",
 ]
