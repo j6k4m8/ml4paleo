@@ -130,7 +130,11 @@
 		try {
 			await api(url, { body });
 		} catch (e) {
-			fail(message(e));
+			fail(
+				e instanceof ApiError && e.detail === "storage_quota_exceeded"
+					? "The project's owner has used all their storage. Free some up, or ask for more."
+					: message(e),
+			);
 		}
 		await refresh();
 		starting = false;

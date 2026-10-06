@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 from helpers import SECRET_KEY, add_worker, run_db, signup
 from ml4paleo_server import artifacts
+from ml4paleo_server.db import User
 from ml4paleo_server.pipelines import mesh as mesh_pipeline
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
@@ -26,6 +27,7 @@ from ml4paleo_worker.context import PermanentError
 from ml4paleo_worker.handlers import HANDLERS
 from ml4paleo_worker.handlers import mesh as mesh_jobs
 from ml4paleo_worker.main import Worker
+from sqlalchemy import update
 
 from ml4paleo.meshing.blocks import mesh_block, mesh_blocks
 from ml4paleo.protocol import WorkerCaps
@@ -173,6 +175,8 @@ def test_a_worker_meshes_each_class(
 
     started = ada.post(base, json={"simplify": 0})
     assert started.status_code == 202, started.text
+    again = ada.post(base, json={})
+    assert again.status_code == 409 and "already" in again.json()["detail"]
     token = add_worker(migrated_database_url)
     client = ServerClient(token, base_url=live_server)
     worker = Worker(
@@ -256,6 +260,25 @@ def test_a_worker_meshes_each_class(
     assert get_bytes(grant, "mesh_info.json") is not None
     assert json.loads(get_bytes(grant, f"{CLAW}.json") or b"")["triangles"] == 0
     assert ada.get(meshes["files_url"] + "4.stl").status_code == 404
+
+
+def test_meshes_wait_for_storage(new_browser, settings, migrated_database_url):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    ada.post(
+        f"/api/projects/{project}/labels/classes",
+        json={"name": "bone", "color": "#ffffff"},
+    )
+    add_segmentation(settings, migrated_database_url, project)
+
+    async def full(db):
+        await db.execute(update(User).values(quota_override={"storage_gb": 0}))
+
+    run_db(migrated_database_url, full)
+    refused = ada.post(f"/api/projects/{project}/meshes", json={})
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == "storage_quota_exceeded"
 
 
 # One mesh job on local storage, in a process of its own, and how far its

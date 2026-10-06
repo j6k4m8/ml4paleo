@@ -66,6 +66,17 @@ async def reserve_storage(
         raise HTTPException(status_code=403, detail="storage_quota_exceeded")
 
 
+async def check_storage(db: AsyncSession, settings: Settings, owner: User) -> None:
+    """
+    Raise 403 if `owner` already uses all the storage they're allowed, so
+    work whose results couldn't be kept doesn't start. This only looks: the
+    results are counted when they're committed.
+    """
+    limit = limits_for(owner, settings).storage_bytes
+    if limit is not None and (await usage_for(db, owner.id)).storage_bytes >= limit:
+        raise HTTPException(status_code=403, detail="storage_quota_exceeded")
+
+
 async def release_storage(db: AsyncSession, owner_id: uuid.UUID, nbytes: int) -> None:
     await _release(db, owner_id, UserUsage.storage_bytes, nbytes)
 

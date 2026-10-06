@@ -7,6 +7,9 @@ Meshes of the final segmentation, one per class.
 Meshes are in (x, y, z) order, in the scan's physical units when it gave a
 voxel size (else in voxels), as STL, OBJ, and GLB per class. GLB files keep
 those units too, with the scene scaled to meters, as glTF expects.
+
+One project makes one set of meshes at a time (409 while it does), and not
+while its owner is out of storage (403).
 """
 
 import datetime
@@ -16,10 +19,12 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.orm import aliased
 
-from .. import artifacts, audit
-from ..auth.deps import CurrentAuth, DbSession
-from ..db import LabelClass
+from .. import artifacts, audit, quotas
+from ..auth.deps import CurrentAuth, DbSession, SettingsDep
+from ..db import Job, LabelClass, Project, User
+from ..jobs.queue import WAITING
 from ..pipelines import mesh
 from .gateway import files_path
 from .projects import MemberProject
@@ -50,10 +55,35 @@ async def make_meshes(
     request: Request,
     auth: CurrentAuth,
     db: DbSession,
+    settings: SettingsDep,
 ) -> MeshStarted:
     segmentation = await artifacts.head(db, project.id, "segmentation")
     if segmentation is None or not segmentation.manifest:
         raise HTTPException(status_code=409, detail="Make a final segmentation first.")
+    # Lock the project so two requests can't both start meshing it.
+    await db.scalar(
+        select(Project.id)
+        .where(Project.id == project.id)
+        .with_for_update(key_share=True)
+    )
+    root = aliased(Job)
+    busy = await db.scalar(
+        select(Job.id)
+        .join(root, root.id == Job.root_id)
+        .where(
+            root.project_id == project.id,
+            root.kind == "mesh.block",
+            Job.status.in_((*WAITING, "leased")),
+        )
+        .limit(1)
+    )
+    if busy is not None:
+        raise HTTPException(
+            status_code=409, detail="Meshes are already being made for this project."
+        )
+    owner = await db.get(User, project.owner_id)
+    assert owner is not None
+    await quotas.check_storage(db, settings, owner)
     classes = [
         {"value": c.value, "name": c.name, "color": c.color}
         for c in await db.scalars(
@@ -66,15 +96,18 @@ async def make_meshes(
         raise HTTPException(
             status_code=409, detail="This project has no label classes."
         )
-    root, artifact = await mesh.start(
-        db,
-        segmentation=segmentation,
-        classes=classes,
-        downsample=body.downsample,
-        method=body.method,
-        simplify=body.simplify,
-        created_by=auth.user.id,
-    )
+    try:
+        started, artifact = await mesh.start(
+            db,
+            segmentation=segmentation,
+            classes=classes,
+            downsample=body.downsample,
+            method=body.method,
+            simplify=body.simplify,
+            created_by=auth.user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     audit.record(
         db,
         actor_id=auth.user.id,
@@ -82,10 +115,10 @@ async def make_meshes(
         target_type="project",
         target_id=project.id,
         request=request,
-        details={"pipeline_id": str(root.id), **body.model_dump()},
+        details={"pipeline_id": str(started.id), **body.model_dump()},
     )
     await db.commit()
-    return MeshStarted(pipeline_id=root.id, artifact_id=artifact.id)
+    return MeshStarted(pipeline_id=started.id, artifact_id=artifact.id)
 
 
 class MeshesOut(BaseModel):
