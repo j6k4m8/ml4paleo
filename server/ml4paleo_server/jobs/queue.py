@@ -330,11 +330,12 @@ async def claim(db: AsyncSession, worker: Worker, caps: WorkerCaps) -> Claimed |
     return Claimed(job=job, lease_token=lease_token)
 
 
-async def _leased_job(
+async def leased_job(
     db: AsyncSession, job_id: uuid.UUID, worker: Worker, lease_token: str
 ) -> Job:
     """
-    Lock a job and check that `worker` holds its lease with `lease_token`.
+    Lock a job (key share, so it can't finish until the caller's transaction
+    ends) and check that `worker` holds its lease with `lease_token`.
     """
     job = await db.scalar(
         select(Job)
@@ -389,7 +390,7 @@ async def heartbeat(
     Renew a lease and record progress. Returns the job; check
     `cancel_requested` to see whether the worker should stop.
     """
-    job = await _leased_job(db, job_id, worker, lease_token)
+    job = await leased_job(db, job_id, worker, lease_token)
     job.lease_expires_at = now() + LEASE
     # A worker busy with a long job doesn't claim, so it is seen here instead.
     await db.execute(
@@ -434,7 +435,7 @@ async def complete(
     job was cancelled while it ran.
     """
     try:
-        job = await _leased_job(db, job_id, worker, lease_token)
+        job = await leased_job(db, job_id, worker, lease_token)
     except LeaseLost:
         job = await db.get(Job, job_id, populate_existing=True)
         if job is not None and job.status == "succeeded":
@@ -477,7 +478,7 @@ async def fail(
     rest of its pipeline is cancelled.
     """
     try:
-        job = await _leased_job(db, job_id, worker, lease_token)
+        job = await leased_job(db, job_id, worker, lease_token)
     except LeaseLost:
         job = await db.get(Job, job_id, populate_existing=True)
         if job is not None and job.status != "leased":
@@ -495,7 +496,7 @@ async def release(
     Give a job back without counting the attempt, so another worker can take
     it right away.
     """
-    job = await _leased_job(db, job_id, worker, lease_token)
+    job = await leased_job(db, job_id, worker, lease_token)
     await _record_attempt(db, job, "released")
     job.attempts -= 1
     if job.cancel_requested:

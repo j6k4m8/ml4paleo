@@ -55,6 +55,15 @@ def check_probe_result(result: dict) -> None:
     """
     Refuse a probe result the rest of the pipeline can't be built from.
     """
+    check_volume(result)
+    if result.get("kind") not in ("images", "dicom"):
+        raise ValueError("kind must be images or dicom")
+
+
+def check_volume(result: dict) -> None:
+    """
+    Check the image a probe made: its shape, pyramid levels, and slabs.
+    """
     shape = result.get("shape_zyx")
     if not (
         isinstance(shape, list)
@@ -81,8 +90,6 @@ def check_probe_result(result: dict) -> None:
         position = slab[1]
     if position != shape[0]:
         raise ValueError("slabs must cover the whole depth")
-    if result.get("kind") not in ("images", "dicom"):
-        raise ValueError("kind must be images or dicom")
 
 
 async def after_probe(db: AsyncSession, probe: Job) -> None:

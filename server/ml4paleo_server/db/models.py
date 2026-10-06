@@ -779,7 +779,7 @@ class Roi(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(16), default="open")
     # "train" or "val" (validation, held out of training).
     split: Mapped[str] = mapped_column(String(8), default="train")
-    # "user" or "suggested".
+    # "user", "suggested", or "v1" (an annotation sample brought over from v1).
     origin: Mapped[str] = mapped_column(String(16), default="user")
     score: Mapped[float | None] = mapped_column(Float)
 

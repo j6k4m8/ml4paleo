@@ -20,6 +20,7 @@ from ml4paleo.protocol import (
     HelloIn,
     HelloOut,
     JobLease,
+    LabelOpIn,
     ReleaseIn,
     WorkerCaps,
 )
@@ -117,6 +118,23 @@ class ServerClient:
 
     def release(self, job_id: uuid.UUID, lease_token: str) -> None:
         self._post(f"/jobs/{job_id}/release", ReleaseIn(lease_token=lease_token))
+
+    def label_op(
+        self, job_id: uuid.UUID, lease_token: str, op: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Send a label edit for the job's project. Raises `ValueError` if the
+        server refuses the edit itself.
+        """
+        try:
+            response = self._post(
+                f"/jobs/{job_id}/label-ops", LabelOpIn(lease_token=lease_token, **op)
+            )
+        except httpx2.HTTPStatusError as exc:
+            if exc.response.status_code == 422:
+                raise ValueError(exc.response.text) from None
+            raise
+        return response.json()
 
 
 def with_retries[T](call: Callable[[], T], *, give_up_after: float) -> T:

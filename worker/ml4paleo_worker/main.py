@@ -21,6 +21,7 @@ import threading
 import traceback
 import uuid
 from collections.abc import Mapping
+from pathlib import Path
 
 import httpx2
 
@@ -53,10 +54,13 @@ class Worker:
         handlers: Mapping[str, Handler] = HANDLERS,
         claim_wait_seconds: float = MAX_CLAIM_WAIT_SECONDS,
         heartbeat_seconds: float | None = None,
+        v1_volume: Path | None = None,
     ):
         self.client = client
         self.caps = caps
         self.handlers = handlers
+        # The v1 app's volume folder, for importing v1 jobs.
+        self.v1_volume = v1_volume
         self.claim_wait_seconds = claim_wait_seconds
         # The server suggests a heartbeat interval; tests use a shorter one.
         self._heartbeat_override = heartbeat_seconds
@@ -148,7 +152,14 @@ class Worker:
         return int(memory * 0.75 / self.caps.slots)
 
     def run_job(self, lease: JobLease) -> None:
-        ctx = JobContext(lease, self.memory_budget_bytes())
+        ctx = JobContext(
+            lease,
+            self.memory_budget_bytes(),
+            v1_volume=self.v1_volume,
+            label_ops=lambda op: self.client.label_op(
+                lease.job_id, lease.lease_token, op
+            ),
+        )
         with self._lock:
             self._running[lease.job_id] = ctx
         if self._stopping.is_set():

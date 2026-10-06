@@ -1,0 +1,227 @@
+"""
+Importing a v1 job into a new project (see `ml4paleo.v1import` for what v1
+kept). Every job but the pyramid's runs on a worker with the v1 volume
+(label "v1-volume").
+
+    v1.probe -> v1.slab x N -> pyramid.level 1 .. L-1 -> artifact.finalize
+             -> v1.labels       (if the job has annotation samples to place)
+             -> v1.prediction   (if it has a finished segmentation)
+
+`start` creates the image artifact and the probe. When the probe succeeds,
+`after_probe` adds a "Foreground" class (v1 had one) and the rest; labels and
+the prediction wait for the image to commit, since edits are checked against
+it. When `v1.labels` succeeds, `after_labels` adds a complete slice ROI for
+each sample, so training treats the samples as fully labeled slices.
+"""
+
+import uuid
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ml4paleo.labels import FIRST_CLASS, MAX_CLASS
+
+from .. import artifacts, jobs
+from ..db import Artifact, Job, LabelClass, Project, Roi
+from .ingest import WEIGHTS, check_volume
+
+V1 = ["v1-volume"]
+FOREGROUND_NAME = "Foreground"
+FOREGROUND_COLOR = "#f2c14e"
+# Weights beyond the ingest's: the samples and the segmentation.
+LABEL_WEIGHT = 10.0
+PREDICTION_WEIGHT = 15.0
+MAX_ROIS = 100_000
+
+
+async def start(
+    db: AsyncSession, project: Project, job_id: str, created_by: uuid.UUID
+) -> tuple[Job, Artifact]:
+    artifact = await artifacts.create_staging(
+        db,
+        project_id=project.id,
+        kind="image",
+        head_slot="image",
+        inputs={"v1_job_id": job_id},
+    )
+    probe = await jobs.enqueue(
+        db,
+        "v1.probe",
+        {"job_id": job_id, "artifact_id": str(artifact.id)},
+        project_id=project.id,
+        created_by=created_by,
+        grants=[artifacts.grant_for(artifact)],
+        required_labels=V1,
+        weight=WEIGHTS["probe"],
+    )
+    return probe, artifact
+
+
+def check_probe_result(result: dict[str, Any]) -> None:
+    check_volume(result)
+    if result.get("kind") != "v1":
+        raise ValueError("kind must be v1")
+    for key in ("annotations", "skipped_annotations"):
+        if not (isinstance(result.get(key), int) and result[key] >= 0):
+            raise ValueError(f"{key} must be a count")
+    found = result.get("segmentation")
+    if found is not None and not (
+        isinstance(found, str) and 0 < len(found) <= 64 and "/" not in found
+    ):
+        raise ValueError("segmentation must be a folder name")
+
+
+async def _foreground(db: AsyncSession, project_id: uuid.UUID) -> int:
+    """Add the class v1's foreground becomes, and return its value."""
+    # As adding a class does: lock the project so values stay unique.
+    await db.scalar(
+        select(Project.id)
+        .where(Project.id == project_id)
+        .with_for_update(key_share=True)
+    )
+    highest = await db.scalar(
+        select(func.max(LabelClass.value)).where(LabelClass.project_id == project_id)
+    )
+    value = max(FIRST_CLASS, (highest or 0) + 1)
+    if value > MAX_CLASS:
+        raise jobs.Rejected("The project has used every class value.", retryable=False)
+    db.add(
+        LabelClass(
+            project_id=project_id,
+            value=value,
+            name=FOREGROUND_NAME,
+            color=FOREGROUND_COLOR,
+        )
+    )
+    await db.flush()
+    return value
+
+
+async def after_probe(db: AsyncSession, probe: Job) -> None:
+    result = probe.result or {}
+    assert probe.project_id is not None
+    job_id = probe.payload["job_id"]
+    shape = result["shape_zyx"]
+    image_grant = probe.grants[:1]
+    common = {"pipeline": probe, "created_by": probe.created_by}
+    previous = [
+        await jobs.enqueue(
+            db,
+            "v1.slab",
+            {"job_id": job_id, "z_range": z_range},
+            depends_on=[probe],
+            grants=image_grant,
+            required_labels=V1,
+            weight=WEIGHTS["slabs"] * (z_range[1] - z_range[0]) / shape[0],
+            **common,
+        )
+        for z_range in result["slabs"]
+    ]
+    levels = int(result["levels"])
+    shares = [8.0**-level for level in range(1, levels)]
+    for level, share in zip(range(1, levels), shares, strict=True):
+        previous = [
+            await jobs.enqueue(
+                db,
+                "pyramid.level",
+                {"level": level},
+                depends_on=previous,
+                grants=image_grant,
+                weight=WEIGHTS["pyramid"] * share / sum(shares),
+                **common,
+            )
+        ]
+    finalize = await jobs.enqueue(
+        db,
+        "artifact.finalize",
+        {"source": {"kind": "v1", "v1_job_id": job_id}},
+        depends_on=previous,
+        grants=image_grant,
+        weight=WEIGHTS["finalize"],
+        **common,
+    )
+    image = await db.get(Artifact, uuid.UUID(probe.payload["artifact_id"]))
+    assert image is not None
+    image.produced_by_job = finalize.id
+    foreground = await _foreground(db, probe.project_id)
+    if result["annotations"]:
+        await jobs.enqueue(
+            db,
+            "v1.labels",
+            {"job_id": job_id, "shape_zyx": shape, "foreground": foreground},
+            depends_on=[finalize],
+            required_labels=V1,
+            weight=LABEL_WEIGHT,
+            **common,
+        )
+    if found := result.get("segmentation"):
+        prediction = await artifacts.create_staging(
+            db,
+            project_id=probe.project_id,
+            kind="prediction",
+            head_slot="prediction",
+            inputs={
+                "model_id": None,
+                "image_artifact_id": str(image.id),
+                "v1_job_id": job_id,
+                "v1_segmentation": found,
+            },
+        )
+        job = await jobs.enqueue(
+            db,
+            "v1.prediction",
+            {
+                "job_id": job_id,
+                "segmentation": found,
+                "shape_zyx": shape,
+                "foreground": foreground,
+            },
+            depends_on=[finalize],
+            grants=[artifacts.grant_for(prediction)],
+            required_labels=V1,
+            weight=PREDICTION_WEIGHT,
+            **common,
+        )
+        prediction.produced_by_job = job.id
+    await db.flush()
+
+
+def check_labels_result(result: dict[str, Any]) -> None:
+    rois = result.get("rois")
+    if not isinstance(rois, list) or len(rois) > MAX_ROIS:
+        raise ValueError(f"rois must be a list of up to {MAX_ROIS} boxes")
+    for box in rois:
+        if not (
+            isinstance(box, list)
+            and len(box) == 6
+            and all(isinstance(n, int) and n >= 0 for n in box)
+            and box[3] == box[0] + 1
+            and box[4] > box[1]
+            and box[5] > box[2]
+        ):
+            raise ValueError(
+                "each roi must be a one-slice box (z0, y0, x0, z1, y1, x1)"
+            )
+
+
+async def after_labels(db: AsyncSession, job: Job) -> None:
+    """Each placed sample was a fully labeled slice: a complete slice ROI."""
+    assert job.project_id is not None
+    seen = set()
+    for box in (job.result or {})["rois"]:
+        if tuple(box) in seen:
+            continue
+        seen.add(tuple(box))
+        db.add(
+            Roi(
+                project_id=job.project_id,
+                created_by=job.created_by,
+                bbox=box,
+                kind="slice",
+                status="complete",
+                split="train",
+                origin="v1",
+            )
+        )
+    await db.flush()

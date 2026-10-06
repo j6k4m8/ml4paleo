@@ -9,7 +9,7 @@ success, so they are never lost). Each pipeline kind lives in its own module.
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import Job
-from . import compose, export, ingest, mesh, predict, train
+from . import compose, export, ingest, mesh, predict, train, v1import
 
 # What people call a pipeline, by the kind of its first job.
 NAMES = {
@@ -20,13 +20,21 @@ NAMES = {
     "mesh.block": "meshes",
     "export.files": "export",
     "export.images": "export",
+    "v1.probe": "import",
     "noop": "check",
 }
 
-_CONTINUATIONS = {"ingest.probe": ingest.after_probe, "model.train": train.after_train}
+_CONTINUATIONS = {
+    "ingest.probe": ingest.after_probe,
+    "model.train": train.after_train,
+    "v1.probe": v1import.after_probe,
+    "v1.labels": v1import.after_labels,
+}
 _RESULT_CHECKS = {
     "ingest.probe": ingest.check_probe_result,
     "model.train": train.check_result,
+    "v1.probe": v1import.check_probe_result,
+    "v1.labels": v1import.check_labels_result,
 }
 
 
@@ -54,4 +62,5 @@ __all__ = [
     "mesh",
     "predict",
     "train",
+    "v1import",
 ]

@@ -4,7 +4,7 @@ Command-line entry point for `ml4paleo-worker`.
     ml4paleo-worker --server https://ml4paleo.example.org --token-file token
 
 Every option can also come from an environment variable (`M4PW_SERVER`,
-`M4PW_TOKEN_FILE`, `M4PW_SLOTS`, `M4PW_LABELS`).
+`M4PW_TOKEN_FILE`, `M4PW_SLOTS`, `M4PW_LABELS`, `M4PW_V1_VOLUME`).
 """
 
 import argparse
@@ -53,6 +53,13 @@ def main(argv: list[str] | None = None) -> int:
         "is found.",
     )
     parser.add_argument(
+        "--v1-volume",
+        type=pathlib.Path,
+        default=os.environ.get("M4PW_V1_VOLUME") or None,
+        help="The ml4paleo v1 app's volume folder (with jobs.json), to import "
+        "v1 jobs from. Adds the 'v1-volume' label. Mount it read-only.",
+    )
+    parser.add_argument(
         "--allow-http",
         action="store_true",
         default=os.environ.get("M4PW_ALLOW_HTTP") == "true",
@@ -80,8 +87,11 @@ def main(argv: list[str] | None = None) -> int:
     from ml4paleo_worker.client import ServerClient
     from ml4paleo_worker.main import Worker
 
+    labels = [*args.label, *(["v1-volume"] if args.v1_volume else [])]
+    if args.v1_volume and not (args.v1_volume / "jobs.json").is_file():
+        parser.error(f"{args.v1_volume} has no jobs.json")
     client = ServerClient(token, args.server.rstrip("/"))
-    worker = Worker(client, detect(args.label, args.slots))
+    worker = Worker(client, detect(labels, args.slots), v1_volume=args.v1_volume)
 
     def stop(signum, frame):
         logging.getLogger(__name__).info("Stopping: giving running jobs back")

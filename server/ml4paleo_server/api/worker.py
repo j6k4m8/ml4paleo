@@ -4,10 +4,14 @@ messages and `ml4paleo_server.jobs.queue` for the job states.
 """
 
 import asyncio
+import json
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
+from ml4paleo.labels import Source
 from ml4paleo.protocol import (
     MAX_CLAIM_WAIT_SECONDS,
     ClaimIn,
@@ -19,18 +23,22 @@ from ml4paleo.protocol import (
     HelloIn,
     HelloOut,
     JobLease,
+    LabelOpIn,
     ReleaseIn,
 )
 
-from .. import artifacts, broker, jobs, pipelines
+from .. import artifacts, broker, jobs, labels, pipelines
 from ..auth.deps import DbSession, SettingsDep
 from ..jobs.workers import CurrentWorker
+from .labels import MAX_TOOL_BYTES, DeltaIn, allowed_values, check_values
 
 router = APIRouter(prefix="/api/worker/v1", tags=["worker"])
 
 # A waiting claim looks for work at least this often, even without a
 # notification.
 CLAIM_POLL_SECONDS = 5.0
+# The kinds of job that may write labels, and the source their edits get.
+LABEL_WRITERS = {"v1.labels": Source.HUMAN}
 
 
 def _lease_lost() -> HTTPException:
@@ -196,3 +204,49 @@ async def release(
     except jobs.LeaseLost:
         raise _lease_lost() from None
     await db.commit()
+
+
+@router.post("/jobs/{job_id}/label-ops", status_code=201)
+async def label_op(
+    job_id: uuid.UUID,
+    body: LabelOpIn,
+    worker: CurrentWorker,
+    db: DbSession,
+    settings: SettingsDep,
+) -> dict[str, Any]:
+    """
+    Apply a label edit to the job's project, as the annotator's edits are
+    applied, for the kinds of job that bring in labels. The job stays locked
+    until the edit commits, so an edit can't land after its job has finished.
+    """
+    try:
+        job = await jobs.leased_job(db, job_id, worker, body.lease_token)
+    except jobs.LeaseLost:
+        raise _lease_lost() from None
+    source = LABEL_WRITERS.get(job.kind)
+    if source is None or job.project_id is None:
+        raise HTTPException(status_code=403, detail="This job can't write labels.")
+    if len(json.dumps(body.tool)) > MAX_TOOL_BYTES:
+        raise HTTPException(status_code=422, detail="tool is too large")
+    try:
+        deltas = [DeltaIn.model_validate(delta).to_delta() for delta in body.deltas]
+        allowed = await allowed_values(db, job.project_id)
+        await run_in_threadpool(check_values, deltas, allowed)
+        result = await labels.apply_edit(
+            db,
+            settings,
+            job.project_id,
+            client_op_id=body.client_op_id,
+            deltas=deltas,
+            source=source,
+            tool=body.tool,
+            job_id=job.id,
+        )
+    except labels.NoImage:
+        raise HTTPException(
+            status_code=422, detail="This project has no image yet."
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    await db.commit()
+    return {"seq": result.seq}

@@ -104,6 +104,11 @@ jobs:
       - name: Generate secrets
         run: deploy/compose/setup.sh localhost
 
+      - name: Check the v1 import override
+        run: >-
+          M4P_V1_VOLUME=/tmp docker compose -f deploy/compose/compose.yml
+          -f deploy/compose/compose.v1.yml config --quiet
+
       - name: Start the stack
         run: >-
           docker compose -f deploy/compose/compose.yml
