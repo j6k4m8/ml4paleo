@@ -3,22 +3,25 @@ Claiming jobs from the ml4paleo v1 app, which this one replaced (see
 `pipelines/v1import.py`).
 
     POST /api/v1-jobs/{job}/claim     import a v1 job into a new project of yours
-    POST /api/v1-jobs/{job}/release   (admins) let a wrongly claimed job go
+    POST /api/v1-jobs/{job}/release   (admins) give a job to an account {to}
 
 v1 had no accounts: anyone with a job's link could open it. So the first
 person to claim a job gets it, claims are rate-limited (ids are only six hex
 digits) per account, per address, and for everyone once too many miss, and
-an admin can release a job someone else claimed. Releasing stops what runs
-in the claimer's project and deletes it (garbage collection gives its
-storage back), so the job's owner can claim it again; the account it was
-released from can't.
+an admin can give a job to the account it belongs to. That stops what runs
+in the project someone else made from it and deletes it (garbage collection
+gives its storage back), and then only that account can claim the job;
+giving it again undoes a mistake.
+
+Claims and releases are recorded in the audit log against the job (target
+"v1_job", the job id), where a claim finds the last of them.
 """
 
 import datetime
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from starlette.concurrency import run_in_threadpool
 
@@ -28,7 +31,7 @@ from .. import audit, jobs
 from ..auth import ratelimit
 from ..auth.deps import AdminAuth, CurrentAuth, DbSession, EngineDep, SettingsDep
 from ..auth.ratelimit import client_key
-from ..db import AuditEvent, Job, Project, ProjectMember
+from ..db import AuditEvent, Job, Project, ProjectMember, User
 from ..jobs.queue import FINISHED
 from ..pipelines import v1import
 from ..settings import Settings
@@ -39,7 +42,12 @@ HOUR = datetime.timedelta(hours=1)
 # Claims of ids that aren't v1 jobs, from anyone.
 MISSES = "v1-claim:misses"
 NOT_HERE = "This server has no v1 jobs to import."
-RELEASED = "An admin released this job from your account. If it's yours, ask them."
+GIVEN = "An admin gave this job to another account. If it's yours, ask an admin."
+
+
+class ReleaseIn(BaseModel):
+    # The username of the account the job belongs to.
+    to: str = Field(min_length=1, max_length=64)
 
 
 class ClaimOut(BaseModel):
@@ -68,19 +76,21 @@ async def _lock(db: DbSession, job_id: str) -> None:
     )
 
 
-async def _released(db: DbSession, job_id: str, user_id: uuid.UUID) -> bool:
-    """Whether an admin released the job from a project of this user's."""
-    release = await db.scalar(
-        select(AuditEvent.id)
+async def _given_to(db: DbSession, job_id: str) -> uuid.UUID | None:
+    """The account an admin last gave the job to, unless it's claimed since."""
+    last = await db.scalar(
+        select(AuditEvent)
         .where(
-            AuditEvent.action == "v1.release",
-            AuditEvent.details.contains(
-                {"v1_job_id": job_id, "owner_id": str(user_id)}
-            ),
+            AuditEvent.target_type == "v1_job",
+            AuditEvent.target_id == job_id,
+            AuditEvent.action.in_(("v1.claim", "v1.release")),
         )
+        .order_by(AuditEvent.id.desc())
         .limit(1)
     )
-    return release is not None
+    if last is None or last.action != "v1.release":
+        return None
+    return uuid.UUID(last.details["to_user_id"])
 
 
 @router.post("/{job_id}/claim", status_code=201)
@@ -129,15 +139,13 @@ async def claim(
         )
     # The first claim wins.
     await _lock(db, job_id)
-    if await _released(db, job_id, auth.user.id):
-        raise HTTPException(status_code=409, detail=RELEASED)
     existing = await db.scalar(select(Project).where(Project.v1_job_id == job_id))
     if existing is not None and existing.deleted_at is None:
         if existing.owner_id != auth.user.id:
             raise HTTPException(
                 status_code=409,
                 detail="Someone has already imported this job. If it's yours, ask "
-                "an admin to release it.",
+                "an admin to give it to you.",
             )
         response.status_code = 200
         # For example, a prediction that didn't fit in your storage then.
@@ -152,11 +160,11 @@ async def claim(
                 db,
                 actor_id=auth.user.id,
                 action="v1.resume",
-                target_type="project",
-                target_id=existing.id,
+                target_type="v1_job",
+                target_id=job_id,
                 request=request,
                 details={
-                    "v1_job_id": job_id,
+                    "project_id": str(existing.id),
                     "pipeline_ids": [str(job.id) for job in started],
                 },
             )
@@ -164,6 +172,9 @@ async def claim(
         return ClaimOut(
             project_id=existing.id, pipeline_ids=[job.id for job in started]
         )
+    given = await _given_to(db, job_id)
+    if given is not None and given != auth.user.id:
+        raise HTTPException(status_code=409, detail=GIVEN)
     if existing is not None:
         # A deleted project lets go of its job.
         existing.v1_job_id = None
@@ -178,10 +189,10 @@ async def claim(
         db,
         actor_id=auth.user.id,
         action="v1.claim",
-        target_type="project",
-        target_id=project.id,
+        target_type="v1_job",
+        target_id=job_id,
         request=request,
-        details={"v1_job_id": job_id, "pipeline_ids": [str(probe.id)]},
+        details={"project_id": str(project.id), "pipeline_ids": [str(probe.id)]},
     )
     await db.commit()
     return ClaimOut(project_id=project.id, pipeline_ids=[probe.id])
@@ -190,42 +201,59 @@ async def claim(
 @router.post("/{job_id}/release", status_code=204)
 async def release(
     job_id: str,
+    body: ReleaseIn,
     request: Request,
     auth: AdminAuth,
     db: DbSession,
+    settings: SettingsDep,
 ) -> None:
     """
-    Stop and delete the project that claimed a v1 job, so the job can be
-    claimed again (by anyone but that project's owner).
+    Give a v1 job to the account it belongs to: only that account can claim
+    it next. A project someone else made from it is stopped and deleted.
     """
+    root = _volume(settings)
     job_id = _job_id(job_id)
+    if job_id not in await run_in_threadpool(read_jobs, root):
+        raise HTTPException(status_code=404, detail="There's no v1 job with that id.")
+    to = await db.scalar(
+        select(User).where(
+            User.username == body.to.strip().lower(), User.status != "disabled"
+        )
+    )
+    if to is None:
+        raise HTTPException(status_code=404, detail="No one with that username.")
     await _lock(db, job_id)
     project = await db.scalar(
         select(Project).where(Project.v1_job_id == job_id, Project.deleted_at.is_(None))
     )
-    if project is None:
-        raise HTTPException(status_code=404, detail="Nobody has claimed that job.")
-    # Pipelines before the project: completing a job locks the job, then its
-    # project.
-    running = await db.scalars(
-        select(Job.root_id)
-        .where(Job.project_id == project.id, Job.status.not_in(FINISHED))
-        .distinct()
-        .order_by(Job.root_id)
-    )
-    for root_id in running.all():
-        await jobs.cancel_pipeline(db, root_id)
-    # Leave v1_job_id (a key) for the next claim to clear: changing a key here
-    # would wait for jobs that are adding rows to the project, which can be
-    # waiting for the jobs this just locked.
-    project.deleted_at = datetime.datetime.now(datetime.UTC)
+    if project is not None:
+        if project.owner_id == to.id:
+            raise HTTPException(status_code=409, detail="That account has the job.")
+        # Pipelines before the project: completing a job locks the job, then
+        # its project.
+        running = await db.scalars(
+            select(Job.root_id)
+            .where(Job.project_id == project.id, Job.status.not_in(FINISHED))
+            .distinct()
+            .order_by(Job.root_id)
+        )
+        for root_id in running.all():
+            await jobs.cancel_pipeline(db, root_id)
+        # Leave v1_job_id (a key) for the next claim to clear: changing a key
+        # here would wait for jobs that are adding rows to the project, which
+        # can be waiting for the jobs this just locked.
+        project.deleted_at = datetime.datetime.now(datetime.UTC)
     audit.record(
         db,
         actor_id=auth.user.id,
         action="v1.release",
-        target_type="project",
-        target_id=project.id,
+        target_type="v1_job",
+        target_id=job_id,
         request=request,
-        details={"v1_job_id": job_id, "owner_id": str(project.owner_id)},
+        details={
+            "to_user_id": str(to.id),
+            "project_id": str(project.id) if project else None,
+            "owner_id": str(project.owner_id) if project else None,
+        },
     )
     await db.commit()

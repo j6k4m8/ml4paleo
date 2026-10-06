@@ -2,7 +2,8 @@
 Importing v1 jobs, end to end: claiming one by its id makes a project, and a
 worker with the v1 volume brings over the image (in z, y, x), the placed
 annotation samples as labels with complete slice ROIs, and the finished
-segmentation as the prediction. The first claim wins; admins can release.
+segmentation as the prediction. The first claim wins; admins can give a job
+to the account it belongs to.
 """
 
 import asyncio
@@ -511,13 +512,15 @@ def test_the_labels_and_the_prediction_come_over_on_their_own(
     assert ada.get(f"/api/projects/{project}/prediction").json()["class_values"] == [2]
 
 
-def test_the_first_claim_wins_until_an_admin_releases_it(
+def test_the_first_claim_wins_until_an_admin_gives_the_job_away(
     new_browser, settings, migrated_database_url
 ):
     ada = new_browser()
     signup(ada)
     bob = new_browser()
     signup(bob, username="bob")
+    carol = new_browser()
+    signup(carol, username="carol")
     assert ada.post("/api/v1-jobs/ABC123/claim").status_code == 201
     taken = bob.post("/api/v1-jobs/abc123/claim")
     assert taken.status_code == 409
@@ -526,25 +529,61 @@ def test_the_first_claim_wins_until_an_admin_releases_it(
     assert bob.post("/api/v1-jobs/ABCDEF/claim").status_code == 404
     assert bob.post("/api/v1-jobs/DEAD00/claim").status_code == 409
 
-    # Releasing deletes the claimer's project, so the owner can claim it, but
-    # the claimer can't take it back from an old link.
+    # Giving the job to bob deletes ada's project, and then only bob can
+    # claim it: not ada from an old link, nor anyone else.
     admin, _ = make_admin(new_browser, migrated_database_url)
-    assert bob.post("/api/v1-jobs/ABC123/release").status_code == 403
-    assert admin.post("/api/v1-jobs/ABC123/release").status_code == 204
-    assert admin.post("/api/v1-jobs/ABC123/release").status_code == 404
-    assert [p["name"] for p in ada.get("/api/projects").json()] == []
-    again = ada.post("/api/v1-jobs/ABC123/claim")
-    assert again.status_code == 409
-    assert again.json()["detail"] == (
-        "An admin released this job from your account. If it's yours, ask them."
+    url = "/api/v1-jobs/ABC123/release"
+    assert bob.post(url, json={"to": "bob"}).status_code == 403
+    assert admin.post(url).status_code == 422
+    assert admin.post(url, json={"to": "nobody"}).status_code == 404
+    assert (
+        admin.post("/api/v1-jobs/ABCDEF/release", json={"to": "bob"}).status_code == 404
     )
+    assert admin.post(url, json={"to": "ada"}).status_code == 409
+    assert admin.post(url, json={"to": " Bob "}).status_code == 204
+    assert [p["name"] for p in ada.get("/api/projects").json()] == []
+    for other in (ada, carol):
+        refused = other.post("/api/v1-jobs/ABC123/claim")
+        assert refused.status_code == 409
+        assert refused.json()["detail"] == (
+            "An admin gave this job to another account. If it's yours, ask an admin."
+        )
+    # Given by mistake, it can be given back, even to the account it was taken
+    # from.
+    assert admin.post(url, json={"to": "ada"}).status_code == 204
+    assert bob.post("/api/v1-jobs/ABC123/claim").status_code == 409
+    assert ada.post("/api/v1-jobs/ABC123/claim").status_code == 201
+    assert admin.post(url, json={"to": "bob"}).status_code == 204
     assert bob.post("/api/v1-jobs/ABC123/claim").status_code == 201
 
-    # So does deleting your own project.
-    project = ada.post("/api/v1-jobs/FEED01/claim").json()["project_id"]
-    assert ada.get(f"/api/projects/{project}").json()["name"] == "v1 job FEED01"
-    assert ada.request("DELETE", f"/api/projects/{project}").status_code == 204
-    assert bob.post("/api/v1-jobs/FEED01/claim").status_code == 201
+    # A job nobody has claimed can be given too.
+    assert (
+        admin.post("/api/v1-jobs/FEED01/release", json={"to": "carol"}).status_code
+        == 204
+    )
+    assert ada.post("/api/v1-jobs/FEED01/claim").status_code == 409
+    project = carol.post("/api/v1-jobs/FEED01/claim").json()["project_id"]
+    # Deleting your own project lets anyone claim the job.
+    assert carol.request("DELETE", f"/api/projects/{project}").status_code == 204
+    assert ada.post("/api/v1-jobs/FEED01/claim").status_code == 201
+
+    # It's all in the audit log against the job, where a claim looks.
+    async def events(db):
+        rows = await db.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.target_type == "v1_job", AuditEvent.target_id == "ABC123")
+            .order_by(AuditEvent.id)
+        )
+        return [event.action for event in rows]
+
+    assert run_db(migrated_database_url, events) == [
+        "v1.claim",
+        "v1.release",
+        "v1.release",
+        "v1.claim",
+        "v1.release",
+        "v1.claim",
+    ]
 
 
 def test_releasing_a_job_stops_its_import(new_browser, settings, migrated_database_url):
@@ -564,7 +603,8 @@ def test_releasing_a_job_stops_its_import(new_browser, settings, migrated_databa
     assert [lease["job_id"]] == claimed["pipeline_ids"]
 
     admin, _ = make_admin(new_browser, migrated_database_url)
-    assert admin.post("/api/v1-jobs/ABC123/release").status_code == 204
+    release = admin.post("/api/v1-jobs/ABC123/release", json={"to": "admin"})
+    assert release.status_code == 204
     beat = worker.post(
         f"/api/worker/v1/jobs/{lease['job_id']}/heartbeat",
         json={"lease_token": lease["lease_token"]},
@@ -578,6 +618,8 @@ def test_releasing_doesnt_wait_for_rows_that_refer_to_the_project(
 ):
     ada = new_browser()
     signup(ada)
+    bob = new_browser()
+    signup(bob, username="bob")
     project = ada.post("/api/v1-jobs/ABC123/claim").json()["project_id"]
     admin, _ = make_admin(new_browser, migrated_database_url)
 
@@ -592,7 +634,10 @@ def test_releasing_doesnt_wait_for_rows_that_refer_to_the_project(
                     finishing, project_id=uuid.UUID(project), kind="image"
                 )
                 releasing = asyncio.get_running_loop().run_in_executor(
-                    None, lambda: admin.post("/api/v1-jobs/ABC123/release")
+                    None,
+                    lambda: admin.post(
+                        "/api/v1-jobs/ABC123/release", json={"to": "bob"}
+                    ),
                 )
                 released = await asyncio.wait_for(releasing, 10)
         finally:
@@ -601,8 +646,6 @@ def test_releasing_doesnt_wait_for_rows_that_refer_to_the_project(
 
     assert asyncio.run(scenario()) == 204
     # The next claim lets go of the deleted project's job.
-    bob = new_browser()
-    signup(bob, username="bob")
     assert bob.post("/api/v1-jobs/ABC123/claim").status_code == 201
 
 
