@@ -222,8 +222,13 @@ def test_random_forest_counts_its_features(channels, sigma_max):
     image = np.zeros((channels, 8, 8, 8), dtype=np.float32)
     assert features(image, sigma_max).shape[-1] == feature_count(channels, sigma_max)
     plugin = get_plugin("rf")()
+    count = feature_count(channels, sigma_max)
     cost = plugin.crop_cost(plugin.Params(sigma_max=sigma_max), channels)
-    assert cost.bytes_per_voxel == 16 * feature_count(channels, sigma_max)
+    # Each scale scikit-image is working on holds about 160 bytes a voxel.
+    assert cost.bytes_per_voxel == max(16 * count, 4 * count + 160)
+    # Threads compute scales at once, each with its own working memory.
+    many = plugin.crop_cost(plugin.Params(sigma_max=sigma_max), channels, threads=16)
+    assert many.bytes_per_voxel >= cost.bytes_per_voxel
 
 
 def test_random_forest_learns_from_sparse_labels(tmp_path):

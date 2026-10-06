@@ -302,13 +302,17 @@ class RandomForestPlugin:
             files=[MODEL_FILE, META_FILE],
         )
 
-    def crop_cost(self, params: BaseModel, channels: int) -> CropCost:
+    def crop_cost(self, params: BaseModel, channels: int, threads: int = 1) -> CropCost:
         assert isinstance(params, RandomForestParams)
         # float32 features, about four times over while scikit-image computes
         # each scale and stacks them, and they are cut down to the samples.
+        # With several threads it computes that many scales at once, as for
+        # prediction (see `RandomForestPredictor.bytes_per_voxel`).
+        count = feature_count(channels, params.sigma_max)
+        at_once = min(max(1, threads), scale_count(params.sigma_max))
         return CropCost(
             halo=halo_for(params.sigma_max),
-            bytes_per_voxel=4 * 4 * feature_count(channels, params.sigma_max),
+            bytes_per_voxel=max(16 * count, 4 * count + 160 * at_once),
         )
 
     def _samples(

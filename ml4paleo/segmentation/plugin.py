@@ -162,8 +162,11 @@ class SegmentationPlugin(Protocol):
         ctx: TrainContext,
     ) -> TrainResult: ...
 
-    def crop_cost(self, params: BaseModel, channels: int) -> CropCost:
-        """What training with `params` holds per crop of a `channels` image."""
+    def crop_cost(self, params: BaseModel, channels: int, threads: int = 1) -> CropCost:
+        """
+        What training with `params` holds per crop of a `channels` image,
+        on `threads` threads.
+        """
         ...
 
     def load(self, directory: pathlib.Path, device: str = "cpu") -> Predictor: ...
