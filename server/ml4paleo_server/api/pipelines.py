@@ -22,9 +22,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from .. import artifacts, audit, jobs, pipelines
-from ..auth.deps import CurrentAuth, DbSession
+from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import Job, Project, ProjectMember, Upload, UserSession
 from ..jobs.queue import FINISHED
+from ..viewer import neuroglancer_available, neuroglancer_link
+from .gateway import zarr_path
 from .projects import MemberProject
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["pipelines"])
@@ -240,15 +242,27 @@ class ImageOut(BaseModel):
     # The manifest: shape_czyx, dtype, levels, voxel_size_zyx, unit, window,
     # histogram, and source.
     manifest: dict[str, Any]
+    # The OME-Zarr image, through the data gateway.
+    zarr_url: str
+    # The image in Neuroglancer, if this server has it.
+    neuroglancer_url: str | None
 
 
 @router.get("/image")
-async def current_image(project: MemberProject, db: DbSession) -> ImageOut:
+async def current_image(
+    project: MemberProject, db: DbSession, settings: SettingsDep
+) -> ImageOut:
     image = await artifacts.head(db, project.id, "image")
     if image is None:
         raise HTTPException(status_code=404, detail="This project has no image yet.")
+    zarr_url = zarr_path(project.id, image.id)
+    manifest = image.manifest or {}
     return ImageOut(
         artifact_id=image.id,
         committed_at=image.state_changed_at,
-        manifest=image.manifest or {},
+        manifest=manifest,
+        zarr_url=zarr_url,
+        neuroglancer_url=neuroglancer_link(settings.public_url, zarr_url, manifest)
+        if neuroglancer_available(settings)
+        else None,
     )

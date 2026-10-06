@@ -340,6 +340,9 @@ async def logout(
         await delete_session(db, auth.token)
         await db.commit()
     clear_session_cookie(response, settings)
+    # Project data the browser cached (viewers cache image chunks) shouldn't
+    # outlive the session, for example on a shared lab computer.
+    response.headers["Clear-Site-Data"] = '"cache"'
 
 
 @router.get("/session")

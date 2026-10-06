@@ -20,17 +20,17 @@ import hashlib
 import secrets
 import uuid
 from email.utils import format_datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 from xml.sax.saxutils import escape
 
 import obstore
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from ml4paleo.storage import StorageGrant, object_store
 
+from .. import objects
 from ..db import Job
 from ..storage import project_storage
 
@@ -109,78 +109,10 @@ def _checked(key: str) -> str:
     return key.strip("/")
 
 
-def _parse_range(header: str) -> Any:
-    """
-    Turn an HTTP Range header (one range) into obstore's range option.
-    """
-    unit, _, spec = header.partition("=")
-    first, sep, last = spec.strip().partition("-")
-    try:
-        if unit.strip() != "bytes" or not sep or "," in spec:
-            raise ValueError
-        if not first:
-            return {"suffix": int(last)}
-        if not last:
-            return {"offset": int(first)}
-        start, end = int(first), int(last) + 1
-        if end <= start:
-            raise ValueError
-        return (start, end)
-    except ValueError:
-        raise HTTPException(status_code=416, detail="Unsupported Range.") from None
-
-
-def _meta_headers(meta: "ObjectMeta") -> dict[str, str]:
-    headers = {"Last-Modified": format_datetime(meta["last_modified"], usegmt=True)}
-    if e_tag := meta.get("e_tag"):
-        headers["ETag"] = e_tag
-    return headers
-
-
 @router.api_route("/{key:path}", methods=["GET", "HEAD"])
 async def read(job_id: uuid.UUID, index: int, key: str, request: Request) -> Response:
     store = await _store(request, job_id, index, write=False)
-    key = _checked(key)
-    if request.method == "HEAD":
-        try:
-            meta = await obstore.head_async(store, key)
-        except FileNotFoundError:
-            return Response(status_code=404)
-        return Response(
-            headers={"Content-Length": str(meta["size"]), **_meta_headers(meta)}
-        )
-    range_header = request.headers.get("range")
-    options: Any = {"range": _parse_range(range_header)} if range_header else {}
-    try:
-        result = await obstore.get_async(store, key, options=options)
-    except FileNotFoundError:
-        return Response(status_code=404)
-    except Exception as exc:  # noqa: BLE001 - obstore reports bad ranges generically
-        if range_header:
-            raise HTTPException(
-                status_code=416, detail="Range not satisfiable."
-            ) from exc
-        raise
-    start, end = result.range
-    size = result.meta["size"]
-    headers = {
-        "Content-Length": str(end - start),
-        "Accept-Ranges": "bytes",
-        **_meta_headers(result.meta),
-    }
-    if range_header:
-        headers["Content-Range"] = f"bytes {start}-{end - 1}/{size}"
-
-    async def body():
-        async for chunk in result.stream():
-            yield memoryview(chunk)
-
-    return StreamingResponse(
-        body(),
-        status_code=206 if range_header else 200,
-        headers=headers,
-        media_type="application/octet-stream",
-    )
+    return await objects.serve(store, _checked(key), request)
 
 
 @router.put("/{key:path}", status_code=201)
