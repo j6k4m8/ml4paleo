@@ -6,6 +6,7 @@ segmentation as the prediction. The first claim wins; admins can release.
 """
 
 import asyncio
+import base64
 import datetime
 import shutil
 import threading
@@ -17,7 +18,7 @@ import pytest
 import v1_volume
 import zarr
 from helpers import SECRET_KEY, add_worker, bearer, make_admin, run_db, signup
-from ml4paleo_server import jobs, pipelines
+from ml4paleo_server import artifacts, jobs, pipelines
 from ml4paleo_server.db import (
     AuditEvent,
     Job,
@@ -36,6 +37,7 @@ from sqlalchemy import select, update
 
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX
 from ml4paleo.labels.codec import decode_chunk
+from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.protocol import JobLease, WorkerCaps
 from ml4paleo.storage import StorageGrant, zarr_store
 
@@ -442,6 +444,68 @@ def test_only_import_jobs_write_labels(new_browser, settings, migrated_database_
     assert refused.status_code == 403
     lost = worker.post(url, json={"lease_token": "nope", **op}, headers=bearer(token))
     assert lost.status_code == 409
+
+
+def test_a_repeated_label_op_gets_its_first_result(
+    new_browser, settings, migrated_database_url
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    classes = f"/api/projects/{project}/labels/classes"
+    value = ada.post(classes, json={"name": "Foreground", "color": "#f2c14e"}).json()[
+        "value"
+    ]
+
+    async def add(db):
+        image = await artifacts.create_staging(
+            db, project_id=uuid.UUID(project), kind="image", head_slot="image"
+        )
+        image.state = "committed"
+        image.manifest = {"shape_czyx": [1, 4, 8, 8]}
+        await artifacts.set_head(db, image)
+        await jobs.enqueue(
+            db,
+            "v1.labels",
+            {},
+            project_id=uuid.UUID(project),
+            required_labels=["v1-volume"],
+        )
+
+    run_db(migrated_database_url, add)
+    token = add_worker(migrated_database_url)
+    worker = new_browser()
+    caps = {"version": "test", "kinds": ["v1.labels"], "labels": ["v1-volume"]}
+    worker.post("/api/worker/v1/hello", json={"caps": caps}, headers=bearer(token))
+    lease = worker.post(
+        "/api/worker/v1/claim",
+        json={"caps": caps, "wait_seconds": 0},
+        headers=bearer(token),
+    ).json()["job"]
+    values = np.full((1, 4, 4), value, dtype=np.uint8)
+    deltas = split_into_deltas(
+        np.ones(values.shape, dtype=bool), (0, 0, 0), values=values
+    )
+    op = {
+        "lease_token": lease["lease_token"],
+        "client_op_id": str(uuid.uuid4()),
+        "deltas": [
+            {
+                "key": list(delta.key),
+                "box": list(delta.box),
+                "mask": base64.b64encode(delta.mask).decode(),
+                "values": base64.b64encode(delta.values or b"").decode(),
+            }
+            for delta in deltas
+        ],
+    }
+    url = f"/api/worker/v1/jobs/{lease['job_id']}/label-ops"
+    first = worker.post(url, json=op, headers=bearer(token))
+    assert first.status_code == 201
+    # The class is retired before the job sends the same op again.
+    assert ada.request("DELETE", f"{classes}/{value}").status_code == 204
+    again = worker.post(url, json=op, headers=bearer(token))
+    assert (again.status_code, again.json()) == (201, first.json())
 
 
 def test_jobs_that_never_converted_cant_be_claimed(new_browser, settings, tmp_path):

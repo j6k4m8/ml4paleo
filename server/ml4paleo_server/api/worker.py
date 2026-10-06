@@ -226,6 +226,9 @@ async def label_op(
     source = LABEL_WRITERS.get(job.kind)
     if source is None or job.project_id is None:
         raise HTTPException(status_code=403, detail="This job can't write labels.")
+    # A retry returns the first result, even if a class it used is gone now.
+    if done := await labels.existing(db, job.project_id, body.client_op_id):
+        return {"seq": done.seq}
     if len(json.dumps(body.tool)) > MAX_TOOL_BYTES:
         raise HTTPException(status_code=422, detail="tool is too large")
     try:
