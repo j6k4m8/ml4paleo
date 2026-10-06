@@ -17,7 +17,8 @@ from ml4paleo_server.db import (
     create_engine,
     create_sessionmaker,
 )
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import OperationalError
 
 from ml4paleo.protocol import Tier, WorkerCaps
 
@@ -409,6 +410,28 @@ async def _two_sessions(database_url, scenario):
         return await scenario(create_sessionmaker(engine))
     finally:
         await engine.dispose()
+
+
+def test_a_held_job_cannot_finish_until_its_holder_commits(migrated_database_url):
+    async def scenario(sessionmaker):
+        async with sessionmaker() as db:
+            worker = await make_worker(db)
+            job = await jobs.enqueue(db, "noop", {})
+            lease = await jobs.claim(db, worker, CPU)
+            await db.commit()
+        async with sessionmaker() as holding, sessionmaker() as finishing:
+            # As the label-op endpoint holds a job until its edit commits.
+            await jobs.leased_job(holding, job.id, worker, lease.lease_token)
+            await finishing.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            with pytest.raises(OperationalError, match="lock timeout"):
+                await jobs.complete(finishing, job.id, worker, lease.lease_token, {})
+            await finishing.rollback()
+            await holding.commit()
+            done = await jobs.complete(finishing, job.id, worker, lease.lease_token, {})
+            await finishing.commit()
+            return done.status
+
+    assert asyncio.run(_two_sessions(migrated_database_url, scenario)) == "succeeded"
 
 
 def test_cancelling_catches_a_job_being_requeued(migrated_database_url):

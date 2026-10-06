@@ -5,6 +5,7 @@ annotation samples as labels with complete slice ROIs, and the finished
 segmentation as the prediction. The first claim wins; admins can release.
 """
 
+import asyncio
 import datetime
 import shutil
 import threading
@@ -16,8 +17,14 @@ import pytest
 import v1_volume
 import zarr
 from helpers import SECRET_KEY, add_worker, bearer, make_admin, run_db, signup
-from ml4paleo_server import jobs
-from ml4paleo_server.db import AuditEvent, Job, User
+from ml4paleo_server import jobs, pipelines
+from ml4paleo_server.db import (
+    AuditEvent,
+    Job,
+    User,
+    create_engine,
+    create_sessionmaker,
+)
 from ml4paleo_server.db import Worker as WorkerRow
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
@@ -464,3 +471,35 @@ def test_the_probe_refuses_jobs_that_never_converted(volume, tmp_path):
         ctx = context(volume, "v1.probe", {"job_id": job_id}, [image])
         with pytest.raises(PermanentError, match="never finished converting"):
             v1import.probe(ctx)
+
+
+def test_the_import_class_and_new_classes_take_turns(
+    new_browser, settings, migrated_database_url
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    url = f"/api/projects/{project}/labels/classes"
+
+    async def scenario():
+        engine = create_engine(migrated_database_url)
+        try:
+            async with create_sessionmaker(engine)() as importing:
+                value = await pipelines.v1import._foreground(
+                    importing, uuid.UUID(project)
+                )
+                # A class added meanwhile waits for the import's to commit...
+                adding = asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: ada.post(url, json={"name": "Bone", "color": "#ffffff"}),
+                )
+                await asyncio.sleep(0.5)
+                waited = not adding.done()
+                await importing.commit()
+                added = await adding
+        finally:
+            await engine.dispose()
+        return value, waited, added.json()["value"]
+
+    # ...and then takes the next value.
+    assert asyncio.run(scenario()) == (2, True, 3)

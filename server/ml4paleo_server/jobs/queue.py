@@ -334,12 +334,14 @@ async def leased_job(
     db: AsyncSession, job_id: uuid.UUID, worker: Worker, lease_token: str
 ) -> Job:
     """
-    Lock a job (key share, so it can't finish until the caller's transaction
-    ends) and check that `worker` holds its lease with `lease_token`.
+    Lock a job (FOR NO KEY UPDATE, so it can't finish until the caller's
+    transaction ends) and check that `worker` holds its lease with
+    `lease_token`.
     """
     job = await db.scalar(
         select(Job)
         .where(Job.id == job_id)
+        # key_share alone is FOR NO KEY UPDATE (with read=True, FOR KEY SHARE).
         .with_for_update(key_share=True)
         # Bulk updates (like cancel_pipeline) don't refresh loaded jobs.
         .execution_options(populate_existing=True)

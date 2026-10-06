@@ -126,7 +126,8 @@ async def _foreground(db: AsyncSession, project_id: uuid.UUID) -> int:
     The value of the class v1's foreground becomes: "Foreground", added
     unless an earlier try at the import added it.
     """
-    # As adding a class does: lock the project so values stay unique.
+    # As adding a class does: lock the project (FOR NO KEY UPDATE) so values
+    # stay unique.
     await db.scalar(
         select(Project.id)
         .where(Project.id == project_id)
