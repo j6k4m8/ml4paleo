@@ -81,10 +81,31 @@ def context(volume, kind, payload, grants=(), memory=4 * 1024**3) -> JobContext:
     return JobContext(lease, memory, v1_volume=volume)
 
 
-def run_import(database_url, live_server, browser, project, pipeline, volume):
+FINISHED = ("succeeded", "failed", "cancelled")
+
+
+def finished(pipelines) -> bool:
+    return all(p["status"] in FINISHED for p in pipelines)
+
+
+def image_in(pipelines) -> bool:
+    return all(p["status"] in FINISHED for p in pipelines if p["kind"] == "import")
+
+
+def run_import(
+    database_url,
+    live_server,
+    browser,
+    project,
+    volume,
+    *,
+    v1_handlers=V1_HANDLERS,
+    until=finished,
+) -> list[dict]:
     """
-    Run an import as the v1 override does: a worker with the v1 volume for
-    the import's own jobs, and a plain worker for the rest.
+    Run an import as the v1 override does, a worker with the v1 volume for
+    the import's own jobs (`v1_handlers`) and a plain worker for the rest,
+    until `until` holds for the project's pipelines, and return them.
     """
     run = uuid.uuid4().hex[:8]
     workers = [
@@ -99,7 +120,7 @@ def run_import(database_url, live_server, browser, project, pipeline, volume):
             v1_volume=v1_volume,
         )
         for name, handlers, labels, v1_volume in (
-            ("worker-v1", V1_HANDLERS, ["v1-volume"], volume),
+            ("worker-v1", v1_handlers, ["v1-volume"], volume),
             ("worker-cpu", HANDLERS, [], None),
         )
     ]
@@ -112,9 +133,9 @@ def run_import(database_url, live_server, browser, project, pipeline, volume):
     try:
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
-            status = browser.get(f"/api/projects/{project}/pipelines/{pipeline}").json()
-            if status["status"] in ("succeeded", "failed", "cancelled"):
-                return status
+            pipelines = browser.get(f"/api/projects/{project}/pipelines").json()
+            if until(pipelines):
+                return pipelines
             time.sleep(0.3)
         raise AssertionError("The import never finished")
     finally:
@@ -126,14 +147,14 @@ def run_import(database_url, live_server, browser, project, pipeline, volume):
             worker.client.close()
 
 
-def ran_on(database_url, pipeline) -> dict[str, set[str]]:
+def ran_on(database_url, project) -> dict[str, set[str]]:
     """The workers ("worker-v1" or "worker-cpu") that ran each kind of job."""
 
     async def look(db):
         rows = await db.execute(
             select(Job.kind, WorkerRow.name)
             .join(WorkerRow, WorkerRow.id == Job.lease_worker_id)
-            .where(Job.root_id == uuid.UUID(pipeline))
+            .where(Job.project_id == uuid.UUID(project))
         )
         found: dict[str, set[str]] = {}
         for kind, name in rows:
@@ -141,6 +162,35 @@ def ran_on(database_url, pipeline) -> dict[str, set[str]]:
         return found
 
     return run_db(database_url, look)
+
+
+def refusing_after(count: int):
+    """A labels job whose server refuses every sample after the first `count`."""
+
+    def labels(ctx: JobContext):
+        send = ctx.apply_label_op
+        sent = []
+
+        def apply(op):
+            if len(sent) >= count:
+                raise ValueError("That sample is damaged.")
+            sent.append(op)
+            return send(op)
+
+        ctx.apply_label_op = apply
+        return v1import.labels(ctx)
+
+    return labels
+
+
+def statuses(pipelines) -> dict[str, list[tuple[str, str | None]]]:
+    """Each kind of pipeline's statuses and errors, oldest first."""
+    found: dict[str, list[tuple[str, str | None]]] = {}
+    for pipeline in reversed(pipelines):
+        found.setdefault(pipeline["kind"], []).append(
+            (pipeline["status"], pipeline["error"])
+        )
+    return found
 
 
 def label_volume(browser, project) -> np.ndarray:
@@ -176,18 +226,14 @@ def test_a_worker_imports_a_claimed_v1_job(
     project = claimed.json()["project_id"]
     assert ada.get(f"/api/projects/{project}").json()["name"] == "Burrow"
 
-    pipeline = run_import(
-        migrated_database_url,
-        live_server,
-        ada,
-        project,
-        claimed.json()["pipeline_id"],
-        volume,
-    )
-    assert pipeline["status"] == "succeeded", pipeline
-    assert pipeline["kind"] == "import"
+    pipelines = run_import(migrated_database_url, live_server, ada, project, volume)
+    assert statuses(pipelines) == {
+        "import": [("succeeded", None)],
+        "import labels": [("succeeded", None)],
+        "import prediction": [("succeeded", None)],
+    }
     # The worker with the v1 volume ran the import's own jobs and no others.
-    for kind, names in ran_on(migrated_database_url, pipeline["id"]).items():
+    for kind, names in ran_on(migrated_database_url, project).items():
         assert names == {"worker-v1" if kind.startswith("v1.") else "worker-cpu"}
 
     # The image, in (z, y, x), with v1's voxel size.
@@ -267,14 +313,7 @@ def test_a_failed_import_starts_again_when_claimed_again(
     room(1e-5)
     claimed = ada.post("/api/v1-jobs/ABC123/claim").json()
     project = claimed["project_id"]
-    failed = run_import(
-        migrated_database_url,
-        live_server,
-        ada,
-        project,
-        claimed["pipeline_id"],
-        volume,
-    )
+    [failed] = run_import(migrated_database_url, live_server, ada, project, volume)
     assert failed["status"] == "failed"
     assert "of storage left" in failed["error"]
     assert ada.get(f"/api/projects/{project}/labels/classes").json() == []
@@ -300,8 +339,16 @@ def test_a_failed_import_starts_again_when_claimed_again(
     assert ada.post(cancel).status_code == 204
     last = ada.post("/api/v1-jobs/ABC123/claim").json()["pipeline_id"]
     assert last not in (None, restarted)
-    done = run_import(migrated_database_url, live_server, ada, project, last, volume)
-    assert done["status"] == "succeeded", done
+    done = run_import(migrated_database_url, live_server, ada, project, volume)
+    assert statuses(done) == {
+        "import": [
+            ("failed", failed["error"]),
+            ("cancelled", None),
+            ("succeeded", None),
+        ],
+        "import labels": [("succeeded", None)],
+        "import prediction": [("succeeded", None)],
+    }
     classes = ada.get(f"/api/projects/{project}/labels/classes").json()
     assert [(c["value"], c["name"]) for c in classes] == [(2, "Foreground")]
     # Now that it has its image, claiming it again just opens it.
@@ -309,6 +356,33 @@ def test_a_failed_import_starts_again_when_claimed_again(
         "project_id": project,
         "pipeline_id": None,
     }
+
+
+def test_the_labels_and_the_prediction_come_over_on_their_own(
+    new_browser, settings, migrated_database_url, live_server, volume
+):
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/v1-jobs/ABC123/claim").json()["project_id"]
+    run_import(migrated_database_url, live_server, ada, project, volume, until=image_in)
+    # Both wait for the image, each in a pipeline of its own...
+    waiting = statuses(ada.get(f"/api/projects/{project}/pipelines").json())
+    assert waiting == {
+        "import": [("succeeded", None)],
+        "import labels": [("waiting", None)],
+        "import prediction": [("waiting", None)],
+    }
+    # ...so a sample the server refuses doesn't stop the prediction.
+    handlers = {**V1_HANDLERS, "v1.labels": refusing_after(1)}
+    pipelines = run_import(
+        migrated_database_url, live_server, ada, project, volume, v1_handlers=handlers
+    )
+    found = statuses(pipelines)
+    [(status, error)] = found["import labels"]
+    assert status == "failed"
+    assert error is not None and "refused sample 1745400100-z07" in error
+    assert found["import prediction"] == [("succeeded", None)]
+    assert ada.get(f"/api/projects/{project}/prediction").json()["class_values"] == [2]
 
 
 def test_the_first_claim_wins_until_an_admin_releases_it(

@@ -3,16 +3,22 @@ Importing a v1 job into a new project (see `ml4paleo.v1import` for what v1
 kept). The v1.* jobs run on a worker with the v1 volume (label "v1-volume"),
 which runs nothing else; the pyramid and finalize jobs run on any worker.
 
+An import is up to three pipelines. The first brings over the image:
+
     v1.probe -> v1.slab x N -> pyramid.level 1 .. L-1 -> artifact.finalize
-             -> v1.labels       (if the job has annotation samples to place)
-             -> v1.prediction   (if it has a finished segmentation)
+
+Once the image is in (edits are checked against it), each of these starts as
+a pipeline of its own, so one failing doesn't stop the other:
+
+    v1.labels       (if the job has annotation samples to place)
+    v1.prediction   (if it has a finished segmentation)
 
 `start` creates the image artifact and the probe. When the probe succeeds,
 `after_probe` checks that the image fits in the owner's storage, then adds a
-"Foreground" class (v1 had one) and the rest; labels and the prediction wait
-for the image to commit, since edits are checked against it. When
-`v1.labels` succeeds, `after_labels` adds a complete slice ROI for each
-sample, so training treats the samples as fully labeled slices.
+"Foreground" class (v1 had one) and the rest of the image's pipeline. When
+the image commits, `after_image` starts the other two. When `v1.labels`
+succeeds, `after_labels` adds a complete slice ROI for each sample, so
+training treats the samples as fully labeled slices.
 """
 
 import math
@@ -34,9 +40,6 @@ from .ingest import WEIGHTS, check_volume
 V1 = ["v1-volume"]
 FOREGROUND_NAME = "Foreground"
 FOREGROUND_COLOR = "#f2c14e"
-# Weights beyond the ingest's: the samples and the segmentation.
-LABEL_WEIGHT = 10.0
-PREDICTION_WEIGHT = 15.0
 MAX_ROIS = 100_000
 # An image with its pyramid takes about this much more than its full
 # resolution alone (each level has an eighth of the voxels of the last).
@@ -213,26 +216,66 @@ async def after_probe(db: AsyncSession, settings: Settings, probe: Job) -> None:
     image = await db.get(Artifact, uuid.UUID(probe.payload["artifact_id"]))
     assert image is not None
     image.produced_by_job = finalize.id
+    await _foreground(db, probe.project_id)
+    await db.flush()
+
+
+async def after_image(db: AsyncSession, settings: Settings, finalize: Job) -> None:
+    """The image is in: start what else the probe found to bring over."""
+    probe = await db.get(Job, finalize.root_id)
+    assert probe is not None and probe.created_by is not None
+    result = probe.result or {}
+    await follow_ups(
+        db,
+        probe,
+        labels=bool(result["annotations"]),
+        prediction=bool(result.get("segmentation")),
+        created_by=probe.created_by,
+    )
+
+
+async def follow_ups(
+    db: AsyncSession,
+    probe: Job,
+    *,
+    labels: bool,
+    prediction: bool,
+    created_by: uuid.UUID,
+) -> list[Job]:
+    """
+    Start the labels and the prediction (as `probe` found them), each as a
+    pipeline of its own, and return their jobs.
+    """
+    assert probe.project_id is not None
+    result = probe.result or {}
+    job_id = probe.payload["job_id"]
+    shape = result["shape_zyx"]
     foreground = await _foreground(db, probe.project_id)
-    if result["annotations"]:
-        await jobs.enqueue(
-            db,
-            "v1.labels",
-            {"job_id": job_id, "shape_zyx": shape, "foreground": foreground},
-            depends_on=[finalize],
-            required_labels=V1,
-            weight=LABEL_WEIGHT,
-            **common,
+    common = {
+        "project_id": probe.project_id,
+        "created_by": created_by,
+        "required_labels": V1,
+    }
+    started = []
+    if labels:
+        started.append(
+            await jobs.enqueue(
+                db,
+                "v1.labels",
+                {"job_id": job_id, "shape_zyx": shape, "foreground": foreground},
+                **common,
+            )
         )
-    if found := result.get("segmentation"):
-        prediction = await artifacts.create_staging(
+    if prediction:
+        found = result["segmentation"]
+        artifact = await artifacts.create_staging(
             db,
             project_id=probe.project_id,
             kind="prediction",
             head_slot="prediction",
             inputs={
                 "model_id": None,
-                "image_artifact_id": str(image.id),
+                "image_artifact_id": probe.payload["artifact_id"],
                 "v1_job_id": job_id,
                 "v1_segmentation": found,
             },
@@ -246,14 +289,13 @@ async def after_probe(db: AsyncSession, settings: Settings, probe: Job) -> None:
                 "shape_zyx": shape,
                 "foreground": foreground,
             },
-            depends_on=[finalize],
-            grants=[artifacts.grant_for(prediction)],
-            required_labels=V1,
-            weight=PREDICTION_WEIGHT,
+            grants=[artifacts.grant_for(artifact)],
             **common,
         )
-        prediction.produced_by_job = job.id
+        artifact.produced_by_job = job.id
+        started.append(job)
     await db.flush()
+    return started
 
 
 def check_labels_result(result: dict[str, Any]) -> None:
