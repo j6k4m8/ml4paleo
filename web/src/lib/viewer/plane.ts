@@ -38,8 +38,8 @@ void main() {
 const LABELS = `#version 300 es
 precision highp float;
 precision highp usampler2D;
-in vec2 uv;
 in vec2 voxel;
+uniform vec4 rect;          // tile u, v, width, height in level-0 voxels
 uniform usampler2D tile;
 uniform sampler2D palette;  // 256 × 1, RGBA by label value
 uniform float opacity;
@@ -47,8 +47,10 @@ uniform vec4 hole;          // u0, v0, u1, v1 in level-0 voxels, left undrawn
 out vec4 color;
 void main() {
 	if (all(greaterThanEqual(voxel, hole.xy)) && all(lessThan(voxel, hole.zw))) discard;
+	// Label tiles are level 0, one texel a voxel; found from the same position
+	// as the hole, so the two agree at its edges.
 	ivec2 size = textureSize(tile, 0);
-	ivec2 texel = min(ivec2(uv * vec2(size)), size - 1);
+	ivec2 texel = clamp(ivec2(floor(voxel - rect.xy)), ivec2(0), size - 1);
 	uint value = texelFetch(tile, texel, 0).r;
 	vec4 swatch = texelFetch(palette, ivec2(int(value), 0), 0);
 	color = vec4(swatch.rgb, swatch.a * opacity);
