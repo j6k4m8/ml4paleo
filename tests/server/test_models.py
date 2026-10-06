@@ -376,6 +376,8 @@ def test_a_prediction_of_a_replaced_image_is_hidden(
     artifact = add_prediction(migrated_database_url, project)
     prediction = ada.get(f"/api/projects/{project}/prediction").json()
     assert prediction["artifact_id"] == artifact
+    image = ada.get(f"/api/projects/{project}/image").json()["artifact_id"]
+    assert prediction["image_artifact_id"] == image
     assert prediction["shape_zyx"] == list(SHAPE)
     started, committed = (
         datetime.datetime.fromisoformat(prediction[f"{at}_at"])

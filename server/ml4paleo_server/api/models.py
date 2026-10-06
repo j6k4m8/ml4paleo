@@ -349,7 +349,9 @@ class PredictionOut(BaseModel):
     model_id: uuid.UUID | None
     model_name: str | None
     class_values: list[int]
-    # The image's (z, y, x) shape when it was predicted.
+    # The image it was predicted from (always the current one), and its
+    # (z, y, x) shape.
+    image_artifact_id: uuid.UUID
     shape_zyx: list[int]
     # The prediction's zarr group (arrays `class` and `uncertainty`), through
     # the data gateway.
@@ -421,6 +423,7 @@ async def _prediction_out(db, project_id: uuid.UUID, head: Artifact, out, **extr
         model_id=model.id if model else None,
         model_name=model.name if model else None,
         class_values=list(head.manifest.get("class_values", [])),
+        image_artifact_id=head.inputs["image_artifact_id"],
         shape_zyx=list(head.manifest.get("shape_zyx", [])),
         zarr_url=zarr_path(project_id, head.id),
         started_at=head.created_at,

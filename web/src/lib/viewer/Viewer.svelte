@@ -67,7 +67,7 @@
 	const MAX_PROPOSAL_VOXELS = 256 ** 3;
 
 	// The page makes a new viewer for each image.
-	const { manifest, zarr_url: zarrUrl } = untrack(() => image);
+	const { manifest, zarr_url: zarrUrl, artifact_id: imageId } = untrack(() => image);
 	const project = untrack(() => projectId);
 	const [, nz, ny, nx] = manifest.shape_czyx;
 	const viewer = new ViewerState([nz, ny, nx], aspectOf(manifest.voxel_size_zyx));
@@ -95,6 +95,9 @@
 	// Why the prediction layer couldn't load when the page opened; cleared
 	// when a later load works.
 	let predictionError = $state("");
+	// The project's image was replaced since this page opened, so its
+	// predictions don't fit the image here.
+	let imageReplaced = $state(false);
 	let pool: WorkerPool | undefined;
 	let hovered: Plane = PLANES.xy;
 	let notice = $state("");
@@ -320,6 +323,7 @@
 		zarr_url: string;
 		model_id: string | null;
 		model_name: string | null;
+		image_artifact_id: string;
 		shape_zyx: number[];
 		// When it was asked for, and when it was done.
 		started_at: string;
@@ -346,6 +350,7 @@
 	 * the server couldn't say, leaving the layer as it was.
 	 */
 	async function loadPrediction(signal: AbortSignal) {
+		if (imageReplaced) return;
 		const load = ++loads;
 		const get = (slot: string) =>
 			api<Predicted>(`/api/projects/${project}/${slot}`, { signal }).catch((e: unknown) => {
@@ -360,21 +365,25 @@
 				() => null,
 			),
 		]);
-		if (signal.aborted || load !== loads) return;
+		if (signal.aborted || load !== loads || imageReplaced) return;
+		// The server gives only predictions of the project's current image, so
+		// one of another image means that image replaced the one shown here.
+		if ([whole, proposed].some((found) => found && found.image_artifact_id !== imageId)) {
+			imageReplaced = true;
+			prediction = proposal = null;
+			predictionError = "This project's image was replaced; reload the page to see the new one.";
+			return;
+		}
 		predictionError = "";
 		// Newest first.
 		if (models) proposer = models.find((m) => m.status === "ready") ?? null;
-		// One of another image (one that replaced this since) wouldn't line up.
-		const fits = (found: Predicted | null) => (found?.shape_zyx.join() === viewer.shape.join() ? found : null);
-		const current = fits(whole);
-		const newer = fits(proposed);
 		const image: Box = [0, 0, 0, ...viewer.shape];
-		prediction = show(prediction, current && { ...current, box: image }, "prediction");
+		prediction = show(prediction, whole && { ...whole, box: image }, "prediction");
 		// A proposal asked for before the prediction is out of date; one asked
 		// for after it shows, even if the prediction was done later.
 		proposal = show(
 			proposal,
-			newer?.box && (!current || Date.parse(newer.started_at) > Date.parse(current.started_at)) ? newer : null,
+			proposed?.box && (!whole || Date.parse(proposed.started_at) > Date.parse(whole.started_at)) ? proposed : null,
 			"proposal",
 		);
 	}
@@ -522,6 +531,7 @@
 	// Why proposing for the selected ROI can't help, if it can't.
 	const proposeBlocked = $derived.by(() => {
 		if (!selectedRoi || !proposer) return "";
+		if (imageReplaced) return "This project's image was replaced; reload the page first";
 		const box = inImage(selectedRoi);
 		if (!box) return "That ROI is outside the image";
 		if (voxels(box) > MAX_PROPOSAL_VOXELS) {
