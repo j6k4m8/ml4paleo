@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from "svelte";
+	import { PlaneMask } from "../labels/raster";
 	import type { ChunkStore } from "./chunks";
 	import type { LabelLayer } from "./labels";
 	import { type LabelTile, PlaneRenderer } from "./plane";
@@ -26,6 +27,8 @@
 		labels,
 		onhover,
 		onresize,
+		onstroke,
+		onpolygon,
 	}: {
 		plane: Plane;
 		viewer: ViewerState;
@@ -34,6 +37,10 @@
 		labels: LabelLayer | null;
 		onhover: (plane: Plane) => void;
 		onresize: (plane: Plane, width: number, height: number) => void;
+		/** A finished brush or eraser stroke at level-0 `slice`. */
+		onstroke: (plane: Plane, slice: number, mask: PlaneMask) => void;
+		/** Close the polygon being drawn. */
+		onpolygon: () => void;
 	} = $props();
 
 	// Labels are full resolution only until the label pyramid exists, so
@@ -211,45 +218,109 @@
 
 	// --- pointer and wheel ---------------------------------------------------
 
-	let press: { x: number; y: number; moved: boolean } | null = null;
+	let press: { x: number; y: number; moved: boolean; pan: boolean } | null = null;
+	let stroke: { mask: PlaneMask; last: [number, number] } | null = null;
+	let cursor: [number, number] | null = $state(null);
+	let overlay: HTMLCanvasElement;
 	let wheelSteps = 0;
 
+	const ratio = () => window.devicePixelRatio || 1;
+	const painting = $derived(viewer.tool === "brush" || viewer.tool === "eraser");
+
 	function offset(event: MouseEvent): [number, number] {
-		const ratio = window.devicePixelRatio || 1;
 		const rect = canvas.getBoundingClientRect();
-		return [(event.clientX - rect.left) * ratio - width / 2, (event.clientY - rect.top) * ratio - height / 2];
+		return [(event.clientX - rect.left) * ratio() - width / 2, (event.clientY - rect.top) * ratio() - height / 2];
+	}
+
+	/** The plane point (u, v) under the pointer, in level-0 voxels. */
+	function planePoint(event: MouseEvent): [number, number] {
+		const point = voxelAt(view(), ...offset(event));
+		return [point[plane.u], point[plane.v]];
+	}
+
+	/** Where a plane point is on screen, in CSS pixels. */
+	function screen(u: number, v: number): [number, number] {
+		const px = pixelsPerVoxel(view());
+		return [
+			((u - viewer.position[plane.u]) * px[plane.u] + width / 2) / ratio(),
+			((v - viewer.position[plane.v]) * px[plane.v] + height / 2) / ratio(),
+		];
+	}
+
+	/** Brush radii along u and v, in level-0 voxels. */
+	function radii(): [number, number] {
+		return [viewer.brushRadius / viewer.aspect[plane.u], viewer.brushRadius / viewer.aspect[plane.v]];
+	}
+
+	function canEdit(): boolean {
+		return viewer.tool === "eraser" || viewer.activeClass !== null;
 	}
 
 	function pointerDown(event: PointerEvent) {
-		press = { x: event.clientX, y: event.clientY, moved: false };
 		canvas.setPointerCapture(event.pointerId);
 		canvas.focus();
+		const pan = viewer.tool === "navigate" || viewer.panning || event.button === 1;
+		press = { x: event.clientX, y: event.clientY, moved: false, pan };
+		if (pan || event.button !== 0 || !canEdit()) return;
+		if (painting) {
+			const point = planePoint(event);
+			const mask = new PlaneMask(viewer.shape[plane.u], viewer.shape[plane.v]);
+			mask.stamp(...point, ...radii());
+			stroke = { mask, last: point };
+			drawStroke();
+		} else if (viewer.tool === "polygon") {
+			const point = planePoint(event);
+			const current = viewer.polygon;
+			if (current && current.plane === plane.name && current.slice === slice) {
+				viewer.polygon = { ...current, points: [...current.points, point] };
+			} else {
+				viewer.polygon = { plane: plane.name, slice, points: [point] };
+			}
+		}
 	}
 
 	function pointerMove(event: PointerEvent) {
 		onhover(plane);
-		if (!press) return;
+		cursor = offset(event).map((d, i) => (d + (i === 0 ? width : height) / 2) / ratio()) as [number, number];
+		if (stroke) {
+			const point = planePoint(event);
+			stroke.mask.line(stroke.last, point, ...radii());
+			stroke.last = point;
+			drawStroke();
+			return;
+		}
+		if (!press?.pan) return;
 		const dx = event.clientX - press.x;
 		const dy = event.clientY - press.y;
 		if (!press.moved && Math.hypot(dx, dy) < 3) return;
 		press.moved = true;
 		viewer.autoFit = false;
-		const ratio = window.devicePixelRatio || 1;
 		const px = pixelsPerVoxel(view());
 		const point = [...viewer.position] as Vec3;
-		point[plane.u] -= (dx * ratio) / px[plane.u];
-		point[plane.v] -= (dy * ratio) / px[plane.v];
+		point[plane.u] -= (dx * ratio()) / px[plane.u];
+		point[plane.v] -= (dy * ratio()) / px[plane.v];
 		viewer.moveTo(point);
 		press.x = event.clientX;
 		press.y = event.clientY;
 	}
 
 	function pointerUp(event: PointerEvent) {
-		if (press && !press.moved) {
+		if (stroke) {
+			const finished = stroke.mask;
+			stroke = null;
+			clearStroke();
+			if (finished.count > 0) onstroke(plane, slice, finished);
+		} else if (press?.pan && !press.moved && viewer.tool === "navigate") {
 			viewer.autoFit = false;
 			viewer.moveTo(voxelAt(view(), ...offset(event)));
 		}
 		press = null;
+	}
+
+	function cancel() {
+		press = null;
+		stroke = null;
+		clearStroke();
 	}
 
 	function wheel(event: WheelEvent) {
@@ -268,6 +339,7 @@
 			viewer.moveTo(point);
 			return;
 		}
+		if (stroke) return;
 		wheelSteps += delta / 40;
 		const steps = Math.trunc(wheelSteps);
 		if (steps !== 0) {
@@ -275,6 +347,64 @@
 			viewer.step(plane.normal, steps);
 		}
 	}
+
+	// --- previews --------------------------------------------------------------
+
+	const activeColor = $derived(
+		viewer.tool === "eraser"
+			? "#ffffff"
+			: (labels?.classes.find((c) => c.value === viewer.activeClass)?.color ?? "#ffffff"),
+	);
+
+	function clearStroke() {
+		overlay?.getContext("2d")?.clearRect(0, 0, overlay.width, overlay.height);
+	}
+
+	/** Paint the stroke so far: one rectangle per run of voxels in a row. */
+	function drawStroke() {
+		if (!stroke || !overlay) return;
+		overlay.width = width;
+		overlay.height = height;
+		const context = overlay.getContext("2d");
+		if (!context) return;
+		const { mask } = stroke;
+		const px = pixelsPerVoxel(view());
+		const r = ratio();
+		context.globalAlpha = Math.max(0.35, viewer.opacity);
+		context.fillStyle = activeColor;
+		for (let j = mask.v0; j < mask.v0 + mask.height; j++) {
+			let i = mask.u0;
+			while (i < mask.u0 + mask.width) {
+				if (!mask.has(i, j)) {
+					i++;
+					continue;
+				}
+				let end = i;
+				while (end < mask.u0 + mask.width && mask.has(end, j)) end++;
+				const [x, y] = screen(i, j);
+				context.fillRect(x * r, y * r, (end - i) * px[plane.u], px[plane.v]);
+				i = end;
+			}
+		}
+	}
+
+	const polygonHere = $derived(
+		viewer.polygon && viewer.polygon.plane === plane.name && viewer.polygon.slice === slice ? viewer.polygon : null,
+	);
+
+	function polygonPath(points: [number, number][], extra: [number, number] | null): string {
+		void [viewer.position, viewer.zoom, width, height];
+		const all = extra ? [...points.map(([u, v]) => screen(u, v)), extra] : points.map(([u, v]) => screen(u, v));
+		return all.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+	}
+
+	const brushOutline = $derived.by(() => {
+		void [viewer.position, viewer.zoom, viewer.brushRadius, width, height];
+		if (!painting || !cursor) return null;
+		const px = pixelsPerVoxel(view());
+		const [ru, rv] = radii();
+		return { x: cursor[0], y: cursor[1], rx: (ru * px[plane.u]) / ratio(), ry: (rv * px[plane.v]) / ratio() };
+	});
 </script>
 
 <div class="plane plane-{plane.normal}">
@@ -285,10 +415,36 @@
 		onpointerdown={pointerDown}
 		onpointermove={pointerMove}
 		onpointerup={pointerUp}
-		onpointercancel={() => (press = null)}
+		onpointercancel={cancel}
 		onpointerenter={() => onhover(plane)}
+		onpointerleave={() => (cursor = null)}
+		ondblclick={() => viewer.tool === "polygon" && onpolygon()}
 		onwheel={wheel}
+		class:editing={viewer.tool !== "navigate" && !viewer.panning}
 	></canvas>
+	<canvas class="overlay" bind:this={overlay} aria-hidden="true"></canvas>
+	<svg class="overlay" aria-hidden="true">
+		{#if polygonHere}
+			<polyline
+				points={polygonPath(polygonHere.points, cursor)}
+				fill={activeColor}
+				fill-opacity="0.25"
+				stroke={activeColor}
+				stroke-width="1.5"
+			/>
+		{/if}
+		{#if brushOutline}
+			<ellipse
+				cx={brushOutline.x}
+				cy={brushOutline.y}
+				rx={Math.max(1, brushOutline.rx)}
+				ry={Math.max(1, brushOutline.ry)}
+				fill="none"
+				stroke={activeColor}
+				stroke-width="1"
+			/>
+		{/if}
+	</svg>
 	<div class="crosshair u axis-{plane.u}" aria-hidden="true"></div>
 	<div class="crosshair v axis-{plane.v}" aria-hidden="true"></div>
 	<div class="caption">
@@ -322,7 +478,18 @@
 		height: 100%;
 		background: #000;
 		touch-action: none;
+		cursor: grab;
+	}
+	canvas.editing {
 		cursor: crosshair;
+	}
+	.overlay {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		pointer-events: none;
+		background: none;
 	}
 	canvas:focus-visible {
 		outline: 2px solid var(--accent);

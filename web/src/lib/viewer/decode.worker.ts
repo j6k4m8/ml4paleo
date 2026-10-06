@@ -31,13 +31,23 @@ export interface CancelRequest {
 }
 
 export type DecodeResponse =
-	| { id: number; data: ArrayBufferView; shape: number[] }
+	| { id: number; data: ArrayBufferView; shape: number[]; version?: number }
 	| { id: number; error: string };
 
 type OpenArray = zarr.Array<zarr.DataType, zarr.FetchStore>;
 
 const arrays = new Map<string, Promise<OpenArray>>();
 const running = new Map<number, AbortController>();
+// The label zarr says which version of a chunk it served (the next edit's
+// base version), by chunk URL.
+const versions = new Map<string, number>();
+
+async function fetchNoting(request: Request): Promise<Response> {
+	const response = await fetch(request);
+	const version = response.headers.get("x-chunk-version");
+	if (version !== null) versions.set(request.url, Number(version));
+	return response;
+}
 
 function openArray(url: string, path: string): Promise<OpenArray> {
 	const key = `${url}#${path}`;
@@ -45,7 +55,7 @@ function openArray(url: string, path: string): Promise<OpenArray> {
 	if (!array) {
 		// Shard indexes are read with suffix ranges, which the gateway serves,
 		// instead of a HEAD request first.
-		const store = new zarr.FetchStore(url, { useSuffixRequest: true });
+		const store = new zarr.FetchStore(url, { useSuffixRequest: true, fetch: fetchNoting });
 		array = zarr.open.v3(zarr.root(store).resolve(path), { kind: "array" });
 		// Let a later request try again after a failure.
 		array.catch(() => arrays.delete(key));
@@ -69,7 +79,11 @@ self.onmessage = async (event: MessageEvent<DecodeRequest | CancelRequest>) => {
 		const selection = message.channel === undefined ? spatial : [message.channel, ...spatial];
 		const chunk = await zarr.get(array, selection, { opts: { signal: controller.signal } });
 		const data = chunk.data as unknown as ArrayBufferView;
-		const reply: DecodeResponse = { id: message.id, data, shape: chunk.shape };
+		// One chunk's region names that chunk (unsharded arrays only).
+		const chunkUrl = `${message.url}${message.path}/c/${[z0, y0, x0].map((c) => Math.floor(c / 64)).join("/")}`;
+		const version = versions.get(chunkUrl);
+		versions.delete(chunkUrl);
+		const reply: DecodeResponse = { id: message.id, data, shape: chunk.shape, version };
 		(self as unknown as Worker).postMessage(reply, [data.buffer as ArrayBuffer]);
 	} catch (error) {
 		const reply: DecodeResponse = { id: message.id, error: String(error) };

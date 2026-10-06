@@ -9,6 +9,7 @@
  * contents, so they stay inside the server's decompression bounds.
  */
 
+import { decompress } from "fzstd";
 import type { Vec3 } from "../viewer/tiles";
 
 export const CHUNK = 64;
@@ -205,6 +206,15 @@ function chunkDelta(mask: Uint8Array, shape: Vec3, origin: Vec3, key: Vec3, opti
 	if (partValues) delta.values = base64(zstdFrame(partValues));
 	else delta.value = options.value;
 	return delta;
+}
+
+/** A delta's mask (0/1 per voxel of its box) and what it writes. */
+export function decodeDelta(delta: DeltaIn): { mask: Uint8Array; written: Uint8Array | number } {
+	const [z0, y0, x0, z1, y1, x1] = delta.box;
+	const count = (z1 - z0) * (y1 - y0) * (x1 - x0);
+	const mask = unpackBits(decompress(fromBase64(delta.mask)), count);
+	const written = delta.values !== undefined ? decompress(fromBase64(delta.values)) : (delta.value ?? 0);
+	return { mask, written };
 }
 
 /**

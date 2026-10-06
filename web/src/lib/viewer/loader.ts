@@ -28,7 +28,7 @@ export class WorkerPool {
 		if (!waiting) return;
 		this.#waiting.delete(response.id);
 		if ("error" in response) waiting.reject(new Error(response.error));
-		else waiting.resolve({ data: response.data as Chunk["data"], shape: response.shape });
+		else waiting.resolve({ data: response.data as Chunk["data"], shape: response.shape, version: response.version });
 	}
 
 	load(request: ArrayRegion, signal: AbortSignal): Promise<Chunk> {

@@ -18,8 +18,15 @@ describe("keymap", () => {
 		expect(actionFor(press("?", { shiftKey: true }))).toBe("help");
 	});
 
-	it("leaves form fields and shortcuts alone", () => {
+	it("leaves form fields and browser shortcuts alone", () => {
 		expect(actionFor(press("0", {}, "INPUT"))).toBeUndefined();
 		expect(actionFor(press("=", { metaKey: true }))).toBeUndefined();
+	});
+
+	it("knows undo and redo with Ctrl or ⌘", () => {
+		expect(actionFor(press("z", { ctrlKey: true }))).toBe("undo");
+		expect(actionFor(press("Z", { metaKey: true, shiftKey: true }))).toBe("redo");
+		expect(actionFor(press("y", { ctrlKey: true }))).toBe("redo");
+		expect(actionFor(press("z"))).toBeUndefined();
 	});
 });

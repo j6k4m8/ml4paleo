@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { decompress } from "fzstd";
 import { describe, expect, it } from "vitest";
 import type { Vec3 } from "../viewer/tiles";
+import fixtures from "../../../../tests/fixtures/labels/cases.json";
 import { applyLocally, base64, fromBase64, packBits, splitIntoDeltas, unpackBits, zstdFrame } from "./deltas";
 
 interface Cases {
@@ -26,9 +25,12 @@ interface Cases {
 	}[];
 }
 
-const cases = JSON.parse(
-	readFileSync(new URL("../../../../tests/fixtures/labels/cases.json", import.meta.url), "utf8"),
-) as Cases;
+const cases = fixtures as unknown as Cases;
+
+async function sha256(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", bytes);
+	return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 const volume = (shape: number[]) => shape.reduce((a, b) => a * b, 1);
 
@@ -85,7 +87,7 @@ function boxShape(box: number[]): number[] {
 	return [box[3]! - box[0]!, box[4]! - box[1]!, box[5]! - box[2]!];
 }
 
-function baseChunk(name: string): Uint8Array {
+function baseChunk(name: string): Uint8Array<ArrayBuffer> {
 	const chunk = new Uint8Array(64 ** 3);
 	if (name === "quadrants") {
 		for (let z = 0; z < 64; z++) {
@@ -102,12 +104,12 @@ function baseChunk(name: string): Uint8Array {
 
 describe("applyLocally", () => {
 	for (const c of cases.apply) {
-		it(`matches the server on ${c.name}`, () => {
+		it(`matches the server on ${c.name}`, async () => {
 			const chunk = baseChunk(c.base);
 			const mask = unpackBits(fromBase64(c.mask_bits), volume(boxShape(c.box)));
 			const written = c.values ? fromBase64(c.values) : (c.value ?? 0);
 			applyLocally(chunk, [64, 64, 64], c.box, mask, written, c.only_if);
-			const sha = chunk.some((v) => v) ? createHash("sha256").update(chunk).digest("hex") : null;
+			const sha = chunk.some((v) => v) ? await sha256(chunk) : null;
 			expect(sha).toBe(c.expected.class_sha256);
 		});
 	}

@@ -143,6 +143,23 @@ describe("ChunkStore", () => {
 		expect(store.get("a")).toBeUndefined();
 	});
 
+	it("refreshes a chunk while the old copy stays in use", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		const first = store.request("a");
+		calls[0]?.finish(10);
+		const old = await first;
+		const seen: string[] = [];
+		store.onLoad = (id) => seen.push(id);
+		const fresh = store.refresh("a");
+		expect(store.get("a")).toBe(old);
+		calls[1]?.finish(30);
+		expect((await fresh).data.byteLength).toBe(30);
+		expect(store.get("a")).not.toBe(old);
+		expect(store.bytes).toBe(30);
+		expect(seen).toEqual(["a"]);
+	});
+
 	it("survives a loader that throws", async () => {
 		let n = 0;
 		const store = new ChunkStore(
