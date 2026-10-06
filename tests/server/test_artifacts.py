@@ -6,6 +6,7 @@ collection.
 
 import datetime
 import threading
+import uuid
 
 import httpx2
 import numpy as np
@@ -367,6 +368,39 @@ def test_new_heads_supersede_old_ones_and_gc_frees_them(
     assert artifact_row(migrated_database_url, first).state == "deleted"
     assert storage_used(migrated_database_url) == first_bytes
     assert artifact_row(migrated_database_url, second).state == "committed"
+
+
+def test_replaced_proposals_go_after_two_days(settings, migrated_database_url):
+    project_id = make_project(migrated_database_url)
+    # Each person's proposals replace each other in a slot of their own.
+    ada, bob = (artifacts.proposal_slot(uuid.uuid4()) for _ in "ab")
+    replaced = {}
+    for slot in (ada, bob, "image"):
+        first, job_id = stage(migrated_database_url, project_id, head_slot=slot)
+        finish(settings, migrated_database_url, job_id)
+        _, job_id = stage(migrated_database_url, project_id, head_slot=slot)
+        finish(settings, migrated_database_url, job_id)
+        replaced[slot] = first
+    size = artifact_row(migrated_database_url, replaced["image"]).bytes
+    assert storage_used(migrated_database_url) == 6 * size
+
+    async def collect_after(db, hours):
+        await db.execute(
+            update(Artifact)
+            .where(Artifact.state == "superseded")
+            .values(state_changed_at=artifacts.now() - datetime.timedelta(hours=hours))
+        )
+        await db.commit()
+        return await artifacts.collect_garbage(create_sessionmaker(db.bind), settings)
+
+    # Not at once, so accepts from one, queued while offline, still land...
+    assert run_db(migrated_database_url, lambda db: collect_after(db, 47)) == 0
+    # ...but long before other replaced artifacts.
+    assert run_db(migrated_database_url, lambda db: collect_after(db, 49)) == 2
+    for slot in (ada, bob):
+        assert artifact_row(migrated_database_url, replaced[slot]).state == "deleted"
+    assert artifact_row(migrated_database_url, replaced["image"]).state == "superseded"
+    assert storage_used(migrated_database_url) == 4 * size
 
 
 def test_deleting_a_project_deletes_its_artifacts(settings, migrated_database_url):

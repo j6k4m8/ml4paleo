@@ -5,7 +5,7 @@
  */
 
 import type { Chunk } from "./chunks";
-import { CHUNK, type Level, type Plane, type TileKey, type Vec3, type View, pixelsPerVoxel, tileId } from "./tiles";
+import { CHUNK, type Level, type Plane, type Rect, type TileKey, type Vec3, type View, pixelsPerVoxel, tileId } from "./tiles";
 
 const VERTEX = `#version 300 es
 in vec2 corner;
@@ -14,8 +14,9 @@ uniform vec2 uvMax;     // the part of the texture inside the image
 uniform vec2 center;    // view center (u, v) in level-0 voxels
 uniform vec2 toClip;    // clip-space units per level-0 voxel along u and v
 out vec2 uv;
+out vec2 voxel;         // (u, v) in level-0 voxels
 void main() {
-	vec2 voxel = rect.xy + corner * rect.zw;
+	voxel = rect.xy + corner * rect.zw;
 	vec2 clip = (voxel - center) * toClip;
 	gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
 	uv = corner * uvMax;
@@ -37,14 +38,19 @@ void main() {
 const LABELS = `#version 300 es
 precision highp float;
 precision highp usampler2D;
-in vec2 uv;
+in vec2 voxel;
+uniform vec4 rect;          // tile u, v, width, height in level-0 voxels
 uniform usampler2D tile;
 uniform sampler2D palette;  // 256 × 1, RGBA by label value
 uniform float opacity;
+uniform vec4 hole;          // u0, v0, u1, v1 in level-0 voxels, left undrawn
 out vec4 color;
 void main() {
+	if (all(greaterThanEqual(voxel, hole.xy)) && all(lessThan(voxel, hole.zw))) discard;
+	// Label tiles are level 0, one texel a voxel; found from the same position
+	// as the hole, so the two agree at its edges.
 	ivec2 size = textureSize(tile, 0);
-	ivec2 texel = min(ivec2(uv * vec2(size)), size - 1);
+	ivec2 texel = clamp(ivec2(floor(voxel - rect.xy)), ivec2(0), size - 1);
 	uint value = texelFetch(tile, texel, 0).r;
 	vec4 swatch = texelFetch(palette, ivec2(int(value), 0), 0);
 	color = vec4(swatch.rgb, swatch.a * opacity);
@@ -154,6 +160,8 @@ export interface Overlay {
 	slice: number;
 	tiles: LabelTile[];
 	opacity: number;
+	/** A part of the plane left undrawn, for another layer to show. */
+	hole?: Rect;
 }
 
 export interface LabelTile {
@@ -190,7 +198,7 @@ export class PlaneRenderer {
 		for (const name of ["rect", "uvMax", "center", "toClip", "tile", "window"]) {
 			this.#imageUniforms[name] = gl.getUniformLocation(this.#image, name);
 		}
-		for (const name of ["rect", "uvMax", "center", "toClip", "tile", "palette", "opacity"]) {
+		for (const name of ["rect", "uvMax", "center", "toClip", "tile", "palette", "opacity", "hole"]) {
 			this.#labelUniforms[name] = gl.getUniformLocation(this.#labels, name);
 		}
 		const buffer = gl.createBuffer();
@@ -291,6 +299,11 @@ export class PlaneRenderer {
 		this.#labelTextures.deletePrefix(`${id}@`);
 	}
 
+	/** Forget every slice of an overlay layer (its textures' `prefix`). */
+	dropOverlay(prefix: string): void {
+		this.#labelTextures.deletePrefix(prefix);
+	}
+
 	/**
 	 * Draw the view: for each image layer (coarsest first), the tiles on the
 	 * GPU, so finer tiles cover coarser ones as they arrive; then each overlay
@@ -353,6 +366,9 @@ export class PlaneRenderer {
 		for (const overlay of overlays) {
 			if (overlay.opacity <= 0) continue;
 			gl.uniform1f(this.#labelUniforms.opacity ?? null, overlay.opacity);
+			// An empty rectangle by default, so every voxel draws.
+			const [u0, v0, u1, v1] = overlay.hole ?? [0, 0, 0, 0];
+			gl.uniform4f(this.#labelUniforms.hole ?? null, u0, v0, u1, v1);
 			for (const tile of overlay.tiles) {
 				const entry = this.#labelTextures.get(`${tile.id}@${overlay.slice}`);
 				if (!entry) continue;

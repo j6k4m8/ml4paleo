@@ -3,7 +3,7 @@ import { latestPredictions, unfinished } from "./pipelines";
 import type { Pipeline } from "./types";
 
 function pipeline(id: string, kind: string, status: Pipeline["status"], model: string | null): Pipeline {
-	return { id, kind, status, progress: 0, jobs: 1, created_at: "2026-10-06T12:00:00Z", error: null, model_id: model };
+	return { id, kind, status, progress: 0, jobs: 1, created_at: "2026-10-06T12:00:00Z", error: null, model_id: model, created_by: null };
 }
 
 describe("latestPredictions", () => {

@@ -5,6 +5,7 @@ the change feed, the labels as zarr, and ROIs.
 
 import asyncio
 import base64
+import datetime
 import json
 import threading
 import time
@@ -14,14 +15,14 @@ import numpy as np
 import pytest
 from helpers import run_db, signup
 from ml4paleo_server import artifacts, labels
-from ml4paleo_server.db import LabelOp, create_engine, create_sessionmaker
+from ml4paleo_server.db import Artifact, LabelOp, create_engine, create_sessionmaker
 from ml4paleo_server.storage import project_storage
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from ml4paleo.labels import LABEL_CHUNK_ZYX, Source
 from ml4paleo.labels.codec import decode_chunk
 from ml4paleo.labels.deltas import split_into_deltas
-from ml4paleo.segmentation.predict import create_prediction
+from ml4paleo.segmentation.predict import create_prediction, open_prediction
 
 SHAPE = (70, 130, 100)  # (z, y, x): chunks along each edge are partial
 
@@ -370,8 +371,11 @@ def test_concurrent_retries_return_the_first_result(
     assert count == 2
 
 
-def add_prediction(settings, database_url, project: str) -> str:
-    """A committed prediction: bone in z 0..8, y 0..8, x 0..8, background elsewhere."""
+def add_prediction(settings, database_url, project: str, head_slot=None) -> str:
+    """
+    A committed prediction: bone in z 0..8, y 0..8, x 0..8, background
+    elsewhere. With `head_slot`, it becomes that slot's head.
+    """
 
     async def create(db):
         artifact = await artifacts.create_staging(
@@ -379,6 +383,7 @@ def add_prediction(settings, database_url, project: str) -> str:
             project_id=uuid.UUID(project),
             kind="prediction",
             inputs={"model_id": None},
+            head_slot=head_slot,
         )
         group = create_prediction(
             project_storage(settings).child(artifacts.artifact_path(artifact)), SHAPE
@@ -388,6 +393,8 @@ def add_prediction(settings, database_url, project: str) -> str:
         group["class"][:] = classes  # type: ignore[index]
         artifact.state = "committed"
         artifact.manifest = {"kind": "prediction", "shape_zyx": list(SHAPE)}
+        if head_slot is not None:
+            await artifacts.set_head(db, artifact)
         return str(artifact.id)
 
     return run_db(database_url, create)
@@ -452,6 +459,137 @@ def test_accepting_a_prediction_is_checked_against_it(
         },
     )
     assert claimed.status_code == 422
+
+
+def test_predictions_labels_were_accepted_from_are_kept(
+    ada, project, settings, migrated_database_url
+):
+    me = uuid.UUID(ada.get("/api/auth/session").json()["user"]["id"])
+    ada.post(
+        f"/api/projects/{project}/rois",
+        json={"bbox": [0, 0, 0, 10, 10, 10], "kind": "cube"},
+    )
+    roi = ada.get(f"/api/projects/{project}/rois").json()[0]["id"]
+    accepted, unused = [], []
+    # A proposal, and a prediction of the whole image.
+    for z, slot in enumerate((artifacts.proposal_slot(me), "prediction")):
+        source = add_prediction(settings, migrated_database_url, project, slot)
+        response = ada.post(
+            f"/api/projects/{project}/labels/accept",
+            json={
+                "client_op_id": str(uuid.uuid4()),
+                "prediction_artifact_id": source,
+                "roi_id": roi,
+                "deltas": deltas_for(
+                    np.ones((1, 8, 8), dtype=bool),
+                    (z, 0, 0),
+                    value=2,
+                    only_if="unlabeled",
+                ),
+            },
+        )
+        assert response.status_code == 201, response.text
+        if slot == "prediction":
+            # Undone labels still count: a redo brings them back.
+            undone = ada.post(
+                f"/api/projects/{project}/labels/ops/{response.json()['seq']}/undo",
+                json={"client_op_id": str(uuid.uuid4())},
+            )
+            assert undone.status_code == 201
+        # Newer ones replace it, and the first of those in turn.
+        unused.append(add_prediction(settings, migrated_database_url, project, slot))
+        add_prediction(settings, migrated_database_url, project, slot)
+        accepted.append(source)
+
+    # Past every grace period.
+    no_wait = settings.model_copy(
+        update={
+            "storage": settings.storage.model_copy(update={"keep_superseded_days": 0})
+        }
+    )
+
+    async def collect(db):
+        long_ago = datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
+        await db.execute(
+            update(Artifact)
+            .where(Artifact.state == "superseded")
+            .values(state_changed_at=long_ago)
+        )
+        await db.commit()
+        return await artifacts.collect_garbage(create_sessionmaker(db.bind), no_wait)
+
+    assert run_db(migrated_database_url, collect) == len(unused)
+
+    async def rows(db, ids):
+        return [await db.get(Artifact, uuid.UUID(i)) for i in ids]
+
+    for artifact in run_db(migrated_database_url, lambda db: rows(db, unused)):
+        assert artifact.state == "deleted"
+    # The ones labels came from stay, files and all.
+    for artifact in run_db(migrated_database_url, lambda db: rows(db, accepted)):
+        assert artifact.state == "superseded"
+        group = open_prediction(
+            project_storage(settings).child(artifacts.artifact_path(artifact))
+        )
+        assert (np.asarray(group["class"][:8, :8, :8]) == 2).all()  # type: ignore[index]
+
+
+def test_collection_waits_for_an_accept_in_progress(
+    project, settings, migrated_database_url
+):
+    # A replaced prediction, past every grace period...
+    replaced = add_prediction(settings, migrated_database_url, project, "prediction")
+    add_prediction(settings, migrated_database_url, project, "prediction")
+    no_wait = settings.model_copy(
+        update={
+            "storage": settings.storage.model_copy(update={"keep_superseded_days": 0})
+        }
+    )
+
+    async def race():
+        engine = create_engine(migrated_database_url)
+        sessionmaker = create_sessionmaker(engine)
+        try:
+            async with sessionmaker() as accepting:
+                # ...that an accept has locked, as the API does, and is
+                # recording labels from...
+                await accepting.scalar(
+                    select(Artifact.id)
+                    .where(Artifact.id == uuid.UUID(replaced))
+                    .with_for_update(read=True)
+                )
+                accepting.add(
+                    LabelOp(
+                        project_id=uuid.UUID(project),
+                        client_op_id=uuid.uuid4(),
+                        kind="edit",
+                        source=int(Source.MODEL_VERIFIED),
+                        tool={"name": "accept-prediction", "prediction": replaced},
+                        bbox=[0, 0, 0, 1, 1, 1],
+                    )
+                )
+                await accepting.flush()
+                # ...while collection starts on it.
+                collecting = asyncio.create_task(
+                    artifacts.collect_garbage(sessionmaker, no_wait)
+                )
+                await asyncio.sleep(0.5)
+                await accepting.commit()
+            return await asyncio.wait_for(collecting, 10)
+        finally:
+            await engine.dispose()
+
+    async def age(db):
+        long_ago = datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
+        await db.execute(update(Artifact).values(state_changed_at=long_ago))
+
+    run_db(migrated_database_url, age)
+    assert asyncio.run(race()) == 0
+
+    async def state(db):
+        return (await db.get(Artifact, uuid.UUID(replaced))).state
+
+    assert run_db(migrated_database_url, state) == "superseded"
 
 
 def test_out_of_range_numbers_are_refused(ada, project):

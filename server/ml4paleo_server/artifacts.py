@@ -13,11 +13,14 @@ becomes current.
 
 Garbage collection (run by the housekeeper) is the only thing that deletes
 artifact files: failed artifacts after `keep_failed_hours`, replaced ones
-after `keep_superseded_days`, expired ones (caches such as exports), and
-everything in deleted projects. It skips artifacts that a waiting or running
-job may still read.
+after `keep_superseded_days` (replaced proposals sooner, after two days),
+expired ones (caches such as exports), and everything in deleted projects.
+It skips artifacts that a waiting or running job may still read, and
+predictions that labels were accepted from, which those labels' record of
+where they came from names.
 """
 
+import base64
 import datetime
 import json
 import logging
@@ -26,14 +29,15 @@ from typing import Any
 
 import obstore
 from fastapi import HTTPException
-from sqlalchemy import and_, delete, exists, func, or_, select, update
+from sqlalchemy import String, and_, cast, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ml4paleo.labels import Source
 from ml4paleo.storage import MANIFEST_KEY, object_store
 
 from . import quotas
-from .db import Artifact, ArtifactHead, Job, Project, User
+from .db import Artifact, ArtifactHead, Job, LabelOp, Project, User
 from .jobs.queue import Rejected
 from .settings import Settings
 from .storage import project_storage
@@ -45,6 +49,14 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 COLLECT_BATCH = 50
 # Staging artifacts that no job will commit are abandoned after this long.
 ABANDONED_AFTER = datetime.timedelta(hours=48)
+# Replaced proposals (one ROI predicted on demand) are kept only this long,
+# since people make many and look at the newest; but no shorter, since
+# accepts from one may wait in a browser that went offline (an accept from
+# one already deleted is refused, and the browser drops it).
+KEEP_SUPERSEDED_PROPOSALS = ABANDONED_AFTER
+# Each person's newest proposal in a project is a head of its own, in a slot
+# named for them (see `proposal_slot`).
+PROPOSAL_SLOTS = "proposal:"
 # Expired artifacts (exports) are deleted this long after they expire, so
 # downloads already running can finish.
 EXPIRED_GRACE = datetime.timedelta(minutes=30)
@@ -52,6 +64,15 @@ EXPIRED_GRACE = datetime.timedelta(minutes=30)
 
 def now() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
+
+
+def proposal_slot(user_id: uuid.UUID) -> str:
+    """
+    The head slot of a person's newest proposal: their id in base64url,
+    unpadded, so the slot fits its 32 characters.
+    """
+    encoded = base64.urlsafe_b64encode(user_id.bytes).rstrip(b"=")
+    return PROPOSAL_SLOTS + encoded.decode()
 
 
 def project_path(project_id: uuid.UUID) -> str:
@@ -261,10 +282,24 @@ def _in_use():
     )
 
 
+def _accepted_from():
+    """
+    SQL: labels were accepted from the artifact (a prediction or proposal),
+    so their ops name it as where they came from (live or undone, since a
+    redo brings them back).
+    """
+    return exists().where(
+        LabelOp.project_id == Artifact.project_id,
+        LabelOp.source == int(Source.MODEL_VERIFIED),
+        LabelOp.tool["prediction"].astext == cast(Artifact.id, String),
+    )
+
+
 def _collectable(settings: Settings):
     """
     SQL: artifacts whose files garbage collection may delete now. A current
-    head is never collected unless its project was deleted.
+    head, or a prediction labels were accepted from, is never collected
+    unless its project was deleted.
     """
     current = now()
     storage = settings.storage
@@ -280,6 +315,7 @@ def _collectable(settings: Settings):
             and_(Artifact.state != "staging", deleted_project),
             and_(
                 ~is_head,
+                ~_accepted_from(),
                 or_(
                     and_(
                         Artifact.state == "failed",
@@ -291,6 +327,11 @@ def _collectable(settings: Settings):
                         Artifact.state_changed_at
                         < current
                         - datetime.timedelta(days=storage.keep_superseded_days),
+                    ),
+                    and_(
+                        Artifact.state == "superseded",
+                        Artifact.head_slot.startswith(PROPOSAL_SLOTS, autoescape=True),
+                        Artifact.state_changed_at < current - KEEP_SUPERSEDED_PROPOSALS,
                     ),
                     and_(
                         Artifact.state == "committed",
