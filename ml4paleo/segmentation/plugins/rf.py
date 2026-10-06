@@ -2,8 +2,10 @@
 A random forest on 3D image features, trained on CPU from sparse labels.
 
 Features are scikit-image's multiscale intensity, edge, and texture
-features of each channel, at Gaussian scales from 1 to `sigma_max`, so a
-block needs `4 * sigma_max` voxels of context on every side. Training
+features of each channel, at Gaussian scales from 1 to `sigma_max`. The
+Gaussian reaches `4 * sigma_max` voxels, and the edge (Sobel) and texture
+(Hessian) features take gradients of it, which reach two more, so a block
+needs `ceil(4 * sigma_max) + 2` voxels of context on every side. Training
 samples are balanced: up to `samples_per_class` voxels of each class,
 drawn uniformly from every crop (reservoir sampling), so sparse brush
 strokes count as much as large painted regions.
@@ -35,7 +37,7 @@ class RandomForestParams(BaseModel):
 
 
 def halo_for(sigma_max: float) -> int:
-    return math.ceil(4 * sigma_max)
+    return math.ceil(4 * sigma_max) + 2
 
 
 def features(image: np.ndarray, sigma_max: float) -> np.ndarray:
