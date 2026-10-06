@@ -21,6 +21,7 @@ for people to look over and accept. A newer proposal stops older ones.
 """
 
 import uuid
+from collections.abc import Sequence
 
 from sqlalchemy import exists, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,18 +44,19 @@ async def running(
     db: AsyncSession,
     project_id: uuid.UUID,
     model_id: uuid.UUID | None = None,
-    kind: str = "predict.prepare",
+    kinds: Sequence[str] = ("predict.prepare",),
 ) -> list[Job]:
     """
-    The first jobs of a project's prediction pipelines (or with `kind`
-    "predict.region", its proposals) that are still running (any of their
-    jobs is), or only of those with `model_id`.
+    The first jobs of a project's pipelines starting with one of `kinds`
+    (its predictions by default; "predict.region" for its proposals) that
+    are still running (any of their jobs is), or only of those with
+    `model_id`.
     """
     job = aliased(Job)
     query = select(Job).where(
         Job.project_id == project_id,
         Job.id == Job.root_id,
-        Job.kind == kind,
+        Job.kind.in_(kinds),
         not_(Job.cancel_requested),
         exists().where(job.root_id == Job.id, job.status.in_(RUNNING_JOB)),
     )
@@ -161,7 +163,8 @@ async def _start_with(db: AsyncSession, model: TrainedModel) -> Artifact:
         .with_for_update(key_share=True)
     )
     # Nor can a model being deleted start one: deleting waits for this share
-    # lock, then cancels what is running, this one included.
+    # lock, then cancels the model's predictions and proposals still
+    # running, this one included.
     alive = await db.scalar(
         select(TrainedModel.id)
         .where(TrainedModel.id == model.id, TrainedModel.deleted_at.is_(None))
@@ -220,7 +223,7 @@ async def propose(
         )
     model_artifact = await _start_with(db, model)
     plugin = get_plugin(model.plugin)
-    for root in await running(db, model.project_id, kind="predict.region"):
+    for root in await running(db, model.project_id, kinds=["predict.region"]):
         await jobs.cancel_pipeline(db, root.id)
     window = _window(model_artifact, image)
     proposal = await artifacts.create_staging(

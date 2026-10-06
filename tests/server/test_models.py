@@ -411,6 +411,17 @@ def predict(browser, project: str, model: dict):
     return browser.post(f"/api/projects/{project}/models/{model['id']}/predict")
 
 
+def propose(browser, project: str, model: dict, bbox=(0, 0, 0, 16, 16, 16)):
+    """Draw an ROI and propose a prediction for it."""
+    roi = browser.post(
+        f"/api/projects/{project}/rois", json={"bbox": list(bbox), "kind": "cube"}
+    ).json()
+    return browser.post(
+        f"/api/projects/{project}/models/{model['id']}/propose",
+        json={"roi_id": roi["id"]},
+    )
+
+
 def windows(database_url, started: dict):
     """The window a prediction recorded, and the one its jobs were given."""
 
@@ -487,6 +498,20 @@ def test_deleting_a_model_stops_its_predictions(ada, settings, migrated_database
     base = f"/api/projects/{project}/models"
     assert ada.request("DELETE", f"{base}/{other['id']}").status_code == 204
     assert pipeline_status(ada, project, started) == "waiting"
+    assert ada.request("DELETE", f"{base}/{model['id']}").status_code == 204
+    assert pipeline_status(ada, project, started) == "cancelled"
+
+
+def test_deleting_a_model_stops_its_proposals(ada, settings, migrated_database_url):
+    project = labeled_project(ada, settings, migrated_database_url)
+    model, other = (ready_model(ada, migrated_database_url, project) for _ in "ab")
+    proposed = propose(ada, project, model)
+    assert proposed.status_code == 202, proposed.text
+    started = proposed.json()["pipeline_id"]
+    base = f"/api/projects/{project}/models"
+    assert ada.request("DELETE", f"{base}/{other['id']}").status_code == 204
+    assert pipeline_status(ada, project, started) == "waiting"
+    # So it can't finish later and become the proposal of a deleted model.
     assert ada.request("DELETE", f"{base}/{model['id']}").status_code == 204
     assert pipeline_status(ada, project, started) == "cancelled"
 
