@@ -130,7 +130,7 @@ async def _session_out(
         csrf_token=csrf_token(settings.secret_key.get_secret_value(), token),
         required_steps=steps,
         starter_limits=has_starter_limits(
-            user, require_email=await get_require_email(db, settings)
+            user, settings, require_email=await get_require_email(db, settings)
         ),
     )
 

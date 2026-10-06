@@ -294,7 +294,9 @@ async def list_users(
             last_login_at=user.last_login_at,
             storage_bytes_used=usage.storage_bytes if usage else 0,
             trained_models_used=usage.trained_models if usage else 0,
-            starter_limits=quotas.has_starter_limits(user, require_email=require_email),
+            starter_limits=quotas.has_starter_limits(
+                user, settings, require_email=require_email
+            ),
             storage_bytes_limit=limits.storage_bytes,
             trained_models_limit=limits.trained_models,
             quota_override=user.quota_override or {},

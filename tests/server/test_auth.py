@@ -328,10 +328,18 @@ def test_admins_set_the_requirement_and_confirm_addresses(
     assert (listed["email_confirmed"], listed["starter_limits"]) == (False, True)
     assert listed["storage_bytes_limit"] == GB
 
-    # A limit an admin sets still applies.
+    # A limit an admin sets still applies, and once their limits replace
+    # every starter limit, those don't hold the account back.
     admin.put(f"/api/admin/users/{ada_id}/quota", json={"trained_models": 5})
     quota = ada.get("/api/me/quota").json()
     assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (GB, 5)
+    assert ada.get("/api/auth/session").json()["starter_limits"] is True
+    admin.put(
+        f"/api/admin/users/{ada_id}/quota",
+        json={"storage_gb": 2, "trained_models": 5},
+    )
+    assert ada.get("/api/auth/session").json()["starter_limits"] is False
+    admin.put(f"/api/admin/users/{ada_id}/quota", json={"trained_models": 5})
 
     # Admins confirm the address they saw, not one it changed to since.
     confirm = f"/api/admin/users/{ada_id}/confirm-email"

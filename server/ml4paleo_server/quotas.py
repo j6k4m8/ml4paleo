@@ -50,10 +50,30 @@ def limits_of(user: User, settings: Settings, *, require_email: bool) -> Limits:
     `limits_for`, with the site's email requirement already looked up (for
     listing many users at once).
     """
+    return _limits(user, settings, starter=_unconfirmed(user, require_email))
+
+
+def has_starter_limits(user: User, settings: Settings, *, require_email: bool) -> bool:
+    """
+    Whether the starter limits hold `user` below their usual limits: sign-up
+    asks for an email address, theirs isn't confirmed, and some starter
+    limit is lower than what they would have otherwise.
+    """
+    return _unconfirmed(user, require_email) and _limits(
+        user, settings, starter=True
+    ) != _limits(user, settings, starter=False)
+
+
+def _unconfirmed(user: User, require_email: bool) -> bool:
+    """Whether the starter limits apply to `user` (never to admins)."""
+    return require_email and not user.is_admin and user.email_verified_at is None
+
+
+def _limits(user: User, settings: Settings, *, starter: bool) -> Limits:
     defaults = settings.quota.model_dump()
-    if has_starter_limits(user, require_email=require_email):
-        starter = settings.unconfirmed_quota.model_dump()
-        defaults = {key: _lower(value, starter[key]) for key, value in defaults.items()}
+    if starter:
+        lowest = settings.unconfirmed_quota.model_dump()
+        defaults = {key: _lower(value, lowest[key]) for key, value in defaults.items()}
     merged = QuotaSettings.model_validate({**defaults, **(user.quota_override or {})})
     return Limits(
         storage_bytes=None
@@ -63,14 +83,6 @@ def limits_of(user: User, settings: Settings, *, require_email: bool) -> Limits:
         cpu_hours_per_day=merged.cpu_hours_per_day,
         gpu_hours_per_day=merged.gpu_hours_per_day,
     )
-
-
-def has_starter_limits(user: User, *, require_email: bool) -> bool:
-    """
-    Whether `user` gets the starter limits: sign-up asks for an email address,
-    and theirs isn't confirmed. Admins never do.
-    """
-    return require_email and not user.is_admin and user.email_verified_at is None
 
 
 def _lower(limit: float | None, other: float | None) -> float | None:
