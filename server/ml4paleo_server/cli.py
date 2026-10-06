@@ -47,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
     set_email = commands.add_parser(
         "set-email",
         help="Give an account an email address, counted as confirmed (for "
-        "example so the admin gets requests for more storage by email).",
+        "example so the admin gets requests for more storage by email, or to "
+        "lift someone's starter limits when email isn't set up).",
     )
     set_email.add_argument("username")
     set_email.add_argument("email")
@@ -109,8 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(_reset_two_factor(args.username))
         print(f"Turned off two-factor sign-in for {args.username}.", flush=True)
     elif args.command == "enable-user":
-        status = asyncio.run(_enable_user(args.username))
-        print(f"{args.username} can sign in again (status: {status}).", flush=True)
+        asyncio.run(_enable_user(args.username))
+        print(f"{args.username} can sign in again.", flush=True)
     elif args.command == "set-email":
         asyncio.run(_set_email(args.username, args.email))
         print(f"{args.username}'s email is now {args.email}.", flush=True)
@@ -277,15 +278,13 @@ async def _reset_password(username: str) -> str:
         await engine.dispose()
 
 
-async def _enable_user(username: str) -> str:
+async def _enable_user(username: str) -> None:
     from sqlalchemy import select
 
-    from ml4paleo_server.api.admin import enabled_status
     from ml4paleo_server.db import User, create_engine, create_sessionmaker
     from ml4paleo_server.settings import Settings
 
-    settings = Settings()
-    engine = create_engine(settings.database_url.get_secret_value())
+    engine = create_engine(Settings().database_url.get_secret_value())
     try:
         async with create_sessionmaker(engine)() as db:
             user = await db.scalar(
@@ -293,9 +292,8 @@ async def _enable_user(username: str) -> str:
             )
             if user is None:
                 raise SystemExit(f"No user named {username!r}.")
-            user.status = enabled_status(user, settings)
+            user.status = "active"
             await db.commit()
-            return user.status
     finally:
         await engine.dispose()
 
@@ -330,8 +328,6 @@ async def _set_email(username: str, email: str) -> None:
             user.email = address
             # Whoever runs this on the server vouches for the address.
             user.email_verified_at = datetime.datetime.now(datetime.UTC)
-            if user.status == "unverified":
-                user.status = "active"
             await db.commit()
     finally:
         await engine.dispose()

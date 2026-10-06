@@ -2,6 +2,7 @@
 	import "../app.css";
 	import ChevronRight from "@lucide/svelte/icons/chevron-right";
 	import LogOut from "@lucide/svelte/icons/log-out";
+	import MailWarning from "@lucide/svelte/icons/mail-warning";
 	import User from "@lucide/svelte/icons/user";
 	import { afterNavigate, goto } from "$app/navigation";
 	import { page } from "$app/state";
@@ -122,6 +123,14 @@
 			</div>
 		{/if}
 	</header>
+
+	{#if session.current?.starter_limits && !workspace && !SETUP.includes(page.url.pathname)}
+		<div class="flex h-7 shrink-0 items-center gap-2 border-b border-warn/30 bg-warn/10 px-3 text-2xs text-warn" role="status">
+			<MailWarning size={13} />
+			Your account has starter limits until it has a confirmed email address.
+			<a href="/account" class="text-warn underline">Account</a>
+		</div>
+	{/if}
 
 	<main class={workspace ? "min-h-0 flex-1" : "min-h-0 flex-1 overflow-auto bg-pasteboard"}>
 		{#if session.loaded}

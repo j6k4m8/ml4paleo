@@ -13,8 +13,19 @@ A link works once, for two weeks. With email set up, giving an address mails
 the link to it (and signing up with it confirms that address); otherwise,
 send the link yourself.
 
-When email is set up, new accounts confirm their address before they can do
-anything, and people can reset forgotten passwords themselves.
+Sign-up also asks for an email address. Until an account's address is
+confirmed, it has starter limits: 1 GB of storage and one trained model by
+default (see [install.md](install.md)), or the limits you set for it under
+**Accounts**. With email set up, people confirm their address from a link
+mailed to them, and can reset forgotten passwords themselves. Without it,
+confirm addresses you know are right under **Accounts** → **Confirm email**.
+Turning off **Ask for an email address** makes the address optional and
+lifts everyone's starter limits. The setting covers accounts made before it
+too, so turning it on for a site that already has accounts puts every one
+whose address isn't confirmed (or that has none) on starter limits; confirm
+their addresses or set their limits first. Admins never have starter
+limits. People can add or change their address on their account page; a
+new one needs confirming again.
 
 ## Storage and models
 
@@ -33,9 +44,9 @@ the default, or type "unlimited").
 **Accounts** lists the newest accounts, or those whose username or email
 starts with what you search for, with what they use and may use. **Disable**
 signs a person out at once, stops the jobs they started, and keeps them from
-signing in; **Enable** lets them back in (an address they never confirmed
-still needs confirming). You can't disable your own account, but admins can
-disable each other, which is how you'd contain a misused admin account.
+signing in; **Enable** lets them back in. You can't disable your own
+account, but admins can disable each other, which is how you'd contain a
+misused admin account.
 
 From the server, for an account locked out:
 

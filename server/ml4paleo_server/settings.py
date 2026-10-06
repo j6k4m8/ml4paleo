@@ -55,6 +55,11 @@ class AuthSettings(BaseModel):
     # "open": anyone can sign up. "invite": only people with an invite link.
     # Admins can change this at runtime; this is the starting value.
     signup_mode: Literal["open", "invite"] = "open"
+    # Whether signing up needs an email address. While it does, accounts
+    # whose address isn't confirmed (other than admins') get the starter
+    # limits in `Settings.unconfirmed_quota`. Admins can change this at
+    # runtime; this is the starting value.
+    require_email: bool = True
     password_min_length: int = Field(default=12, ge=8)
     session_idle_days: float = 7
     session_max_days: float = 30
@@ -62,8 +67,9 @@ class AuthSettings(BaseModel):
 
 class SmtpSettings(BaseModel):
     """
-    Outgoing email. Email is off when `host` is unset: signups are not
-    verified, and admins reset passwords from the command line.
+    Outgoing email. Email is off when `host` is unset: people can't confirm
+    their addresses themselves (admins confirm them), and admins reset
+    passwords from the command line.
     """
 
     host: str | None = None
@@ -94,6 +100,18 @@ class QuotaSettings(BaseModel):
     trained_models: int | None = Field(default=20, ge=0)
     cpu_hours_per_day: float | None = Field(default=None, ge=0)
     gpu_hours_per_day: float | None = Field(default=None, ge=0)
+
+
+class UnconfirmedQuotaSettings(QuotaSettings):
+    """
+    Starter limits, for accounts whose email address isn't confirmed while
+    sign-up asks for one (see `AuthSettings.require_email`). Each applies
+    only where it is lower than the account's usual limit, and an admin's
+    override for the account still wins.
+    """
+
+    storage_gb: float | None = Field(default=1, ge=0)
+    trained_models: int | None = Field(default=1, ge=0)
 
 
 class V1Settings(BaseModel):
@@ -137,6 +155,7 @@ class Settings(BaseSettings):
     auth: AuthSettings = AuthSettings()
     smtp: SmtpSettings = SmtpSettings()
     quota: QuotaSettings = QuotaSettings()
+    unconfirmed_quota: UnconfirmedQuotaSettings = UnconfirmedQuotaSettings()
     v1: V1Settings = V1Settings()
     # The first admin account's password (usually M4P_INITIAL_ADMIN_PASSWORD_FILE).
     # Without it, `migrate` generates one and prints it once.

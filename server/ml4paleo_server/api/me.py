@@ -29,7 +29,7 @@ class QuotaOut(BaseModel):
 
 @router.get("/quota")
 async def my_quota(auth: CurrentAuth, db: DbSession, settings: SettingsDep) -> QuotaOut:
-    limits = quotas.limits_for(auth.user, settings)
+    limits = await quotas.limits_for(db, auth.user, settings)
     usage = await quotas.usage_for(db, auth.user.id)
     open_request = await db.scalar(
         select(QuotaRequest.id).where(

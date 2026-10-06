@@ -10,12 +10,12 @@
 	let password = $state("");
 	let error = $state("");
 	let busy = $state(false);
-	let mode = $state("open");
+	let config = $state({ signup_mode: "open", require_email: false, email_enabled: false, password_min_length: 12 });
 	const invite = $derived(page.url.searchParams.get("invite") ?? undefined);
 
 	$effect(() => {
-		api<{ signup_mode: string }>("/api/auth/config").then(
-			(config) => (mode = config.signup_mode),
+		api<typeof config>("/api/auth/config").then(
+			(loaded) => (config = loaded),
 			() => {},
 		);
 	});
@@ -36,17 +36,34 @@
 </script>
 
 <Card title="Create an account">
-	{#if mode === "invite" && !invite}
+	{#if config.signup_mode === "invite" && !invite}
 		<p class="rounded-sm border border-warn/40 bg-warn/10 p-2 text-warn">
 			Signing up needs an invitation. Ask the people who run this site for one.
 		</p>
 	{/if}
 	<form class="flex flex-col gap-3" onsubmit={submit}>
 		<label class="label">Username <input class="field" bind:value={username} autocomplete="username" required /></label>
-		<label class="label">Email (optional) <input class="field" type="email" bind:value={email} autocomplete="email" /></label>
 		<label class="label">
-			Password (at least 12 characters)
-			<input class="field" type="password" bind:value={password} autocomplete="new-password" minlength="12" required />
+			{config.require_email ? "Email" : "Email (optional)"}
+			<input class="field" type="email" bind:value={email} autocomplete="email" required={config.require_email} />
+			{#if config.require_email}
+				<span>
+					{config.email_enabled
+						? "Until you confirm it, your account has starter limits."
+						: "Until an admin confirms it, your account has starter limits."}
+				</span>
+			{/if}
+		</label>
+		<label class="label">
+			Password (at least {config.password_min_length} characters)
+			<input
+				class="field"
+				type="password"
+				bind:value={password}
+				autocomplete="new-password"
+				minlength={config.password_min_length}
+				required
+			/>
 		</label>
 		{#if error}<p class="error" role="alert">{error}</p>{/if}
 		<button class="btn btn-primary h-7" disabled={busy}>Sign up</button>

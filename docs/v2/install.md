@@ -14,8 +14,9 @@ the housekeeper, Postgres, SeaweedFS (object storage), and the job workers.
   instead (Caddy then uses its own local certificate authority).
 - Optionally, an NVIDIA GPU with the NVIDIA Container Toolkit, for the GPU
   worker.
-- Optionally, an SMTP account for email (sign-up confirmation, password
-  resets, invites, notices about requests for more storage).
+- Optionally, an SMTP account for email (people confirming their addresses,
+  password resets, invites, notices about requests for more storage).
+  Without one, admins confirm addresses on the admin page.
 
 ## First start
 
@@ -68,6 +69,8 @@ Others worth knowing (nested settings use `__`; see
 | `M4P_QUOTA__STORAGE_GB` | 10 | Storage per account (projects count against their owner). |
 | `M4P_QUOTA__TRAINED_MODELS` | 20 | Trained models each account can keep. |
 | `M4P_AUTH__SIGNUP_MODE` | open | Who can sign up at first: `open`, or `invite` (admins can change it later). |
+| `M4P_AUTH__REQUIRE_EMAIL` | true | Whether sign-up asks for an email address, with starter limits until it's confirmed (admins can change it later). |
+| `M4P_UNCONFIRMED_QUOTA__STORAGE_GB`, `M4P_UNCONFIRMED_QUOTA__TRAINED_MODELS` | 1, 1 | The starter limits. |
 | `M4P_AUTH__SESSION_IDLE_DAYS`, `M4P_AUTH__SESSION_MAX_DAYS` | 7, 30 | When sessions end. |
 
 To lift a limit entirely, set the whole group as JSON, for example

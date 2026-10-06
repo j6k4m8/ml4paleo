@@ -7,7 +7,7 @@ import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, or_, select
 
 from .. import audit, jobs, quotas
@@ -16,7 +16,13 @@ from ..auth.tokens import new_token, token_hash
 from ..db import AuthToken, Job, QuotaRequest, User, UserSession, UserUsage
 from ..email import queue_email
 from ..settings import QuotaSettings
-from ..site_settings import SignupMode, get_signup_mode, set_signup_mode
+from ..site_settings import (
+    SignupMode,
+    get_require_email,
+    get_signup_mode,
+    set_require_email,
+    set_signup_mode,
+)
 from .auth import Email
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -26,30 +32,66 @@ INVITE_LIFETIME = datetime.timedelta(days=14)
 
 class SiteSettingsOut(BaseModel):
     signup_mode: SignupMode
+    # Whether signing up needs an email address; while it does, accounts
+    # whose address isn't confirmed get `unconfirmed_quota` (set at deploy).
+    require_email: bool
+    unconfirmed_quota: QuotaSettings
 
 
 class SiteSettingsIn(BaseModel):
-    signup_mode: SignupMode
+    """The settings to change; those left out stay as they are."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    signup_mode: SignupMode | None = None
+    require_email: bool | None = None
+
+
+async def _site_settings(db, settings) -> SiteSettingsOut:
+    return SiteSettingsOut(
+        signup_mode=await get_signup_mode(db, settings),
+        require_email=await get_require_email(db, settings),
+        unconfirmed_quota=settings.unconfirmed_quota,
+    )
 
 
 @router.get("/settings")
 async def get_site_settings(
     auth: AdminAuth, db: DbSession, settings: SettingsDep
 ) -> SiteSettingsOut:
-    return SiteSettingsOut(signup_mode=await get_signup_mode(db, settings))
+    return await _site_settings(db, settings)
 
 
 @router.put("/settings")
 async def update_site_settings(
-    body: SiteSettingsIn, auth: AdminAuth, db: DbSession
+    body: SiteSettingsIn,
+    request: Request,
+    auth: AdminAuth,
+    db: DbSession,
+    settings: SettingsDep,
 ) -> SiteSettingsOut:
-    await set_signup_mode(db, body.signup_mode)
+    changes = body.model_dump(exclude_none=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="Say which settings to change.")
+    if body.signup_mode is not None:
+        await set_signup_mode(db, body.signup_mode)
+    if body.require_email is not None:
+        await set_require_email(db, body.require_email)
+    audit.record(
+        db,
+        actor_id=auth.user.id,
+        action="site.settings",
+        target_type="site",
+        target_id="settings",
+        request=request,
+        details=changes,
+    )
     await db.commit()
-    return SiteSettingsOut(signup_mode=body.signup_mode)
+    return await _site_settings(db, settings)
 
 
 class InviteIn(BaseModel):
-    # When set, signing up with this email skips email verification.
+    # When set, signing up with this email counts as confirming it.
     email: Email = None
 
 
@@ -92,6 +134,7 @@ class QuotaRequestOut(BaseModel):
     id: str
     user_id: str
     username: str
+    email_confirmed: bool
     message: str
     status: str
     created_at: datetime.datetime
@@ -113,6 +156,7 @@ async def list_quota_requests(auth: AdminAuth, db: DbSession) -> list[QuotaReque
             id=str(quota_request.id),
             user_id=str(user.id),
             username=user.username,
+            email_confirmed=user.email_verified_at is not None,
             message=quota_request.message,
             status=quota_request.status,
             created_at=quota_request.created_at,
@@ -198,15 +242,18 @@ class UserOut(BaseModel):
     id: uuid.UUID
     username: str
     email: str | None
+    email_confirmed: bool
     is_admin: bool
-    # "active", "unverified", or "disabled".
+    # "active" or "disabled".
     status: str
     created_at: datetime.datetime
     last_login_at: datetime.datetime | None
     storage_bytes_used: int
     trained_models_used: int
-    # Their limits (None: unlimited), and the ones that replace the deploy's
-    # defaults for them.
+    # Their limits (None: unlimited), whether those are the starter limits
+    # until they confirm their email, and the limits that replace the
+    # deploy's defaults for them.
+    starter_limits: bool
     storage_bytes_limit: int | None
     trained_models_limit: int | None
     quota_override: dict
@@ -239,23 +286,28 @@ async def list_users(
                 func.lower(User.email).like(pattern, escape="\\"),
             )
         )
+    require_email = await get_require_email(db, settings)
     return [
         UserOut(
             id=user.id,
             username=user.username,
             email=user.email,
+            email_confirmed=user.email_verified_at is not None,
             is_admin=user.is_admin,
             status=user.status,
             created_at=user.created_at,
             last_login_at=user.last_login_at,
             storage_bytes_used=usage.storage_bytes if usage else 0,
             trained_models_used=usage.trained_models if usage else 0,
+            starter_limits=quotas.has_starter_limits(
+                user, settings, require_email=require_email
+            ),
             storage_bytes_limit=limits.storage_bytes,
             trained_models_limit=limits.trained_models,
             quota_override=user.quota_override or {},
         )
         for user, usage in await db.execute(query)
-        for limits in [quotas.limits_for(user, settings)]
+        for limits in [quotas.limits_of(user, settings, require_email=require_email)]
     ]
 
 
@@ -270,7 +322,6 @@ async def set_user_status(
     request: Request,
     auth: AdminAuth,
     db: DbSession,
-    settings: SettingsDep,
 ) -> None:
     """
     Disable an account (it is signed out at once, can't sign in again, and
@@ -287,7 +338,7 @@ async def set_user_status(
     if body.status == "disabled":
         await disable(db, user)
     else:
-        user.status = enabled_status(user, settings)
+        user.status = "active"
     audit.record(
         db,
         actor_id=auth.user.id,
@@ -299,14 +350,46 @@ async def set_user_status(
     await db.commit()
 
 
-def enabled_status(user: User, settings) -> str:
+class ConfirmEmailIn(BaseModel):
+    # The address the admin is vouching for, as they saw it.
+    email: Email
+
+
+@router.post("/users/{user_id}/confirm-email", status_code=204)
+async def confirm_user_email(
+    user_id: uuid.UUID,
+    body: ConfirmEmailIn,
+    request: Request,
+    auth: AdminAuth,
+    db: DbSession,
+) -> None:
     """
-    What an account's status becomes when it's enabled: still waiting for
-    its email to be confirmed, if mail is on and it never was.
+    Count an account's email address as confirmed, vouching for it (for
+    example when email isn't set up, so people can't confirm it themselves).
+    Refused if the account's address isn't the one given, say because it
+    changed since the admin looked.
     """
-    if user.email and user.email_verified_at is None and settings.smtp.enabled:
-        return "unverified"
-    return "active"
+    user = await db.get(User, user_id, with_for_update=True, populate_existing=True)
+    if user is None:
+        raise HTTPException(status_code=404, detail="No such user.")
+    if not user.email:
+        raise HTTPException(status_code=409, detail="They have no email address.")
+    if user.email != body.email:
+        raise HTTPException(
+            status_code=409, detail="Their address changed; look again."
+        )
+    if user.email_verified_at is None:
+        user.email_verified_at = datetime.datetime.now(datetime.UTC)
+        audit.record(
+            db,
+            actor_id=auth.user.id,
+            action="user.confirm_email",
+            target_type="user",
+            target_id=user.id,
+            request=request,
+            details={"email": user.email},
+        )
+    await db.commit()
 
 
 async def disable(db, user: User) -> None:

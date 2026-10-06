@@ -122,7 +122,7 @@ def test_enabling_keeps_an_unconfirmed_email_unconfirmed(
     for status in ("disabled", "active"):
         admin.put(f"/api/admin/users/{eve_id}/status", json={"status": status})
     [listed] = admin.get("/api/admin/users?q=eve").json()
-    assert listed["status"] == "unverified"
+    assert (listed["status"], listed["email_confirmed"]) == ("active", False)
     assert (
         admin.put(
             f"/api/admin/users/{uuid.uuid4()}/status", json={"status": "active"}

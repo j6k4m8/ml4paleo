@@ -87,7 +87,11 @@ def main(origin: str) -> int:
     api(
         "POST",
         "/api/auth/signup",
-        {"username": "uploader", "password": secrets.token_urlsafe(18)},
+        {
+            "username": "uploader",
+            "email": "uploader@example.org",
+            "password": secrets.token_urlsafe(18),
+        },
     )
     project = api("POST", "/api/projects", {"name": "Upload check"})["id"]
     data = secrets.token_bytes(6 * 1024 * 1024)

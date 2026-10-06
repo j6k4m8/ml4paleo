@@ -3,8 +3,10 @@ Per-user limits: how much a user can store and how many trained models they
 can keep (plus optional compute-time limits for deploys that want them).
 
 Each limit comes from the user's override if it has that key, otherwise from
-the deploy's defaults; None means unlimited. Project storage counts against
-the project owner.
+the deploy's defaults; None means unlimited. While sign-up asks for an email
+address, an account whose address isn't confirmed (other than an admin's)
+gets the starter limits (`Settings.unconfirmed_quota`) in place of any
+default that is higher. Project storage counts against the project owner.
 
 Usage is reserved before work starts and released when the work fails or its
 output is deleted. A reservation checks the limit and adds to usage in one
@@ -24,6 +26,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 
 from .db import User, UserUsage
 from .settings import QuotaSettings, Settings
+from .site_settings import get_require_email
 
 GB = 1024**3
 
@@ -36,8 +39,41 @@ class Limits:
     gpu_hours_per_day: float | None
 
 
-def limits_for(user: User, settings: Settings) -> Limits:
+async def limits_for(db: AsyncSession, user: User, settings: Settings) -> Limits:
+    return limits_of(
+        user, settings, require_email=await get_require_email(db, settings)
+    )
+
+
+def limits_of(user: User, settings: Settings, *, require_email: bool) -> Limits:
+    """
+    `limits_for`, with the site's email requirement already looked up (for
+    listing many users at once).
+    """
+    return _limits(user, settings, starter=_unconfirmed(user, require_email))
+
+
+def has_starter_limits(user: User, settings: Settings, *, require_email: bool) -> bool:
+    """
+    Whether the starter limits hold `user` below their usual limits: sign-up
+    asks for an email address, theirs isn't confirmed, and some starter
+    limit is lower than what they would have otherwise.
+    """
+    return _unconfirmed(user, require_email) and _limits(
+        user, settings, starter=True
+    ) != _limits(user, settings, starter=False)
+
+
+def _unconfirmed(user: User, require_email: bool) -> bool:
+    """Whether the starter limits apply to `user` (never to admins)."""
+    return require_email and not user.is_admin and user.email_verified_at is None
+
+
+def _limits(user: User, settings: Settings, *, starter: bool) -> Limits:
     defaults = settings.quota.model_dump()
+    if starter:
+        lowest = settings.unconfirmed_quota.model_dump()
+        defaults = {key: _lower(value, lowest[key]) for key, value in defaults.items()}
     merged = QuotaSettings.model_validate({**defaults, **(user.quota_override or {})})
     return Limits(
         storage_bytes=None
@@ -47,6 +83,13 @@ def limits_for(user: User, settings: Settings) -> Limits:
         cpu_hours_per_day=merged.cpu_hours_per_day,
         gpu_hours_per_day=merged.gpu_hours_per_day,
     )
+
+
+def _lower(limit: float | None, other: float | None) -> float | None:
+    """The lower of two limits, where None is unlimited."""
+    if limit is None or other is None:
+        return other if limit is None else limit
+    return min(limit, other)
 
 
 async def usage_for(db: AsyncSession, user_id: uuid.UUID) -> UserUsage:
@@ -61,7 +104,7 @@ async def reserve_storage(
     Count `nbytes` more storage against `owner`, or raise 403 if that would put
     them over their limit.
     """
-    limit = limits_for(owner, settings).storage_bytes
+    limit = (await limits_for(db, owner, settings)).storage_bytes
     if not await _reserve(db, owner.id, UserUsage.storage_bytes, nbytes, limit):
         raise HTTPException(status_code=403, detail="storage_quota_exceeded")
 
@@ -72,7 +115,7 @@ async def check_storage(db: AsyncSession, settings: Settings, owner: User) -> No
     work whose results couldn't be kept doesn't start. This only looks: the
     results are counted when they're committed.
     """
-    limit = limits_for(owner, settings).storage_bytes
+    limit = (await limits_for(db, owner, settings)).storage_bytes
     if limit is not None and (await usage_for(db, owner.id)).storage_bytes >= limit:
         raise HTTPException(status_code=403, detail="storage_quota_exceeded")
 
@@ -88,7 +131,7 @@ async def reserve_trained_model(
     Count one more trained model against `owner`, or raise 403 if they already
     keep as many as allowed.
     """
-    limit = limits_for(owner, settings).trained_models
+    limit = (await limits_for(db, owner, settings)).trained_models
     if not await _reserve(db, owner.id, UserUsage.trained_models, 1, limit):
         raise HTTPException(status_code=403, detail="trained_model_quota_exceeded")
 
@@ -100,7 +143,7 @@ async def check_trained_model(
     Raise 403 if `owner` already keeps as many trained models as allowed.
     This only looks: `reserve_trained_model` is what counts one more.
     """
-    limit = limits_for(owner, settings).trained_models
+    limit = (await limits_for(db, owner, settings)).trained_models
     if limit is not None and (await usage_for(db, owner.id)).trained_models >= limit:
         raise HTTPException(status_code=403, detail="trained_model_quota_exceeded")
 

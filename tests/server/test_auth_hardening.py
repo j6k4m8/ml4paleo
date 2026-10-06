@@ -56,19 +56,6 @@ def smtp_settings(settings):
     )
 
 
-def test_unverified_accounts_can_only_finish_setup(
-    new_browser, smtp_settings, migrated_database_url
-):
-    browser = new_browser(smtp_settings)
-    signup(browser, email="ada@example.org")
-    # Signed-in routes refuse the account until its email is verified...
-    refused = browser.post("/api/admin/invites", json={})
-    assert refused.json()["detail"] == "email_verification_required"
-    # ...but it can ask for another verification email.
-    assert browser.post("/api/auth/verify-email/resend").status_code == 202
-    assert len(outbox(migrated_database_url)) == 2
-
-
 def test_changing_a_password_voids_outstanding_reset_links(
     new_browser, smtp_settings, migrated_database_url
 ):

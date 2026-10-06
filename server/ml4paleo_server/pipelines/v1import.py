@@ -181,7 +181,7 @@ async def _check_room(
         .where(Project.id == project_id)
     )
     assert owner is not None
-    limit = quotas.limits_for(owner, settings).storage_bytes
+    limit = (await quotas.limits_for(db, owner, settings)).storage_bytes
     if limit is None:
         return
     used = (await quotas.usage_for(db, owner.id)).storage_bytes

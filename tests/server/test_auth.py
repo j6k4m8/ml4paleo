@@ -1,6 +1,7 @@
 """
 Accounts and sign-in: signup, login, sessions, CSRF, password changes and
-resets, email verification, admin bootstrap with two-factor, and invites.
+resets, email addresses and their confirmation (with starter limits until
+then), admin bootstrap with two-factor, and invites.
 """
 
 import datetime
@@ -8,6 +9,7 @@ import re
 
 import pyotp
 import pytest
+from fastapi import HTTPException
 from helpers import (
     PASSWORD,
     link_token,
@@ -18,8 +20,9 @@ from helpers import (
     signup,
 )
 from ml4paleo_server import email as email_module
+from ml4paleo_server import quotas
 from ml4paleo_server.app import create_app
-from ml4paleo_server.auth import ensure_admin
+from ml4paleo_server.auth import ensure_admin, passwords
 from ml4paleo_server.db import (
     EmailOutbox,
     User,
@@ -228,11 +231,10 @@ def smtp_settings(settings):
 
 def test_email_verification_flow(new_browser, smtp_settings, migrated_database_url):
     browser = new_browser(smtp_settings)
-    assert signup(browser).status_code == 422  # email is required with SMTP on
     created = signup(browser, email="Ada@Example.org")
     assert created.status_code == 201
-    assert created.json()["required_steps"] == ["verify_email"]
     assert created.json()["user"]["email"] == "ada@example.org"
+    assert created.json()["user"]["email_verified"] is False
 
     [message] = outbox(migrated_database_url)
     assert message.to_address == "ada@example.org"
@@ -241,10 +243,260 @@ def test_email_verification_flow(new_browser, smtp_settings, migrated_database_u
         browser.post("/api/auth/verify-email", json={"token": token}).status_code == 204
     )
     session = browser.get("/api/auth/session").json()
-    assert session["user"]["status"] == "active"
     assert session["user"]["email_verified"]
     again = browser.post("/api/auth/verify-email", json={"token": token})
     assert again.status_code == 400
+
+
+GB = 1024**3
+
+
+def requiring_email(settings):
+    return settings.model_copy(
+        update={"auth": settings.auth.model_copy(update={"require_email": True})}
+    )
+
+
+def test_unconfirmed_accounts_get_starter_limits(
+    new_browser, smtp_settings, migrated_database_url
+):
+    browser = new_browser(requiring_email(smtp_settings))
+    assert new_browser().get("/api/auth/config").json()["require_email"] is False
+    assert browser.get("/api/auth/config").json()["require_email"] is True
+    missing = signup(browser)
+    assert (missing.status_code, missing.json()["detail"]) == (
+        422,
+        "Enter an email address.",
+    )
+    created = signup(browser, email="ada@example.org")
+    assert created.status_code == 201
+    assert created.json()["starter_limits"] is True
+    assert created.json()["required_steps"] == []
+    quota = browser.get("/api/me/quota").json()
+    assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (GB, 1)
+    # Meanwhile they can use the site, and ask for the link again.
+    assert browser.post("/api/projects", json={"name": "Trial"}).status_code == 201
+    assert browser.post("/api/auth/verify-email/resend").status_code == 202
+    _, again = outbox(migrated_database_url)
+    assert again.to_address == "ada@example.org"
+
+    token = link_token(again.body)
+    assert (
+        browser.post("/api/auth/verify-email", json={"token": token}).status_code == 204
+    )
+    assert browser.get("/api/auth/session").json()["starter_limits"] is False
+    quota = browser.get("/api/me/quota").json()
+    assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (
+        10 * GB,
+        20,
+    )
+    # Nothing more to confirm.
+    assert browser.post("/api/auth/verify-email/resend").status_code == 202
+    assert len(outbox(migrated_database_url)) == 2
+
+
+def test_starter_limits_hold_reservations(settings, migrated_database_url):
+    required = requiring_email(settings)
+
+    async def reserve(db):
+        user = User(username="ada", email="ada@example.org")
+        db.add(user)
+        await db.flush()
+        with pytest.raises(HTTPException):
+            await quotas.reserve_storage(db, required, user, 2 * GB)
+        user.email_verified_at = datetime.datetime.now(datetime.UTC)
+        await quotas.reserve_storage(db, required, user, 2 * GB)
+        return (await quotas.usage_for(db, user.id)).storage_bytes
+
+    assert run_db(migrated_database_url, reserve) == 2 * GB
+
+
+def test_admins_set_the_requirement_and_confirm_addresses(
+    new_browser, settings, migrated_database_url
+):
+    required = requiring_email(settings)
+    admin, _ = make_admin(lambda: new_browser(required), migrated_database_url)
+    # Admins never have starter limits.
+    assert admin.get("/api/auth/session").json()["starter_limits"] is False
+    shown = admin.get("/api/admin/settings").json()
+    assert shown["require_email"] is True
+    assert shown["unconfirmed_quota"]["storage_gb"] == 1
+    ada = new_browser(required)
+    signup(ada, email="ada@example.org")
+    ada_id = ada.get("/api/auth/session").json()["user"]["id"]
+    [listed] = admin.get("/api/admin/users?q=ada").json()
+    assert (listed["email_confirmed"], listed["starter_limits"]) == (False, True)
+    assert listed["storage_bytes_limit"] == GB
+
+    # A limit an admin sets still applies, and once their limits replace
+    # every starter limit, those don't hold the account back.
+    admin.put(f"/api/admin/users/{ada_id}/quota", json={"trained_models": 5})
+    quota = ada.get("/api/me/quota").json()
+    assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (GB, 5)
+    assert ada.get("/api/auth/session").json()["starter_limits"] is True
+    admin.put(
+        f"/api/admin/users/{ada_id}/quota",
+        json={"storage_gb": 2, "trained_models": 5},
+    )
+    assert ada.get("/api/auth/session").json()["starter_limits"] is False
+    admin.put(f"/api/admin/users/{ada_id}/quota", json={"trained_models": 5})
+
+    # Admins confirm the address they saw, not one it changed to since.
+    confirm = f"/api/admin/users/{ada_id}/confirm-email"
+    stale = admin.post(confirm, json={"email": "someone@example.org"})
+    assert stale.status_code == 409
+    confirmed = admin.post(confirm, json={"email": "ada@example.org"})
+    assert confirmed.status_code == 204
+    quota = ada.get("/api/me/quota").json()
+    assert (quota["storage_bytes_limit"], quota["trained_models_limit"]) == (
+        10 * GB,
+        5,
+    )
+
+    changed = admin.put("/api/admin/settings", json={"require_email": False}).json()
+    assert (changed["signup_mode"], changed["require_email"]) == ("open", False)
+    bob = new_browser(required)
+    assert signup(bob, username="bob").status_code == 201
+    assert bob.get("/api/auth/session").json()["starter_limits"] is False
+    assert bob.get("/api/me/quota").json()["storage_bytes_limit"] == 10 * GB
+    bob_id = bob.get("/api/auth/session").json()["user"]["id"]
+    no_address = admin.post(
+        f"/api/admin/users/{bob_id}/confirm-email", json={"email": "bob@example.org"}
+    )
+    assert no_address.status_code == 409
+    refused = ada.post(
+        f"/api/admin/users/{bob_id}/confirm-email", json={"email": "bob@example.org"}
+    )
+    assert refused.status_code == 403
+    # Settings changes say what to change.
+    assert admin.put("/api/admin/settings", json={}).status_code == 422
+    assert admin.put("/api/admin/settings", json={"require": True}).status_code == 422
+
+    # People without an address can add one (it isn't confirmed by that).
+    added = bob.put(
+        "/api/auth/email",
+        json={"email": "bob@example.org", "current_password": PASSWORD},
+    )
+    assert added.status_code == 200
+    assert added.json()["user"]["email"] == "bob@example.org"
+    assert added.json()["user"]["email_verified"] is False
+    assert outbox(migrated_database_url) == []
+
+
+def test_a_link_for_an_old_address_confirms_nothing(
+    new_browser, smtp_settings, migrated_database_url
+):
+    browser = new_browser(smtp_settings)
+    signup(browser, email="old@example.org")
+    [old_link] = outbox(migrated_database_url)
+    changed = browser.put(
+        "/api/auth/email",
+        json={"email": "new@example.org", "current_password": PASSWORD},
+    )
+    assert changed.status_code == 200
+    # The old address was never confirmed, so it isn't told about the change.
+    [_, new_link] = outbox(migrated_database_url)
+    assert new_link.to_address == "new@example.org"
+    stale = browser.post(
+        "/api/auth/verify-email", json={"token": link_token(old_link.body)}
+    )
+    assert stale.status_code == 400
+    assert browser.get("/api/auth/session").json()["user"]["email_verified"] is False
+    assert (
+        browser.post(
+            "/api/auth/verify-email", json={"token": link_token(new_link.body)}
+        ).status_code
+        == 204
+    )
+
+
+def test_opening_the_old_link_during_a_change_confirms_nothing(
+    new_browser, smtp_settings, migrated_database_url, monkeypatch
+):
+    browser = new_browser(smtp_settings)
+    signup(browser, email="old@example.org")
+    [old_link] = outbox(migrated_database_url)
+    elsewhere = new_browser(smtp_settings)
+    check = passwords.verify_password
+
+    async def opened_meanwhile(password, hashed):
+        # The old address's link is opened while the password is checked.
+        token = link_token(old_link.body)
+        opened = elsewhere.post("/api/auth/verify-email", json={"token": token})
+        assert opened.status_code == 204
+        return await check(password, hashed)
+
+    monkeypatch.setattr(passwords, "verify_password", opened_meanwhile)
+    changed = browser.put(
+        "/api/auth/email",
+        json={"email": "new@example.org", "current_password": PASSWORD},
+    )
+    assert changed.status_code == 200
+    monkeypatch.undo()
+    session = browser.get("/api/auth/session").json()
+    assert session["user"]["email"] == "new@example.org"
+    assert session["user"]["email_verified"] is False
+
+
+def test_invites_confirm_their_address_with_open_sign_up_too(
+    new_browser, smtp_settings, migrated_database_url
+):
+    admin, _ = make_admin(lambda: new_browser(smtp_settings), migrated_database_url)
+    url = admin.post("/api/admin/invites", json={"email": "eve@example.org"}).json()
+    invite = url["url"].split("invite=")[1]
+    eve = new_browser(smtp_settings)
+    created = signup(eve, username="eve", email="eve@example.org", invite=invite)
+    assert created.json()["user"]["email_verified"] is True
+    # A used-up invite doesn't stop anyone signing up while sign-up is open.
+    again = signup(new_browser(smtp_settings), username="eva", invite=invite)
+    assert again.status_code == 201
+
+
+def test_people_can_change_their_email(
+    new_browser, smtp_settings, migrated_database_url
+):
+    browser = new_browser(smtp_settings)
+    signup(browser, email="ada@example.org")
+    browser.post(
+        "/api/auth/verify-email",
+        json={"token": link_token(outbox(migrated_database_url)[0].body)},
+    )
+    signup(new_browser(smtp_settings), username="bob", email="bob@example.org")
+    anonymous = new_browser(smtp_settings)
+    anonymous.post(
+        "/api/auth/password-reset/request", json={"email": "ada@example.org"}
+    )
+    reset_token = link_token(outbox(migrated_database_url)[-1].body)
+
+    def change(address, password=PASSWORD):
+        return browser.put(
+            "/api/auth/email", json={"email": address, "current_password": password}
+        )
+
+    assert change("ada@lab.org", password="not my password").status_code == 403
+    assert change("bob@example.org").status_code == 409
+    assert change("ada@example.org").status_code == 422
+    changed = change("Ada@Lab.org")
+    assert changed.status_code == 200
+    assert changed.json()["user"]["email"] == "ada@lab.org"
+    assert changed.json()["user"]["email_verified"] is False
+    # A link to confirm the new address, and a notice to the old one.
+    link, notice = outbox(migrated_database_url)[-2:]
+    assert (link.to_address, notice.to_address) == ("ada@lab.org", "ada@example.org")
+    assert "ada@lab.org" in notice.body
+    # The reset link sent to the old address no longer works.
+    stale = anonymous.post(
+        "/api/auth/password-reset/confirm",
+        json={"token": reset_token, "new_password": "a brand new passphrase"},
+    )
+    assert stale.status_code == 400
+    assert (
+        browser.post(
+            "/api/auth/verify-email", json={"token": link_token(link.body)}
+        ).status_code
+        == 204
+    )
+    assert browser.get("/api/auth/session").json()["user"]["email_verified"]
 
 
 def test_password_reset_flow(new_browser, smtp_settings, migrated_database_url):

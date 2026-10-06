@@ -46,11 +46,19 @@ export async function api<T>(
 	return data as T;
 }
 
+/** What the API's error codes mean, for people. Limits are the project owner's. */
+const CODES: Record<string, string> = {
+	storage_quota_exceeded:
+		"That needs more storage than the project's owner has left. Free some up, or ask for more on the account page.",
+	trained_model_quota_exceeded:
+		"The project's owner keeps as many trained models as their limits allow. Delete one, or ask for more on the account page.",
+};
+
 /** A readable message for an error from `api`. */
 export function message(error: unknown): string {
 	if (error instanceof ApiError) {
 		const detail = error.detail;
-		if (typeof detail === "string") return detail;
+		if (typeof detail === "string") return CODES[detail] ?? detail;
 		if (detail && typeof detail === "object" && "message" in detail) {
 			return String((detail as { message: unknown }).message);
 		}

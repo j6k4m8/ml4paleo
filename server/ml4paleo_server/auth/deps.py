@@ -2,9 +2,10 @@
 FastAPI dependencies that identify the signed-in user.
 
 Use `CurrentAuth` on every route that needs a signed-in user. It refuses
-users who still have a required setup step: a forced password change,
-two-factor setup for admins, or email verification. The few routes that
-complete those steps use `SetupAuth` instead.
+users who still have a required setup step: a forced password change, or
+two-factor setup for admins. The few routes that complete those steps use
+`SetupAuth` instead. (An unconfirmed email address isn't a step: it only
+means starter limits, see `quotas`.)
 """
 
 from dataclasses import dataclass
@@ -63,8 +64,6 @@ async def current_auth(auth: Annotated[Auth, Depends(setup_auth)]) -> Auth:
         raise HTTPException(status_code=403, detail="password_change_required")
     if auth.user.is_admin and auth.user.totp_secret_enc is None:
         raise HTTPException(status_code=403, detail="two_factor_required")
-    if auth.user.status == "unverified":
-        raise HTTPException(status_code=403, detail="email_verification_required")
     return auth
 
 
