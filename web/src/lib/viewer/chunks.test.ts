@@ -57,6 +57,20 @@ describe("ChunkStore", () => {
 		expect(calls.map((c) => c.id)).toEqual(["a", "c"]);
 	});
 
+	it("keeps loads that any owner still wants", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		store.want("xy", new Set(["a"]));
+		const a = store.request("a");
+		store.want("xz", new Set(["b"]));
+		const b = store.request("b");
+		store.want("xy", new Set());
+		await expect(a).rejects.toThrow("No longer needed");
+		expect(calls[1]?.signal.aborted).toBe(false);
+		calls[1]?.finish();
+		await expect(b).resolves.toBeDefined();
+	});
+
 	it("can ask again for a chunk after cancelling it", async () => {
 		const { calls, load } = controlled();
 		const store = new ChunkStore(load, 1000);
@@ -95,6 +109,54 @@ describe("ChunkStore", () => {
 		expect(calls).toHaveLength(2);
 		calls[1]?.finish();
 		await expect(second).resolves.toBeDefined();
+	});
+
+	it("cancels a load that an invalidation overtakes", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		const stale = store.request("a");
+		store.invalidate("a");
+		await expect(stale).rejects.toThrow("Changed while loading");
+		expect(calls[0]?.signal.aborted).toBe(true);
+		calls[0]?.finish();
+		const fresh = store.request("a");
+		expect(calls).toHaveLength(2);
+		calls[1]?.finish(20);
+		expect((await fresh).data.byteLength).toBe(20);
+	});
+
+	it("keeps chunks a view wants even over budget", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 15);
+		store.want("xy", new Set(["a", "b"]));
+		for (const id of ["a", "b"]) {
+			const pending = store.request(id);
+			calls.at(-1)?.finish();
+			await pending;
+		}
+		expect(store.get("a")).toBeDefined();
+		expect(store.get("b")).toBeDefined();
+		store.want("xy", new Set(["b"]));
+		const c = store.request("c");
+		calls.at(-1)?.finish();
+		await c;
+		expect(store.get("a")).toBeUndefined();
+	});
+
+	it("survives a loader that throws", async () => {
+		let n = 0;
+		const store = new ChunkStore(
+			(id) => {
+				n++;
+				if (id === "bad") throw new Error("broken");
+				return Promise.resolve(chunk(1));
+			},
+			1000,
+			1,
+		);
+		await expect(store.request("bad")).rejects.toThrow("broken");
+		await expect(store.request("good")).resolves.toBeDefined();
+		expect(n).toBe(2);
 	});
 
 	it("forgets invalidated chunks", async () => {

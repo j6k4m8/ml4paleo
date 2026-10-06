@@ -28,6 +28,8 @@ export class ChunkStore {
 	#queue: Pending[] = [];
 	#running = 0;
 	#pinned = new Set<string>();
+	#wanted = new Map<string, Set<string>>();
+	#protected = new Map<string, Set<string>>();
 
 	constructor(
 		private load: Loader,
@@ -65,6 +67,24 @@ export class ChunkStore {
 		return promise;
 	}
 
+	/**
+	 * Say which chunks `owner` (for example one of several views sharing
+	 * this store) needs now; loads no owner needs are cancelled. Of those,
+	 * the `shown` ones (by default all) are never evicted, even over budget.
+	 */
+	want(owner: string, ids: Set<string>, shown: Set<string> = ids): void {
+		this.#wanted.set(owner, ids);
+		this.#protected.set(owner, shown);
+		const union = new Set<string>();
+		for (const set of this.#wanted.values()) for (const id of set) union.add(id);
+		this.keepOnly(union);
+	}
+
+	#isShown(id: string): boolean {
+		for (const set of this.#protected.values()) if (set.has(id)) return true;
+		return false;
+	}
+
 	/** Cancel queued and running loads of chunks not in `wanted`. */
 	keepOnly(wanted: Set<string>): void {
 		for (const [id, { entry }] of this.#pending) {
@@ -86,12 +106,22 @@ export class ChunkStore {
 		this.#evict();
 	}
 
-	/** Forget a chunk, for example after an edit changed it. */
+	/**
+	 * Forget a chunk, for example after an edit changed it. A load already
+	 * running might return the old contents, so it is cancelled too.
+	 */
 	invalidate(id: string): void {
 		const chunk = this.#cache.get(id);
 		if (chunk) {
 			this.#cache.delete(id);
 			this.#bytes -= chunk.data.byteLength;
+		}
+		const pending = this.#pending.get(id);
+		if (pending) {
+			pending.entry.controller.abort();
+			this.#pending.delete(id);
+			this.#queue = this.#queue.filter((entry) => entry !== pending.entry);
+			pending.entry.reject(new DOMException("Changed while loading", "AbortError"));
 		}
 	}
 
@@ -102,7 +132,14 @@ export class ChunkStore {
 			if (entry.controller.signal.aborted) continue;
 			entry.started = true;
 			this.#running += 1;
-			this.load(entry.id, entry.controller.signal)
+			let loading: Promise<Chunk>;
+			try {
+				loading = this.load(entry.id, entry.controller.signal);
+			} catch (error) {
+				// A loader that throws counts as a failed load.
+				loading = Promise.reject(error);
+			}
+			loading
 				.then((chunk) => {
 					if (this.#pending.get(entry.id)?.entry !== entry) return;
 					this.#pending.delete(entry.id);
@@ -122,10 +159,14 @@ export class ChunkStore {
 		}
 	}
 
+	/**
+	 * Drop least recently used chunks until under budget, but never pinned
+	 * chunks or chunks a view needs now (the budget stretches instead).
+	 */
 	#evict(): void {
 		for (const [id, chunk] of this.#cache) {
 			if (this.#bytes <= this.maxBytes) return;
-			if (this.#pinned.has(id)) continue;
+			if (this.#pinned.has(id) || this.#isShown(id)) continue;
 			this.#cache.delete(id);
 			this.#bytes -= chunk.data.byteLength;
 		}

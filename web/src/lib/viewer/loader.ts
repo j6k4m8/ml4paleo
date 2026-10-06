@@ -1,11 +1,11 @@
 /**
- * A pool of decode workers that loads one image's chunks (see
- * decode.worker.ts), for a ChunkStore.
+ * A pool of decode workers (see decode.worker.ts), and loaders for the
+ * ChunkStores of an image and of its labels.
  */
 
 import type { Chunk, Loader } from "./chunks";
-import type { DecodeResponse } from "./decode.worker";
-import { CHUNK, type Level } from "./tiles";
+import type { ArrayRegion, DecodeResponse, Region } from "./decode.worker";
+import { CHUNK, type Level, type Vec3 } from "./tiles";
 
 export class WorkerPool {
 	#workers: Worker[];
@@ -28,39 +28,60 @@ export class WorkerPool {
 		if (!waiting) return;
 		this.#waiting.delete(response.id);
 		if ("error" in response) waiting.reject(new Error(response.error));
-		else
-			waiting.resolve({
-				data: response.data as Chunk["data"],
-				shape: response.shape,
-			});
+		else waiting.resolve({ data: response.data as Chunk["data"], shape: response.shape });
 	}
 
-	/** A Loader for `url` (an OME-Zarr image) whose ids are tile ids. */
-	loader(url: string, levels: Level[]): Loader {
-		return (id, signal) => {
-			const [level, cz, cy, cx] = id.split("/").map(Number) as [number, number, number, number];
-			const shape = levels[level]?.shape;
-			if (!shape) return Promise.reject(new Error(`No level ${level}`));
-			const region = [cz, cy, cx].map((c, axis) => [
-				c * CHUNK,
-				Math.min((c + 1) * CHUNK, shape[axis] ?? 0),
-			]) as [[number, number], [number, number], [number, number]];
-			const requestId = ++this.#id;
-			const worker = this.#workers[this.#next++ % this.#workers.length];
-			if (!worker) return Promise.reject(new Error("No decode workers"));
-			return new Promise<Chunk>((resolve, reject) => {
-				this.#waiting.set(requestId, { resolve, reject });
-				signal.addEventListener("abort", () => {
-					worker.postMessage({ type: "cancel", id: requestId });
-					this.#waiting.delete(requestId);
-					reject(new DOMException("No longer needed", "AbortError"));
-				});
-				worker.postMessage({ type: "load", id: requestId, url, level, region });
+	load(request: ArrayRegion, signal: AbortSignal): Promise<Chunk> {
+		const id = ++this.#id;
+		const worker = this.#workers[this.#next++ % this.#workers.length];
+		if (!worker) return Promise.reject(new Error("No decode workers"));
+		return new Promise<Chunk>((resolve, reject) => {
+			const abort = () => {
+				worker.postMessage({ type: "cancel", id });
+				this.#waiting.delete(id);
+				reject(new DOMException("No longer needed", "AbortError"));
+			};
+			signal.addEventListener("abort", abort, { once: true });
+			const done = () => signal.removeEventListener("abort", abort);
+			this.#waiting.set(id, {
+				resolve: (chunk) => (done(), resolve(chunk)),
+				reject: (error) => (done(), reject(error)),
 			});
-		};
+			worker.postMessage({ type: "load", id, ...request });
+		});
 	}
 
 	close(): void {
 		for (const worker of this.#workers) worker.terminate();
+		for (const { reject } of this.#waiting.values()) reject(new DOMException("Closed", "AbortError"));
+		this.#waiting.clear();
 	}
+}
+
+/** The region of chunk (cz, cy, cx) in an array of `shape`. */
+export function chunkRegion(key: Vec3, shape: Vec3): Region {
+	return key.map((c, axis) => [c * CHUNK, Math.min((c + 1) * CHUNK, shape[axis] ?? 0)]) as Region;
+}
+
+function parse(id: string): number[] {
+	return id.split("/").map(Number);
+}
+
+/** Loads image chunks, with ids `level/cz/cy/cx`, from an OME-Zarr image. */
+export function imageLoader(pool: WorkerPool, url: string, levels: Level[]): Loader {
+	return (id, signal) => {
+		const [level = 0, cz = 0, cy = 0, cx = 0] = parse(id);
+		const found = levels[level];
+		if (!found) return Promise.reject(new Error(`No level ${level}`));
+		const region = chunkRegion([cz, cy, cx], found.shape);
+		return pool.load({ url, path: found.path, region, channel: 0 }, signal);
+	};
+}
+
+/** Loads label chunks, with ids `cz/cy/cx`, from a project's label zarr. */
+export function labelLoader(pool: WorkerPool, url: string, shape: Vec3): Loader {
+	return (id, signal) => {
+		const [cz = 0, cy = 0, cx = 0] = parse(id);
+		return pool.load({ url, path: "class", region: chunkRegion([cz, cy, cx], shape) }, signal);
+	};
 }

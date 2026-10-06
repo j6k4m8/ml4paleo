@@ -2,27 +2,50 @@
  * Which pyramid level and which chunks a plane view needs.
  *
  * Coordinates are in full-resolution (level 0) voxels, ordered (z, y, x) as
- * in storage. A view looks at one z plane; `zoom` is screen pixels per
- * level-0 voxel.
+ * in storage. A view shows the plane through `position` normal to one axis,
+ * centered on `position`; its horizontal axis is `u` and its vertical axis
+ * `v`. `zoom` is screen pixels per level-0 voxel along the finest axis, and
+ * `aspect` stretches coarser axes so voxels show their physical shape.
  */
 
 export const CHUNK = 64;
 
+export type Axis = 0 | 1 | 2;
+export type Vec3 = [number, number, number];
+
+export interface Plane {
+	name: "xy" | "xz" | "yz";
+	normal: Axis;
+	u: Axis;
+	v: Axis;
+}
+
+// Laid out 2 × 2 as XY | YZ over XZ, so rows share y and columns share x.
+export const PLANES: Record<Plane["name"], Plane> = {
+	xy: { name: "xy", normal: 0, u: 2, v: 1 },
+	xz: { name: "xz", normal: 1, u: 2, v: 0 },
+	yz: { name: "yz", normal: 2, u: 0, v: 1 },
+};
+
 export interface Level {
 	index: number;
+	/** The level's array, within the image. */
+	path: string;
 	/** Shape of the level, (z, y, x). */
-	shape: [number, number, number];
+	shape: Vec3;
 	/** Level-0 voxels per voxel of this level, (z, y, x). */
-	scale: [number, number, number];
+	scale: Vec3;
 }
 
 export interface View {
-	z: number;
-	centerY: number;
-	centerX: number;
+	plane: Plane;
+	position: Vec3;
 	zoom: number;
+	aspect: Vec3;
 	width: number;
 	height: number;
+	/** Device pixels per CSS pixel; levels are chosen per CSS pixel. */
+	pixelRatio?: number;
 }
 
 export interface TileKey {
@@ -36,17 +59,39 @@ export function tileId(key: TileKey): string {
 	return `${key.level}/${key.cz}/${key.cy}/${key.cx}`;
 }
 
+/** Physical voxel size per axis relative to the finest axis. */
+export function aspectOf(voxelSize: Vec3 | null | undefined): Vec3 {
+	if (!voxelSize || voxelSize.some((s) => !(s > 0))) return [1, 1, 1];
+	const finest = Math.min(...voxelSize);
+	return voxelSize.map((s) => s / finest) as Vec3;
+}
+
+/** Screen pixels per level-0 voxel along each axis. */
+export function pixelsPerVoxel(view: View): Vec3 {
+	return view.aspect.map((a) => a * view.zoom) as Vec3;
+}
+
 /**
- * The coarsest level whose voxels still cover at most about one screen pixel.
+ * The coarsest level whose voxels still cover at most about one and a half
+ * CSS pixels in the view's plane.
  */
-export function chooseLevel(levels: Level[], zoom: number): Level {
+export function chooseLevel(levels: Level[], view: View): Level {
 	let best = levels[0];
 	if (!best) throw new Error("An image has at least one level");
+	const { u, v } = view.plane;
+	const px = pixelsPerVoxel(view);
+	const limit = 1.5 * (view.pixelRatio ?? 1);
+	const size = (level: Level) => Math.min(level.scale[u] * px[u], level.scale[v] * px[v]);
 	for (const level of levels) {
-		const inPlane = Math.min(level.scale[1], level.scale[2]);
-		if (inPlane * zoom <= 1.5 && inPlane > Math.min(best.scale[1], best.scale[2])) best = level;
+		if (size(level) <= limit && size(level) > size(best)) best = level;
 	}
 	return best;
+}
+
+/** The plane's index along its normal axis, in `level`'s voxels. */
+export function sliceIndex(level: Level, view: View): number {
+	const n = view.plane.normal;
+	return Math.floor(Math.floor(view.position[n]) / level.scale[n]);
 }
 
 /**
@@ -54,30 +99,45 @@ export function chooseLevel(levels: Level[], zoom: number): Level {
  * it, to load before they scroll into view), nearest to the center first.
  */
 export function visibleTiles(level: Level, view: View, padding = 1): TileKey[] {
-	const [sz, sy, sx] = level.scale;
-	const [nz, ny, nx] = level.shape;
-	const z = Math.floor(view.z / sz);
-	if (z < 0 || z >= nz) return [];
-	const halfH = view.height / 2 / view.zoom;
-	const halfW = view.width / 2 / view.zoom;
-	const lastY = Math.ceil(ny / CHUNK) - 1;
-	const lastX = Math.ceil(nx / CHUNK) - 1;
-	const y0 = Math.max(0, Math.floor((view.centerY - halfH) / sy / CHUNK) - padding);
-	const y1 = Math.min(lastY, Math.floor((view.centerY + halfH) / sy / CHUNK) + padding);
-	const x0 = Math.max(0, Math.floor((view.centerX - halfW) / sx / CHUNK) - padding);
-	const x1 = Math.min(lastX, Math.floor((view.centerX + halfW) / sx / CHUNK) + padding);
-	const cz = Math.floor(z / CHUNK);
-	const tiles: TileKey[] = [];
-	for (let cy = y0; cy <= y1; cy++) {
-		for (let cx = x0; cx <= x1; cx++) tiles.push({ level: level.index, cz, cy, cx });
+	const { normal, u, v } = view.plane;
+	const slice = sliceIndex(level, view);
+	if (slice < 0 || slice >= level.shape[normal]) return [];
+	const px = pixelsPerVoxel(view);
+	const range = (axis: Axis, half: number) => {
+		const center = view.position[axis] / level.scale[axis];
+		const extent = half / (px[axis] * level.scale[axis]);
+		const last = Math.ceil(level.shape[axis] / CHUNK) - 1;
+		return {
+			first: Math.max(0, Math.floor((center - extent) / CHUNK) - padding),
+			last: Math.min(last, Math.floor((center + extent) / CHUNK) + padding),
+			center: center / CHUNK - 0.5,
+		};
+	};
+	const us = range(u, view.width / 2);
+	const vs = range(v, view.height / 2);
+	const tiles: (TileKey & { distance: number })[] = [];
+	for (let cv = vs.first; cv <= vs.last; cv++) {
+		for (let cu = us.first; cu <= us.last; cu++) {
+			const c: Vec3 = [0, 0, 0];
+			c[normal] = Math.floor(slice / CHUNK);
+			c[u] = cu;
+			c[v] = cv;
+			const distance = Math.hypot(cu - us.center, cv - vs.center);
+			tiles.push({ level: level.index, cz: c[0], cy: c[1], cx: c[2], distance });
+		}
 	}
-	const centerCy = view.centerY / sy / CHUNK - 0.5;
-	const centerCx = view.centerX / sx / CHUNK - 0.5;
-	tiles.sort(
-		(a, b) =>
-			Math.hypot(a.cy - centerCy, a.cx - centerCx) - Math.hypot(b.cy - centerCy, b.cx - centerCx),
-	);
-	return tiles;
+	tiles.sort((a, b) => a.distance - b.distance);
+	return tiles.map(({ level, cz, cy, cx }) => ({ level, cz, cy, cx }));
+}
+
+/** The level-0 voxel under a point on the view, from the view's center. */
+export function voxelAt(view: View, dx: number, dy: number): Vec3 {
+	const px = pixelsPerVoxel(view);
+	const { u, v } = view.plane;
+	const point = [...view.position] as Vec3;
+	point[u] += dx / px[u];
+	point[v] += dy / px[v];
+	return point;
 }
 
 /** Map a stored value into [0, 1] for display, given a window [low, high]. */

@@ -1,7 +1,7 @@
 /**
- * Fetches and decodes image chunks off the main thread. Each request names
- * an OME-Zarr image (its URL), a level, and a chunk; the answer is the
- * chunk's voxels, transferred without copying.
+ * Fetches and decodes chunks off the main thread. Each request names a zarr
+ * array (a store URL and a path in it) and a region; the answer is the
+ * region's values, transferred without copying.
  */
 
 import * as zarr from "zarrita";
@@ -9,12 +9,20 @@ import { useZstd } from "./zstd";
 
 useZstd();
 
-export interface DecodeRequest {
+export type Region = [[number, number], [number, number], [number, number]];
+
+export interface ArrayRegion {
+	url: string;
+	path: string;
+	/** The (z, y, x) region to read. */
+	region: Region;
+	/** The channel to read, for arrays with a leading channel axis. */
+	channel?: number;
+}
+
+export interface DecodeRequest extends ArrayRegion {
 	type: "load";
 	id: number;
-	url: string;
-	level: number;
-	region: [[number, number], [number, number], [number, number]];
 }
 
 export interface CancelRequest {
@@ -26,17 +34,21 @@ export type DecodeResponse =
 	| { id: number; data: ArrayBufferView; shape: number[] }
 	| { id: number; error: string };
 
-const arrays = new Map<string, Promise<zarr.Array<zarr.DataType, zarr.FetchStore>>>();
+type OpenArray = zarr.Array<zarr.DataType, zarr.FetchStore>;
+
+const arrays = new Map<string, Promise<OpenArray>>();
 const running = new Map<number, AbortController>();
 
-function openLevel(url: string, level: number) {
-	const key = `${url}#${level}`;
+function openArray(url: string, path: string): Promise<OpenArray> {
+	const key = `${url}#${path}`;
 	let array = arrays.get(key);
 	if (!array) {
 		// Shard indexes are read with suffix ranges, which the gateway serves,
 		// instead of a HEAD request first.
 		const store = new zarr.FetchStore(url, { useSuffixRequest: true });
-		array = zarr.open.v3(zarr.root(store).resolve(String(level)), { kind: "array" });
+		array = zarr.open.v3(zarr.root(store).resolve(path), { kind: "array" });
+		// Let a later request try again after a failure.
+		array.catch(() => arrays.delete(key));
 		arrays.set(key, array);
 	}
 	return array;
@@ -51,13 +63,11 @@ self.onmessage = async (event: MessageEvent<DecodeRequest | CancelRequest>) => {
 	const controller = new AbortController();
 	running.set(message.id, controller);
 	try {
-		const array = await openLevel(message.url, message.level);
+		const array = await openArray(message.url, message.path);
 		const [[z0, z1], [y0, y1], [x0, x1]] = message.region;
-		const chunk = await zarr.get(
-			array,
-			[0, zarr.slice(z0, z1), zarr.slice(y0, y1), zarr.slice(x0, x1)],
-			{ opts: { signal: controller.signal } },
-		);
+		const spatial = [zarr.slice(z0, z1), zarr.slice(y0, y1), zarr.slice(x0, x1)];
+		const selection = message.channel === undefined ? spatial : [message.channel, ...spatial];
+		const chunk = await zarr.get(array, selection, { opts: { signal: controller.signal } });
 		const data = chunk.data as unknown as ArrayBufferView;
 		const reply: DecodeResponse = { id: message.id, data, shape: chunk.shape };
 		(self as unknown as Worker).postMessage(reply, [data.buffer as ArrayBuffer]);
