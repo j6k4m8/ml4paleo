@@ -92,6 +92,10 @@ def image_in(pipelines) -> bool:
     return all(p["status"] in FINISHED for p in pipelines if p["kind"] == "import")
 
 
+# Only the image's jobs, so the rest waits for a later run.
+IMAGE_ONLY = {kind: V1_HANDLERS[kind] for kind in ("v1.probe", "v1.slab")}
+
+
 def run_import(
     database_url,
     live_server,
@@ -364,7 +368,15 @@ def test_the_labels_and_the_prediction_come_over_on_their_own(
     ada = new_browser()
     signup(ada)
     project = ada.post("/api/v1-jobs/ABC123/claim").json()["project_id"]
-    run_import(migrated_database_url, live_server, ada, project, volume, until=image_in)
+    run_import(
+        migrated_database_url,
+        live_server,
+        ada,
+        project,
+        volume,
+        v1_handlers=IMAGE_ONLY,
+        until=image_in,
+    )
     # Both wait for the image, each in a pipeline of its own...
     waiting = statuses(ada.get(f"/api/projects/{project}/pipelines").json())
     assert waiting == {
