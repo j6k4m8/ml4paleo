@@ -681,9 +681,12 @@ def test_only_import_jobs_write_labels(new_browser, settings, migrated_database_
     assert lost.status_code == 409
 
 
-def test_a_repeated_label_op_gets_its_first_result(
-    new_browser, settings, migrated_database_url
-):
+def labels_job(new_browser, database_url):
+    """
+    A project with an image and a "Foreground" class, and a leased labels job
+    in it. Returns ada, the project, the class's value, the job's worker, and
+    a function that sends one edit as that job.
+    """
     ada = new_browser()
     signup(ada)
     project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
@@ -707,8 +710,8 @@ def test_a_repeated_label_op_gets_its_first_result(
             required_labels=["v1-volume"],
         )
 
-    run_db(migrated_database_url, add)
-    token = add_worker(migrated_database_url)
+    run_db(database_url, add)
+    token = add_worker(database_url)
     worker = new_browser()
     caps = {"version": "test", "kinds": ["v1.labels"], "labels": ["v1-volume"]}
     worker.post("/api/worker/v1/hello", json={"caps": caps}, headers=bearer(token))
@@ -721,26 +724,54 @@ def test_a_repeated_label_op_gets_its_first_result(
     deltas = split_into_deltas(
         np.ones(values.shape, dtype=bool), (0, 0, 0), values=values
     )
-    op = {
-        "lease_token": lease["lease_token"],
-        "client_op_id": str(uuid.uuid4()),
-        "deltas": [
-            {
-                "key": list(delta.key),
-                "box": list(delta.box),
-                "mask": base64.b64encode(delta.mask).decode(),
-                "values": base64.b64encode(delta.values or b"").decode(),
-            }
-            for delta in deltas
-        ],
-    }
+    wire = [
+        {
+            "key": list(delta.key),
+            "box": list(delta.box),
+            "mask": base64.b64encode(delta.mask).decode(),
+            "values": base64.b64encode(delta.values or b"").decode(),
+        }
+        for delta in deltas
+    ]
     url = f"/api/worker/v1/jobs/{lease['job_id']}/label-ops"
-    first = worker.post(url, json=op, headers=bearer(token))
+
+    def send(client_op_id: str):
+        op = {
+            "lease_token": lease["lease_token"],
+            "client_op_id": client_op_id,
+            "deltas": wire,
+        }
+        return worker.post(url, json=op, headers=bearer(token))
+
+    return ada, project, value, lease["job_id"], send
+
+
+def test_a_repeated_label_op_gets_its_first_result(
+    new_browser, settings, migrated_database_url
+):
+    ada, project, value, _, send = labels_job(new_browser, migrated_database_url)
+    op_id = str(uuid.uuid4())
+    first = send(op_id)
     assert first.status_code == 201
     # The class is retired before the job sends the same op again.
+    classes = f"/api/projects/{project}/labels/classes"
     assert ada.request("DELETE", f"{classes}/{value}").status_code == 204
-    again = worker.post(url, json=op, headers=bearer(token))
+    again = send(op_id)
     assert (again.status_code, again.json()) == (201, first.json())
+
+
+def test_a_cancelled_job_writes_no_more_labels(
+    new_browser, settings, migrated_database_url
+):
+    ada, project, _, job, send = labels_job(new_browser, migrated_database_url)
+    assert send(str(uuid.uuid4())).status_code == 201
+    cancel = f"/api/projects/{project}/pipelines/{job}/cancel"
+    assert ada.post(cancel).status_code == 204
+    refused = send(str(uuid.uuid4()))
+    assert refused.status_code == 409
+    assert refused.json()["detail"].startswith("job_cancelled")
+    history = ada.get(f"/api/projects/{project}/labels/ops").json()
+    assert len(history) == 1
 
 
 def test_jobs_that_never_converted_cant_be_claimed(new_browser, settings, tmp_path):
