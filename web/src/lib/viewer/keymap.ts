@@ -71,15 +71,32 @@ const BY_KEY = new Map(KEYMAP.flatMap((binding) => binding.keys.map((key) => [ke
 export function comboOf(event: KeyboardEvent): string {
 	const name = event.key.length === 1 ? event.key.toLowerCase() : event.key;
 	if (!(event.ctrlKey || event.metaKey)) return name;
-	return `mod+${event.shiftKey ? "shift+" : ""}${name}`;
+	// Shortcuts follow the key's position, so Ctrl+Z works on any layout.
+	const letter = /^Key([A-Z])$/.exec(event.code ?? "")?.[1]?.toLowerCase();
+	return `mod+${event.shiftKey ? "shift+" : ""}${letter ?? name}`;
 }
 
-/** The action for a key press, ignoring presses meant for form fields. */
+const NON_TEXT_INPUTS = new Set(["checkbox", "radio", "range", "button", "submit", "reset", "color", "file"]);
+
+/**
+ * Whether a key press belongs to the focused element rather than the
+ * viewer: typing in a field, Space or Enter on a button or checkbox, arrows
+ * on a slider or radio button.
+ */
+export function forFocused(event: KeyboardEvent): boolean {
+	const target = event.target as (HTMLElement & { type?: string }) | null;
+	if (!target?.tagName) return false;
+	const tag = target.tagName;
+	if (target.isContentEditable || tag === "TEXTAREA" || tag === "SELECT") return true;
+	if (tag === "INPUT" && !NON_TEXT_INPUTS.has(target.type ?? "text")) return true;
+	const control = tag === "BUTTON" || tag === "A" || tag === "INPUT" || tag === "SUMMARY";
+	if (control && (event.key === " " || event.key === "Enter")) return true;
+	return tag === "INPUT" && (target.type === "range" || target.type === "radio") && event.key.startsWith("Arrow");
+}
+
+/** The action for a key press, or undefined if it isn't the viewer's. */
 export function actionFor(event: KeyboardEvent): Action | undefined {
 	if (event.altKey && event.key !== "Enter") return undefined;
-	const target = event.target as HTMLElement | null;
-	if (target && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) {
-		return undefined;
-	}
+	if (forFocused(event)) return undefined;
 	return BY_KEY.get(comboOf(event));
 }

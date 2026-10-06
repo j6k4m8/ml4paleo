@@ -21,6 +21,8 @@ interface Pending {
 	reject: (error: unknown) => void;
 	controller: AbortController;
 	started: boolean;
+	/** Replaces a cached copy that is now out of date. */
+	refresh: boolean;
 }
 
 export class ChunkStore {
@@ -61,7 +63,7 @@ export class ChunkStore {
 		if (cached) return Promise.resolve(cached);
 		const pending = this.#pending.get(id);
 		if (pending) return pending.promise;
-		return this.#enqueue(id);
+		return this.#enqueue(id, false);
 	}
 
 	/**
@@ -76,13 +78,19 @@ export class ChunkStore {
 			this.#queue = this.#queue.filter((entry) => entry !== pending.entry);
 			pending.entry.reject(new DOMException("Changed while loading", "AbortError"));
 		}
-		return this.#enqueue(id);
+		return this.#enqueue(id, true);
 	}
 
-	#enqueue(id: string): Promise<Chunk> {
+	/** Whether any view needs this chunk now. */
+	isWanted(id: string): boolean {
+		for (const set of this.#wanted.values()) if (set.has(id)) return true;
+		return false;
+	}
+
+	#enqueue(id: string, refresh: boolean): Promise<Chunk> {
 		let entry!: Pending;
 		const promise = new Promise<Chunk>((resolve, reject) => {
-			entry = { id, resolve, reject, controller: new AbortController(), started: false };
+			entry = { id, resolve, reject, controller: new AbortController(), started: false, refresh };
 		});
 		this.#pending.set(id, { promise, entry });
 		this.#queue.push(entry);
@@ -114,6 +122,9 @@ export class ChunkStore {
 			if (wanted.has(id)) continue;
 			entry.controller.abort();
 			this.#pending.delete(id);
+			// A cancelled refresh leaves an out-of-date copy: drop it, so the
+			// next request loads afresh.
+			if (entry.refresh) this.#drop(id);
 			entry.reject(new DOMException("No longer needed", "AbortError"));
 		}
 		this.#queue = this.#queue.filter((entry) => wanted.has(entry.id));
@@ -134,17 +145,21 @@ export class ChunkStore {
 	 * running might return the old contents, so it is cancelled too.
 	 */
 	invalidate(id: string): void {
-		const chunk = this.#cache.get(id);
-		if (chunk) {
-			this.#cache.delete(id);
-			this.#bytes -= chunk.data.byteLength;
-		}
+		this.#drop(id);
 		const pending = this.#pending.get(id);
 		if (pending) {
 			pending.entry.controller.abort();
 			this.#pending.delete(id);
 			this.#queue = this.#queue.filter((entry) => entry !== pending.entry);
 			pending.entry.reject(new DOMException("Changed while loading", "AbortError"));
+		}
+	}
+
+	#drop(id: string): void {
+		const chunk = this.#cache.get(id);
+		if (chunk) {
+			this.#cache.delete(id);
+			this.#bytes -= chunk.data.byteLength;
 		}
 	}
 

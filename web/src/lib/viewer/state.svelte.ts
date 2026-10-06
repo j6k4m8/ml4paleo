@@ -4,12 +4,24 @@
  * this browser.
  */
 
+import type { PlaneMask } from "../labels/raster";
 import type { Plane, Vec3 } from "./tiles";
 
 export type Layout = "four" | Plane["name"];
 export const LAYOUTS: Layout[] = ["four", "xy", "xz", "yz"];
 
 export type Tool = "navigate" | "brush" | "eraser" | "polygon";
+
+/** A finished brush or eraser stroke and the settings it was drawn with. */
+export interface Stroke {
+	plane: Plane;
+	slice: number;
+	mask: PlaneMask;
+	erase: boolean;
+	value: number;
+	onlyIf: string;
+	radius: number;
+}
 
 /** A polygon being drawn: its plane, slice, and vertices in plane voxels. */
 export interface Polygon {

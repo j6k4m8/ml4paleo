@@ -29,6 +29,7 @@ describe("OpQueue", () => {
 		const queue = new OpQueue("p", null, send);
 		queue.edit([delta(0)]);
 		queue.edit([delta(1)]);
+		await settle(queue);
 		queue.undo();
 		queue.redo();
 		await settle(queue);
@@ -72,6 +73,7 @@ describe("OpQueue", () => {
 		const queue = new OpQueue("p", null, send);
 		const ops = queue.edit(Array.from({ length: MAX_DELTAS + 3 }, (_, i) => delta(i)));
 		expect(ops).toHaveLength(2);
+		await settle(queue);
 		queue.undo();
 		await settle(queue);
 		expect(calls.map((c) => c.path.split("/labels/")[1])).toEqual(["ops", "ops", "ops/2/undo", "ops/1/undo"]);
@@ -84,10 +86,58 @@ describe("OpQueue", () => {
 		failures.push(new ApiError(422, "label values [9] are not classes here"));
 		const queue = new OpQueue("p", null, send);
 		queue.edit([delta(0)]);
+		await settle(queue);
 		queue.undo();
 		await settle(queue);
 		expect(calls).toHaveLength(1);
 		expect(queue.error).toContain("not classes");
+	});
+
+	it("drops an edit undone before it was sent, and sends it anew on redo", async () => {
+		const { calls, failures, send } = server();
+		failures.push(new TypeError("Failed to fetch"));
+		const queue = new OpQueue("p", null, send);
+		const outcomes: Outcome[] = [];
+		const requeued: string[] = [];
+		queue.onOutcome((o) => outcomes.push(o));
+		queue.onRequeue((ops) => requeued.push(...ops.map((op) => op.local)));
+		queue.edit([delta(0)]);
+		const [second] = queue.edit([delta(1)]);
+		queue.undo();
+		expect(outcomes).toEqual([{ op: second, cancelled: true }]);
+		queue.redo();
+		expect(requeued).toHaveLength(1);
+		expect(requeued[0]).not.toBe(second?.local);
+		await settle(queue);
+		const sent = calls.map((c) => c.body.client_op_id);
+		expect(sent).not.toContain(second?.clientOpId);
+		expect(calls.filter((c) => c.path.endsWith("/ops"))).toHaveLength(3);
+	});
+
+	it("saves undos of sent edits, with their seq", async () => {
+		const { send } = server();
+		const saved: { kind: string; seq?: number }[] = [];
+		const storage = { load: async () => [], save: async (op: { kind: string; seq?: number }) => void saved.push(op), remove: async () => {} };
+		const queue = new OpQueue("p", storage, send);
+		queue.edit([delta(0)]);
+		await settle(queue);
+		queue.undo();
+		expect(saved.map((op) => [op.kind, op.seq])).toEqual([
+			["edit", undefined],
+			["undo", 1],
+		]);
+	});
+
+	it("lets the page adjust an edit just before it goes", async () => {
+		const bodies: unknown[] = [];
+		const queue = new OpQueue("p", null, async (_path, body) => {
+			bodies.push(body);
+			return { seq: 1, chunks: [] };
+		});
+		queue.beforeSend = (op) => ({ ...op, deltas: op.deltas.map((d) => ({ ...d, base_version: 7 })) });
+		queue.edit([delta(0)], { strict: true });
+		await settle(queue);
+		expect((bodies[0] as { deltas: { base_version: number }[] }).deltas[0]?.base_version).toBe(7);
 	});
 
 	it("resumes edits a previous page left unsent", async () => {

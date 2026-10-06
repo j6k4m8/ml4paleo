@@ -160,6 +160,19 @@ describe("ChunkStore", () => {
 		expect(seen).toEqual(["a"]);
 	});
 
+	it("drops an out-of-date copy when its refresh is cancelled", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		const first = store.request("a");
+		calls[0]?.finish(10);
+		await first;
+		const refreshing = store.refresh("a");
+		refreshing.catch(() => {});
+		store.want("xy", new Set(["b"]));
+		await expect(refreshing).rejects.toThrow("No longer needed");
+		expect(store.get("a")).toBeUndefined();
+	});
+
 	it("survives a loader that throws", async () => {
 		let n = 0;
 		const store = new ChunkStore(

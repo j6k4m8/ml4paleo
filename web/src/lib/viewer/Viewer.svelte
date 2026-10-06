@@ -1,16 +1,17 @@
 <script lang="ts">
 	import { onDestroy, onMount, untrack } from "svelte";
+	import { session } from "#lib/session.svelte.ts";
 	import type { ProjectImage } from "#lib/types.ts";
 	import { splitIntoDeltas } from "../labels/deltas";
-	import { indexedDbStorage, OpQueue } from "../labels/opqueue.svelte";
+	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
 	import { PlaneMask } from "../labels/raster";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
-	import { actionFor, KEYMAP, MOUSE } from "./keymap";
+	import { actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
 	import { type LabelClass, LabelLayer } from "./labels";
 	import { imageLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
-	import { ViewerState } from "./state.svelte";
+	import { type Stroke, ViewerState } from "./state.svelte";
 	import { aspectOf, type Level, type Plane, PLANES, type Vec3 } from "./tiles";
 
 	let { image, projectId }: { image: ProjectImage; projectId: string } = $props();
@@ -33,7 +34,16 @@
 	let pool: WorkerPool | undefined;
 	let hovered: Plane = PLANES.xy;
 	let notice = $state("");
-	const queue = new OpQueue(project, indexedDbStorage(project));
+	const queue = new OpQueue(project, indexedDbStorage(session.current?.user.id ?? "", project));
+	// Strict edits compare against the chunk versions current when they're
+	// sent, after this page's earlier edits have landed; if any version is
+	// unknown, the edit applies like a brush stroke instead.
+	queue.beforeSend = (op: QueuedEdit) => {
+		if (!op.strict || !labels) return op;
+		const versions = op.deltas.map((d) => labels!.versionOf(d.key.join("/")));
+		if (versions.some((v) => v === undefined)) return { ...op, strict: false };
+		return { ...op, deltas: op.deltas.map((d, i) => ({ ...d, base_version: versions[i]! })) };
+	};
 	const sizes = new Map<string, [number, number]>();
 	const controller = new AbortController();
 
@@ -53,8 +63,12 @@
 			classes = layer.classes;
 			viewer.activeClass ??= classes[0]?.value ?? null;
 			queue.onOutcome((outcome) => {
-				if (outcome.op.kind !== "edit") return;
-				if ("result" in outcome) {
+				if ("cancelled" in outcome) {
+					layer.settle(outcome.op.local, null);
+				} else if (outcome.op.kind !== "edit") {
+					if ("result" in outcome) layer.noteVersions(outcome.result.chunks);
+					else if (!outcome.alreadyDone) notice = `That ${outcome.op.kind} didn't go through: ${outcome.error}`;
+				} else if ("result" in outcome) {
 					layer.settle(outcome.op.local, outcome.result.chunks);
 				} else {
 					layer.settle(outcome.op.local, null);
@@ -62,6 +76,9 @@
 						? "Someone changed those labels while you drew; your polygon was dropped. Draw it again."
 						: `That edit didn't save: ${outcome.error}`;
 				}
+			});
+			queue.onRequeue((ops) => {
+				for (const op of ops) layer.applyLocal(op.local, op.deltas);
 			});
 			// Edits a previous visit left unsent show until they're saved.
 			for (const op of await queue.start()) if (op.kind === "edit") layer.applyLocal(op.local, op.deltas);
@@ -112,30 +129,18 @@
 	function commit(plane: Plane, slice: number, mask: PlaneMask, value: number, onlyIf: string, tool: Record<string, unknown>, strict = false) {
 		if (!labels) return;
 		const volume = mask.toVolume(plane, slice);
-		let baseVersions: Map<string, number> | undefined;
-		if (strict) {
-			// Strict edits need the version of every chunk they touch; without
-			// them, the edit applies like a brush stroke.
-			const keys = splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value }).map((d) => d.key.join("/"));
-			const known = keys.map((id) => [id, labels!.versionOf(id)] as const);
-			if (known.every(([, version]) => version !== undefined)) baseVersions = new Map(known as [string, number][]);
-			else strict = false;
-		}
-		const deltas = splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value, onlyIf, baseVersions });
+		const deltas = splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value, onlyIf });
 		notice = "";
 		for (const op of queue.edit(deltas, { strict, tool })) labels.applyLocal(op.local, op.deltas);
 	}
 
-	function stroke(plane: Plane, slice: number, mask: PlaneMask) {
-		const erase = viewer.tool === "eraser";
-		const value = erase ? 0 : viewer.activeClass;
-		if (value === null) return;
-		const onlyIf = erase ? "any" : viewer.protectLabels ? "unlabeled" : "any";
-		commit(plane, slice, mask, value, onlyIf, {
-			name: erase ? "eraser" : "brush",
-			radius: viewer.brushRadius,
-			plane: plane.name,
-			slice,
+	function stroke(drawn: Stroke) {
+		if (!drawn.erase && drawn.value === 0) return;
+		commit(drawn.plane, drawn.slice, drawn.mask, drawn.value, drawn.onlyIf, {
+			name: drawn.erase ? "eraser" : "brush",
+			radius: drawn.radius,
+			plane: drawn.plane.name,
+			slice: drawn.slice,
 		});
 	}
 
@@ -185,13 +190,15 @@
 			event.preventDefault();
 			return;
 		}
-		if (event.key === " " && !(event.target instanceof HTMLInputElement)) {
+		if (event.key === " " && !forFocused(event)) {
 			viewer.panning = true;
 			event.preventDefault();
 			return;
 		}
 		const action = actionFor(event);
 		if (!action) return;
+		// Enter and Backspace only mean something while drawing a polygon.
+		if ((action === "close-polygon" || action === "remove-point") && !viewer.polygon) return;
 		event.preventDefault();
 		const step = event.shiftKey ? 10 : 1;
 		switch (action) {

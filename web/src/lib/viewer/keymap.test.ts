@@ -23,6 +23,21 @@ describe("keymap", () => {
 		expect(actionFor(press("=", { metaKey: true }))).toBeUndefined();
 	});
 
+	it("leaves Space, Enter, and arrows to focused controls", () => {
+		const on = (key: string, tagName: string, type?: string) =>
+			({ key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, target: { tagName, type, isContentEditable: false } }) as unknown as KeyboardEvent;
+		expect(actionFor(on("Enter", "BUTTON"))).toBeUndefined();
+		expect(actionFor(on("ArrowUp", "INPUT", "range"))).toBeUndefined();
+		expect(actionFor(on("ArrowUp", "INPUT", "checkbox"))).toBe("slice-next");
+		expect(actionFor(on("b", "INPUT", "radio"))).toBe("brush");
+		expect(actionFor(on("b", "INPUT", "text"))).toBeUndefined();
+	});
+
+	it("matches shortcuts by key position on other layouts", () => {
+		const cyrillic = { key: "я", code: "KeyZ", ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, target: null } as unknown as KeyboardEvent;
+		expect(actionFor(cyrillic)).toBe("undo");
+	});
+
 	it("knows undo and redo with Ctrl or ⌘", () => {
 		expect(actionFor(press("z", { ctrlKey: true }))).toBe("undo");
 		expect(actionFor(press("Z", { metaKey: true, shiftKey: true }))).toBe("redo");
