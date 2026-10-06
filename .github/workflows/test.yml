@@ -90,6 +90,15 @@ jobs:
             --data "{\"username\": \"admin\", \"password\": \"$password\"}" \
             https://localhost/api/auth/login | grep -q change_password
 
+      - name: Check that the public network can't reach the database or storage
+        run: >-
+          docker run --rm --network ml4paleo_public
+          --volume "$PWD/.github/scripts:/scripts:ro" ml4paleo-server:local
+          python /scripts/check_network.py --reach api:8000
+          --no-reach postgres:5432 --no-reach seaweedfs:8333
+          --no-reach seaweedfs:9333 --no-reach seaweedfs:8888
+          --no-reach seaweedfs:8080
+
       - name: Show logs
         if: failure()
         run: docker compose -f deploy/compose/compose.yml logs
