@@ -142,7 +142,9 @@ async def claim(
         response.status_code = 200
         # For example, a prediction that didn't fit in your storage then.
         try:
-            started = await v1import.resume(db, existing, auth.user.id)
+            started = await v1import.resume(db, settings, existing, auth.user.id)
+        except v1import.NoRoom as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from None
         except jobs.Rejected as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         if started:

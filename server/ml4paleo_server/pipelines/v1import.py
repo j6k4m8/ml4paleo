@@ -32,7 +32,7 @@ import uuid
 from typing import Any
 
 import numpy as np
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -100,19 +100,80 @@ def check_probe_result(result: dict[str, Any]) -> None:
         raise ValueError("segmentation must be a v1 segmentation's folder name")
 
 
+class NoRoom(Exception):
+    """An import, or part of one, won't fit in its owner's storage."""
+
+
+def estimate(result: dict[str, Any]) -> tuple[int, int]:
+    """
+    The most the image (with its pyramid) and the prediction that a probe
+    found take, in bytes. They're stored compressed, so this errs on the
+    large side.
+    """
+    voxels = math.prod(result["shape_zyx"])
+    image = math.ceil(voxels * np.dtype(result["dtype"]).itemsize * PYRAMID)
+    # A prediction holds a one-byte class per voxel.
+    return image, voxels if result.get("segmentation") else 0
+
+
 def _size(nbytes: float) -> str:
-    if nbytes < 1024**3:
-        return f"{max(1, round(nbytes / 1024**2))} MB"
-    return f"{nbytes / 1024**3:.1f} GB"
+    if nbytes >= 1024**3:
+        return f"{nbytes / 1024**3:.1f} GB"
+    if 0 < nbytes < 1024**2 / 2:
+        return "under 1 MB"
+    return f"{round(nbytes / 1024**2)} MB"
+
+
+async def _coming(
+    db: AsyncSession, owner_id: uuid.UUID, exclude: uuid.UUID | None
+) -> int:
+    """
+    What the owner's imports still running will add to their storage: an
+    image and prediction for each image still coming over (but `exclude`'s),
+    and each prediction.
+    """
+    other = aliased(Job)
+    images = (
+        select(Job.result)
+        .join(Project, Project.id == Job.project_id)
+        .where(
+            Project.owner_id == owner_id,
+            Job.kind == "v1.probe",
+            Job.status == "succeeded",
+            exists().where(other.root_id == Job.id, other.status.in_(UNFINISHED)),
+        )
+    )
+    if exclude is not None:
+        images = images.where(Job.id != exclude)
+    predictions = (
+        select(Job.payload)
+        .join(Project, Project.id == Job.project_id)
+        .where(
+            Project.owner_id == owner_id,
+            Job.kind == "v1.prediction",
+            Job.status.in_(UNFINISHED),
+        )
+    )
+    total = 0
+    for result in await db.scalars(images):
+        if result is not None:
+            total += sum(estimate(result))
+    for payload in await db.scalars(predictions):
+        total += math.prod(payload["shape_zyx"])
+    return total
 
 
 async def _check_room(
-    db: AsyncSession, settings: Settings, project_id: uuid.UUID, result: dict
+    db: AsyncSession,
+    settings: Settings,
+    project_id: uuid.UUID,
+    need: int,
+    what: str,
+    exclude: uuid.UUID | None = None,
 ) -> None:
     """
-    Refuse an import whose image won't fit in the owner's storage, before
-    any of it is copied. It's stored compressed, so this errs on the large
-    side.
+    Raise `NoRoom` if `need` bytes won't fit in the storage the project's
+    owner has left once their other imports still running are in.
     """
     owner = await db.scalar(
         select(User)
@@ -123,15 +184,13 @@ async def _check_room(
     limit = quotas.limits_for(owner, settings).storage_bytes
     if limit is None:
         return
-    itemsize = np.dtype(result["dtype"]).itemsize
-    size = math.prod(result["shape_zyx"]) * itemsize * PYRAMID
-    left = max(0, limit - (await quotas.usage_for(db, owner.id)).storage_bytes)
-    if size > left:
-        raise jobs.Rejected(
-            f"This scan takes about {_size(size)}, and you have {_size(left)} of "
-            "storage left. Free some up or ask for more on the account page, then "
-            "import the job again.",
-            retryable=False,
+    used = (await quotas.usage_for(db, owner.id)).storage_bytes
+    left = max(0, limit - used - await _coming(db, owner.id, exclude))
+    if need > left:
+        raise NoRoom(
+            f"{what} takes about {_size(need)}, and you have {_size(left)} of "
+            "storage left for it. Free some up or ask for more on the account "
+            "page, then import the job again."
         )
 
 
@@ -180,7 +239,18 @@ async def _foreground(db: AsyncSession, project_id: uuid.UUID) -> int:
 async def after_probe(db: AsyncSession, settings: Settings, probe: Job) -> None:
     result = probe.result or {}
     assert probe.project_id is not None
-    await _check_room(db, settings, probe.project_id, result)
+    try:
+        # The prediction too: it comes once the image is in.
+        await _check_room(
+            db,
+            settings,
+            probe.project_id,
+            sum(estimate(result)),
+            "This job",
+            exclude=probe.id,
+        )
+    except NoRoom as exc:
+        raise jobs.Rejected(str(exc), retryable=False) from None
     job_id = probe.payload["job_id"]
     shape = result["shape_zyx"]
     image_grant = probe.grants[:1]
@@ -307,11 +377,13 @@ async def follow_ups(
 
 
 async def resume(
-    db: AsyncSession, project: Project, created_by: uuid.UUID
+    db: AsyncSession, settings: Settings, project: Project, created_by: uuid.UUID
 ) -> list[Job]:
     """
     Start again whichever parts of the project's import aren't done or
-    running, and return the jobs that start them.
+    running, and return the jobs that start them. Raises `NoRoom` if the
+    prediction won't fit in the owner's storage (the image's own probe checks
+    the image).
     """
     assert project.v1_job_id is not None
     image = await artifacts.head(db, project.id, "image")
@@ -363,6 +435,9 @@ async def resume(
     prediction = bool(result.get("segmentation")) and await missing("v1.prediction")
     if not (labels or prediction):
         return []
+    if prediction:
+        _, need = estimate(result)
+        await _check_room(db, settings, project.id, need, "This job's segmentation")
     return await follow_ups(
         db, probe, labels=labels, prediction=prediction, created_by=created_by
     )

@@ -403,7 +403,14 @@ def test_claiming_again_brings_over_what_an_import_is_missing(
     assert error is not None and "storage_quota_exceeded" in error
     assert failed["import labels"][0][0] == "failed"
 
-    # Claiming the job again starts both again, and only them...
+    # Claiming the job again refuses to start a prediction that won't fit...
+    refused = ada.post("/api/v1-jobs/ABC123/claim")
+    assert refused.status_code == 403
+    assert refused.json()["detail"].startswith(
+        "This job's segmentation takes about under 1 MB, and you have 0 MB of "
+        "storage left for it."
+    )
+    # ...and with room, starts both again, and only them...
     set_room(migrated_database_url, 1)
     again = ada.post("/api/v1-jobs/ABC123/claim")
     assert again.status_code == 200
@@ -426,6 +433,47 @@ def test_claiming_again_brings_over_what_an_import_is_missing(
     assert sorted(r["bbox"][0] for r in rois) == [9, 11]
     assert ada.get(f"/api/projects/{project}/prediction").json()["class_values"] == [2]
     assert ada.post("/api/v1-jobs/ABC123/claim").json()["pipeline_ids"] == []
+
+
+def test_an_import_must_fit_beside_the_imports_still_running(
+    new_browser, settings, migrated_database_url, live_server, volume
+):
+    ada = new_browser()
+    signup(ada)
+
+    def probe(project):
+        """Run the next probe, and give the project's newest pipeline."""
+        worker = Worker(
+            ServerClient(
+                add_worker(migrated_database_url, name=f"probe-{uuid.uuid4().hex}"),
+                base_url=live_server,
+            ),
+            WorkerCaps(version="test", kinds=["v1.probe"], labels=["v1-volume"]),
+            handlers={"v1.probe": v1import.probe},
+            claim_wait_seconds=0.5,
+            v1_volume=volume,
+        )
+        worker.run(max_jobs=1)
+        worker.client.close()
+        return ada.get(f"/api/projects/{project}/pipelines").json()[0]
+
+    # ABC123's image takes 20 x 30 x 40 voxels x 2 bytes x 1.15 (with its
+    # pyramid), 55200 bytes, and its prediction a byte a voxel, 24000.
+    set_room(migrated_database_url, 70_000 / 1024**3)
+    first = ada.post("/api/v1-jobs/ABC123/claim").json()["project_id"]
+    refused = probe(first)
+    assert refused["status"] == "failed"
+    assert refused["error"].startswith("This job takes about under 1 MB")
+    # With room for both, its image starts coming over...
+    set_room(migrated_database_url, 100_000 / 1024**3)
+    assert ada.post("/api/v1-jobs/ABC123/claim").status_code == 200
+    assert ada.get(f"/api/projects/{first}/pipelines").json()[0]["status"] == "waiting"
+    probe(first)
+    # ...and FEED01's image (55200 bytes, no prediction) doesn't fit beside it.
+    second = ada.post("/api/v1-jobs/FEED01/claim").json()["project_id"]
+    refused = probe(second)
+    assert refused["status"] == "failed"
+    assert "storage left for it" in refused["error"]
 
 
 def test_the_labels_and_the_prediction_come_over_on_their_own(
