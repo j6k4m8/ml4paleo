@@ -3,8 +3,11 @@ The final segmentation, end to end: a worker merges the prediction with the
 labels and complete ROIs, and removes specks.
 """
 
+import datetime
+import json
 import threading
 import time
+import tracemalloc
 import uuid
 
 import numpy as np
@@ -15,13 +18,21 @@ from ml4paleo_server import artifacts, labels
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
+from ml4paleo_worker.context import JobContext, PermanentError
 from ml4paleo_worker.handlers import HANDLERS
+from ml4paleo_worker.handlers import compose as jobs
 from ml4paleo_worker.main import Worker
+from scipy import ndimage
 
 from ml4paleo.labels.deltas import split_into_deltas
-from ml4paleo.protocol import WorkerCaps
-from ml4paleo.segmentation.predict import create_prediction
-from ml4paleo.storage import zarr_store
+from ml4paleo.protocol import JobLease, WorkerCaps
+from ml4paleo.segmentation.predict import (
+    SHARD_ZYX,
+    create_prediction,
+    open_prediction,
+    shard_boxes,
+)
+from ml4paleo.storage import StorageGrant, put_bytes, zarr_store
 
 SHAPE = (20, 24, 28)
 BONE, TOOTH = 2, 3
@@ -179,3 +190,91 @@ def test_a_worker_composes_the_final_segmentation(
     )
     assert get_bytes(grant, "scratch/0.npz") is None
     assert get_bytes(grant, "inputs.json") is not None
+
+
+def job(kind: str, payload: dict, grants: list, budget: int) -> JobContext:
+    """A job as a worker would get it, with `budget` bytes to use."""
+    return JobContext(
+        JobLease(
+            job_id=uuid.uuid4(),
+            kind=kind,
+            payload=payload,
+            lease_token="token",
+            lease_expires_at=datetime.datetime.now(datetime.UTC)
+            + datetime.timedelta(minutes=5),
+            attempt=1,
+            grants=grants,
+        ),
+        memory_budget_bytes=budget,
+    )
+
+
+def run_within(ctx: JobContext, handler) -> dict:
+    tracemalloc.start()
+    try:
+        result = handler(ctx)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak <= ctx.memory_budget_bytes, (ctx.lease.kind, peak)
+    return result
+
+
+def test_noisy_compose_jobs_stay_within_their_budget_or_fail_for_good(tmp_path):
+    # Every voxel background, bone, or tooth at random, over four shards:
+    # hundreds of thousands of pieces, most of them specks.
+    shape = (4, 520, 520)
+    rng = np.random.default_rng(3)
+    classes = rng.choice(
+        np.array([1, BONE, TOOTH], dtype=np.uint8), size=shape, p=[0.5, 0.25, 0.25]
+    )
+    prediction = StorageGrant(url=f"file://{tmp_path}/prediction", access="rw")
+    create_prediction(prediction, shape)["class"][:] = classes  # type: ignore[index]
+    grants = [
+        prediction.model_copy(update={"access": "r"}),
+        StorageGrant(url=f"file://{tmp_path}/labels"),
+        StorageGrant(url=f"file://{tmp_path}/segmentation", access="rw"),
+    ]
+    put_bytes(
+        grants[2],
+        "inputs.json",
+        json.dumps({"chunks": [], "complete_rois": [], "label_seq": 0}).encode(),
+    )
+    boxes = shard_boxes(shape, SHARD_ZYX)
+    assert len(boxes) == 4
+    payload = {
+        "shape_zyx": list(shape),
+        "min_voxels": 20,
+        "model_id": None,
+        "prediction_artifact_id": str(uuid.uuid4()),
+        "label_seq": 0,
+        "shards": len(boxes),
+    }
+    budget = 32 * 1024**2
+    jobs.prepare(job("compose.prepare", payload, grants, budget))
+
+    def shard(kind: str, index: int, budget: int) -> JobContext:
+        return job(
+            kind, {**payload, "shard": index, "box": list(boxes[index])}, grants, budget
+        )
+
+    # Too little memory to label a 4×512×512 shard: it fails for good, at once.
+    with pytest.raises(PermanentError, match="a job may use on this worker"):
+        jobs.block(shard("cc.block", 0, 8 * 1024**2))
+    blocks = [run_within(shard("cc.block", i, budget), jobs.block) for i in range(4)]
+    assert sum(found["specks"] for found in blocks) > 100_000
+    with pytest.raises(PermanentError, match="Joining the pieces"):
+        jobs.merge(job("cc.merge", payload, grants, 64 * 1024))
+    run_within(job("cc.merge", payload, grants, budget), jobs.merge)
+    for index in range(4):
+        run_within(shard("cc.apply", index, budget), jobs.apply)
+    jobs.finalize(job("compose.finalize", payload, grants, budget))
+
+    want = classes.copy()
+    for value in (BONE, TOOTH):
+        ids, count = ndimage.label(classes == value)  # type: ignore[misc]
+        speck = np.bincount(ids.ravel(), minlength=count + 1) < 20
+        speck[0] = False
+        want[speck[ids]] = 1
+    final = open_prediction(grants[2])["class"][:]  # type: ignore[index]
+    assert np.array_equal(final, want)
