@@ -72,6 +72,8 @@
 	// The model "Propose here" uses: the newest ready one.
 	let proposer: { id: string; name: string } | null = $state(null);
 	let proposing = $state(false);
+	// How far the proposal being made has got (0 to 1), once a worker has it.
+	let proposalProgress: number | null = $state(null);
 	let segmentation: ChunkStore | null = $state(null);
 	let classes: LabelClass[] = $state([]);
 	let error = $state("");
@@ -372,10 +374,10 @@
 	}
 
 	/**
-	 * Follow a pipeline until it ends, and give its final state. Stops
-	 * following, and rejects, when `signal` aborts.
+	 * Follow a pipeline until it ends, passing on its updates, and give its
+	 * final state. Stops following, and rejects, when `signal` aborts.
 	 */
-	function finished(id: string, signal: AbortSignal): Promise<Pipeline> {
+	function finished(id: string, signal: AbortSignal, onupdate: (pipeline: Pipeline) => void): Promise<Pipeline> {
 		return new Promise((resolve, reject) => {
 			if (signal.aborted) return reject(signal.reason);
 			const source = new EventSource(`/api/projects/${project}/pipelines/${id}/events`);
@@ -394,7 +396,8 @@
 			signal.addEventListener("abort", aborted);
 			source.addEventListener("status", (event) => {
 				const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
-				if (!unfinished(update) && stop()) resolve(update);
+				if (unfinished(update)) onupdate(update);
+				else if (stop()) resolve(update);
 			});
 			// The server answers 204 for a pipeline that has ended, which closes the stream.
 			source.addEventListener("error", () => {
@@ -404,16 +407,31 @@
 		});
 	}
 
+	/** Why a proposal wasn't made, in a sentence. */
+	async function whyNot(final: Pipeline): Promise<string> {
+		if (unfinished(final)) return "Lost track of the proposal; it shows here once it's made.";
+		if (final.status === "failed") return final.error ?? "The proposal failed.";
+		// Each proposal stops the ones still running.
+		const pipelines = await api<Pipeline[]>(`/api/projects/${project}/pipelines`, { signal: controller.signal }).catch(
+			() => [],
+		);
+		const newest = pipelines.find((p) => p.kind === "proposal");
+		return newest && newest.id !== final.id ? "A newer proposal replaced this one." : "The proposal was cancelled.";
+	}
+
 	/**
-	 * Wait for a proposal (its pipeline, or a request that gives it) to be
-	 * made, and then show it.
+	 * Show how far a proposal (its pipeline, or a request that gives it) has
+	 * got, and then the proposal.
 	 */
 	async function follow(pipeline: string | Promise<string>) {
 		proposing = true;
+		proposalProgress = null;
 		try {
-			const final = await finished(await pipeline, controller.signal);
+			const final = await finished(await pipeline, controller.signal, (update) => {
+				proposalProgress = update.status === "running" ? update.progress : null;
+			});
 			if (final.status !== "succeeded") {
-				notice = final.error ?? `The proposal ${final.status}.`;
+				notice = await whyNot(final);
 				return;
 			}
 			await loadPrediction(controller.signal);
@@ -450,6 +468,9 @@
 		if (shownHere?.model_id === proposer.id) return `The ${shownHere.kind} here is already from ${proposer.name}, the newest model`;
 		return "";
 	});
+	const proposeLabel = $derived(
+		!proposing ? "Propose here" : proposalProgress === null ? "Proposing…" : `Proposing… ${Math.round(proposalProgress * 100)}%`,
+	);
 	let accepting = $state(false);
 
 	/**
@@ -974,7 +995,7 @@
 						onclick={() => selectedRoi && propose(selectedRoi)}
 					>
 						<Sparkles size={13} />
-						{proposing ? "Proposing…" : "Propose here"}
+						{proposeLabel}
 					</button>
 				{/if}
 				{#if shownHere && selectedRoi}
