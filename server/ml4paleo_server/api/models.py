@@ -226,6 +226,9 @@ async def delete_model(
     """
     model = await _model(db, project, model_id)
     model.deleted_at = datetime.datetime.now(datetime.UTC)
+    # Waits for a prediction being started with it, so the search below
+    # finds (and stops) that one too.
+    await db.flush()
     if model.job_id:
         job = await db.get(Job, model.job_id)
         if job is not None and job.status in train.RUNNING_JOB:

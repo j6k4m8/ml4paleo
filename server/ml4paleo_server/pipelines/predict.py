@@ -70,6 +70,15 @@ async def start(
         .where(Project.id == model.project_id)
         .with_for_update(key_share=True)
     )
+    # Nor can a model being deleted start one: deleting waits for this share
+    # lock, then cancels what is running, this one included.
+    alive = await db.scalar(
+        select(TrainedModel.id)
+        .where(TrainedModel.id == model.id, TrainedModel.deleted_at.is_(None))
+        .with_for_update(read=True)
+    )
+    if alive is None:
+        raise ValueError("That model was deleted.")
     others = await running(db, model.project_id)
     if any(
         root.payload.get("model_id") == str(model.id)
