@@ -12,9 +12,12 @@ ROIs. Crops come from two places:
   crops ignore every voxel inside a validation ROI, and a voxel inside
   several ROIs of one split counts once, in the first of them.
 - Labeled chunks outside those ROIs ("free" labels, for example from hand
-  annotating the whole volume), for training only. Voxels inside open or
-  complete ROIs are left to the ROI crops, so validation labels never leak
-  into training.
+  annotating the whole volume), tiled the same way, for training only.
+  Voxels inside open or complete ROIs are left to the ROI crops, so
+  validation labels never leak into training.
+
+Workers choose `tile` from their memory budget and the plugin's crop cost
+(see `tile_for`).
 
 Images are normalized with the image's display window, the same for every
 crop and at prediction time. Every crop has the full halo of context the
@@ -33,7 +36,7 @@ from ml4paleo.labels import LABEL_CHUNK_ZYX, PLUGIN_IGNORE, to_plugin_space
 from ml4paleo.labels.codec import blob_key, decode_chunk
 from ml4paleo.storage import StorageGrant, get_bytes
 
-from .plugin import Crop, Split
+from .plugin import Crop, CropCost, Split
 
 ChunkKey = tuple[int, int, int]
 Box = tuple[int, int, int, int, int, int]
@@ -107,6 +110,19 @@ def tiles(box: Box, tile: int) -> Iterator[Box]:
             min(y + tile, box[4]),
             min(x + tile, box[5]),
         )
+
+
+def tile_for(
+    memory_budget_bytes: int, cost: CropCost, minimum: int = 32, maximum: int = 256
+) -> int:
+    """
+    The largest tile whose crops, with their halo, fit in a memory budget at
+    `cost`, but at least `minimum` and at most `maximum` voxels a side.
+    """
+    side = round((memory_budget_bytes / cost.bytes_per_voxel) ** (1 / 3))
+    while side > 0 and side**3 * cost.bytes_per_voxel > memory_budget_bytes:
+        side -= 1
+    return max(minimum, min(maximum, side - 2 * cost.halo))
 
 
 class TrainingSet:
@@ -217,7 +233,7 @@ class TrainingSet:
             return
         for key in self.labeled_chunks:
             origin = [k * c for k, c in zip(key, LABEL_CHUNK_ZYX, strict=True)]
-            box: Box = (
+            chunk: Box = (
                 origin[0],
                 origin[1],
                 origin[2],
@@ -225,11 +241,14 @@ class TrainingSet:
                 min(origin[1] + LABEL_CHUNK_ZYX[1], self.shape[1]),
                 min(origin[2] + LABEL_CHUNK_ZYX[2], self.shape[2]),
             )
-            if any(box[a] >= box[a + 3] for a in range(3)):
+            if any(chunk[a] >= chunk[a + 3] for a in range(3)):
                 continue
-            targets = to_plugin_space(self.read_labels(box), self.class_values)
-            targets[self._inside(box, self.rois)] = PLUGIN_IGNORE
-            if (targets == PLUGIN_IGNORE).all():
-                continue
-            image, interior = self.read_image(box, halo)
-            yield Crop(image=image, targets=targets, interior=interior, split="train")
+            for box in tiles(chunk, self.tile):
+                targets = to_plugin_space(self.read_labels(box), self.class_values)
+                targets[self._inside(box, self.rois)] = PLUGIN_IGNORE
+                if (targets == PLUGIN_IGNORE).all():
+                    continue
+                image, interior = self.read_image(box, halo)
+                yield Crop(
+                    image=image, targets=targets, interior=interior, split="train"
+                )

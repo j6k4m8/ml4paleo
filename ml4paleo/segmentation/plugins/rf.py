@@ -23,7 +23,14 @@ from pydantic import BaseModel, Field
 from ml4paleo.labels import PLUGIN_IGNORE
 
 from ..metrics import ScoreSheet
-from ..plugin import Crop, PluginCaps, TrainContext, TrainingData, TrainResult
+from ..plugin import (
+    Crop,
+    CropCost,
+    PluginCaps,
+    TrainContext,
+    TrainingData,
+    TrainResult,
+)
 
 MODEL_FILE = "forest.joblib"
 META_FILE = "model.json"
@@ -39,6 +46,14 @@ class RandomForestParams(BaseModel):
 
 def halo_for(sigma_max: float) -> int:
     return math.ceil(4 * sigma_max) + 2
+
+
+def feature_count(channels: int, sigma_max: float) -> int:
+    """How many features `features` gives each voxel."""
+    # scikit-image's scales are 1, 2, 4, ... up to sigma_max, and each gives
+    # intensity, edges, and the three eigenvalues of the Hessian.
+    scales = int(math.log2(sigma_max) + 1)
+    return channels * 5 * scales
 
 
 def features(
@@ -209,6 +224,15 @@ class RandomForestPlugin:
             metrics=metrics,
             samples={k: len(v) for k, v in reservoir.rows.items()},
             files=[MODEL_FILE, META_FILE],
+        )
+
+    def crop_cost(self, params: BaseModel, channels: int) -> CropCost:
+        assert isinstance(params, RandomForestParams)
+        # float32 features, about four times over while scikit-image computes
+        # each scale and stacks them, and they are cut down to the samples.
+        return CropCost(
+            halo=halo_for(params.sigma_max),
+            bytes_per_voxel=4 * 4 * feature_count(channels, params.sigma_max),
         )
 
     def _samples(

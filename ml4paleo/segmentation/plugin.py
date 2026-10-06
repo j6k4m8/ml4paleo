@@ -36,6 +36,19 @@ class PluginCaps:
     prompt: bool = False
 
 
+@dataclasses.dataclass(frozen=True)
+class CropCost:
+    """
+    What training holds in memory for one crop, so workers can size crops to
+    their memory.
+    """
+
+    # Voxels of context the plugin asks crops for on every side.
+    halo: int
+    # Bytes held per voxel of a crop (halo included) while training on it.
+    bytes_per_voxel: int
+
+
 @dataclasses.dataclass
 class Crop:
     """
@@ -120,6 +133,10 @@ class SegmentationPlugin(Protocol):
         out: pathlib.Path,
         ctx: TrainContext,
     ) -> TrainResult: ...
+
+    def crop_cost(self, params: BaseModel, channels: int) -> CropCost:
+        """What training with `params` holds per crop of a `channels` image."""
+        ...
 
     def load(self, directory: pathlib.Path, device: str = "cpu") -> Predictor: ...
 

@@ -11,8 +11,8 @@ import numpy as np
 import pytest
 
 from ml4paleo.labels import LABEL_CHUNK_ZYX, PLUGIN_IGNORE
-from ml4paleo.segmentation.dataset import RoiSpec, TrainingSet, tiles
-from ml4paleo.segmentation.plugin import get_plugin, plugins
+from ml4paleo.segmentation.dataset import RoiSpec, TrainingSet, tile_for, tiles
+from ml4paleo.segmentation.plugin import CropCost, get_plugin, plugins
 
 SHAPE = (80, 70, 90)  # (z, y, x): edge chunks are partial on every axis
 BONE = 2
@@ -78,17 +78,18 @@ def test_crops_follow_roi_status_split_and_free_labels():
     assert roi_crop.interior == (slice(4, 12), slice(4, 12), slice(4, 12))
     # The open ROI has no labels, so it gives no crop. Of the labeled chunks,
     # (0, 0, 0) only has labels inside the complete and validation ROIs, so
-    # it gives none either; (0, 0, 1) has the free background label.
+    # it gives none either; (0, 0, 1) has the free background label, in the
+    # first of its tiles.
     assert len(train) == 2
     free = train[1]
-    assert free.targets.shape == (64, 64, 26)
+    assert free.targets.shape == (32, 32, 26)
     assert int((free.targets != PLUGIN_IGNORE).sum()) == 1
     assert free.targets[5, 5, 70 - 64] == 0
     # At the image's edges, the crop still has the full halo: edge voxels
     # repeated, as at prediction time.
-    assert free.image.shape == (1, 72, 72, 34)
-    assert free.interior == (slice(4, 68), slice(4, 68), slice(4, 30))
-    edged = np.pad(image[:, :68, :68, 60:], ((0, 0), (4, 0), (4, 0), (0, 4)), "edge")
+    assert free.image.shape == (1, 40, 40, 34)
+    assert free.interior == (slice(4, 36), slice(4, 36), slice(4, 30))
+    edged = np.pad(image[:, :36, :36, 60:], ((0, 0), (4, 0), (4, 0), (0, 4)), "edge")
     np.testing.assert_allclose(free.image, (edged - 200.0) / 600.0, rtol=1e-6)
     val = list(data.crops("val", halo=4))
     assert len(val) == 1 and int((val[0].targets == 1).sum()) == 1
@@ -190,6 +191,25 @@ def test_random_forest_halo_covers_every_feature(sigma_max):
     block = image[:, 20 - h : 28 + h, 20 - h : 28 + h, 20 - h : 28 + h]
     part = features(block, sigma_max)[h:-h, h:-h, h:-h]
     np.testing.assert_allclose(part, whole, atol=1e-6)
+
+
+def test_tiles_fit_the_memory_budget():
+    cost = CropCost(halo=10, bytes_per_voxel=100)
+    assert tile_for(100 * 100**3, cost) == 80
+    assert tile_for(100 * 100**3 - 1, cost) == 79
+    assert tile_for(1024, cost) == 32
+    assert tile_for(10**15, cost) == 256
+
+
+@pytest.mark.parametrize(("channels", "sigma_max"), [(1, 1.0), (2, 3.0), (1, 8.0)])
+def test_random_forest_counts_its_features(channels, sigma_max):
+    from ml4paleo.segmentation.plugins.rf import feature_count, features
+
+    image = np.zeros((channels, 8, 8, 8), dtype=np.float32)
+    assert features(image, sigma_max).shape[-1] == feature_count(channels, sigma_max)
+    plugin = get_plugin("rf")()
+    cost = plugin.crop_cost(plugin.Params(sigma_max=sigma_max), channels)
+    assert cost.bytes_per_voxel == 16 * feature_count(channels, sigma_max)
 
 
 def test_random_forest_learns_from_sparse_labels(tmp_path):
