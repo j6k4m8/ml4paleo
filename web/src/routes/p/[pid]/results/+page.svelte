@@ -1,9 +1,11 @@
 <script lang="ts">
+	import Archive from "@lucide/svelte/icons/archive";
 	import Box from "@lucide/svelte/icons/box";
 	import Brush from "@lucide/svelte/icons/brush";
 	import Combine from "@lucide/svelte/icons/combine";
 	import Download from "@lucide/svelte/icons/download";
 	import Shapes from "@lucide/svelte/icons/shapes";
+	import Trash from "@lucide/svelte/icons/trash";
 	import { untrack } from "svelte";
 	import { page } from "$app/state";
 	import { ApiError, api, message } from "#lib/api.ts";
@@ -38,6 +40,33 @@
 		committed_at: string;
 	}
 
+	type Source = "image" | "prediction" | "segmentation" | "meshes";
+
+	interface Export {
+		id: string;
+		source: Source;
+		format: string;
+		filename: string;
+		status: "making" | "ready" | "failed";
+		pipeline_id: string | null;
+		progress: number;
+		error: string | null;
+		bytes: number;
+		expires_at: string;
+		download_url: string | null;
+	}
+
+	const SLICES: [string, string][] = [
+		["tiff", "TIFF stack"],
+		["png", "PNG stack"],
+	];
+	const SOURCES: { source: Source; label: string; formats: [string, string][] }[] = [
+		{ source: "image", label: "Image", formats: [["zarr", "OME-Zarr"], ...SLICES] },
+		{ source: "prediction", label: "Prediction", formats: [["zarr", "Zarr"], ...SLICES] },
+		{ source: "segmentation", label: "Final segmentation", formats: [["zarr", "Zarr"], ...SLICES] },
+		{ source: "meshes", label: "Meshes", formats: [["zip", "Every file"]] },
+	];
+
 	const FORMATS: [Format, string][] = [
 		["stl", "STL"],
 		["obj", "OBJ"],
@@ -49,6 +78,9 @@
 	let prediction: Prediction | null = $state(null);
 	let segmentation: Segmentation | null = $state(null);
 	let meshes: Meshes | null = $state(null);
+	// The image's dtype (numpy's notation, such as "<u2"), once there is one.
+	let imageDtype: string | null = $state(null);
+	let exports: Export[] = $state([]);
 	let pipelines: Pipeline[] = $state([]);
 	let loaded = $state(false);
 	let minVoxels = $state(50);
@@ -58,6 +90,7 @@
 	let error = $state("");
 	let composeError = $state("");
 	let meshError = $state("");
+	let exportError = $state("");
 	// Set while a request to start a pipeline is out, so a double click
 	// doesn't start two.
 	let starting = $state(false);
@@ -79,12 +112,16 @@
 	async function refresh() {
 		try {
 			projectName = (await api<{ name: string }>(`/api/projects/${pid}`)).name;
-			[prediction, segmentation, meshes, pipelines] = await Promise.all([
+			let image: { manifest: { dtype: string } } | null;
+			[prediction, segmentation, meshes, pipelines, image, exports] = await Promise.all([
 				api<Prediction>(`/api/projects/${pid}/prediction`).catch(missing),
 				api<Segmentation>(`/api/projects/${pid}/segmentation`).catch(missing),
 				api<Meshes>(`/api/projects/${pid}/meshes`).catch(missing),
 				api<Pipeline[]>(`/api/projects/${pid}/pipelines`),
+				api<{ manifest: { dtype: string } }>(`/api/projects/${pid}/image`).catch(missing),
+				api<Export[]>(`/api/projects/${pid}/exports`),
 			]);
+			imageDtype = image?.manifest.dtype ?? null;
 		} catch (e) {
 			error = message(e);
 		} finally {
@@ -98,9 +135,11 @@
 
 	// Only which pipelines run, so status updates don't reopen the streams.
 	const running = $derived(
-		[composing, meshing]
-			.filter(active)
-			.map((p) => p?.id)
+		[
+			...[composing, meshing].filter(active).map((p) => p?.id),
+			...exports.filter((e) => e.status === "making").map((e) => e.pipeline_id),
+		]
+			.filter(Boolean)
 			.join(","),
 	);
 
@@ -113,6 +152,7 @@
 			source.addEventListener("status", (event) => {
 				const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
 				pipelines = untrack(() => pipelines).map((p) => (p.id === update.id ? update : p));
+				exports = untrack(() => exports).map((e) => (e.pipeline_id === update.id ? { ...e, progress: update.progress } : e));
 				if (!active(update)) refresh();
 			});
 			source.addEventListener("error", () => {
@@ -144,6 +184,31 @@
 	function makeMeshes(event: SubmitEvent) {
 		event.preventDefault();
 		start(`/api/projects/${pid}/meshes`, { downsample, method, simplify }, (text) => (meshError = text));
+	}
+
+	const available = (source: Source) =>
+		({ image: imageDtype !== null, prediction: !!prediction, segmentation: !!segmentation, meshes: !!meshes })[source];
+	// PNG holds 8- or 16-bit unsigned values; labels are 8-bit.
+	const pngHolds = (source: Source) => source !== "image" || /u[12]$/.test(imageDtype ?? "");
+
+	function exportAs(source: Source, format: string) {
+		start(`/api/projects/${pid}/exports`, { source, format }, (text) => (exportError = text));
+	}
+
+	async function forget(item: Export) {
+		exportError = "";
+		try {
+			await api(`/api/projects/${pid}/exports/${item.id}`, { method: "DELETE" });
+		} catch (e) {
+			exportError = message(e);
+		}
+		await refresh();
+	}
+
+	function size(bytes: number): string {
+		if (bytes < 1024 ** 2) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+		if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+		return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 	}
 
 	const slug = (text: string) =>
@@ -288,6 +353,67 @@
 				<p class="text-2xs text-ink-dim">Make a final segmentation first.</p>
 			{/if}
 			{@render progress(meshing, meshError)}
+		</div>
+	</section>
+
+	<section class="panel self-start lg:col-span-2">
+		<h2 class="panel-title">Downloads</h2>
+		<div class="flex flex-col gap-3 p-3">
+			<p class="text-ink-dim">
+				Zip archives of the project's volumes and meshes. Stacks hold one image per slice, as the scan was uploaded. Archives
+				are kept for a week, and count against your storage until then.
+			</p>
+			<div class="grid items-center gap-2 sm:grid-cols-[max-content_1fr]">
+				{#each SOURCES as { source, label, formats } (source)}
+					<span class="font-medium" class:text-ink-faint={!available(source)}>{label}</span>
+					<div class="flex flex-wrap gap-1.5">
+						{#each formats as [format, name] (format)}
+							{@const holds = format !== "png" || pngHolds(source)}
+							<button
+								class="btn"
+								disabled={!available(source) || !holds || starting}
+								title={holds ? undefined : "PNG holds 8- or 16-bit unsigned values; use TIFF for this image"}
+								onclick={() => exportAs(source, format)}
+							>
+								<Archive size={13} />
+								{name}
+							</button>
+						{/each}
+					</div>
+				{/each}
+			</div>
+			{#if exports.length}
+				<ul class="flex flex-col divide-y divide-edge rounded-sm border border-edge bg-field">
+					{#each exports as item (item.id)}
+						<li class="flex flex-wrap items-center gap-2 px-2 py-1.5">
+							<span class="min-w-0 flex-1 truncate font-mono text-2xs">{item.filename}</span>
+							{#if item.status === "making"}
+								<progress class="h-1 w-32 accent-accent" max="1" value={item.progress}></progress>
+								<span class="font-mono text-2xs text-ink-dim">{Math.round(item.progress * 100)}%</span>
+							{:else if item.status === "ready" && item.download_url}
+								<span class="text-2xs text-ink-dim">
+									{size(item.bytes)} · kept until {new Date(item.expires_at).toLocaleDateString()}
+								</span>
+								<a class="btn btn-primary hover:no-underline" href={item.download_url} download={item.filename}>
+									<Download size={13} />
+									Download
+								</a>
+							{:else}
+								<span class="error text-2xs" role="alert">{item.error}</span>
+							{/if}
+							<button
+								class="btn btn-ghost"
+								title={item.status === "making" ? "Stop" : "Delete"}
+								aria-label="{item.status === 'making' ? 'Stop' : 'Delete'} {item.filename}"
+								onclick={() => forget(item)}
+							>
+								<Trash size={13} />
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+			{#if exportError}<p class="error" role="alert">{exportError}</p>{/if}
 		</div>
 	</section>
 </div>
