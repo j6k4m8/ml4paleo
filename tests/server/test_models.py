@@ -4,6 +4,7 @@ quota, and a random forest trained end to end by a worker.
 """
 
 import asyncio
+import datetime
 import json
 import threading
 import time
@@ -299,6 +300,40 @@ def test_others_cant_reach_models(new_browser, settings, migrated_database_url):
     assert bob.get(f"/api/projects/{project}/models").status_code == 404
     assert bob.post(f"/api/projects/{project}/models", json={}).status_code == 404
     assert bob.get("/api/plugins").json()[0]["name"] == "rf"
+
+
+def test_missing_label_blobs_fail_training_for_good(tmp_path):
+    from ml4paleo_worker.context import JobContext, PermanentError
+    from ml4paleo_worker.handlers import train as train_handler
+
+    from ml4paleo.protocol import JobLease
+    from ml4paleo.storage import StorageGrant, put_bytes
+
+    def grant(name, access="r"):
+        (tmp_path / name).mkdir()
+        return StorageGrant(url=f"file://{tmp_path}/{name}", access=access)
+
+    image = grant("image", "rw")
+    OmeImage.create(image, shape_czyx=(1, 16, 16, 16), dtype=np.uint16)
+    training = grant("training", "rw")
+    manifest = {
+        "image": {"window": [0, 1]},
+        "class_values": [BONE],
+        "rois": [],
+        "chunks": [[0, 0, 0, "ab" * 32]],
+    }
+    put_bytes(training, "manifest.json", json.dumps(manifest).encode())
+    lease = JobLease(
+        job_id=uuid.uuid4(),
+        kind="model.train",
+        payload={"plugin": "rf", "params": {"sigma_max": 1.0}, "training_set": "x"},
+        lease_token="token",
+        lease_expires_at=datetime.datetime.now(datetime.UTC),
+        attempt=1,
+        grants=[image, grant("labels"), training, grant("model", "rw")],
+    )
+    with pytest.raises(PermanentError, match="missing"):
+        train_handler.run(JobContext(lease))
 
 
 @pytest.fixture

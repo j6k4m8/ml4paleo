@@ -17,7 +17,13 @@ import tempfile
 from typing import Any
 
 from ml4paleo.ome import OmeImage
-from ml4paleo.segmentation.dataset import BlobLabels, RoiSpec, TrainingSet, tile_for
+from ml4paleo.segmentation.dataset import (
+    BlobLabels,
+    MissingLabels,
+    RoiSpec,
+    TrainingSet,
+    tile_for,
+)
 from ml4paleo.segmentation.plugin import get_plugin
 from ml4paleo.storage import get_bytes, put_bytes, write_manifest
 
@@ -57,6 +63,10 @@ def run(ctx: JobContext) -> dict[str, Any]:
         out = pathlib.Path(scratch)
         try:
             result = plugin.train(data, params, out, ctx)
+        except MissingLabels as exc:
+            # The training set pins labels that are gone; retrying won't
+            # bring them back.
+            raise PermanentError(str(exc)) from exc
         except ValueError as exc:
             # Bad training data (for example labels of only one class).
             raise PermanentError(str(exc)) from exc
