@@ -9,8 +9,17 @@ from joblib import Parallel, delayed
 from ml4paleo.blocks import block_ranges
 from ml4paleo.volume_providers import VolumeProvider
 
-from .rf import RandomForest3DSegmenter
 from .segmenter import Segmenter3D
+
+
+def __getattr__(name: str) -> Any:
+    # The v1 random forest needs the `rf` extra; import it only when asked,
+    # so the plugin metadata here stays importable without it.
+    if name == "RandomForest3DSegmenter":
+        from .rf import RandomForest3DSegmenter
+
+        return RandomForest3DSegmenter
+    raise AttributeError(name)
 
 
 def segment_chunk_and_write(
