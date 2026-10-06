@@ -392,6 +392,9 @@ def test_predictions_cover_shards_and_match_block_by_block(tmp_path):
     plugin = get_plugin("rf")()
 
     class Ctx:
+        threads = 1
+        memory_budget_bytes = 4 * 1024**3
+
         def progress(self, fraction, message=None):
             pass
 
