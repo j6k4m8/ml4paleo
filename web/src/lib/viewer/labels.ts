@@ -33,6 +33,9 @@ export class LabelLayer {
 	#events: EventSource | null = null;
 	// Edits sent but not yet confirmed, in order, by op: chunk id → delta.
 	#local = new Map<string, Map<string, LocalDelta>>();
+	// Chunks that reloaded while an op was unconfirmed, by op: its delta was
+	// put back over whatever the server had, which may be newer.
+	#reapplied = new Map<string, Set<string>>();
 	/** Called if live updates stop for good (signed out, or removed from the project). */
 	onStopped: (() => void) | null = null;
 
@@ -45,9 +48,11 @@ export class LabelLayer {
 		this.store = new ChunkStore(labelLoader(pool, url, shape), CACHE_BYTES, 4);
 		// Whatever the server sends, unconfirmed edits stay on screen.
 		this.store.onLoad = (id, chunk) => {
-			for (const deltas of this.#local.values()) {
+			for (const [op, deltas] of this.#local) {
 				const delta = deltas.get(id);
-				if (delta) applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, delta.mask, delta.written, delta.onlyIf);
+				if (!delta) continue;
+				applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, delta.mask, delta.written, delta.onlyIf);
+				this.#reapplied.get(op)?.add(id);
 			}
 		};
 	}
@@ -72,18 +77,25 @@ export class LabelLayer {
 		});
 	}
 
-	/** Fetch chunks again (keeping what's on screen meanwhile), then redraw them. */
+	/**
+	 * Fetch chunks again. Ones a view shows reload in the background (what's
+	 * on screen stays until the new copy arrives); others are dropped, along
+	 * with any load in flight, so the next look fetches them afresh.
+	 */
 	reload(ids: string[]): void {
+		const dropped: string[] = [];
 		for (const id of ids) {
-			if (this.store.get(id)) {
+			if (this.store.get(id) && this.store.isWanted(id)) {
 				this.store.refresh(id).then(
 					() => this.#emit([id]),
 					() => {},
 				);
 			} else {
-				this.#emit([id]);
+				this.store.invalidate(id);
+				dropped.push(id);
 			}
 		}
+		this.#emit(dropped);
 	}
 
 	/** The chunk version this page last read, if it has the chunk. */
@@ -106,6 +118,7 @@ export class LabelLayer {
 			}
 		}
 		this.#local.set(op, local);
+		this.#reapplied.set(op, new Set());
 		this.#emit(changed);
 	}
 
@@ -115,16 +128,33 @@ export class LabelLayer {
 	 */
 	settle(op: string, versions: { key: Vec3; version: number }[] | null): void {
 		const local = this.#local.get(op);
+		const reapplied = this.#reapplied.get(op) ?? new Set<string>();
 		this.#local.delete(op);
+		this.#reapplied.delete(op);
 		for (const id of local?.keys() ?? []) this.store.unpin(id);
 		if (versions) {
-			for (const { key, version } of versions) {
-				const chunk = this.store.get(key.join("/"));
-				if (chunk && (chunk.version ?? -1) < version) chunk.version = version;
-			}
+			this.noteVersions(versions);
+			if (reapplied.size > 0) this.reload([...reapplied]);
 		} else if (local) {
 			this.reload([...local.keys()]);
 		}
+	}
+
+	/**
+	 * Take the versions an op of this page made. A chunk this page had at the
+	 * version just before is now current; otherwise someone else changed it
+	 * too, and it reloads.
+	 */
+	noteVersions(versions: { key: Vec3; version: number }[]): void {
+		const stale: string[] = [];
+		for (const { key, version } of versions) {
+			const id = key.join("/");
+			const chunk = this.store.get(id);
+			if (!chunk || chunk.version === undefined) continue;
+			if (chunk.version === version - 1) chunk.version = version;
+			else if (chunk.version < version) stale.push(id);
+		}
+		if (stale.length > 0) this.reload(stale);
 	}
 
 	#emit(ids: string[]): void {

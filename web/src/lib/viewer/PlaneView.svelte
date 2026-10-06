@@ -2,6 +2,7 @@
 	import { onDestroy, onMount } from "svelte";
 	import { PlaneMask } from "../labels/raster";
 	import type { Roi } from "../rois.svelte";
+	import type { Stroke } from "./state.svelte";
 	import type { ChunkStore } from "./chunks";
 	import type { LabelLayer } from "./labels";
 	import { type LabelTile, PlaneRenderer } from "./plane";
@@ -40,8 +41,8 @@
 		labels: LabelLayer | null;
 		onhover: (plane: Plane) => void;
 		onresize: (plane: Plane, width: number, height: number) => void;
-		/** A finished brush or eraser stroke at level-0 `slice`. */
-		onstroke: (plane: Plane, slice: number, mask: PlaneMask) => void;
+		/** A finished brush or eraser stroke, with the settings it began with. */
+		onstroke: (stroke: Stroke) => void;
 		/** Close the polygon being drawn. */
 		onpolygon: () => void;
 		rois: Roi[];
@@ -239,8 +240,8 @@
 
 	// --- pointer and wheel ---------------------------------------------------
 
-	let press: { x: number; y: number; moved: boolean; pan: boolean } | null = null;
-	let stroke: { mask: PlaneMask; last: [number, number] } | null = null;
+	let press: { x: number; y: number; moved: boolean; pan: boolean; pointer: number } | null = null;
+	let stroke: (Stroke & { last: [number, number] }) | null = null;
 	let rectangle: { from: [number, number]; to: [number, number] } | null = $state(null);
 	let cursor: [number, number] | null = $state(null);
 	let overlay: HTMLCanvasElement;
@@ -279,16 +280,28 @@
 	}
 
 	function pointerDown(event: PointerEvent) {
+		// One pointer at a time: a second finger doesn't join the stroke.
+		if (press) return;
 		canvas.setPointerCapture(event.pointerId);
 		canvas.focus();
 		const pan = viewer.tool === "navigate" || viewer.panning || event.button === 1;
-		press = { x: event.clientX, y: event.clientY, moved: false, pan };
+		press = { x: event.clientX, y: event.clientY, moved: false, pan, pointer: event.pointerId };
 		if (pan || event.button !== 0 || !canEdit()) return;
 		if (painting) {
 			const point = planePoint(event);
 			const mask = new PlaneMask(viewer.shape[plane.u], viewer.shape[plane.v]);
 			mask.stamp(...point, ...radii());
-			stroke = { mask, last: point };
+			// The slice, tool, and class are the ones the stroke started with.
+			stroke = {
+				plane,
+				slice,
+				mask,
+				erase: viewer.tool === "eraser",
+				value: viewer.tool === "eraser" ? 0 : (viewer.activeClass ?? 0),
+				onlyIf: viewer.tool === "eraser" || !viewer.protectLabels ? "any" : "unlabeled",
+				radius: viewer.brushRadius,
+				last: point,
+			};
 			drawStroke();
 		} else if (viewer.tool === "roi") {
 			const point = planePoint(event);
@@ -306,6 +319,7 @@
 
 	function pointerMove(event: PointerEvent) {
 		onhover(plane);
+		if (press && event.pointerId !== press.pointer) return;
 		cursor = offset(event).map((d, i) => (d + (i === 0 ? width : height) / 2) / ratio()) as [number, number];
 		if (rectangle) {
 			rectangle = { ...rectangle, to: planePoint(event) };
@@ -334,15 +348,16 @@
 	}
 
 	function pointerUp(event: PointerEvent) {
+		if (press && event.pointerId !== press.pointer) return;
 		if (rectangle) {
 			const { from, to } = rectangle;
 			rectangle = null;
 			onroi(plane, slice, [from, to]);
 		} else if (stroke) {
-			const finished = stroke.mask;
+			const { last: _last, ...finished } = stroke;
 			stroke = null;
 			clearStroke();
-			if (finished.count > 0) onstroke(plane, slice, finished);
+			if (finished.mask.count > 0) onstroke(finished);
 		} else if (press?.pan && !press.moved && viewer.tool === "navigate") {
 			viewer.autoFit = false;
 			viewer.moveTo(voxelAt(view(), ...offset(event)));
