@@ -94,10 +94,11 @@
 <div class="mx-auto flex max-w-6xl flex-col gap-4 p-6">
 	<div class="flex flex-wrap items-center gap-3">
 		<h1>ROIs</h1>
-		<div class="ml-auto flex overflow-hidden rounded-sm border border-edge" role="radiogroup" aria-label="Show">
+		<div class="ml-auto flex rounded-sm border border-edge" role="radiogroup" aria-label="Show">
 			{#each ["all", "open", "complete", "skipped"] as option (option)}
 				<label
-					class="flex cursor-pointer items-center gap-1.5 px-2.5 py-1 capitalize
+					class="relative flex cursor-pointer items-center gap-1.5 px-2.5 py-1 capitalize first:rounded-l-[3px] last:rounded-r-[3px]
+						has-[:focus-visible]:z-10 has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-1 has-[:focus-visible]:outline-accent
 						{filter === option ? 'bg-accent-fill text-white' : 'bg-panel text-ink-dim hover:bg-raised hover:text-ink'}"
 				>
 					<input class="sr-only" type="radio" name="filter" value={option} bind:group={filter} />

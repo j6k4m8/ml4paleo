@@ -149,6 +149,7 @@
 					<form onsubmit={upload} class="flex flex-col gap-2">
 						<label
 							class="flex cursor-pointer flex-col items-center gap-1.5 rounded-sm border border-dashed p-6 text-center transition-colors
+								has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-1 has-[:focus-visible]:outline-accent
 								{dragging ? 'border-accent bg-accent-soft/40' : 'border-line bg-field hover:border-ink-faint'}"
 							ondragover={(e) => {
 								e.preventDefault();
