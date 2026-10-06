@@ -29,7 +29,8 @@ JOB_ID = re.compile(r"[0-9A-F]{6}")
 JOBS_FILE = "jobs.json"
 # Statuses that mean the newest segmentation finished. v1 also sets
 # "annotated" whenever someone annotates, even after segmenting, so this is
-# only a fallback for jobs whose models predate sidecars naming their output.
+# only a fallback for jobs without sidecars from v1's segment runner (older
+# ones, or ones migrated with v1's button) that name their output.
 SEGMENTED = {"segmented", "meshing_queued", "meshing", "meshed", "mesh_error"}
 
 
@@ -72,11 +73,22 @@ def _stamp(name: str) -> int:
     return int(digits) if digits.isdigit() else -1
 
 
+def _from_segment_runner(meta: dict[str, Any]) -> bool:
+    """
+    Whether v1's segment runner wrote a model's sidecar: it names the run's
+    segmentation only once segmenting succeeds. v1's "migrate metadata"
+    button names one whenever its folder exists, finished or not.
+    """
+    return "legacy_metadata_migrated_at" not in meta and (
+        "training_samples" in meta or "metrics" in meta
+    )
+
+
 def segmentation(root: Path, job_id: str, record: dict[str, Any]) -> str | None:
     """
-    The name of the newest segmentation known to be complete: one a model's
-    sidecar names (v1 writes that once segmenting succeeds), else the newest
-    one if the job's status says segmenting finished. None if there's none.
+    The name of the newest segmentation known to be complete: one a sidecar
+    from v1's segment runner names, else the newest one if the job's status
+    says segmenting finished. None if there's none.
     """
     folder = root / "segmented" / job_id
     named = []
@@ -85,7 +97,9 @@ def segmentation(root: Path, job_id: str, record: dict[str, Any]) -> str | None:
             meta = json.loads(sidecar.read_text())
         except (OSError, ValueError):
             continue
-        name = meta.get("segmentation_id") if isinstance(meta, dict) else None
+        if not (isinstance(meta, dict) and _from_segment_runner(meta)):
+            continue
+        name = meta.get("segmentation_id")
         if isinstance(name, str) and "/" not in name and _is_array(folder / name):
             named.append(name)
     if named:

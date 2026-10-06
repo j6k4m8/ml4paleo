@@ -74,3 +74,22 @@ def test_only_finished_segmentations_count(root):
     finished = {**jobs["FEED01"], "status": "JobStatus.SEGMENTED"}
     assert segmentation(root, "FEED01", finished) == "1745400150.zarr"
     assert segmentation(root, "DEAD00", jobs["DEAD00"]) is None
+
+
+def test_migrated_sidecars_dont_vouch_for_a_segmentation(root):
+    # The newer run crashed while segmenting. v1's "migrate metadata" button
+    # then named its half-written segmentation in the runner's sidecar, as it
+    # does whenever the folder exists.
+    models = root / "models" / "ABC123"
+    migrated = {
+        **v1_volume.runner_sidecar("1745400300"),
+        "legacy_metadata_migrated_at": "2026-04-30T12:00:00+00:00",
+    }
+    (models / "1745400300.json").write_text(json.dumps(migrated))
+    jobs = read_jobs(root)
+    assert segmentation(root, "ABC123", jobs["ABC123"]) == "1745400150.zarr"
+    # Without a sidecar from the runner, the status decides; here, that
+    # segmenting failed.
+    (models / "1745400150.json").unlink()
+    failed = {**jobs["ABC123"], "status": "JobStatus.SEGMENT_ERROR"}
+    assert segmentation(root, "ABC123", failed) is None
