@@ -24,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ml4paleo.v1import import UNCONVERTED, normalize_job_id, read_jobs, status
 
-from .. import audit, jobs
+from .. import artifacts, audit, jobs
 from ..auth import ratelimit
 from ..auth.deps import AdminAuth, CurrentAuth, DbSession, EngineDep, SettingsDep
 from ..auth.ratelimit import client_key
@@ -44,7 +44,8 @@ RELEASED = "An admin released this job from your account. If it's yours, ask the
 
 class ClaimOut(BaseModel):
     project_id: uuid.UUID
-    # The import's pipeline; None if you had already claimed the job.
+    # The import's pipeline; None if you had already claimed the job (and its
+    # import hadn't failed).
     pipeline_id: uuid.UUID | None
 
 
@@ -82,6 +83,18 @@ async def _released(db: DbSession, job_id: str, user_id: uuid.UUID) -> bool:
     return release is not None
 
 
+async def _import_failed(db: DbSession, project: Project) -> bool:
+    """Whether the project's import ended without an image, and nothing runs."""
+    if await artifacts.head(db, project.id, "image") is not None:
+        return False
+    running = await db.scalar(
+        select(Job.id)
+        .where(Job.project_id == project.id, Job.status.not_in(FINISHED))
+        .limit(1)
+    )
+    return running is None
+
+
 @router.post("/{job_id}/claim", status_code=201)
 async def claim(
     job_id: str,
@@ -94,7 +107,8 @@ async def claim(
 ) -> ClaimOut:
     """
     Import a v1 job into a new project of yours. Claiming a job you already
-    claimed gives that project; a job someone else claimed gets 409.
+    claimed gives that project, and starts its import again if it failed; a
+    job someone else claimed gets 409.
     """
     root = _volume(settings)
     # Per account and per address, since one address can sign up a few
@@ -138,16 +152,20 @@ async def claim(
                 "an admin to release it.",
             )
         response.status_code = 200
-        return ClaimOut(project_id=existing.id, pipeline_id=None)
-    if existing is not None:
-        # A deleted project lets go of its job.
-        existing.v1_job_id = None
+        if not await _import_failed(db, existing):
+            return ClaimOut(project_id=existing.id, pipeline_id=None)
+        # For example, it didn't fit in your storage then: try again.
+        project = existing
+    else:
+        if existing is not None:
+            # A deleted project lets go of its job.
+            existing.v1_job_id = None
+            await db.flush()
+        name = str(record.get("name") or "").strip() or f"v1 job {job_id}"
+        project = Project(name=name[:100], owner_id=auth.user.id, v1_job_id=job_id)
+        db.add(project)
         await db.flush()
-    name = str(record.get("name") or "").strip() or f"v1 job {job_id}"
-    project = Project(name=name[:100], owner_id=auth.user.id, v1_job_id=job_id)
-    db.add(project)
-    await db.flush()
-    db.add(ProjectMember(project_id=project.id, user_id=auth.user.id))
+        db.add(ProjectMember(project_id=project.id, user_id=auth.user.id))
     probe, _ = await v1import.start(db, project, job_id, auth.user.id)
     audit.record(
         db,

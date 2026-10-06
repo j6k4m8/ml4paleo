@@ -129,7 +129,7 @@ def check_result(result: dict[str, Any]) -> None:
         raise ValueError("plugin_version must be a string")
 
 
-async def after_train(db: AsyncSession, job: Job) -> None:
+async def after_train(db: AsyncSession, settings: Settings, job: Job) -> None:
     model = await db.scalar(select(TrainedModel).where(TrainedModel.job_id == job.id))
     if model is None:
         return

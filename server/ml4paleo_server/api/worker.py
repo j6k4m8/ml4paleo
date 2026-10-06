@@ -157,7 +157,7 @@ async def complete(
         await artifacts.commit_outputs(db, settings, job)
 
     async def continue_pipeline(job):
-        await pipelines.after_success(db, job)
+        await pipelines.after_success(db, settings, job)
 
     try:
         await jobs.complete(

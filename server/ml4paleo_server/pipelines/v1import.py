@@ -8,22 +8,26 @@ which runs nothing else; the pyramid and finalize jobs run on any worker.
              -> v1.prediction   (if it has a finished segmentation)
 
 `start` creates the image artifact and the probe. When the probe succeeds,
-`after_probe` adds a "Foreground" class (v1 had one) and the rest; labels and
-the prediction wait for the image to commit, since edits are checked against
-it. When `v1.labels` succeeds, `after_labels` adds a complete slice ROI for
-each sample, so training treats the samples as fully labeled slices.
+`after_probe` checks that the image fits in the owner's storage, then adds a
+"Foreground" class (v1 had one) and the rest; labels and the prediction wait
+for the image to commit, since edits are checked against it. When
+`v1.labels` succeeds, `after_labels` adds a complete slice ROI for each
+sample, so training treats the samples as fully labeled slices.
 """
 
+import math
 import uuid
 from typing import Any
 
+import numpy as np
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ml4paleo.labels import FIRST_CLASS, MAX_CLASS
 
-from .. import artifacts, jobs
-from ..db import Artifact, Job, LabelClass, Project, Roi
+from .. import artifacts, jobs, quotas
+from ..db import Artifact, Job, LabelClass, Project, Roi, User
+from ..settings import Settings
 from .ingest import WEIGHTS, check_volume
 
 V1 = ["v1-volume"]
@@ -33,6 +37,9 @@ FOREGROUND_COLOR = "#f2c14e"
 LABEL_WEIGHT = 10.0
 PREDICTION_WEIGHT = 15.0
 MAX_ROIS = 100_000
+# An image with its pyramid takes about this much more than its full
+# resolution alone (each level has an eighth of the voxels of the last).
+PYRAMID = 1.15
 
 
 async def start(
@@ -65,6 +72,13 @@ def check_probe_result(result: dict[str, Any]) -> None:
     for key in ("annotations", "skipped_annotations"):
         if not (isinstance(result.get(key), int) and result[key] >= 0):
             raise ValueError(f"{key} must be a count")
+    dtype = result.get("dtype")
+    try:
+        numeric = isinstance(dtype, str) and np.dtype(dtype).kind in "buif"
+    except TypeError:
+        numeric = False
+    if not numeric:
+        raise ValueError("dtype must be a numeric dtype")
     found = result.get("segmentation")
     if found is not None and not (
         isinstance(found, str) and 0 < len(found) <= 64 and "/" not in found
@@ -72,14 +86,64 @@ def check_probe_result(result: dict[str, Any]) -> None:
         raise ValueError("segmentation must be a folder name")
 
 
+def _size(nbytes: float) -> str:
+    if nbytes < 1024**3:
+        return f"{max(1, round(nbytes / 1024**2))} MB"
+    return f"{nbytes / 1024**3:.1f} GB"
+
+
+async def _check_room(
+    db: AsyncSession, settings: Settings, project_id: uuid.UUID, result: dict
+) -> None:
+    """
+    Refuse an import whose image won't fit in the owner's storage, before
+    any of it is copied. It's stored compressed, so this errs on the large
+    side.
+    """
+    owner = await db.scalar(
+        select(User)
+        .join(Project, Project.owner_id == User.id)
+        .where(Project.id == project_id)
+    )
+    assert owner is not None
+    limit = quotas.limits_for(owner, settings).storage_bytes
+    if limit is None:
+        return
+    itemsize = np.dtype(result["dtype"]).itemsize
+    size = math.prod(result["shape_zyx"]) * itemsize * PYRAMID
+    left = max(0, limit - (await quotas.usage_for(db, owner.id)).storage_bytes)
+    if size > left:
+        raise jobs.Rejected(
+            f"This scan takes about {_size(size)}, and you have {_size(left)} of "
+            "storage left. Free some up or ask for more on the account page, then "
+            "import the job again.",
+            retryable=False,
+        )
+
+
 async def _foreground(db: AsyncSession, project_id: uuid.UUID) -> int:
-    """Add the class v1's foreground becomes, and return its value."""
+    """
+    The value of the class v1's foreground becomes: "Foreground", added
+    unless an earlier try at the import added it.
+    """
     # As adding a class does: lock the project so values stay unique.
     await db.scalar(
         select(Project.id)
         .where(Project.id == project_id)
         .with_for_update(key_share=True)
     )
+    added = await db.scalar(
+        select(LabelClass.value)
+        .where(
+            LabelClass.project_id == project_id,
+            LabelClass.name == FOREGROUND_NAME,
+            LabelClass.deleted_at.is_(None),
+        )
+        .order_by(LabelClass.value)
+        .limit(1)
+    )
+    if added is not None:
+        return added
     highest = await db.scalar(
         select(func.max(LabelClass.value)).where(LabelClass.project_id == project_id)
     )
@@ -98,9 +162,10 @@ async def _foreground(db: AsyncSession, project_id: uuid.UUID) -> int:
     return value
 
 
-async def after_probe(db: AsyncSession, probe: Job) -> None:
+async def after_probe(db: AsyncSession, settings: Settings, probe: Job) -> None:
     result = probe.result or {}
     assert probe.project_id is not None
+    await _check_room(db, settings, probe.project_id, result)
     job_id = probe.payload["job_id"]
     shape = result["shape_zyx"]
     image_grant = probe.grants[:1]
@@ -205,7 +270,7 @@ def check_labels_result(result: dict[str, Any]) -> None:
             )
 
 
-async def after_labels(db: AsyncSession, job: Job) -> None:
+async def after_labels(db: AsyncSession, settings: Settings, job: Job) -> None:
     """Each placed sample was a fully labeled slice: a complete slice ROI."""
     assert job.project_id is not None
     seen = set()

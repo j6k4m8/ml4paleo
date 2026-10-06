@@ -17,7 +17,7 @@ import v1_volume
 import zarr
 from helpers import SECRET_KEY, add_worker, bearer, make_admin, run_db, signup
 from ml4paleo_server import jobs
-from ml4paleo_server.db import AuditEvent, Job
+from ml4paleo_server.db import AuditEvent, Job, User
 from ml4paleo_server.db import Worker as WorkerRow
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
@@ -25,7 +25,7 @@ from ml4paleo_worker.client import ServerClient
 from ml4paleo_worker.context import JobContext, PermanentError
 from ml4paleo_worker.handlers import HANDLERS, V1_HANDLERS, v1import
 from ml4paleo_worker.main import Worker
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX
 from ml4paleo.labels.codec import decode_chunk
@@ -75,9 +75,12 @@ def run_import(database_url, live_server, browser, project, pipeline, volume):
     Run an import as the v1 override does: a worker with the v1 volume for
     the import's own jobs, and a plain worker for the rest.
     """
+    run = uuid.uuid4().hex[:8]
     workers = [
         Worker(
-            ServerClient(add_worker(database_url, name=name), base_url=live_server),
+            ServerClient(
+                add_worker(database_url, name=f"{name}-{run}"), base_url=live_server
+            ),
             WorkerCaps(version="test", kinds=sorted(handlers), labels=labels),
             handlers=handlers,
             claim_wait_seconds=0.5,
@@ -113,7 +116,7 @@ def run_import(database_url, live_server, browser, project, pipeline, volume):
 
 
 def ran_on(database_url, pipeline) -> dict[str, set[str]]:
-    """The workers that ran each kind of job in a pipeline."""
+    """The workers ("worker-v1" or "worker-cpu") that ran each kind of job."""
 
     async def look(db):
         rows = await db.execute(
@@ -123,7 +126,7 @@ def ran_on(database_url, pipeline) -> dict[str, set[str]]:
         )
         found: dict[str, set[str]] = {}
         for kind, name in rows:
-            found.setdefault(kind, set()).add(name)
+            found.setdefault(kind, set()).add(name.rsplit("-", 1)[0])
         return found
 
     return run_db(database_url, look)
@@ -231,6 +234,70 @@ def test_a_worker_imports_a_claimed_v1_job(
     again = ada.post("/api/v1-jobs/ABC123/claim")
     assert again.status_code == 200
     assert again.json() == {"project_id": project, "pipeline_id": None}
+
+
+def test_a_failed_import_starts_again_when_claimed_again(
+    new_browser, settings, migrated_database_url, live_server, volume
+):
+    ada = new_browser()
+    signup(ada)
+
+    def room(gb):
+        async def set_quota(db):
+            await db.execute(
+                update(User)
+                .where(User.username == "ada")
+                .values(quota_override={"storage_gb": gb})
+            )
+
+        run_db(migrated_database_url, set_quota)
+
+    # The scan doesn't fit, so nothing of it is copied.
+    room(1e-5)
+    claimed = ada.post("/api/v1-jobs/ABC123/claim").json()
+    project = claimed["project_id"]
+    failed = run_import(
+        migrated_database_url,
+        live_server,
+        ada,
+        project,
+        claimed["pipeline_id"],
+        volume,
+    )
+    assert failed["status"] == "failed"
+    assert "of storage left" in failed["error"]
+    assert ada.get(f"/api/projects/{project}/labels/classes").json() == []
+
+    # With room, claiming it again starts the import again.
+    room(1)
+    again = ada.post("/api/v1-jobs/ABC123/claim")
+    assert again.status_code == 200
+    restarted = again.json()["pipeline_id"]
+    assert again.json()["project_id"] == project
+    assert restarted not in (None, claimed["pipeline_id"])
+    # Stop it once the probe has added the class, then start it once more.
+    probing = Worker(
+        ServerClient(add_worker(migrated_database_url), base_url=live_server),
+        WorkerCaps(version="test", kinds=["v1.probe"], labels=["v1-volume"]),
+        handlers={"v1.probe": v1import.probe},
+        claim_wait_seconds=0.5,
+        v1_volume=volume,
+    )
+    probing.run(max_jobs=1)
+    probing.client.close()
+    cancel = f"/api/projects/{project}/pipelines/{restarted}/cancel"
+    assert ada.post(cancel).status_code == 204
+    last = ada.post("/api/v1-jobs/ABC123/claim").json()["pipeline_id"]
+    assert last not in (None, restarted)
+    done = run_import(migrated_database_url, live_server, ada, project, last, volume)
+    assert done["status"] == "succeeded", done
+    classes = ada.get(f"/api/projects/{project}/labels/classes").json()
+    assert [(c["value"], c["name"]) for c in classes] == [(2, "Foreground")]
+    # Now that it has its image, claiming it again just opens it.
+    assert ada.post("/api/v1-jobs/ABC123/claim").json() == {
+        "project_id": project,
+        "pipeline_id": None,
+    }
 
 
 def test_the_first_claim_wins_until_an_admin_releases_it(
