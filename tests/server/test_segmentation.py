@@ -15,7 +15,7 @@ import pytest
 import zarr
 from helpers import SECRET_KEY, add_worker, run_db, signup
 from ml4paleo_server import artifacts, labels
-from ml4paleo_server.db import Artifact, TrainedModel, TrainingSet
+from ml4paleo_server.db import Artifact, LabelOp, TrainedModel, TrainingSet
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
@@ -141,8 +141,26 @@ def test_a_worker_composes_the_final_segmentation(
     ada.patch(f"/api/projects/{project}/rois/{roi['id']}", json={"status": "complete"})
     assert ada.get(base).status_code == 404
 
+    async def newest_edit(db):
+        return await db.scalar(
+            select(LabelOp.created_at)
+            .where(LabelOp.project_id == uuid.UUID(project))
+            .order_by(LabelOp.seq.desc())
+            .limit(1)
+        )
+
+    pinned = run_db(migrated_database_url, newest_edit)
     started = ada.post(base, json={"min_voxels": 10})
     assert started.status_code == 202, started.text
+    # Labeling the speck now is too late for this one.
+    paint(
+        settings,
+        migrated_database_url,
+        project,
+        (15, 20, 20),
+        np.ones((1, 1, 1)),
+        TOOTH,
+    )
     token = add_worker(migrated_database_url)
     client = ServerClient(token, base_url=live_server)
     worker = Worker(
@@ -172,6 +190,7 @@ def test_a_worker_composes_the_final_segmentation(
 
     segmentation = ada.get(base).json()
     assert segmentation["min_voxels"] == 10
+    assert datetime.datetime.fromisoformat(segmentation["labels_as_of"]) == pinned
     group = zarr.open_group(
         store=zarr_store(
             project_storage(settings).child(
@@ -245,6 +264,7 @@ def test_the_final_segmentation_is_described_by_what_the_server_recorded(
     # Another project's model stays unnamed.
     assert out.json()["model_name"] is None
     assert out.json()["min_voxels"] == 7
+    assert out.json()["labels_as_of"] is None
 
 
 def test_one_final_segmentation_at_a_time(new_browser, settings, migrated_database_url):

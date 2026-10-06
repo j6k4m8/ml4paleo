@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from .. import artifacts, audit
 from ..auth.deps import CurrentAuth, DbSession
-from ..db import Project, TrainedModel
+from ..db import LabelOp, Project, TrainedModel
 from ..pipelines import compose
 from .gateway import zarr_path
 from .projects import MemberProject
@@ -98,8 +98,8 @@ class SegmentationOut(BaseModel):
     artifact_id: uuid.UUID
     model_name: str | None
     min_voxels: int
-    # The last label edit it includes.
-    label_seq: int
+    # When the newest label edit it includes was made; None if it has none.
+    labels_as_of: datetime.datetime | None
     # Its zarr group (an array `class`), through the data gateway.
     zarr_url: str
     committed_at: datetime.datetime
@@ -129,11 +129,20 @@ async def current_segmentation(
         )
     # What the server recorded when it started, not what the worker wrote.
     inputs = head.inputs or {}
+    labels_as_of = await db.scalar(
+        select(LabelOp.created_at)
+        .where(
+            LabelOp.project_id == project.id,
+            LabelOp.seq <= int(inputs.get("label_seq", 0)),
+        )
+        .order_by(LabelOp.seq.desc())
+        .limit(1)
+    )
     return SegmentationOut(
         artifact_id=head.id,
         model_name=await _model_name(db, project.id, inputs.get("model_id")),
         min_voxels=int(inputs.get("min_voxels", 0)),
-        label_seq=int(inputs.get("label_seq", 0)),
+        labels_as_of=labels_as_of,
         zarr_url=zarr_path(project.id, head.id),
         committed_at=head.state_changed_at,
     )
