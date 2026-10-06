@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from helpers import SECRET_KEY, add_worker, run_db, signup
 from ml4paleo_server import artifacts, labels
-from ml4paleo_server.db import Job
+from ml4paleo_server.db import Artifact, Job, TrainedModel
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_server.training import training_path
@@ -254,3 +254,10 @@ def test_a_worker_trains_a_random_forest(
     assert status["plugin_version"] == "1"
     assert status["metrics"]["validation_crops"] == 1
     assert status["metrics"]["classes"][str(BONE)]["dice"] > 0.8
+
+    async def model_manifest(db):
+        trained = await db.get(TrainedModel, uuid.UUID(model["id"]))
+        return (await db.get(Artifact, trained.artifact_id)).manifest
+
+    # The model keeps the window its training crops were normalized with.
+    assert run_db(migrated_database_url, model_manifest)["window"] == [200.0, 800.0]

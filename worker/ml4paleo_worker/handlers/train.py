@@ -71,6 +71,8 @@ def run(ctx: JobContext) -> dict[str, Any]:
             "plugin_version": plugin_class.version,
             "params": params.model_dump(),
             "class_values": data.class_values,
+            # The window crops were normalized with, for prediction to use.
+            "window": [float(v) for v in data.window],
             "training_set": ctx.payload["training_set"],
             "metrics": result.metrics,
             "samples": samples,
