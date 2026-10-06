@@ -33,7 +33,7 @@ class RandomForestParams(BaseModel):
     n_estimators: int = Field(100, ge=1, le=500)
     max_depth: int = Field(16, ge=1, le=64)
     samples_per_class: int = Field(50_000, ge=100, le=1_000_000)
-    sigma_max: float = Field(8.0, ge=1.0, le=16.0)
+    sigma_max: float = Field(8.0, ge=1.0, le=8.0)
     seed: int = 0
 
 

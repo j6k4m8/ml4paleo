@@ -272,6 +272,8 @@ def test_plugins_are_listed_and_check_their_params():
     params = get_plugin("rf").Params
     with pytest.raises(ValueError):
         params(n_estimators=0)
+    with pytest.raises(ValueError):
+        params(sigma_max=9.0)
     with pytest.raises(ValueError, match="No segmentation plugin"):
         get_plugin("nope")
 
