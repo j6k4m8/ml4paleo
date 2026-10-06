@@ -2,7 +2,8 @@
 Prediction jobs (see the server's `pipelines/predict.py`).
 
 Grants, in order: the image artifact (read), the model artifact (read), and
-the prediction artifact (write).
+the prediction artifact (write). A shard job predicts its shard in blocks
+sized to the job's memory budget (see `predict_box`).
 """
 
 import json
@@ -17,7 +18,6 @@ from ml4paleo.segmentation.predict import (
     create_prediction,
     open_prediction,
     predict_box,
-    write_box,
 )
 from ml4paleo.storage import StorageGrant, get_bytes, write_manifest
 
@@ -70,15 +70,16 @@ def shard(ctx: JobContext) -> dict[str, Any]:
         ctx.progress(fraction)
         ctx.check()
 
-    classes, uncertainty = predict_box(
+    predict_box(
         predictor,
         OmeImage.open(image_grant).array(0),
         box,  # type: ignore[arg-type]
         tuple(ctx.payload["window"]),  # type: ignore[arg-type]
         list(ctx.payload["class_values"]),
+        open_prediction(prediction_grant),
+        ctx.memory_budget_bytes,
         progress=progress,
     )
-    write_box(open_prediction(prediction_grant), box, classes, uncertainty)  # type: ignore[arg-type]
     return {"box": list(box)}
 
 
@@ -90,6 +91,8 @@ def finalize(ctx: JobContext) -> dict[str, Any]:
             "model_id": ctx.payload["model_id"],
             "class_values": ctx.payload["class_values"],
             "shape_zyx": ctx.payload["shape_zyx"],
+            # The window the image was normalized with.
+            "window": ctx.payload["window"],
         },
     )
     return {}

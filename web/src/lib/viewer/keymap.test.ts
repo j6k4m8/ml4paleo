@@ -27,6 +27,8 @@ describe("keymap", () => {
 		const on = (key: string, tagName: string, type?: string) =>
 			({ key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, target: { tagName, type, isContentEditable: false } }) as unknown as KeyboardEvent;
 		expect(actionFor(on("Enter", "BUTTON"))).toBeUndefined();
+		expect(actionFor(on("ArrowDown", "BUTTON"))).toBeUndefined();
+		expect(actionFor(on("b", "BUTTON"))).toBe("brush");
 		expect(actionFor(on("ArrowUp", "INPUT", "range"))).toBeUndefined();
 		expect(actionFor(on("ArrowUp", "INPUT", "checkbox"))).toBe("slice-next");
 		expect(actionFor(on("b", "INPUT", "radio"))).toBe("brush");
