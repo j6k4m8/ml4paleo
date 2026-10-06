@@ -90,17 +90,26 @@ async def stop_project(db: AsyncSession, project: Project) -> None:
     For a project being deleted: cancel everything of it still running
     (trainings, predictions, and the rest, which would otherwise run to the
     end only to be refused) and give back the trained-model slots its models
-    hold.
+    hold. Call it before marking the project deleted, so pipelines are
+    locked before the project, as completing a job locks them.
     """
-    roots = (
-        await db.scalars(
-            select(Job.root_id).where(
-                Job.project_id == project.id, Job.status.in_(RUNNING_JOB)
+    cancelled: set[uuid.UUID] = set()
+    while True:
+        # Look again after cancelling: a job finishing meanwhile may have
+        # started more (a v1 import starts its labels and prediction).
+        roots = (
+            await db.scalars(
+                select(Job.root_id).where(
+                    Job.project_id == project.id, Job.status.in_(RUNNING_JOB)
+                )
             )
-        )
-    ).all()
-    for root_id in sorted(set(roots)):
-        await jobs.cancel_pipeline(db, root_id)
+        ).all()
+        new = sorted(set(roots) - cancelled)
+        if not new:
+            break
+        for root_id in new:
+            await jobs.cancel_pipeline(db, root_id)
+            cancelled.add(root_id)
     await release_slots(db, project.owner_id, TrainedModel.project_id == project.id)
 
 

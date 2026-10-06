@@ -2,8 +2,9 @@
 Pipelines: chains of jobs that make something for a project.
 
 A pipeline starts as one job; when a job succeeds, `after_success` may add
-the next jobs from its result (in the same transaction that records the
-success, so they are never lost). Each pipeline kind lives in its own module.
+the next jobs from its result, or start other pipelines (in the same
+transaction that records the success, so they are never lost). Each pipeline
+kind lives in its own module.
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,12 +24,22 @@ NAMES = {
     "export.files": "export",
     "export.images": "export",
     "v1.probe": "import",
+    "v1.labels": "import labels",
+    "v1.prediction": "import prediction",
     "noop": "check",
 }
+
+
+async def _after_finalize(db: AsyncSession, settings: Settings, job: Job) -> None:
+    # A v1 import's image is in: start the rest of the import.
+    if job.payload.get("source", {}).get("kind") == "v1":
+        await v1import.after_image(db, settings, job)
+
 
 _CONTINUATIONS = {
     "ingest.probe": ingest.after_probe,
     "model.train": train.after_train,
+    "artifact.finalize": _after_finalize,
     "v1.probe": v1import.after_probe,
     "v1.labels": v1import.after_labels,
 }

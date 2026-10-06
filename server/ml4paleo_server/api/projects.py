@@ -173,8 +173,8 @@ async def delete_project(
     """
     if project.owner_id != auth.user.id:
         raise HTTPException(status_code=403, detail="Only the owner can delete it.")
-    project.deleted_at = datetime.datetime.now(datetime.UTC)
     await train.stop_project(db, project)
+    project.deleted_at = datetime.datetime.now(datetime.UTC)
     audit.record(
         db,
         actor_id=auth.user.id,
