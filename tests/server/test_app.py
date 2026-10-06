@@ -74,12 +74,7 @@ def test_the_web_apps_inline_script_is_allowed_by_hash(settings, web_dir):
     with TestClient(create_app(settings)) as client:
         policy = client.get("/projects").headers["content-security-policy"]
     script_src = next(d for d in policy.split("; ") if d.startswith("script-src"))
-    assert script_src.split() == [
-        "script-src",
-        "'self'",
-        "'wasm-unsafe-eval'",
-        f"'sha256-{digest}'",
-    ]
+    assert script_src.split() == ["script-src", "'self'", f"'sha256-{digest}'"]
 
 
 def test_migrations_round_trip_and_match_the_models(database_url):
