@@ -164,7 +164,9 @@ def join_class(ctx: JobContext) -> dict[str, Any]:
             writers = {
                 "stl": join.finish,
                 "obj": lambda: join.write_obj(Path(tmp) / "mesh.obj"),
-                "glb": lambda: join.write_glb(Path(tmp) / "mesh.glb"),
+                "glb": lambda: join.write_glb(
+                    Path(tmp) / "mesh.glb", ctx.payload["unit"]
+                ),
             }
             for done, extension in enumerate(EXTENSIONS):
                 try:

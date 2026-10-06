@@ -5,7 +5,8 @@ Meshes of the final segmentation, one per class.
     GET  /api/projects/{id}/meshes   the current meshes and their files
 
 Meshes are in (x, y, z) order, in the scan's physical units when it gave a
-voxel size (else in voxels), as STL, OBJ, and GLB per class.
+voxel size (else in voxels), as STL, OBJ, and GLB per class. GLB files keep
+those units too, with the scene scaled to meters, as glTF expects.
 """
 
 import datetime

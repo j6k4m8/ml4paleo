@@ -52,6 +52,14 @@ SMALLEST = 16
 # about 10 MB of arrays or strings.
 CHUNK = 1 << 16
 LINES = 1 << 16
+# glTF's unit is the meter.
+METERS_PER_UNIT = {
+    "meter": 1.0,
+    "centimeter": 0.01,
+    "millimeter": 0.001,
+    "micrometer": 1e-6,
+    "nanometer": 1e-9,
+}
 
 _STL_HEADER = b"ml4paleo mesh".ljust(80, b" ")
 _STL_RECORD = np.dtype(
@@ -415,14 +423,21 @@ class Join:
                 )
         return path
 
-    def write_glb(self, path: Path) -> Path:
-        """A binary glTF 2.0 file with one mesh."""
+    def write_glb(self, path: Path, unit: str | None) -> Path:
+        """
+        A binary glTF 2.0 file with one mesh. The vertices stay in `unit`;
+        the node scales them to meters, as glTF expects, when it is a length
+        (meshes in voxels are left as they are).
+        """
         positions, indices = 12 * self.vertices, 12 * self.triangles
+        node: dict = {"mesh": 0}
+        if unit in METERS_PER_UNIT and METERS_PER_UNIT[unit] != 1:
+            node["scale"] = [METERS_PER_UNIT[unit]] * 3
         gltf = {
             "asset": {"version": "2.0", "generator": "ml4paleo"},
             "scene": 0,
             "scenes": [{"nodes": [0]}],
-            "nodes": [{"mesh": 0}],
+            "nodes": [node],
             "meshes": [
                 {
                     "primitives": [

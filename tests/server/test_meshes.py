@@ -106,6 +106,16 @@ def read_stl(raw: bytes) -> tuple[np.ndarray, np.ndarray]:
     return vertices, faces.reshape(-1, 3)
 
 
+def read_glb(raw: bytes) -> tuple[np.ndarray, np.ndarray, dict]:
+    (size,) = struct.unpack_from("<I", raw, 12)
+    gltf = json.loads(raw[20 : 20 + size])
+    count = gltf["accessors"][0]["count"]
+    binary = raw[28 + size :]
+    vertices = np.frombuffer(binary[: 12 * count], dtype="<f4").reshape(-1, 3)
+    faces = np.frombuffer(binary[12 * count :], dtype="<u4").reshape(-1, 3)
+    return vertices, faces.astype(np.int64), gltf
+
+
 def signed_volume(vertices, faces):
     triangles = vertices[faces].astype(np.float64)
     return (
@@ -206,9 +216,14 @@ def test_a_worker_meshes_each_class(
     assert vertices.min(axis=0) == pytest.approx([10 * 0.25, 6 * 0.5, 4 * 2.0])
     assert vertices.max(axis=0) == pytest.approx([22 * 0.25, 20 * 0.5, 18 * 2.0])
 
-    glb = ada.get(meshes["files_url"] + "3.glb").content
+    # The GLB holds the same millimeters and scales its scene to meters.
+    glb = ada.get(meshes["files_url"] + "2.glb").content
     magic, version, length = struct.unpack_from("<4sII", glb)
     assert (magic, version, length) == (b"glTF", 2, len(glb))
+    glb_vertices, glb_faces, gltf = read_glb(glb)
+    assert gltf["nodes"][0]["scale"] == [0.001, 0.001, 0.001]
+    assert glb_vertices.min(axis=0) == pytest.approx(vertices.min(axis=0))
+    assert closed(glb_faces)
     obj = ada.get(meshes["files_url"] + "3.obj").text
     assert obj.count("\nf ") > 0 and obj.count("\nv ") > 0
 

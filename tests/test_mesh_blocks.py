@@ -51,7 +51,7 @@ def join(per_block, shape, block, voxel_size=(1.0, 1.0, 1.0)):
         joined.finish()
         if not joined.triangles:
             return None
-        glb = joined.write_glb(Path(tmp) / "mesh.glb").read_bytes()
+        glb = joined.write_glb(Path(tmp) / "mesh.glb", None).read_bytes()
     vertices, faces, _ = read_glb(glb)
     return vertices, faces
 
@@ -259,7 +259,8 @@ def test_file_formats(tmp_path):
         joined.add(piece)
         stl = joined.finish().read_bytes()
         obj = joined.write_obj(tmp_path / "mesh.obj").read_text().splitlines()
-        glb = joined.write_glb(tmp_path / "mesh.glb").read_bytes()
+        glb = joined.write_glb(tmp_path / "mesh.glb", "millimeter").read_bytes()
+        voxels = joined.write_glb(tmp_path / "voxels.glb", "voxels").read_bytes()
     assert len(stl) == 84 + 50 and struct.unpack("<I", stl[80:84])[0] == 1
     assert obj[1] == "v 1234.56787 0 0"  # float32 exactly, not 1234.57
     assert obj[-1] == "f 1 2 3"
@@ -268,3 +269,6 @@ def test_file_formats(tmp_path):
     got, faces, gltf = read_glb(glb)
     assert np.array_equal(got, vertices) and faces.tolist() == [[0, 1, 2]]
     assert gltf["accessors"][0]["max"] == [float(np.float32(1234.5679)), 1, 0]
+    # Vertices stay in millimeters; glTF scales the scene to meters.
+    assert gltf["nodes"] == [{"mesh": 0, "scale": [0.001, 0.001, 0.001]}]
+    assert read_glb(voxels)[2]["nodes"] == [{"mesh": 0}]
