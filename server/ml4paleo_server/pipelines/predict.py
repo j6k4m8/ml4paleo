@@ -1,0 +1,91 @@
+"""
+Predicting with a model: the project's image through a ready model, into a
+prediction artifact that becomes the project's "prediction" head.
+
+    predict.prepare -> predict.shard x N -> prediction.finalize
+
+`prepare` creates the prediction's arrays; each `predict.shard` job predicts
+and writes one 512³ shard (they run in parallel, on as many workers as
+there are); `finalize` writes the manifest, so its success commits the
+artifact.
+"""
+
+import uuid
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ml4paleo.segmentation.predict import SHARD_ZYX, shard_boxes
+
+from .. import artifacts, jobs
+from ..db import Artifact, Job, TrainedModel
+
+WEIGHTS = {"prepare": 1.0, "shards": 95.0, "finalize": 1.0}
+
+
+async def start(
+    db: AsyncSession,
+    *,
+    model: TrainedModel,
+    image: Artifact,
+    created_by: uuid.UUID,
+) -> tuple[Job, Artifact]:
+    model_artifact = (
+        await db.get(Artifact, model.artifact_id) if model.artifact_id else None
+    )
+    if model_artifact is None or model_artifact.state != "committed":
+        raise ValueError("That model isn't ready.")
+    assert image.manifest is not None
+    _, z, y, x = image.manifest["shape_czyx"]
+    shape = (int(z), int(y), int(x))
+    prediction = await artifacts.create_staging(
+        db,
+        project_id=model.project_id,
+        kind="prediction",
+        head_slot="prediction",
+        inputs={"model_id": str(model.id), "image_artifact_id": str(image.id)},
+    )
+    grants = [
+        artifacts.grant_for(image, "r"),
+        artifacts.grant_for(model_artifact, "r"),
+        artifacts.grant_for(prediction),
+    ]
+    common = {
+        "project_id": model.project_id,
+        "created_by": created_by,
+        "grants": grants,
+    }
+    payload = {
+        "model_id": str(model.id),
+        "plugin": model.plugin,
+        "class_values": list(model.class_values),
+        "window": image.manifest.get("window") or [0, 1],
+        "shape_zyx": list(shape),
+    }
+    prepare = await jobs.enqueue(
+        db, "predict.prepare", payload, weight=WEIGHTS["prepare"], **common
+    )
+    boxes = shard_boxes(shape, SHARD_ZYX)
+    shards = [
+        await jobs.enqueue(
+            db,
+            "predict.shard",
+            {**payload, "box": list(box)},
+            pipeline=prepare,
+            depends_on=[prepare],
+            weight=WEIGHTS["shards"] / len(boxes),
+            **common,
+        )
+        for box in boxes
+    ]
+    finalize = await jobs.enqueue(
+        db,
+        "prediction.finalize",
+        payload,
+        pipeline=prepare,
+        depends_on=shards,
+        weight=WEIGHTS["finalize"],
+        **common,
+    )
+    prediction.produced_by_job = finalize.id
+    await db.flush()
+    return prepare, prediction

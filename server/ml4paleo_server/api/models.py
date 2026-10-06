@@ -6,6 +6,8 @@ Segmentation models.
     POST   /api/projects/{id}/models            {plugin, params?, name?}
     GET    /api/projects/{id}/models/{model}
     DELETE /api/projects/{id}/models/{model}
+    POST   /api/projects/{id}/models/{model}/predict
+    GET    /api/projects/{id}/prediction           the current prediction
 
 Training pins the project's labels and ROIs as a training set and starts a
 `model.train` pipeline (follow it under /pipelines). A model is "training"
@@ -24,11 +26,12 @@ from sqlalchemy import select
 
 from ml4paleo.segmentation.plugin import get_plugin, plugins
 
-from .. import audit, jobs, training
+from .. import artifacts, audit, jobs, training
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import Artifact, Job, Project, TrainedModel, TrainingSet
-from ..pipelines import train
+from ..pipelines import predict, train
 from ..quotas import release_trained_model
+from .gateway import zarr_path
 from .projects import MemberProject
 
 router = APIRouter(prefix="/api", tags=["models"])
@@ -236,3 +239,77 @@ async def delete_model(
         details={"model_id": str(model.id)},
     )
     await db.commit()
+
+
+class PredictionStarted(BaseModel):
+    pipeline_id: uuid.UUID
+    artifact_id: uuid.UUID
+
+
+@router.post("/projects/{project_id}/models/{model_id}/predict", status_code=202)
+async def predict_with(
+    model_id: uuid.UUID,
+    project: MemberProject,
+    request: Request,
+    auth: CurrentAuth,
+    db: DbSession,
+) -> PredictionStarted:
+    """
+    Run a ready model over the project's image; the result becomes the
+    project's prediction when the pipeline succeeds.
+    """
+    model = await _model(db, project, model_id)
+    image = await artifacts.head(db, project.id, "image")
+    if image is None or not image.manifest:
+        raise HTTPException(status_code=409, detail="This project has no image yet.")
+    try:
+        root, artifact = await predict.start(
+            db, model=model, image=image, created_by=auth.user.id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    audit.record(
+        db,
+        actor_id=auth.user.id,
+        action="model.predict",
+        target_type="project",
+        target_id=project.id,
+        request=request,
+        details={"model_id": str(model.id), "pipeline_id": str(root.id)},
+    )
+    await db.commit()
+    return PredictionStarted(pipeline_id=root.id, artifact_id=artifact.id)
+
+
+class PredictionOut(BaseModel):
+    artifact_id: uuid.UUID
+    model_id: uuid.UUID | None
+    model_name: str | None
+    class_values: list[int]
+    # The prediction's zarr group (arrays `class` and `uncertainty`), through
+    # the data gateway.
+    zarr_url: str
+    committed_at: datetime.datetime
+
+
+@router.get("/projects/{project_id}/prediction")
+async def current_prediction(project: MemberProject, db: DbSession) -> PredictionOut:
+    head = await artifacts.head(db, project.id, "prediction")
+    if head is None or not head.manifest:
+        raise HTTPException(
+            status_code=404, detail="This project has no prediction yet."
+        )
+    model_id = head.inputs.get("model_id")
+    model = (
+        await db.get(TrainedModel, uuid.UUID(model_id))
+        if model_id is not None
+        else None
+    )
+    return PredictionOut(
+        artifact_id=head.id,
+        model_id=model.id if model else None,
+        model_name=model.name if model else None,
+        class_values=list(head.manifest.get("class_values", [])),
+        zarr_url=zarr_path(project.id, head.id),
+        committed_at=head.state_changed_at,
+    )

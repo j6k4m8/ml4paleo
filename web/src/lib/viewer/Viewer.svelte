@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount, untrack } from "svelte";
+	import { ApiError, api } from "#lib/api.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { ProjectImage } from "#lib/types.ts";
 	import { splitIntoDeltas } from "../labels/deltas";
@@ -10,7 +11,7 @@
 	import { absolute, loadLevels } from "./image";
 	import { actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
 	import { type LabelClass, LabelLayer } from "./labels";
-	import { imageLoader, WorkerPool } from "./loader";
+	import { imageLoader, labelLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
 	import { type Stroke, ViewerState } from "./state.svelte";
 	import { aspectOf, type Level, type Plane, PLANES, type Vec3 } from "./tiles";
@@ -30,6 +31,8 @@
 	let levels: Level[] = $state([]);
 	let images: ChunkStore | null = $state(null);
 	let labels: LabelLayer | null = $state(null);
+	let prediction: ChunkStore | null = $state(null);
+	let predictionModel = $state("");
 	let classes: LabelClass[] = $state([]);
 	let error = $state("");
 	let pool: WorkerPool | undefined;
@@ -63,6 +66,17 @@
 			});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
+			api<{ zarr_url: string; model_name: string | null }>(`/api/projects/${project}/prediction`).then(
+				(found) => {
+					if (!pool || controller.signal.aborted) return;
+					// Predictions never change once made, so their chunks cache like the image's.
+					prediction = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
+					predictionModel = found.model_name ?? "a model";
+				},
+				(e: unknown) => {
+					if (!(e instanceof ApiError && e.status === 404)) error = e instanceof Error ? e.message : String(e);
+				},
+			);
 			const layer = new LabelLayer(project, pool, viewer.shape);
 			await layer.start();
 			if (controller.signal.aborted) return layer.stop();
@@ -107,7 +121,16 @@
 	});
 
 	$effect(() => {
-		void [viewer.opacity, viewer.showLabels, viewer.layout, viewer.brushRadius, viewer.protectLabels, viewer.roiDepth];
+		void [
+			viewer.opacity,
+			viewer.showLabels,
+			viewer.layout,
+			viewer.brushRadius,
+			viewer.protectLabels,
+			viewer.roiDepth,
+			viewer.showPrediction,
+			viewer.predictionOpacity,
+		];
 		viewer.savePreferences();
 	});
 
@@ -321,6 +344,9 @@
 			case "labels":
 				viewer.showLabels = !viewer.showLabels;
 				return;
+			case "prediction":
+				viewer.showPrediction = !viewer.showPrediction;
+				return;
 			case "help":
 				viewer.help = !viewer.help;
 				return;
@@ -346,6 +372,7 @@
 					{levels}
 					{images}
 					{labels}
+					{prediction}
 					onhover={(p) => (hovered = p)}
 					onresize={resized}
 					onstroke={stroke}
@@ -369,6 +396,15 @@
 				</span>
 			</label>
 			<label class="row"><input type="checkbox" bind:checked={viewer.showLabels} /> Labels</label>
+			{#if prediction}
+				<label class="row">
+					<input type="checkbox" bind:checked={viewer.showPrediction} /> Prediction by {predictionModel}
+				</label>
+				<label>
+					Prediction opacity
+					<input type="range" min="0" max="1" step="0.05" bind:value={viewer.predictionOpacity} />
+				</label>
+			{/if}
 			<label>
 				Label opacity
 				<input type="range" min="0" max="1" step="0.05" bind:value={viewer.opacity} />

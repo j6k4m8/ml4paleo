@@ -196,3 +196,56 @@ def test_listing_plugins_needs_no_scikit():
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     assert out.stdout.strip() == "False"
+
+
+def test_predictions_cover_shards_and_match_block_by_block(tmp_path):
+    from ml4paleo.segmentation.predict import (
+        create_prediction,
+        open_prediction,
+        predict_box,
+        shard_boxes,
+        write_box,
+    )
+    from ml4paleo.storage import StorageGrant
+
+    image, truth = synthetic()
+    labels = np.zeros(SHAPE, dtype=np.uint8)
+    labels[20, 18:23, 25] = BONE
+    labels[55, 45, 55:66] = BONE
+    labels[5, 5:30, 5] = 1
+    labels[70, 10, 10:80] = 1
+    source = DictLabels(labels)
+    data = TrainingSet(image, source, source.chunks, [], [BONE], (200.0, 800.0))
+    plugin = get_plugin("rf")()
+
+    class Ctx:
+        def progress(self, fraction, message=None):
+            pass
+
+        def check(self):
+            pass
+
+    params = plugin.Params(
+        n_estimators=20, max_depth=8, samples_per_class=2000, sigma_max=1.0
+    )
+    plugin.train(data, params, tmp_path / "model", Ctx())
+    predictor = plugin.load(tmp_path / "model")
+
+    boxes = shard_boxes(SHAPE, (32, 32, 32))
+    covered = np.zeros(SHAPE, dtype=int)
+    for b in boxes:
+        covered[b[0] : b[3], b[1] : b[4], b[2] : b[5]] += 1
+    assert (covered == 1).all()
+
+    grant = StorageGrant(url=f"file://{tmp_path}/prediction", access="rw")
+    create_prediction(grant, SHAPE)
+    group = open_prediction(grant)
+    for b in boxes:
+        classes, uncertainty = predict_box(
+            predictor, image, b, (200.0, 800.0), [BONE], block=(16, 16, 16)
+        )
+        write_box(group, b, classes, uncertainty)
+    predicted = np.asarray(group["class"][:])
+    assert set(np.unique(predicted)) <= {1, BONE}
+    assert ((predicted == BONE) == truth).mean() > 0.95
+    assert np.asarray(group["uncertainty"][:]).max() <= 255

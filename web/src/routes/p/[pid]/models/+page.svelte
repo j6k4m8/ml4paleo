@@ -40,6 +40,9 @@
 	let classes: LabelClass[] = $state([]);
 	let quota: Quota | null = $state(null);
 	let progress: Record<string, number> = $state({});
+	let prediction: { model_id: string | null; model_name: string | null } | null = $state(null);
+	// Prediction pipelines started from this page, by model.
+	let predicting: Record<string, string> = $state({});
 	let plugin = $state("rf");
 	let params: Record<string, number> = $state({});
 	let name = $state("");
@@ -47,12 +50,17 @@
 	let busy = $state(false);
 
 	const chosen = $derived(plugins.find((p) => p.name === plugin));
-	const training = $derived(models.filter((m) => m.status === "training").map((m) => m.pipeline_id).join(","));
+	const training = $derived(
+		[...models.filter((m) => m.status === "training").map((m) => m.pipeline_id), ...Object.values(predicting)].join(","),
+	);
 
 	async function refresh() {
 		try {
 			models = await api<Model[]>(`/api/projects/${pid}/models`);
 			quota = await api<Quota>("/api/me/quota").catch(() => null);
+			prediction = await api<{ model_id: string | null; model_name: string | null }>(
+				`/api/projects/${pid}/prediction`,
+			).catch(() => null);
 		} catch (e) {
 			error = message(e);
 		}
@@ -77,7 +85,10 @@
 			source.addEventListener("status", (event) => {
 				const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
 				progress = { ...progress, [id]: update.progress };
-				if (update.status !== "waiting" && update.status !== "running") refresh();
+				if (update.status !== "waiting" && update.status !== "running") {
+					predicting = Object.fromEntries(Object.entries(predicting).filter(([, p]) => p !== id));
+					refresh();
+				}
 			});
 			return source;
 		});
@@ -99,6 +110,18 @@
 					: message(e);
 		} finally {
 			busy = false;
+		}
+	}
+
+	async function predict(model: Model) {
+		error = "";
+		try {
+			const started = await api<{ pipeline_id: string }>(`/api/projects/${pid}/models/${model.id}/predict`, {
+				method: "POST",
+			});
+			predicting = { ...predicting, [model.id]: started.pipeline_id };
+		} catch (e) {
+			error = message(e);
 		}
 	}
 
@@ -175,11 +198,20 @@
 				<li class="card status-{model.status}">
 					<div class="head">
 						<strong>{model.name}</strong>
-						<span class="badge">{model.status}</span>
+						<span class="badge">
+							{model.status}{#if prediction?.model_id === model.id} · its prediction shows in the annotator{/if}
+						</span>
+						{#if model.status === "ready"}
+							<button disabled={!!predicting[model.id]} onclick={() => predict(model)}>
+								{predicting[model.id] ? "Predicting…" : "Predict"}
+							</button>
+						{/if}
 						<button class="secondary" onclick={() => remove(model)}>Delete</button>
 					</div>
 					{#if model.status === "training"}
 						<progress max="1" value={progress[model.pipeline_id ?? ""] ?? 0}></progress>
+					{:else if predicting[model.id]}
+						<progress max="1" value={progress[predicting[model.id] ?? ""] ?? 0}></progress>
 					{/if}
 					<p class="muted">
 						{model.plugin} · {new Date(model.created_at).toLocaleString()} · trained on
@@ -237,8 +269,10 @@
 		gap: 0.6rem;
 	}
 	.head button {
-		margin-left: auto;
 		padding: 0.2rem 0.6rem;
+	}
+	.head .badge {
+		margin-right: auto;
 	}
 	.badge {
 		font-size: 0.8rem;

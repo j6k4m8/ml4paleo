@@ -239,18 +239,56 @@ def test_a_worker_trains_a_random_forest(
     worker = Worker(client, caps, claim_wait_seconds=0.5, heartbeat_seconds=0.2)
     thread = threading.Thread(target=worker.run, kwargs={"max_jobs": None})
     thread.start()
-    try:
+
+    def wait(url, done):
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
-            status = ada.get(f"/api/projects/{project}/models/{model['id']}").json()
-            if status["status"] != "training":
-                break
+            response = ada.get(url)
+            if done(response):
+                return response
             time.sleep(0.3)
+        raise AssertionError(f"{url} never finished")
+
+    try:
+        status = wait(
+            f"/api/projects/{project}/models/{model['id']}",
+            lambda r: r.json()["status"] != "training",
+        ).json()
+        assert status["status"] == "ready", status
+        assert status["plugin_version"] == "1"
+        assert status["metrics"]["validation_crops"] == 1
+        assert status["metrics"]["classes"][str(BONE)]["dice"] > 0.8
+
+        # The model predicts the whole image, which becomes the prediction.
+        assert ada.get(f"/api/projects/{project}/prediction").status_code == 404
+        started = ada.post(f"/api/projects/{project}/models/{model['id']}/predict")
+        assert started.status_code == 202, started.text
+        pipeline = wait(
+            f"/api/projects/{project}/pipelines/{started.json()['pipeline_id']}",
+            lambda r: r.json()["status"] in ("succeeded", "failed", "cancelled"),
+        ).json()
+        assert pipeline["status"] == "succeeded", pipeline
+        assert pipeline["kind"] == "prediction"
     finally:
         worker.stop()
         thread.join(timeout=30)
         client.close()
-    assert status["status"] == "ready", status
-    assert status["plugin_version"] == "1"
-    assert status["metrics"]["validation_crops"] == 1
-    assert status["metrics"]["classes"][str(BONE)]["dice"] > 0.8
+    prediction = ada.get(f"/api/projects/{project}/prediction").json()
+    assert prediction["model_id"] == model["id"]
+    assert prediction["class_values"] == [BONE]
+    metadata = ada.get(prediction["zarr_url"] + "class/zarr.json").json()
+    assert metadata["shape"] == list(SHAPE)
+    import zarr
+
+    from ml4paleo.storage import zarr_store
+
+    group = zarr.open_group(
+        store=zarr_store(
+            project_storage(settings).child(
+                f"projects/{project}/artifacts/{prediction['artifact_id']}"
+            )
+        ),
+        mode="r",
+    )
+    predicted = np.asarray(group["class"][:])
+    assert ((predicted == BONE) == truth).mean() > 0.95
