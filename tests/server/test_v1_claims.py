@@ -17,7 +17,7 @@ import v1_volume
 import zarr
 from helpers import SECRET_KEY, add_worker, bearer, make_admin, run_db, signup
 from ml4paleo_server import jobs
-from ml4paleo_server.db import Job
+from ml4paleo_server.db import AuditEvent, Job
 from ml4paleo_server.db import Worker as WorkerRow
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
@@ -298,21 +298,46 @@ def test_releasing_a_job_stops_its_import(new_browser, settings, migrated_databa
 def test_claims_are_limited_and_need_a_v1_volume(
     new_browser, settings, migrated_database_url
 ):
-    limited = settings.model_copy(
-        update={"v1": settings.v1.model_copy(update={"claims_per_hour": 2})}
-    )
-    ada = new_browser(limited)
+    limits = {"claims_per_hour": 2, "failed_claims_per_hour": 3}
+    limited = settings.model_copy(update={"v1": settings.v1.model_copy(update=limits)})
+    # Per account...
+    ada = new_browser(limited, address="192.0.2.1")
     signup(ada)
     assert ada.post("/api/v1-jobs/000000/claim").status_code == 404
     assert ada.post("/api/v1-jobs/000001/claim").status_code == 404
     assert ada.post("/api/v1-jobs/ABC123/claim").status_code == 429
+    # ...and per address, whatever account is signed in there.
+    bob = new_browser(limited, address="192.0.2.1")
+    signup(bob, username="bob")
+    assert bob.post("/api/v1-jobs/ABC123/claim").status_code == 429
+    # Too many misses, from anyone, stop every claim for the hour.
+    carol = new_browser(limited, address="192.0.2.2")
+    signup(carol, username="carol")
+    assert carol.post("/api/v1-jobs/000002/claim").status_code == 404
+    dan = new_browser(limited, address="192.0.2.3")
+    signup(dan, username="dan")
+    stopped = dan.post("/api/v1-jobs/ABC123/claim")
+    assert stopped.status_code == 429
+    assert int(stopped.headers["Retry-After"]) > 3000
+
+    async def misses(db):
+        rows = await db.scalars(
+            select(AuditEvent).where(AuditEvent.action == "v1.claim.miss")
+        )
+        return sorted((e.target_type, e.target_id, e.ip) for e in rows)
+
+    assert run_db(migrated_database_url, misses) == [
+        ("v1_job", "000000", "192.0.2.1"),
+        ("v1_job", "000001", "192.0.2.1"),
+        ("v1_job", "000002", "192.0.2.2"),
+    ]
 
     unset = settings.model_copy(
         update={"v1": settings.v1.model_copy(update={"volume_path": None})}
     )
-    bob = new_browser(unset)
-    signup(bob, username="bob")
-    missing = bob.post("/api/v1-jobs/ABC123/claim")
+    erin = new_browser(unset, address="192.0.2.4")
+    signup(erin, username="erin")
+    missing = erin.post("/api/v1-jobs/ABC123/claim")
     assert missing.status_code == 404
     assert missing.json()["detail"] == "This server has no v1 jobs to import."
 

@@ -106,9 +106,13 @@ class V1Settings(BaseModel):
     # mounted read-only; unset when there are no v1 jobs to import. A worker
     # started with --v1-volume does the importing.
     volume_path: pathlib.Path | None = None
-    # Claims each account may try per hour. v1 job ids are only six hex
-    # digits, so this keeps people from guessing other people's jobs.
+    # Claims each account, and each address, may try per hour. v1 job ids are
+    # only six hex digits, so this keeps people from guessing other people's
+    # jobs.
     claims_per_hour: int = Field(default=30, ge=1)
+    # Claims of ids that aren't v1 jobs, from everyone, per hour. Past this,
+    # nobody can claim until the hour is up.
+    failed_claims_per_hour: int = Field(default=100, ge=1)
 
 
 class Settings(BaseSettings):

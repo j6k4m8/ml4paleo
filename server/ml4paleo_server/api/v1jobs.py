@@ -7,10 +7,11 @@ Claiming jobs from the ml4paleo v1 app, which this one replaced (see
 
 v1 had no accounts: anyone with a job's link could open it. So the first
 person to claim a job gets it, claims are rate-limited (ids are only six hex
-digits), and an admin can release a job someone else claimed. Releasing
-stops what runs in the claimer's project and deletes it (garbage collection
-gives its storage back), so the job's owner can claim it again; the account
-it was released from can't.
+digits) per account, per address, and for everyone once too many miss, and
+an admin can release a job someone else claimed. Releasing stops what runs
+in the claimer's project and deletes it (garbage collection gives its
+storage back), so the job's owner can claim it again; the account it was
+released from can't.
 """
 
 import datetime
@@ -26,6 +27,7 @@ from ml4paleo.v1import import UNCONVERTED, normalize_job_id, read_jobs, status
 from .. import audit, jobs
 from ..auth import ratelimit
 from ..auth.deps import AdminAuth, CurrentAuth, DbSession, EngineDep, SettingsDep
+from ..auth.ratelimit import client_key
 from ..db import AuditEvent, Job, Project, ProjectMember
 from ..jobs.queue import FINISHED
 from ..pipelines import v1import
@@ -34,6 +36,8 @@ from ..settings import Settings
 router = APIRouter(prefix="/api/v1-jobs", tags=["v1"])
 
 HOUR = datetime.timedelta(hours=1)
+# Claims of ids that aren't v1 jobs, from anyone.
+MISSES = "v1-claim:misses"
 NOT_HERE = "This server has no v1 jobs to import."
 RELEASED = "An admin released this job from your account. If it's yours, ask them."
 
@@ -93,15 +97,27 @@ async def claim(
     claimed gives that project; a job someone else claimed gets 409.
     """
     root = _volume(settings)
-    await ratelimit.hit(
-        engine,
-        f"v1-claim:{auth.user.id}",
-        limit=settings.v1.claims_per_hour,
-        window=HOUR,
-    )
+    # Per account and per address, since one address can sign up a few
+    # accounts an hour.
+    for key in (f"v1-claim:user:{auth.user.id}", f"v1-claim:ip:{client_key(request)}"):
+        await ratelimit.hit(engine, key, limit=settings.v1.claims_per_hour, window=HOUR)
+    # Guessing ids misses far more often than claiming your own jobs does, so
+    # once too many claims miss, nobody can claim until the hour is up.
+    misses = settings.v1.failed_claims_per_hour
+    await ratelimit.peek(engine, MISSES, limit=misses, window=HOUR)
     job_id = _job_id(job_id)
     record = (await run_in_threadpool(read_jobs, root)).get(job_id)
     if record is None:
+        audit.record(
+            db,
+            actor_id=auth.user.id,
+            action="v1.claim.miss",
+            target_type="v1_job",
+            target_id=job_id,
+            request=request,
+        )
+        await db.commit()
+        await ratelimit.hit(engine, MISSES, limit=misses, window=HOUR)
         raise HTTPException(status_code=404, detail="There's no v1 job with that id.")
     if status(record) in UNCONVERTED:
         raise HTTPException(
