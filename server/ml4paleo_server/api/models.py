@@ -262,7 +262,9 @@ async def predict_with(
 ) -> PredictionStarted:
     """
     Run a ready model over the project's image; the result becomes the
-    project's prediction when the pipeline succeeds.
+    project's prediction when the pipeline succeeds. Other predictions still
+    running are cancelled, and if this model is already predicting this
+    image, the answer is 409.
     """
     model = await _model(db, project, model_id)
     image = await artifacts.head(db, project.id, "image")

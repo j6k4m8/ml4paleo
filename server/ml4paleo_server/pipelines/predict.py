@@ -11,7 +11,8 @@ artifact.
 
 Starting a prediction cancels the project's other predictions that are
 still running, so an older one can't finish later and take the head from
-it.
+it, unless one of them is already predicting the same image with the same
+model; then the new one is refused.
 """
 
 import uuid
@@ -67,7 +68,14 @@ async def start(
         .where(Project.id == model.project_id)
         .with_for_update(key_share=True)
     )
-    for root in await running(db, model.project_id):
+    others = await running(db, model.project_id)
+    if any(
+        root.payload.get("model_id") == str(model.id)
+        and root.payload.get("image_artifact_id") == str(image.id)
+        for root in others
+    ):
+        raise ValueError("A prediction with this model is already running.")
+    for root in others:
         await jobs.cancel_pipeline(db, root.id)
     assert image.manifest is not None
     _, z, y, x = image.manifest["shape_czyx"]
@@ -102,6 +110,7 @@ async def start(
     }
     payload = {
         "model_id": str(model.id),
+        "image_artifact_id": str(image.id),
         "plugin": model.plugin,
         "class_values": list(model.class_values),
         "window": window,

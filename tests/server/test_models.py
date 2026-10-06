@@ -449,6 +449,27 @@ def test_a_new_prediction_cancels_older_ones(ada, settings, migrated_database_ur
     assert pipeline_status(ada, project, newer) == "waiting"
 
 
+def test_a_running_prediction_isnt_started_again(ada, settings, migrated_database_url):
+    project = labeled_project(ada, settings, migrated_database_url)
+    model = ready_model(ada, migrated_database_url, project)
+    first = predict(ada, project, model)
+    assert first.status_code == 202
+    again = predict(ada, project, model)
+    assert again.status_code == 409
+    assert again.json()["detail"] == "A prediction with this model is already running."
+    started = first.json()["pipeline_id"]
+    assert pipeline_status(ada, project, started) == "waiting"
+    # The pipelines say which model they're for.
+    listed = ada.get(f"/api/projects/{project}/pipelines").json()
+    assert [(p["id"], p["model_id"]) for p in listed if p["kind"] == "prediction"] == [
+        (started, model["id"])
+    ]
+    # A new image is a new prediction, and the old one stops.
+    add_image(settings, migrated_database_url, project)
+    assert predict(ada, project, model).status_code == 202
+    assert pipeline_status(ada, project, started) == "cancelled"
+
+
 def test_missing_label_blobs_fail_training_for_good(tmp_path):
     from ml4paleo_worker.context import JobContext, PermanentError
     from ml4paleo_worker.handlers import train as train_handler
