@@ -4,6 +4,7 @@
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue } from "../labels/opqueue.svelte";
 	import { PlaneMask } from "../labels/raster";
+	import { type Roi, RoiList, roiBox, thinAxis } from "../rois.svelte";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
 	import { actionFor, KEYMAP, MOUSE } from "./keymap";
@@ -13,7 +14,7 @@
 	import { ViewerState } from "./state.svelte";
 	import { aspectOf, type Level, type Plane, PLANES, type Vec3 } from "./tiles";
 
-	let { image, projectId }: { image: ProjectImage; projectId: string } = $props();
+	let { image, projectId, roi: startRoi = null }: { image: ProjectImage; projectId: string; roi?: string | null } = $props();
 
 	const CACHE_BYTES = 512 * 1024 * 1024;
 
@@ -34,6 +35,8 @@
 	let hovered: Plane = PLANES.xy;
 	let notice = $state("");
 	const queue = new OpQueue(project, indexedDbStorage(project));
+	const rois = new RoiList(project);
+	const firstRoi = untrack(() => startRoi);
 	const sizes = new Map<string, [number, number]>();
 	const controller = new AbortController();
 
@@ -43,6 +46,10 @@
 	onMount(async () => {
 		try {
 			levels = await loadLevels(zarrUrl, controller.signal);
+			rois.load().then(() => {
+				const found = rois.items.find((r) => r.id === firstRoi);
+				if (found) goTo(found);
+			}, () => {});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
 			const layer = new LabelLayer(project, pool, viewer.shape);
@@ -78,7 +85,7 @@
 	});
 
 	$effect(() => {
-		void [viewer.opacity, viewer.showLabels, viewer.layout, viewer.brushRadius, viewer.protectLabels];
+		void [viewer.opacity, viewer.showLabels, viewer.layout, viewer.brushRadius, viewer.protectLabels, viewer.roiDepth];
 		viewer.savePreferences();
 	});
 
@@ -102,7 +109,9 @@
 	function resized(plane: Plane, width: number, height: number) {
 		sizes.set(plane.name, [width, height]);
 		const main = viewer.layout === "four" ? "xy" : viewer.layout;
-		if (viewer.autoFit && plane.name === main) fit();
+		if (plane.name !== main) return;
+		if (pendingGoTo) goTo(pendingGoTo);
+		else if (viewer.autoFit) fit();
 	}
 
 	// --- editing -------------------------------------------------------------
@@ -154,6 +163,46 @@
 		commit(plane, polygon.slice, mask, value, onlyIf, tool, true);
 	}
 
+	// --- ROIs ----------------------------------------------------------------
+
+	async function drawRoi(plane: Plane, slice: number, corners: [[number, number], [number, number]]) {
+		const bbox = roiBox(plane, slice, corners, viewer.roiDepth, viewer.shape);
+		if (!bbox) return;
+		const roi = await rois.add(bbox, viewer.roiDepth === 1 ? "slice" : "cube");
+		if (roi) viewer.selectedRoi = roi.id;
+	}
+
+	// An ROI to fit once the main view knows its size.
+	let pendingGoTo: Roi | null = null;
+
+	/** Center the views on an ROI and fit it in the main view. */
+	function goTo(roi: Roi) {
+		viewer.selectedRoi = roi.id;
+		viewer.autoFit = false;
+		const { bbox } = roi;
+		if (roi.kind === "slice" && viewer.layout !== "four") {
+			const thin = thinAxis(bbox);
+			viewer.layout = thin === 0 ? "xy" : thin === 1 ? "xz" : "yz";
+		}
+		const plane = viewer.layout === "four" ? PLANES.xy : PLANES[viewer.layout];
+		viewer.moveTo([0, 1, 2].map((a) => (bbox[a]! + bbox[a + 3]!) / 2) as Vec3);
+		const size = sizes.get(plane.name);
+		pendingGoTo = size ? null : roi;
+		if (size) {
+			const extent = (axis: number) => (bbox[axis + 3]! - bbox[axis]!) * viewer.aspect[axis]!;
+			viewer.zoom = 0.85 * Math.min(size[0] / extent(plane.u), size[1] / extent(plane.v));
+		}
+	}
+
+	const openRois = $derived(rois.items.filter((r) => r.status === "open"));
+
+	function nextOpen() {
+		const list = openRois;
+		if (list.length === 0) return;
+		const at = list.findIndex((r) => r.id === viewer.selectedRoi);
+		goTo(list[(at + 1) % list.length]!);
+	}
+
 	function setTool(tool: typeof viewer.tool) {
 		viewer.tool = tool;
 		if (tool !== "polygon") viewer.polygon = null;
@@ -188,7 +237,13 @@
 			case "brush":
 			case "eraser":
 			case "polygon":
+			case "roi":
 				return setTool(action);
+			case "next-roi":
+				return nextOpen();
+			case "complete-roi":
+				if (viewer.selectedRoi) rois.update(viewer.selectedRoi, { status: event.shiftKey ? "open" : "complete" });
+				return;
 			case "smaller":
 				viewer.brushRadius = Math.max(0.5, Math.round(viewer.brushRadius / 1.25 * 2) / 2);
 				return;
@@ -262,6 +317,8 @@
 					onresize={resized}
 					onstroke={stroke}
 					onpolygon={() => closePolygon()}
+					rois={rois.items}
+					onroi={drawRoi}
 				/>
 			{/each}
 		{/if}
@@ -284,7 +341,7 @@
 				<input type="range" min="0" max="1" step="0.05" bind:value={viewer.opacity} />
 			</label>
 			<div class="tools" role="radiogroup" aria-label="Tool">
-				{#each [["navigate", "Navigate", "n"], ["brush", "Brush", "b"], ["eraser", "Eraser", "e"], ["polygon", "Polygon", "p"]] as [tool, name, shortcut] (tool)}
+				{#each [["navigate", "Navigate", "n"], ["brush", "Brush", "b"], ["eraser", "Eraser", "e"], ["polygon", "Polygon", "p"], ["roi", "ROI", "r"]] as [tool, name, shortcut] (tool)}
 					<button
 						class:secondary={viewer.tool !== tool}
 						role="radio"
@@ -320,6 +377,34 @@
 				<span class="status" class:error={!!queue.error} role="status">{status}</span>
 			</div>
 			{#if notice}<p class="error" role="alert">{notice}</p>{/if}
+			<details class="rois" open>
+				<summary>ROIs · {openRois.length} open of {rois.items.length}</summary>
+				<label>
+					New ROIs: {viewer.roiDepth === 1 ? "one-voxel slices" : `cubes ${viewer.roiDepth} deep`}
+					<input type="range" min="1" max="256" step="1" bind:value={viewer.roiDepth} />
+				</label>
+				<ul>
+					{#each rois.items as roi (roi.id)}
+						<li class:selected={roi.id === viewer.selectedRoi}>
+							<button class="link" onclick={() => goTo(roi)}>
+								<span class="dot dot-{roi.status}"></span>
+								{roi.kind} {roi.bbox[5] - roi.bbox[2]}×{roi.bbox[4] - roi.bbox[1]}×{roi.bbox[3] - roi.bbox[0]}
+							</button>
+							<select
+								aria-label="Status"
+								value={roi.status}
+								onchange={(e) => rois.update(roi.id, { status: e.currentTarget.value as Roi["status"] })}
+							>
+								<option value="open">open</option>
+								<option value="complete">complete</option>
+								<option value="skipped">skipped</option>
+							</select>
+						</li>
+					{/each}
+				</ul>
+				{#if rois.error}<p class="error" role="alert">{rois.error}</p>{/if}
+				<p><a href="/p/{project}/rois">All ROIs</a></p>
+			</details>
 			<p class="muted">Press <kbd>?</kbd> for keys.</p>
 			{#if error}<p class="error" role="alert">{error}</p>{/if}
 		</aside>
@@ -430,6 +515,49 @@
 	}
 	.history button {
 		padding: 0.2rem 0.5rem;
+	}
+	.rois ul {
+		list-style: none;
+		margin: 0.3rem 0;
+		padding: 0;
+		max-height: 12rem;
+		overflow: auto;
+	}
+	.rois li {
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
+	}
+	.rois li.selected {
+		font-weight: 600;
+	}
+	.rois p {
+		margin: 0.2rem 0;
+	}
+	button.link {
+		background: none;
+		border: none;
+		color: var(--fg);
+		padding: 0;
+		text-align: left;
+		flex: 1;
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
+	}
+	.dot {
+		width: 0.6rem;
+		height: 0.6rem;
+		border-radius: 50%;
+	}
+	.dot-open {
+		background: #e3b341;
+	}
+	.dot-complete {
+		background: #57ab5a;
+	}
+	.dot-skipped {
+		background: #768390;
 	}
 	.status {
 		margin-left: auto;

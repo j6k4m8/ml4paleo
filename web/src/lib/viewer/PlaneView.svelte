@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onDestroy, onMount } from "svelte";
 	import { PlaneMask } from "../labels/raster";
+	import type { Roi } from "../rois.svelte";
 	import type { ChunkStore } from "./chunks";
 	import type { LabelLayer } from "./labels";
 	import { type LabelTile, PlaneRenderer } from "./plane";
@@ -29,6 +30,8 @@
 		onresize,
 		onstroke,
 		onpolygon,
+		rois,
+		onroi,
 	}: {
 		plane: Plane;
 		viewer: ViewerState;
@@ -41,6 +44,9 @@
 		onstroke: (plane: Plane, slice: number, mask: PlaneMask) => void;
 		/** Close the polygon being drawn. */
 		onpolygon: () => void;
+		rois: Roi[];
+		/** A rectangle drawn with the ROI tool, in plane voxels, at `slice`. */
+		onroi: (plane: Plane, slice: number, corners: [[number, number], [number, number]]) => void;
 	} = $props();
 
 	// Labels are full resolution only until the label pyramid exists, so
@@ -220,6 +226,7 @@
 
 	let press: { x: number; y: number; moved: boolean; pan: boolean } | null = null;
 	let stroke: { mask: PlaneMask; last: [number, number] } | null = null;
+	let rectangle: { from: [number, number]; to: [number, number] } | null = $state(null);
 	let cursor: [number, number] | null = $state(null);
 	let overlay: HTMLCanvasElement;
 	let wheelSteps = 0;
@@ -253,7 +260,7 @@
 	}
 
 	function canEdit(): boolean {
-		return viewer.tool === "eraser" || viewer.activeClass !== null;
+		return viewer.tool === "eraser" || viewer.tool === "roi" || viewer.activeClass !== null;
 	}
 
 	function pointerDown(event: PointerEvent) {
@@ -268,6 +275,9 @@
 			mask.stamp(...point, ...radii());
 			stroke = { mask, last: point };
 			drawStroke();
+		} else if (viewer.tool === "roi") {
+			const point = planePoint(event);
+			rectangle = { from: point, to: point };
 		} else if (viewer.tool === "polygon") {
 			const point = planePoint(event);
 			const current = viewer.polygon;
@@ -282,6 +292,10 @@
 	function pointerMove(event: PointerEvent) {
 		onhover(plane);
 		cursor = offset(event).map((d, i) => (d + (i === 0 ? width : height) / 2) / ratio()) as [number, number];
+		if (rectangle) {
+			rectangle = { ...rectangle, to: planePoint(event) };
+			return;
+		}
 		if (stroke) {
 			const point = planePoint(event);
 			stroke.mask.line(stroke.last, point, ...radii());
@@ -305,7 +319,11 @@
 	}
 
 	function pointerUp(event: PointerEvent) {
-		if (stroke) {
+		if (rectangle) {
+			const { from, to } = rectangle;
+			rectangle = null;
+			onroi(plane, slice, [from, to]);
+		} else if (stroke) {
 			const finished = stroke.mask;
 			stroke = null;
 			clearStroke();
@@ -320,6 +338,7 @@
 	function cancel() {
 		press = null;
 		stroke = null;
+		rectangle = null;
 		clearStroke();
 	}
 
@@ -398,6 +417,27 @@
 		return all.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
 	}
 
+	/** Screen rectangles of the ROIs this view's plane cuts through. */
+	const roiOutlines = $derived.by(() => {
+		void [viewer.position, viewer.zoom, width, height];
+		const { normal, u, v } = plane;
+		return rois
+			.filter((roi) => roi.bbox[normal]! <= slice && slice < roi.bbox[normal + 3]!)
+			.map((roi) => {
+				const [x0, y0] = screen(roi.bbox[u]!, roi.bbox[v]!);
+				const [x1, y1] = screen(roi.bbox[u + 3]!, roi.bbox[v + 3]!);
+				return { id: roi.id, status: roi.status, x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+			});
+	});
+
+	const rectangleOutline = $derived.by(() => {
+		void [viewer.position, viewer.zoom, width, height];
+		if (!rectangle) return null;
+		const [x0, y0] = screen(...rectangle.from);
+		const [x1, y1] = screen(...rectangle.to);
+		return { x: Math.min(x0, x1), y: Math.min(y0, y1), w: Math.abs(x1 - x0), h: Math.abs(y1 - y0) };
+	});
+
 	const brushOutline = $derived.by(() => {
 		void [viewer.position, viewer.zoom, viewer.brushRadius, width, height];
 		if (!painting || !cursor) return null;
@@ -424,6 +464,19 @@
 	></canvas>
 	<canvas class="overlay" bind:this={overlay} aria-hidden="true"></canvas>
 	<svg class="overlay" aria-hidden="true">
+		{#each roiOutlines as roi (roi.id)}
+			<rect
+				class="roi roi-{roi.status}"
+				class:selected={roi.id === viewer.selectedRoi}
+				x={roi.x}
+				y={roi.y}
+				width={Math.max(1, roi.w)}
+				height={Math.max(1, roi.h)}
+			/>
+		{/each}
+		{#if rectangleOutline}
+			<rect class="roi roi-new" x={rectangleOutline.x} y={rectangleOutline.y} width={rectangleOutline.w} height={rectangleOutline.h} />
+		{/if}
 		{#if polygonHere}
 			<polyline
 				points={polygonPath(polygonHere.points, cursor)}
@@ -482,6 +535,27 @@
 	}
 	canvas.editing {
 		cursor: crosshair;
+	}
+	.roi {
+		fill: none;
+		stroke-width: 1.5;
+		stroke-dasharray: 6 3;
+	}
+	.roi-open {
+		stroke: #e3b341;
+	}
+	.roi-complete {
+		stroke: #57ab5a;
+		stroke-dasharray: none;
+	}
+	.roi-skipped {
+		stroke: #768390;
+	}
+	.roi-new {
+		stroke: #fff;
+	}
+	.roi.selected {
+		stroke-width: 3;
 	}
 	.overlay {
 		position: absolute;

@@ -15,6 +15,9 @@ export type Action =
 	| "brush"
 	| "eraser"
 	| "polygon"
+	| "roi"
+	| "next-roi"
+	| "complete-roi"
 	| "smaller"
 	| "bigger"
 	| "class"
@@ -43,6 +46,9 @@ export const KEYMAP: Binding[] = [
 	{ action: "brush", keys: ["b"], label: "Brush" },
 	{ action: "eraser", keys: ["e"], label: "Eraser" },
 	{ action: "polygon", keys: ["p"], label: "Polygon (with Alt when closing: erase that class)" },
+	{ action: "roi", keys: ["r"], label: "Draw an ROI" },
+	{ action: "next-roi", keys: ["g"], label: "Go to the next open ROI" },
+	{ action: "complete-roi", keys: ["c"], label: "Mark the selected ROI complete (with Shift: reopen)" },
 	{ action: "smaller", keys: ["["], label: "Smaller brush" },
 	{ action: "bigger", keys: ["]"], label: "Bigger brush" },
 	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class" },
@@ -62,6 +68,7 @@ export const MOUSE: [string, string][] = [
 	["Click (navigating)", "Move the crosshair there"],
 	["Drag (brush, eraser)", "Paint"],
 	["Click (polygon)", "Add a point"],
+	["Drag (ROI)", "Draw an ROI on this slice"],
 ];
 
 const BY_KEY = new Map(KEYMAP.flatMap((binding) => binding.keys.map((key) => [key, binding.action] as const)));

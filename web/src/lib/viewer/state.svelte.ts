@@ -9,7 +9,7 @@ import type { Plane, Vec3 } from "./tiles";
 export type Layout = "four" | Plane["name"];
 export const LAYOUTS: Layout[] = ["four", "xy", "xz", "yz"];
 
-export type Tool = "navigate" | "brush" | "eraser" | "polygon";
+export type Tool = "navigate" | "brush" | "eraser" | "polygon" | "roi";
 
 /** A polygon being drawn: its plane, slice, and vertices in plane voxels. */
 export interface Polygon {
@@ -26,6 +26,7 @@ interface Preferences {
 	layout: Layout;
 	brushRadius: number;
 	protectLabels: boolean;
+	roiDepth: number;
 }
 
 function loadPreferences(): Partial<Preferences> {
@@ -58,6 +59,9 @@ export class ViewerState {
 	polygon = $state<Polygon | null>(null);
 	/** Space is held: drag pans whatever the tool. */
 	panning = $state(false);
+	/** New ROIs: one-voxel slices, or cubes this many voxels deep. */
+	roiDepth = $state(1);
+	selectedRoi = $state<string | null>(null);
 
 	constructor(
 		public shape: Vec3,
@@ -69,6 +73,7 @@ export class ViewerState {
 		if (saved.layout && LAYOUTS.includes(saved.layout)) this.layout = saved.layout;
 		if (typeof saved.brushRadius === "number") this.brushRadius = Math.min(64, Math.max(0.5, saved.brushRadius));
 		if (typeof saved.protectLabels === "boolean") this.protectLabels = saved.protectLabels;
+		if (typeof saved.roiDepth === "number") this.roiDepth = Math.min(512, Math.max(1, Math.round(saved.roiDepth)));
 	}
 
 	savePreferences(): void {
@@ -79,6 +84,7 @@ export class ViewerState {
 				layout: this.layout,
 				brushRadius: this.brushRadius,
 				protectLabels: this.protectLabels,
+				roiDepth: this.roiDepth,
 			};
 			localStorage.setItem(PREFERENCES, JSON.stringify(preferences));
 		} catch {

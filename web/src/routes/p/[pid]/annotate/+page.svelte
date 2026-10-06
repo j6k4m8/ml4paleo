@@ -20,7 +20,7 @@
 	<p><a href="/p/{pid}">← Project</a></p>
 	{#if image}
 		{#key image.artifact_id}
-			<Viewer {image} projectId={pid} />
+			<Viewer {image} projectId={pid} roi={page.url.searchParams.get("roi")} />
 		{/key}
 	{:else if error}
 		<p class="error" role="alert">{error}</p>
