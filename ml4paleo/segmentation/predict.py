@@ -8,13 +8,15 @@ arrays, in 64³ chunks inside 512³ shards:
   nothing was predicted yet.
 - `uncertainty`: 255 × (1 − the top class probability), so 0 is sure.
 
-Each shard is predicted and written whole by one job, so jobs never write
-the same shard.
+Each shard is predicted by one job, so jobs never write the same shard. A
+job goes through its shard in blocks sized to its memory budget, reading
+each block with the predictor's halo straight from the image (see
+`predict_box`).
 """
 
 import itertools
 import math
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 
 import numpy as np
 import zarr
@@ -22,12 +24,14 @@ import zarr
 from ml4paleo.labels import from_plugin_space
 from ml4paleo.storage import StorageGrant, zarr_store
 
-from .dataset import Box, ImageArray, normalize
-from .plugin import Predictor
+from .dataset import Box, ImageArray, normalize, read_box, tile_for, tiles
+from .plugin import CropCost, Predictor
 
 CHUNK_ZYX = (64, 64, 64)
 SHARD_ZYX = (512, 512, 512)
 ARRAYS = ("class", "uncertainty")
+# Blocks are at least this many voxels a side, however little memory there is.
+MIN_BLOCK = 16
 
 
 def create_prediction(grant: StorageGrant, shape_zyx: Sequence[int]) -> zarr.Group:
@@ -79,17 +83,39 @@ def shard_boxes(
     ]
 
 
-def blocks(box: Box, size: Sequence[int]) -> Iterator[Box]:
-    starts = [range(box[a], box[a + 3], size[a]) for a in range(3)]
-    for z, y, x in itertools.product(*starts):
-        yield (
-            z,
-            y,
-            x,
-            min(z + size[0], box[3]),
-            min(y + size[1], box[4]),
-            min(x + size[2], box[5]),
-        )
+def block_for(memory_budget_bytes: int, channels: int, predictor: Predictor) -> int:
+    """
+    The side of the largest blocks that fit in a memory budget with their
+    halo, counting the image read for them and what the predictor holds,
+    but at least `MIN_BLOCK` and at most a shard.
+    """
+    # The image is held as read (at most 8 bytes a voxel and channel) and
+    # normalized to float32 (twice over while normalizing).
+    cost = CropCost(
+        halo=predictor.halo,
+        bytes_per_voxel=16 * channels + predictor.bytes_per_voxel,
+    )
+    return tile_for(memory_budget_bytes, cost, MIN_BLOCK, max(SHARD_ZYX))
+
+
+def _predict(
+    predictor: Predictor,
+    image: ImageArray,
+    box: Box,
+    window: tuple[float, float],
+    class_values: list[int],
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Stored label values and uncertainty for a box of the image.
+    """
+    probabilities = predictor.predict_block(
+        normalize(read_box(image, box, predictor.halo), window)
+    )
+    classes = from_plugin_space(
+        probabilities.argmax(axis=0).astype(np.uint8), class_values
+    )
+    uncertainty = np.round(255 * (1 - probabilities.max(axis=0))).astype(np.uint8)
+    return classes, uncertainty
 
 
 def predict_box(
@@ -98,47 +124,49 @@ def predict_box(
     box: Box,
     window: tuple[float, float],
     class_values: list[int],
-    block: Sequence[int] = CHUNK_ZYX,
+    out: zarr.Group,
+    memory_budget_bytes: int,
     progress: Callable[[float], None] | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> None:
     """
-    Predict a box of the image (level 0, (c, z, y, x)): stored label values
-    and uncertainty, each shaped like the box.
+    Predict a box of the image (level 0, (c, z, y, x)) into the prediction
+    `out`, block by block. Each block is read with the predictor's halo;
+    where the image ends, its edge voxels are repeated.
 
-    The box is read once with the predictor's halo around it; where the
-    image ends, its edge voxels are repeated.
+    Blocks and the box's outputs share half the memory budget, and the
+    model keeps the other half, as in training. When the box's outputs take
+    at most half of that share, they are kept in memory and written once;
+    otherwise each block's are written as soon as it's predicted, which
+    reads and rewrites the shard every time.
     """
-    h = predictor.halo
-    shape = tuple(int(n) for n in image.shape[1:4])
-    lo = [max(0, box[a] - h) for a in range(3)]
-    hi = [min(shape[a], box[a + 3] + h) for a in range(3)]
-    region = np.asarray(image[(slice(None), *(slice(lo[a], hi[a]) for a in range(3)))])
-    padding = [(0, 0)] + [
-        (h - (box[a] - lo[a]), h - (hi[a] - box[a + 3])) for a in range(3)
-    ]
-    region = np.pad(region, padding, mode="edge")
     size = tuple(box[a + 3] - box[a] for a in range(3))
-    classes = np.zeros(size, dtype=np.uint8)
-    uncertainty = np.zeros(size, dtype=np.uint8)
-    pieces = list(blocks(box, block))
+    share = memory_budget_bytes // 2
+    output_bytes = len(ARRAYS) * math.prod(size)
+    outputs = (
+        (np.zeros(size, dtype=np.uint8), np.zeros(size, dtype=np.uint8))
+        if output_bytes <= share // 2
+        else None
+    )
+    side = block_for(
+        share - output_bytes if outputs is not None else share,
+        int(image.shape[0]),
+        predictor,
+    )
+    pieces = list(tiles(box, side))
     for done, piece in enumerate(pieces):
-        # Where the block sits in the padded region (which starts h before the box).
-        start = [piece[a] - box[a] for a in range(3)]
-        stop = [piece[a + 3] - box[a] + 2 * h for a in range(3)]
-        chunk = normalize(
-            region[(slice(None), *(slice(start[a], stop[a]) for a in range(3)))], window
-        )
-        probabilities = predictor.predict_block(chunk)
-        out = tuple(slice(piece[a] - box[a], piece[a + 3] - box[a]) for a in range(3))
-        classes[out] = from_plugin_space(
-            probabilities.argmax(axis=0).astype(np.uint8), class_values
-        )
-        uncertainty[out] = np.round(255 * (1 - probabilities.max(axis=0))).astype(
-            np.uint8
-        )
+        classes, uncertainty = _predict(predictor, image, piece, window, class_values)
+        if outputs is None:
+            write_box(out, piece, classes, uncertainty)
+        else:
+            at = tuple(
+                slice(piece[a] - box[a], piece[a + 3] - box[a]) for a in range(3)
+            )
+            outputs[0][at] = classes
+            outputs[1][at] = uncertainty
         if progress:
             progress((done + 1) / len(pieces))
-    return classes, uncertainty
+    if outputs is not None:
+        write_box(out, box, *outputs)
 
 
 def write_box(

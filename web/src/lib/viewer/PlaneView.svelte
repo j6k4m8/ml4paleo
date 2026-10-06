@@ -211,7 +211,9 @@
 
 		const full = levels[0]!;
 		const fullTiles = visibleTiles(full, current, 0);
-		labelsHidden = (viewer.showLabels || viewer.showPrediction) && fullTiles.length > MAX_LABEL_TILES;
+		// Only layers that exist and are shown get hidden when zoomed out.
+		const overlaid = !!((viewer.showLabels && labels) || (viewer.showPrediction && prediction));
+		labelsHidden = overlaid && fullTiles.length > MAX_LABEL_TILES;
 		const overlays: Overlay[] = [];
 		const add = (store: ChunkStore | null | undefined, prefix: string, shown: boolean, opacity: number) => {
 			if (!store) return;
