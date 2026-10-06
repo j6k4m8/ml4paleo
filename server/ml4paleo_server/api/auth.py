@@ -249,11 +249,18 @@ async def signup(
     )
     if _is_reserved(body.username):
         raise HTTPException(status_code=422, detail="That username is reserved.")
+    invite_only = await get_signup_mode(db, settings) == "invite"
+    if invite_only and not body.invite:
+        raise HTTPException(status_code=403, detail="Sign-up needs an invite link.")
     invite = None
-    if await get_signup_mode(db, settings) == "invite":
-        if not body.invite:
-            raise HTTPException(status_code=403, detail="Sign-up needs an invite link.")
-        invite = await _use_token(db, "invite", body.invite)
+    if body.invite:
+        # An invite also counts with open sign-up (it can confirm the address
+        # it was sent to), but there a stale one doesn't stop anyone.
+        try:
+            invite = await _use_token(db, "invite", body.invite)
+        except HTTPException:
+            if invite_only:
+                raise
     if body.email is None and await get_require_email(db, settings):
         raise HTTPException(status_code=422, detail="Enter an email address.")
     taken = await db.scalar(

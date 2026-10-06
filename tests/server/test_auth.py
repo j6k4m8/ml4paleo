@@ -435,6 +435,20 @@ def test_opening_the_old_link_during_a_change_confirms_nothing(
     assert session["user"]["email_verified"] is False
 
 
+def test_invites_confirm_their_address_with_open_sign_up_too(
+    new_browser, smtp_settings, migrated_database_url
+):
+    admin, _ = make_admin(lambda: new_browser(smtp_settings), migrated_database_url)
+    url = admin.post("/api/admin/invites", json={"email": "eve@example.org"}).json()
+    invite = url["url"].split("invite=")[1]
+    eve = new_browser(smtp_settings)
+    created = signup(eve, username="eve", email="eve@example.org", invite=invite)
+    assert created.json()["user"]["email_verified"] is True
+    # A used-up invite doesn't stop anyone signing up while sign-up is open.
+    again = signup(new_browser(smtp_settings), username="eva", invite=invite)
+    assert again.status_code == 201
+
+
 def test_people_can_change_their_email(
     new_browser, smtp_settings, migrated_database_url
 ):
