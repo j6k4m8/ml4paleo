@@ -150,12 +150,14 @@
 		start(`/api/projects/${pid}/meshes`, { downsample, method, simplify }, (text) => (meshError = text));
 	}
 
-	// Letters and digits in any script, so names that aren't in Latin letters
-	// still say something. Files also carry the class's value, which is unique.
+	// Letters, with their combining marks, and digits in any script, so names
+	// that aren't in Latin letters still say something. Files also carry the
+	// class's value, which is unique.
 	const slug = (text: string) =>
 		text
+			.normalize("NFC")
 			.toLowerCase()
-			.replace(/[^\p{L}\p{N}]+/gu, "-")
+			.replace(/[^\p{L}\p{M}\p{N}]+/gu, "-")
 			.replace(/^-|-$/g, "") || "mesh";
 </script>
 
