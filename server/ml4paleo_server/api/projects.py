@@ -12,7 +12,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
 from .. import audit
 from ..auth.deps import CurrentAuth, DbSession
@@ -205,31 +206,38 @@ async def add_member(
     auth: CurrentAuth,
     db: DbSession,
 ) -> list[MemberOut]:
+    """
+    Add someone by their username: 404 if no active account has it, 409 if
+    they're already a member.
+    """
     name = body.username.strip().lower()
     user = await db.scalar(
         select(User).where(User.username == name, User.status == "active")
     )
     if user is None:
         raise HTTPException(status_code=404, detail="No one with that username.")
-    already = await db.scalar(
-        select(func.count())
-        .select_from(ProjectMember)
-        .where(ProjectMember.project_id == project.id, ProjectMember.user_id == user.id)
+    # Inserts nothing for someone who's already a member, even one added a
+    # moment ago by someone else.
+    added = await db.scalar(
+        insert(ProjectMember)
+        .values(project_id=project.id, user_id=user.id, added_by=auth.user.id)
+        .on_conflict_do_nothing()
+        .returning(ProjectMember.user_id)
     )
-    if not already:
-        db.add(
-            ProjectMember(project_id=project.id, user_id=user.id, added_by=auth.user.id)
+    if added is None:
+        raise HTTPException(
+            status_code=409, detail=f"{user.username} is already a member."
         )
-        audit.record(
-            db,
-            actor_id=auth.user.id,
-            action="project.member.add",
-            target_type="project",
-            target_id=project.id,
-            request=request,
-            details={"user_id": str(user.id), "username": user.username},
-        )
-        await db.commit()
+    audit.record(
+        db,
+        actor_id=auth.user.id,
+        action="project.member.add",
+        target_type="project",
+        target_id=project.id,
+        request=request,
+        details={"user_id": str(user.id), "username": user.username},
+    )
+    await db.commit()
     return await _members(db, project)
 
 

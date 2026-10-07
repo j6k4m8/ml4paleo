@@ -90,8 +90,12 @@ def test_membership_changes(new_browser):
         for m in ada.post(url, json={"username": "bob"}).json()
         if m["username"] == "bob"
     )
-    # Adding twice is harmless.
-    assert len(ada.post(url, json={"username": "bob"}).json()) == 2
+    # Adding someone twice says so, and changes nothing.
+    again = ada.post(url, json={"username": "bob"})
+    assert again.status_code == 409
+    assert again.json()["detail"] == "bob is already a member."
+    assert ada.post(url, json={"username": "ada"}).status_code == 409
+    assert len(ada.get(url).json()) == 2
     # Nobody can remove the owner; a collaborator can leave.
     assert bob.request("DELETE", f"{url}/{ada_id}").status_code == 403
     assert bob.request("DELETE", f"{url}/{bob_id}").status_code == 204
