@@ -190,6 +190,10 @@ def test_slices_of_other_sizes_and_pages_in_a_zip_are_refused(tmp_path):
 def test_other_files_are_refused():
     with pytest.raises(IngestError, match="isn't a TIFF or a zip"):
         file_kind(io.BytesIO(b"just some text, not labels"))
+    # Lossy or other formats aren't read, even inside a zip.
+    planes = ZipPlanes(_zip({"a.jpg": _image(np.zeros((4, 4), np.uint8), "JPEG")}))
+    with pytest.raises(IngestError, match="a.jpg: it isn't a TIFF or PNG"):
+        count_values(planes)
 
 
 @pytest.mark.parametrize("keep", [0.1, 0.5, 0.8])

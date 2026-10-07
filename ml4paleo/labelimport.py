@@ -75,6 +75,13 @@ NOT_LABELS = (
     "The file isn't a TIFF or a zip. Upload a TIFF stack, or a zip of TIFF or "
     "PNG slices."
 )
+# Only lossless formats, which keep each pixel's number exactly (and fewer
+# of Pillow's decoders see what people upload).
+FORMATS = ["TIFF", "PNG"]
+UNREADABLE = (
+    "it isn't a TIFF or PNG Pillow can read. Labels need to be whole numbers "
+    "(8, 16, or 32 bits) or 32-bit floats; if they are, the file may be damaged."
+)
 TOO_MANY = (
     f"The labels have more than {MAX_VALUES} different values, more than a "
     "project has room for as classes."
@@ -231,12 +238,10 @@ class ZipPlanes(Planes):
         member = self._members[z]
         image = None
         try:
-            image = Image.open(member.open())
+            image = Image.open(member.open(), formats=FORMATS)
             pages = getattr(image, "n_frames", 1)
         except Image.UnidentifiedImageError:
-            raise IngestError(
-                f"Couldn't read {member.name}: it isn't a TIFF or PNG image."
-            ) from None
+            raise IngestError(f"Couldn't read {member.name}: {UNREADABLE}") from None
         except READ_ERRORS as exc:
             if image is not None:
                 image.close()
@@ -271,9 +276,9 @@ class ImagePlanes(Planes):
     ):
         super().__init__(limits)
         try:
-            self._image = Image.open(source)
+            self._image = Image.open(source, formats=FORMATS)
         except Image.UnidentifiedImageError:
-            raise IngestError("Couldn't read the labels file; is it damaged?") from None
+            raise IngestError(f"Couldn't read the labels file: {UNREADABLE}") from None
         except READ_ERRORS as exc:
             raise IngestError(f"Couldn't read the labels file: {exc}") from None
         try:
