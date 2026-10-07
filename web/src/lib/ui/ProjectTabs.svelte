@@ -3,6 +3,7 @@
 	import Brush from "@lucide/svelte/icons/brush";
 	import Shapes from "@lucide/svelte/icons/shapes";
 	import House from "@lucide/svelte/icons/house";
+	import RotateCcwClock from "@lucide/svelte/icons/rotate-ccw-clock";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
 	import { page } from "$app/state";
 
@@ -14,17 +15,18 @@
 		{ href: `/p/${pid}/rois`, label: "ROIs", icon: SquareDashed },
 		{ href: `/p/${pid}/models`, label: "Models", icon: Brain },
 		{ href: `/p/${pid}/results`, label: "Results", icon: Shapes },
+		{ href: `/p/${pid}/history`, label: "History", icon: RotateCcwClock },
 	]);
 </script>
 
-<!-- A project's pages as document-style tabs. -->
-<nav class="flex h-8 items-end gap-px border-b border-edge bg-chrome px-3" aria-label="Project">
+<!-- A project's pages as document-style tabs, scrolling sideways when they don't fit. -->
+<nav class="flex h-8 items-end gap-px overflow-x-auto border-b border-edge bg-chrome px-3" aria-label="Project">
 	{#each tabs as tab (tab.href)}
 		{@const current = page.url.pathname === tab.href}
 		<a
 			href={tab.href}
 			aria-current={current ? "page" : undefined}
-			class="flex h-7 items-center gap-1.5 rounded-t-sm px-3 text-xs no-underline hover:no-underline
+			class="flex h-7 shrink-0 items-center gap-1.5 rounded-t-sm px-3 text-xs no-underline hover:no-underline
 				{current ? 'bg-pasteboard text-ink shadow-[inset_0_1px_0_var(--color-accent)]' : 'text-ink-dim hover:bg-panel hover:text-ink'}"
 		>
 			<tab.icon size={13} />
