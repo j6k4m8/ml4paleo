@@ -60,7 +60,8 @@
 		projectId,
 		title = "Image",
 		roi: startRoi = null,
-	}: { image: ProjectImage; projectId: string; title?: string; roi?: string | null } = $props();
+		box: startBox = null,
+	}: { image: ProjectImage; projectId: string; title?: string; roi?: string | null; box?: Box | null } = $props();
 
 	const CACHE_BYTES = 512 * 1024 * 1024;
 	// The most one proposal predicts (the server's limit).
@@ -117,6 +118,7 @@
 	};
 	const rois = new RoiList(project);
 	const firstRoi = untrack(() => startRoi);
+	const firstBox = untrack(() => startBox);
 	const sizes = new Map<string, [number, number]>();
 	const controller = new AbortController();
 
@@ -129,6 +131,7 @@
 			rois.load().then(() => {
 				const found = rois.items.find((r) => r.id === firstRoi);
 				if (found) goTo(found);
+				else if (firstBox) showBox(firstBox);
 				else if (firstRoi) rois.error = "That ROI isn't in this project any more.";
 			});
 			pool = new WorkerPool();
@@ -235,7 +238,7 @@
 
 	function resized(plane: Plane, width: number, height: number) {
 		sizes.set(plane.name, [width, height]);
-		if (pendingGoTo) return goTo(pendingGoTo);
+		if (pendingPlace) return fitTo(pendingPlace);
 		const main = viewer.layout === "four" ? "xy" : viewer.layout;
 		if (plane.name === main && viewer.autoFit) fit();
 	}
@@ -286,34 +289,55 @@
 		if (roi) viewer.selectedRoi = roi.id;
 	}
 
-	// An ROI to fit once the main view knows its size.
-	let pendingGoTo: Roi | null = null;
+	/** A box to center the views on and fit: an ROI's, or one a link gave. */
+	interface Place {
+		bbox: Box;
+		/** One voxel thick, so it shows in the view of its plane. */
+		slice: boolean;
+		/** Fit at least this many voxels across, for some room around small boxes. */
+		least?: number;
+	}
 
-	/**
-	 * Center the views on an ROI and fit it: a slice ROI in the view of its
-	 * plane, a cube in every view shown.
-	 */
+	// A place to fit once the main view knows its size.
+	let pendingPlace: Place | null = null;
+
+	/** Select an ROI, and center the views on it and fit it. */
 	function goTo(roi: Roi) {
 		viewer.selectedRoi = roi.id;
+		fitTo({ bbox: roi.bbox, slice: roi.kind === "slice" });
+	}
+
+	/** Show a box a link gave, such as an edit's from the history page. */
+	function showBox(box: Box) {
+		const bbox = clipBox(box, viewer.shape);
+		if (!bbox) {
+			notice = "That place is outside the image.";
+			return;
+		}
+		fitTo({ bbox, slice: [0, 1, 2].some((a) => bbox[a + 3]! - bbox[a]! === 1), least: 64 });
+	}
+
+	/** Center the views on a place and fit it: a slice in the view of its plane, a cube in every view shown. */
+	function fitTo(place: Place) {
 		viewer.autoFit = false;
-		const { bbox } = roi;
+		const { bbox } = place;
 		const thin = thinAxis(bbox);
 		const slicePlane = thin === 0 ? PLANES.xy : thin === 1 ? PLANES.xz : PLANES.yz;
 		viewer.moveTo([0, 1, 2].map((a) => (bbox[a]! + bbox[a + 3]!) / 2) as Vec3);
-		if (roi.kind === "slice" && viewer.layout !== "four" && viewer.layout !== slicePlane.name) {
+		if (place.slice && viewer.layout !== "four" && viewer.layout !== slicePlane.name) {
 			// The new view's size arrives when it lays out; fit then.
 			viewer.layout = slicePlane.name;
 			sizes.clear();
-			pendingGoTo = roi;
+			pendingPlace = place;
 			return;
 		}
-		const planes = roi.kind === "slice" ? [slicePlane] : shown;
-		const extent = (axis: number) => (bbox[axis + 3]! - bbox[axis]!) * viewer.aspect[axis]!;
+		const planes = place.slice ? [slicePlane] : shown;
+		const extent = (axis: number) => Math.max(place.least ?? 1, bbox[axis + 3]! - bbox[axis]!) * viewer.aspect[axis]!;
 		const zooms = planes.flatMap((plane) => {
 			const size = sizes.get(plane.name);
 			return size ? [Math.min(size[0] / extent(plane.u), size[1] / extent(plane.v))] : [];
 		});
-		pendingGoTo = zooms.length === planes.length ? null : roi;
+		pendingPlace = zooms.length === planes.length ? null : place;
 		if (zooms.length > 0) viewer.zoom = Math.min(64, Math.max(1 / 512, 0.85 * Math.min(...zooms)));
 	}
 
