@@ -246,6 +246,10 @@ def test_a_label_file_is_checked_and_imported_as_edits(
     assert len(imported) == 2 * 1 * 3
     assert all(op["source"] == Source.IMPORTED for op in imported)
     assert {op["user_id"] for op in imported} == {me}
+    # The history names who imported them, and the job that brought them in.
+    assert {(op["username"], op["job_kind"]) for op in imported} == {
+        ("ada", "labels.import")
+    }
     assert imported[0]["tool"] == {
         "name": "label-import",
         "import": import_id,
