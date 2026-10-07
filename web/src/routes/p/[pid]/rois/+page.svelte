@@ -10,6 +10,7 @@
 	import type { Level } from "#lib/viewer/tiles.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
 	import LabelImport from "#lib/ui/LabelImport.svelte";
+	import Loop from "#lib/ui/Loop.svelte";
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
 	import Trash from "@lucide/svelte/icons/trash";
@@ -128,7 +129,9 @@
 		{#if rois?.loaded && rois.items.length === 0}
 			<div class="panel grid place-items-center gap-2 p-10 text-center">
 				<SquareDashed size={28} class="text-ink-faint" />
-				<p class="muted">No ROIs yet. In the annotator, pick the ROI tool (<span class="kbd">R</span>) and drag a box.</p>
+				<p class="muted">
+					No ROIs yet. Explore a new place, or in the annotator pick the ROI tool (<span class="kbd">R</span>) and drag a box.
+				</p>
 			</div>
 		{/if}
 
@@ -192,6 +195,7 @@
 	</div>
 
 	<div class="flex flex-col gap-4 lg:self-start">
+		<Loop {pid} importHref="#import-labels" />
 		<LabelImport {pid} onimported={labelsImported} />
 	</div>
 </div>

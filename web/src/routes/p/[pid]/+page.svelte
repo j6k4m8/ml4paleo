@@ -4,6 +4,7 @@
 	import { ApiError, api, message } from "#lib/api.ts";
 	import type { Pipeline, Project, ProjectImage, Upload as UploadInfo } from "#lib/types.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
+	import Loop from "#lib/ui/Loop.svelte";
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 	import { uploadFile } from "#lib/upload.ts";
 	import Brush from "@lucide/svelte/icons/brush";
@@ -202,6 +203,10 @@
 					</form>
 				</div>
 			</section>
+
+			{#if image}
+				<Loop {pid} importHref="/p/{pid}/rois#import-labels" />
+			{/if}
 		</div>
 
 		<section class="panel self-start">
