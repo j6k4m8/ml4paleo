@@ -57,7 +57,7 @@ class PipelineOut(BaseModel):
     created_by: uuid.UUID | None = None
 
 
-async def _pipeline_out(db, root: Job) -> PipelineOut:
+async def pipeline_out(db, root: Job) -> PipelineOut:
     status = await jobs.pipeline_status(db, root.id)
     error = None
     if status.status == "failed":
@@ -124,7 +124,7 @@ async def start_ingest(
     )
     await db.commit()
     await db.refresh(root)
-    return await _pipeline_out(db, root)
+    return await pipeline_out(db, root)
 
 
 @router.get("/pipelines")
@@ -137,14 +137,14 @@ async def list_pipelines(project: MemberProject, db: DbSession) -> list[Pipeline
             .limit(50)
         )
     ).all()
-    return [await _pipeline_out(db, root) for root in roots]
+    return [await pipeline_out(db, root) for root in roots]
 
 
 @router.get("/pipelines/{pipeline_id}")
 async def get_pipeline(
     pipeline_id: uuid.UUID, project: MemberProject, db: DbSession
 ) -> PipelineOut:
-    return await _pipeline_out(db, await _root(db, project, pipeline_id))
+    return await pipeline_out(db, await _root(db, project, pipeline_id))
 
 
 @router.get("/pipelines/{pipeline_id}/events", response_model=None)
@@ -162,7 +162,7 @@ async def pipeline_events(
     not to reconnect (fetch the pipeline instead).
     """
     root = await _root(db, project, pipeline_id)
-    if (await _pipeline_out(db, root)).status in FINISHED:
+    if (await pipeline_out(db, root)).status in FINISHED:
         return Response(status_code=204)
     # Read what the stream needs before ending the transaction, which
     # expires loaded objects (the job is detached, so it keeps its values).
@@ -204,7 +204,7 @@ async def pipeline_events(
             async with sessionmaker() as session:
                 if not await still_allowed(session):
                     return
-                current = await _pipeline_out(session, root)
+                current = await pipeline_out(session, root)
             payload = current.model_dump_json()
             if payload != last:
                 last = payload

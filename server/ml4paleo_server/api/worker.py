@@ -38,7 +38,10 @@ router = APIRouter(prefix="/api/worker/v1", tags=["worker"])
 # notification.
 CLAIM_POLL_SECONDS = 5.0
 # The kinds of job that may write labels, and the source their edits get.
-LABEL_WRITERS = {"v1.labels": Source.HUMAN}
+LABEL_WRITERS = {"v1.labels": Source.HUMAN, "labels.import": Source.IMPORTED}
+# Kinds whose edits are the person's who started the job: a file they
+# imported, unlike v1 samples, which anyone with the job's link drew.
+STARTERS_EDITS = {"labels.import"}
 
 
 def _lease_lost() -> HTTPException:
@@ -248,6 +251,7 @@ async def label_op(
             deltas=deltas,
             source=source,
             tool=body.tool,
+            user_id=job.created_by if job.kind in STARTERS_EDITS else None,
             job_id=job.id,
         )
     except labels.NoImage:
