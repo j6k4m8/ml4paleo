@@ -3,6 +3,7 @@
 	import Check from "@lucide/svelte/icons/check";
 	import CheckCheck from "@lucide/svelte/icons/check-check";
 	import CloudOff from "@lucide/svelte/icons/cloud-off";
+	import Compass from "@lucide/svelte/icons/compass";
 	import Eraser from "@lucide/svelte/icons/eraser";
 	import Eye from "@lucide/svelte/icons/eye";
 	import EyeOff from "@lucide/svelte/icons/eye-off";
@@ -619,6 +620,26 @@
 		}
 	}
 
+	let exploring = $state(false);
+
+	/**
+	 * Make an ROI at a random place no ROI covers, go there, and propose
+	 * labels there with the newest model, if one is ready.
+	 */
+	async function explore() {
+		if (exploring) return;
+		exploring = true;
+		notice = "";
+		try {
+			const roi = await rois.explore();
+			if (!roi) return;
+			goTo(roi);
+			if (proposer && !proposing && !proposeBlocked) propose(roi);
+		} finally {
+			exploring = false;
+		}
+	}
+
 	/** The next open ROI after the selected one, in list order. */
 	function nextOpen() {
 		const items = rois.items;
@@ -1129,7 +1150,18 @@
 						{accepting ? "Accepting…" : `Accept ${shownHere.kind} here`}
 					</button>
 				{/if}
-				<a href="/p/{project}/rois" class="self-start text-2xs">Open the ROI gallery</a>
+				<div class="flex items-center gap-2">
+					<button
+						class="btn"
+						disabled={exploring}
+						title="Make an ROI at a random place no ROI covers and go there; with a ready model, propose labels there"
+						onclick={explore}
+					>
+						<Compass size={13} />
+						{exploring ? "Exploring…" : "Explore"}
+					</button>
+					<a href="/p/{project}/rois" class="ml-auto text-2xs">Open the ROI gallery</a>
+				</div>
 			</Panel>
 		</aside>
 	</div>

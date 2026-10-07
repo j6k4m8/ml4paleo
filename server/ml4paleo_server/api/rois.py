@@ -3,6 +3,7 @@ Regions of interest: the cubes and slabs where people label for training.
 
     GET    /api/projects/{id}/rois
     POST   /api/projects/{id}/rois         {bbox, kind, split?}
+    POST   /api/projects/{id}/rois/explore an ROI at a random place no ROI covers
     PATCH  /api/projects/{id}/rois/{roi}   {status?, split?}
     DELETE /api/projects/{id}/rois/{roi}
 
@@ -12,14 +13,17 @@ its unlabeled voxels are background, which training then uses.
 """
 
 import datetime
+import random
 import uuid
+from collections.abc import Sequence
 from typing import Literal
 
+import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from .. import audit, labels
+from .. import artifacts, audit, labels
 from ..auth.deps import CurrentAuth, DbSession
 from ..db import Roi
 from .projects import MemberProject
@@ -29,6 +33,13 @@ router = APIRouter(prefix="/api/projects/{project_id}/rois", tags=["rois"])
 MAX_ROIS = 10_000
 Status = Literal["open", "complete", "skipped"]
 Split = Literal["train", "val"]
+# An explored place is a cube this many voxels a side, small enough to
+# propose labels for quickly (proposals take up to 256 a side), or down to
+# EXPLORE_SMALLEST where ROIs leave no room for that.
+EXPLORE_SIDE = 128
+EXPLORE_SMALLEST = 32
+EXPLORE_TRIES = 1000
+_random = random.Random()
 
 
 class RoiIn(BaseModel):
@@ -124,6 +135,96 @@ async def add_roi(
         target_id=project.id,
         request=request,
         details={"roi_id": str(roi.id), "bbox": roi.bbox},
+    )
+    await db.commit()
+    await db.refresh(roi)
+    return _out(roi)
+
+
+def explore_box(
+    shape_zyx: Sequence[int],
+    taken: Sequence[Sequence[int]],
+    voxel_size_zyx: Sequence[float] | None = None,
+    rng: random.Random = _random,
+) -> list[int] | None:
+    """
+    A box at a random place in an image of `shape_zyx` that shares no voxel
+    with any box in `taken`, or None if random tries find no such place. It's
+    `EXPLORE_SIDE` voxels a side (cut to the image), or half that, and so on
+    down to `EXPLORE_SMALLEST`, where the boxes in `taken` leave no room; and
+    fewer along axes whose voxels are longer, so it's a cube in physical terms.
+    """
+    spacing = (
+        [float(s) for s in voxel_size_zyx]
+        if voxel_size_zyx and all(s > 0 for s in voxel_size_zyx)
+        else [1.0, 1.0, 1.0]
+    )
+    boxes = np.array([list(box) for box in taken], dtype=np.int64).reshape(-1, 6)
+    side = EXPLORE_SIDE
+    while side >= EXPLORE_SMALLEST:
+        size = [
+            max(1, min(int(n), round(side * min(spacing) / s)))
+            for n, s in zip(shape_zyx, spacing, strict=True)
+        ]
+        for _ in range(EXPLORE_TRIES):
+            lo = np.array(
+                [
+                    rng.randrange(int(n) - s + 1)
+                    for n, s in zip(shape_zyx, size, strict=True)
+                ]
+            )
+            hi = lo + size
+            if not np.all((lo < boxes[:, 3:]) & (boxes[:, :3] < hi), axis=1).any():
+                return [*lo.tolist(), *hi.tolist()]
+        side //= 2
+    return None
+
+
+@router.post("/explore", status_code=201)
+async def explore(
+    project: MemberProject,
+    request: Request,
+    auth: CurrentAuth,
+    db: DbSession,
+) -> RoiOut:
+    """
+    Make an open ROI at a random place no ROI covers yet, to see how a model
+    does somewhere new.
+    """
+    image = await artifacts.head(db, project.id, "image")
+    if image is None or not image.manifest:
+        raise HTTPException(status_code=409, detail="This project has no image yet.")
+    _, *shape = image.manifest["shape_czyx"]
+    taken = (
+        await db.scalars(select(Roi.bbox).where(Roi.project_id == project.id))
+    ).all()
+    if len(taken) >= MAX_ROIS:
+        raise HTTPException(status_code=409, detail="This project has too many ROIs.")
+    box = explore_box(shape, taken, image.manifest.get("voxel_size_zyx"))
+    if box is None:
+        raise HTTPException(
+            status_code=409,
+            detail="There's no room left for an ROI clear of the others.",
+        )
+    roi = Roi(
+        project_id=project.id,
+        created_by=auth.user.id,
+        bbox=box,
+        kind="slice" if min(box[a + 3] - box[a] for a in range(3)) == 1 else "cube",
+        split="train",
+        status="open",
+        origin="explore",
+    )
+    db.add(roi)
+    await db.flush()
+    audit.record(
+        db,
+        actor_id=auth.user.id,
+        action="roi.add",
+        target_type="project",
+        target_id=project.id,
+        request=request,
+        details={"roi_id": str(roi.id), "bbox": roi.bbox, "origin": "explore"},
     )
     await db.commit()
     await db.refresh(roi)

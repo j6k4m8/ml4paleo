@@ -79,6 +79,10 @@ describe("what, who, and origin", () => {
 			"v1 annotation",
 			"By hand",
 		]);
+		// A file someone imported: theirs, and named.
+		const file = op(2, { source: 5, job_kind: "labels.import", tool: { name: "label-import", file: "bone.tif" } });
+		expect([action(file), who(file), what(file), origin(file)]).toEqual(["import", "ada", "From bone.tif", "Imported"]);
+		expect(what(op(2, { job_kind: "labels.import", tool: {} }))).toBe("Labels from a file");
 		expect(who(op(1, { username: null, job_kind: "propagate" }))).toBe("A job");
 		expect(who(op(1, { user_id: null, username: null }))).toBe("Someone");
 		expect(origin(op(1, { source: 4 }))).toBe("Propagated");

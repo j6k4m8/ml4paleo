@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import Job
 from ..settings import Settings
-from . import compose, export, ingest, mesh, predict, train, v1import
+from . import compose, export, ingest, labelimport, mesh, predict, train, v1import
 
 # What people call a pipeline, by the kind of its first job.
 NAMES = {
@@ -26,6 +26,8 @@ NAMES = {
     "v1.probe": "import",
     "v1.labels": "import labels",
     "v1.prediction": "import prediction",
+    "labels.probe": "label check",
+    "labels.import": "label import",
     "noop": "check",
 }
 
@@ -48,6 +50,8 @@ _RESULT_CHECKS = {
     "model.train": train.check_result,
     "v1.probe": v1import.check_probe_result,
     "v1.labels": v1import.check_labels_result,
+    "labels.probe": labelimport.check_probe_result,
+    "labels.import": labelimport.check_import_result,
 }
 
 
@@ -75,6 +79,7 @@ __all__ = [
     "compose",
     "export",
     "ingest",
+    "labelimport",
     "mesh",
     "predict",
     "train",

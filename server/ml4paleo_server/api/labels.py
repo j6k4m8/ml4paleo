@@ -106,6 +106,31 @@ async def list_classes(project: MemberProject, db: DbSession) -> list[ClassOut]:
     return [ClassOut(value=r.value, name=r.name, color=r.color) for r in rows]
 
 
+async def new_class_values(db, project_id: uuid.UUID, count: int) -> list[int]:
+    """
+    The next `count` class values never used in a project, for new classes.
+    """
+    # Lock the project (FOR NO KEY UPDATE, which conflicts with itself) so two
+    # new classes, or these and the v1 import's, can't take the same value.
+    await db.scalar(
+        select(Project.id)
+        .where(Project.id == project_id)
+        .with_for_update(key_share=True)
+    )
+    highest = await db.scalar(
+        select(func.max(LabelClass.value)).where(LabelClass.project_id == project_id)
+    )
+    first = max(FIRST_CLASS, (highest or 0) + 1)
+    room = max(0, MAX_CLASS - first + 1)
+    if count > room:
+        detail = "This project has used every class value."
+        if room:
+            classes = "class" if room == 1 else "classes"
+            detail = f"This project has room for only {room} more {classes}."
+        raise HTTPException(status_code=409, detail=detail)
+    return list(range(first, first + count))
+
+
 @router.post("/classes", status_code=201)
 async def add_class(
     body: ClassIn,
@@ -117,21 +142,7 @@ async def add_class(
     """
     Add a class. It gets the next value never used in this project.
     """
-    # Lock the project (FOR NO KEY UPDATE, which conflicts with itself) so two
-    # new classes, or this and the v1 import's, can't take the same value.
-    await db.scalar(
-        select(Project.id)
-        .where(Project.id == project.id)
-        .with_for_update(key_share=True)
-    )
-    highest = await db.scalar(
-        select(func.max(LabelClass.value)).where(LabelClass.project_id == project.id)
-    )
-    value = max(FIRST_CLASS, (highest or 0) + 1)
-    if value > MAX_CLASS:
-        raise HTTPException(
-            status_code=409, detail="This project has used every class value."
-        )
+    [value] = await new_class_values(db, project.id, 1)
     db.add(
         LabelClass(project_id=project.id, value=value, name=body.name, color=body.color)
     )

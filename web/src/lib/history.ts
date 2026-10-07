@@ -58,7 +58,10 @@ const TOOLS = new Map([
 ]);
 
 /** Jobs that write labels: who they are, and what each of their edits is. */
-const JOBS = new Map([["v1.labels", { who: "v1 import", what: "v1 annotation" }]]);
+const JOBS = new Map([
+	["v1.labels", { who: "v1 import", what: "v1 annotation" }],
+	["labels.import", { who: "Label import", what: "Labels from a file" }],
+]);
 
 export type Action = "brush" | "eraser" | "polygon" | "polygon-erase" | "accept" | "import" | "edit" | "undo" | "redo";
 
@@ -78,7 +81,12 @@ export function what(entry: Entry): string {
 	if (done === "undo") return `Undid #${entry.target_seq}`;
 	if (done === "redo") return `Redid #${entry.target_seq}`;
 	if (done === "accept") return `Accepted ${entry.accepted?.kind ?? "prediction"}`;
-	if (done === "import") return JOBS.get(entry.job_kind ?? "")?.what ?? "Edit";
+	if (done === "import") {
+		// A label import's job names the file the person uploaded.
+		const file = entry.job_kind === "labels.import" ? entry.tool.file : undefined;
+		if (typeof file === "string" && file) return `From ${file}`;
+		return JOBS.get(entry.job_kind ?? "")?.what ?? "Edit";
+	}
 	return TOOLS.get(done) ?? "Edit";
 }
 

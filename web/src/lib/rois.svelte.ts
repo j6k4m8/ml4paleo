@@ -55,6 +55,19 @@ export class RoiList {
 		this.error = message(e);
 	}
 
+	/** Make an ROI at a random place no ROI covers yet (see `exploreRoi`). */
+	async explore(): Promise<Roi | null> {
+		try {
+			const roi = await exploreRoi(this.projectId);
+			this.items = [...this.items, roi];
+			this.error = "";
+			return roi;
+		} catch (e) {
+			this.#failed(e);
+			return null;
+		}
+	}
+
 	async add(bbox: Box, kind: Roi["kind"]): Promise<Roi | null> {
 		try {
 			const roi = await api<Roi>(this.#base, { body: { bbox, kind } });
@@ -89,6 +102,36 @@ export class RoiList {
 			this.#failed(e, id);
 		}
 	}
+}
+
+/**
+ * Make an open ROI at a random place no ROI covers yet: a cube up to 128
+ * voxels a side, small enough for a quick proposal.
+ */
+export function exploreRoi(projectId: string): Promise<Roi> {
+	return api<Roi>(`/api/projects/${projectId}/rois/explore`, { method: "POST" });
+}
+
+/**
+ * Make an ROI somewhere new and, if a model is ready, have the newest one
+ * propose labels there, unless its prediction of the whole image already
+ * shows there. The annotator shows the proposal once it's made.
+ */
+export async function explore(projectId: string): Promise<Roi> {
+	const roi = await exploreRoi(projectId);
+	const base = `/api/projects/${projectId}`;
+	try {
+		const models = await api<{ id: string; status: string }[]>(`${base}/models`);
+		// Newest first.
+		const newest = models.find((m) => m.status === "ready");
+		const prediction = await api<{ model_id: string | null }>(`${base}/prediction`).catch(() => null);
+		if (newest && prediction?.model_id !== newest.id) {
+			await api(`${base}/models/${newest.id}/propose`, { body: { roi_id: roi.id } });
+		}
+	} catch {
+		// The annotator offers "Propose here" instead.
+	}
+	return roi;
 }
 
 /** A short description of an ROI, such as "slice 40 × 30 × 1". */
