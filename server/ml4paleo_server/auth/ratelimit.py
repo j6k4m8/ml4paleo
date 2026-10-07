@@ -137,6 +137,31 @@ async def give_back(
         await connection.execute(_GIVE_BACK, {"key": key, "window_start": window_start})
 
 
+async def take_each(
+    engine: AsyncEngine, limits: list[tuple[str, int]], *, window: datetime.timedelta
+) -> list[tuple[str, datetime.datetime]]:
+    """
+    `take` against each (key, limit), in order, refusing (with nothing
+    counted) once one is at its limit. Returns what `give_back_each` needs.
+    """
+    counted: list[tuple[str, datetime.datetime]] = []
+    try:
+        for key, limit in limits:
+            counted.append((key, await take(engine, key, limit=limit, window=window)))
+    except BaseException:
+        await give_back_each(engine, counted)
+        raise
+    return counted
+
+
+async def give_back_each(
+    engine: AsyncEngine, counted: list[tuple[str, datetime.datetime]]
+) -> None:
+    """Uncount what `take_each` counted."""
+    for key, started in counted:
+        await give_back(engine, key, started)
+
+
 def _too_many(window_start: datetime.datetime, window: datetime.timedelta) -> None:
     retry_after = window_start + window - datetime.datetime.now(datetime.UTC)
     raise HTTPException(

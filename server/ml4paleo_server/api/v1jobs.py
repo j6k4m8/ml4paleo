@@ -24,7 +24,6 @@ import uuid
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.concurrency import run_in_threadpool
 
 from ml4paleo.v1import import UNCONVERTED, normalize_job_id, read_jobs, status
@@ -77,32 +76,6 @@ async def _lock(db: DbSession, job_id: str) -> None:
     )
 
 
-async def _count_miss(
-    engine: AsyncEngine, limits: list[tuple[str, int]]
-) -> list[tuple[str, datetime.datetime]]:
-    """
-    Count a miss against each key, in order, refusing (with nothing counted)
-    once one is at its limit. Returns what to give back if it's no miss.
-    """
-    counted: list[tuple[str, datetime.datetime]] = []
-    try:
-        for key, limit in limits:
-            counted.append(
-                (key, await ratelimit.take(engine, key, limit=limit, window=HOUR))
-            )
-    except BaseException:
-        await _give_back(engine, counted)
-        raise
-    return counted
-
-
-async def _give_back(
-    engine: AsyncEngine, counted: list[tuple[str, datetime.datetime]]
-) -> None:
-    for key, started in counted:
-        await ratelimit.give_back(engine, key, started)
-
-
 async def _given_to(db: DbSession, job_id: str) -> uuid.UUID | None:
     """The account an admin last gave the job to, unless it's claimed since."""
     last = await db.scalar(
@@ -146,10 +119,11 @@ async def claim(
     # every time, so once too many miss, from anyone, nobody can claim until
     # the hour is up; that comes first, and then each one's own misses, so a
     # claim refused for either counts against nothing else.
-    misses = await _count_miss(
+    misses = await ratelimit.take_each(
         engine,
         [(SITE_MISSES, limits.site_misses_per_hour)]
         + [(f"v1-miss:{key}", limits.misses_per_hour) for key in keys],
+        window=HOUR,
     )
     try:
         for key in keys:
@@ -158,7 +132,7 @@ async def claim(
             )
         record = (await run_in_threadpool(read_jobs, root)).get(job_id)
     except BaseException:
-        await _give_back(engine, misses)
+        await ratelimit.give_back_each(engine, misses)
         raise
     if record is None:
         audit.record(
@@ -171,7 +145,7 @@ async def claim(
         )
         await db.commit()
         raise HTTPException(status_code=404, detail="There's no v1 job with that id.")
-    await _give_back(engine, misses)
+    await ratelimit.give_back_each(engine, misses)
     if status(record) in UNCONVERTED:
         raise HTTPException(
             status_code=409,
