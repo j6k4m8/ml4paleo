@@ -193,6 +193,7 @@ def test_other_files_are_refused():
 
 
 @pytest.mark.parametrize("keep", [0.1, 0.5, 0.8])
+@pytest.mark.filterwarnings("ignore:Corrupt EXIF data")
 def test_damaged_files_are_refused_as_such(tmp_path, keep):
     data = _tiff(tmp_path / "a.tif", [np.ones((40, 40), np.uint8)] * 3).read_bytes()
     damaged = data[: int(len(data) * keep)]
