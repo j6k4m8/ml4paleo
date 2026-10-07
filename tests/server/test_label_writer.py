@@ -7,6 +7,7 @@ import asyncio
 import base64
 import datetime
 import json
+import random
 import threading
 import time
 import uuid
@@ -659,3 +660,41 @@ def test_rois(ada, project, new_browser):
     assert bob.get(base).status_code == 404
     assert ada.request("DELETE", f"{base}/{roi}").status_code == 204
     assert len(ada.get(base).json()) == 1
+
+
+def test_exploring_makes_an_roi_where_none_is(ada, project):
+    base = f"/api/projects/{project}/rois"
+    made = ada.post(f"{base}/explore")
+    assert made.status_code == 201, made.text
+    roi = made.json()
+    assert (roi["kind"], roi["status"], roi["origin"]) == ("cube", "open", "explore")
+    # A cube 128 voxels a side, cut to the image and inside it.
+    z0, y0, x0, z1, y1, x1 = roi["bbox"]
+    assert (z1 - z0, y1 - y0, x1 - x0) == (70, 128, 100)
+    assert (z0, x0) == (0, 0) and 0 <= y0 <= 2
+    # Every place overlaps it, even smaller ones, until it's gone.
+    full = ada.post(f"{base}/explore")
+    assert full.status_code == 409
+    assert (
+        full.json()["detail"] == "There's no room left for an ROI clear of the others."
+    )
+    assert ada.request("DELETE", f"{base}/{roi['id']}").status_code == 204
+    assert ada.post(f"{base}/explore").status_code == 201
+
+
+def test_explored_places_are_cubes_and_miss_rois():
+    from ml4paleo_server.api.rois import EXPLORE_SIDE, explore_box
+
+    rng = random.Random(0)
+    assert explore_box((500, 500, 500), [], rng=rng)[3:] != [0, 0, 0]
+    # Voxels twice as deep as they are wide: half as many along z.
+    box = explore_box((500, 500, 500), [], (2.0, 1.0, 1.0), rng=rng)
+    assert [box[a + 3] - box[a] for a in range(3)] == [64, 128, 128]
+    taken = [[0, 0, 0, 500, 500, 250]]
+    for _ in range(20):
+        box = explore_box((500, 500, 500), taken, rng=rng)
+        assert box[2] >= 250 and box[5] - box[2] == EXPLORE_SIDE
+    # Where ROIs leave no room for that, a smaller cube.
+    box = explore_box((100, 200, 200), [[0, 0, 0, 100, 200, 100]], rng=rng)
+    assert [box[a + 3] - box[a] for a in range(3)] == [64, 64, 64]
+    assert explore_box((10, 10, 10), [[0, 0, 0, 1, 1, 1]], rng=rng) is None
