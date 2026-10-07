@@ -432,3 +432,26 @@ def test_check_results_are_checked():
     ]:
         with pytest.raises(ValueError):
             labelimport.check_probe_result(bad)
+
+
+def test_an_import_says_why_the_server_refused_its_labels(
+    new_browser, settings, migrated_database_url, live_server
+):
+    ada = new_browser()
+    signup(ada)
+    project = make_project(ada, migrated_database_url, (2, 3, 4))
+    upload_id = upload(ada, project, tiff(np.full((2, 3, 4), 4, np.uint8)))
+    base = f"/api/projects/{project}/labels/imports"
+    import_id = ada.post(base, json={"upload_id": upload_id}).json()["id"]
+    run_worker(ada, project, import_id, migrated_database_url, live_server)
+    mapping = [{"value": 4, "new_class": {"name": "Bone", "color": "#e5484d"}}]
+    ada.post(f"{base}/{import_id}/start", json={"mapping": mapping})
+    # The class goes before the labels come in.
+    classes = f"/api/projects/{project}/labels/classes"
+    assert ada.request("DELETE", f"{classes}/2").status_code == 204
+    failed = run_worker(ada, project, import_id, migrated_database_url, live_server)
+    assert failed["state"] == "failed"
+    assert failed["error"] == (
+        "The server refused the labels at z 0, y 0, x 0: label values [2] are not "
+        "classes here"
+    )

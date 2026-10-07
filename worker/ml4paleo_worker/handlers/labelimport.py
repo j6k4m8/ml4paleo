@@ -14,6 +14,7 @@ import base64
 import contextlib
 import functools
 import io
+import json
 import shutil
 import tempfile
 import uuid
@@ -116,6 +117,15 @@ def _wire(delta: ChunkDelta) -> dict[str, Any]:
     return wire
 
 
+def _reason(refused: ValueError) -> str:
+    """Why the server refused an edit: the `detail` of its JSON answer."""
+    try:
+        detail = json.loads(str(refused)).get("detail")
+    except (ValueError, AttributeError):
+        return str(refused)
+    return detail if isinstance(detail, str) else str(refused)
+
+
 def run(ctx: JobContext) -> dict[str, Any]:
     """
     Send each chunk's labels as one edit, named by the upload and chunk, so a
@@ -156,8 +166,10 @@ def run(ctx: JobContext) -> dict[str, Any]:
                     give_up_after=EDIT_PATIENCE_SECONDS,
                 )
             except ValueError as exc:
+                z, y, x = origin
                 raise PermanentError(
-                    f"The server refused the labels at {origin}: {exc}"
+                    f"The server refused the labels at z {z}, y {y}, x {x}: "
+                    f"{_reason(exc)}"
                 ) from exc
             chunks += 1
             voxels += int((block != 0).sum())
