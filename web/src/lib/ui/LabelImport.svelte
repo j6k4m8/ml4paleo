@@ -66,12 +66,13 @@
 		classes = await api<LabelClass[]>(`/api/projects/${pid}/labels/classes`);
 	}
 
-	/** Fetch the imports, and the one shown again. */
+	/** Fetch the imports, and the one shown again (the list holds only the newest). */
 	async function refresh() {
 		const shown = current?.id;
 		try {
 			imports = await api<LabelImport[]>(base);
-			const found = imports.find((i) => i.id === shown) ?? null;
+			const found =
+				imports.find((i) => i.id === shown) ?? (shown ? await api<LabelImport>(`${base}/${shown}`).catch(() => null) : null);
 			if (found?.state === "done" && current?.state !== "done") onimported?.();
 			show(found ?? imports.find((i) => ACTIVE.includes(i.state)) ?? null);
 		} catch (e) {
@@ -148,8 +149,9 @@
 	function pick(value: number, choice: string) {
 		if (choice === "skip") return setTarget(value, { kind: "skip" });
 		if (choice !== "new") return setTarget(value, { kind: "label", label: Number(choice) });
-		const used = [...classes.map((c) => c.color), ...[...targets.values()].flatMap((t) => (t.kind === "new" ? [t.color] : []))];
-		setTarget(value, { kind: "new", name: String(value), color: nextColor(used) });
+		const made = [...targets.values()].flatMap((t) => (t.kind === "new" ? [t.color] : []));
+		const color = nextColor([...classes.map((c) => c.color), ...made]);
+		setTarget(value, { kind: "new", name: String(value), color });
 	}
 
 	/** Every value besides 0 as a new class named after it. */
