@@ -192,6 +192,17 @@ def test_other_files_are_refused():
         file_kind(io.BytesIO(b"just some text, not labels"))
 
 
+@pytest.mark.parametrize("keep", [0.1, 0.5, 0.8])
+def test_damaged_files_are_refused_as_such(tmp_path, keep):
+    data = _tiff(tmp_path / "a.tif", [np.ones((40, 40), np.uint8)] * 3).read_bytes()
+    damaged = data[: int(len(data) * keep)]
+    # Damaged past reading, or holding fewer slices than the image.
+    with pytest.raises(IngestError):
+        count_values(ImagePlanes(io.BytesIO(damaged)), (3, 40, 40))
+    with pytest.raises(IngestError):
+        count_values(ZipPlanes(_zip({"a.tif": damaged})), (1, 40, 40))
+
+
 def test_lookups_map_values_and_leave_the_rest_unlabeled():
     lookup = Lookup([(3, 2), (1, 1)])
     for dtype in (np.uint8, np.uint16, np.int32, np.int64):

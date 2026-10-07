@@ -58,12 +58,16 @@ MODE_BYTES = {
     "I": 4,
     "F": 4,
 }
-# What Pillow raises for files it can't read.
+# What Pillow raises for files it can't read (damaged TIFF tags raise all
+# sorts).
 READ_ERRORS = (
     OSError,
     ValueError,
     EOFError,
     SyntaxError,
+    TypeError,
+    KeyError,
+    IndexError,
     struct.error,
     Image.DecompressionBombError,
 )
@@ -225,11 +229,19 @@ class ZipPlanes(Planes):
 
     def _open(self, z: int) -> Image.Image:
         member = self._members[z]
+        image = None
         try:
             image = Image.open(member.open())
+            pages = getattr(image, "n_frames", 1)
+        except Image.UnidentifiedImageError:
+            raise IngestError(
+                f"Couldn't read {member.name}: it isn't a TIFF or PNG image."
+            ) from None
         except READ_ERRORS as exc:
+            if image is not None:
+                image.close()
             raise IngestError(f"Couldn't read {member.name}: {exc}") from None
-        if getattr(image, "n_frames", 1) > 1:
+        if pages > 1:
             image.close()
             raise IngestError(
                 f"{member.name} has several pages. Upload a TIFF stack by itself, "
@@ -260,8 +272,14 @@ class ImagePlanes(Planes):
         super().__init__(limits)
         try:
             self._image = Image.open(source)
+        except Image.UnidentifiedImageError:
+            raise IngestError("Couldn't read the labels file; is it damaged?") from None
+        except READ_ERRORS as exc:
+            raise IngestError(f"Couldn't read the labels file: {exc}") from None
+        try:
             pages = getattr(self._image, "n_frames", 1)
         except READ_ERRORS as exc:
+            self._image.close()
             raise IngestError(f"Couldn't read the labels file: {exc}") from None
         # An animated PNG's frames aren't slices.
         self._pages = pages if self._image.format == "TIFF" else 1
