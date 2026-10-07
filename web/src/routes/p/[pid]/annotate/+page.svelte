@@ -3,6 +3,7 @@
 	import { api, message } from "#lib/api.ts";
 	import type { Project, ProjectImage } from "#lib/types.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
+	import { parseBox } from "#lib/viewer/link.ts";
 	import Viewer from "#lib/viewer/Viewer.svelte";
 
 	const pid = $derived(page.params.pid ?? "");
@@ -38,7 +39,13 @@
 
 {#if shown}
 	{#key `${shown.pid}/${shown.image.artifact_id}`}
-		<Viewer image={shown.image} projectId={shown.pid} title={shown.name} roi={page.url.searchParams.get("roi")} />
+		<Viewer
+			image={shown.image}
+			projectId={shown.pid}
+			title={shown.name}
+			roi={page.url.searchParams.get("roi")}
+			box={parseBox(page.url.searchParams.get("box"))}
+		/>
 	{/key}
 {:else if error}
 	<div class="grid h-full place-items-center bg-pasteboard">

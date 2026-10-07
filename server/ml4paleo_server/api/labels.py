@@ -29,7 +29,7 @@ import json
 import re
 import uuid
 from collections.abc import Sequence
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
@@ -48,12 +48,15 @@ from .. import artifacts, audit, labels, streams
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import (
     Artifact,
+    Job,
     LabelChunk,
     LabelClass,
     LabelOp,
     Project,
     ProjectMember,
     Roi,
+    TrainedModel,
+    User,
     UserSession,
 )
 from ..storage import project_storage
@@ -539,18 +542,163 @@ def _history_out(op: LabelOp) -> HistoryOut:
     )
 
 
+class AcceptedOut(BaseModel):
+    """
+    Where accepted labels came from: a prediction of the whole image or one
+    person's proposal, the model that made it (none for a prediction brought
+    over from v1, whose job is named instead), and the ROI they went into.
+    """
+
+    kind: Literal["prediction", "proposal"]
+    model_id: uuid.UUID | None
+    model_name: str | None
+    v1_job_id: str | None
+    roi_id: uuid.UUID | None
+
+
+class HistoryEntryOut(HistoryOut):
+    """
+    An op as the history shows it: who made it (a member, or the kind of job
+    for edits a job made, such as an import), where accepted labels came
+    from, and for an undo or redo, the edit it acts on, as that is now.
+    """
+
+    username: str | None
+    job_kind: str | None
+    accepted: AcceptedOut | None
+    target: "HistoryEntryOut | None" = None
+
+
+def _uuid(value: Any) -> uuid.UUID | None:
+    """A UUID written as a string, or None for anything else."""
+    try:
+        return uuid.UUID(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+
+
+async def _lookup(db, key, value, ids: set[Any], *where) -> dict[Any, Any]:
+    """
+    `value` by `key` for the rows whose key is in `ids` (and that match
+    `where`), in one query.
+    """
+    ids.discard(None)
+    if not ids:
+        return {}
+    return dict(
+        (await db.execute(select(key, value).where(key.in_(ids), *where))).all()
+    )
+
+
+async def _accepted(
+    db, project_id: uuid.UUID, ops: Sequence[LabelOp]
+) -> dict[int, AcceptedOut]:
+    """
+    Where the accepted labels among `ops` came from, by seq. Only the server
+    makes model-verified edits, with the tool record `accept_prediction`
+    writes; anyone's own edits can say anything there, so they don't count.
+    """
+    accepted = [
+        op for op in ops if op.kind == "edit" and op.source == Source.MODEL_VERIFIED
+    ]
+    if not accepted:
+        return {}
+    named = {_uuid(op.tool.get("prediction")) for op in accepted} - {None}
+    predictions = {
+        row.id: row
+        for row in await db.execute(
+            select(Artifact.id, Artifact.head_slot, Artifact.inputs).where(
+                Artifact.project_id == project_id, Artifact.id.in_(named)
+            )
+        )
+    }
+    models = await _lookup(
+        db,
+        TrainedModel.id,
+        TrainedModel.name,
+        {_uuid(op.tool.get("model")) for op in accepted},
+        TrainedModel.project_id == project_id,
+    )
+    out = {}
+    for op in accepted:
+        prediction = predictions.get(_uuid(op.tool.get("prediction")))
+        slot = (prediction.head_slot or "") if prediction else ""
+        v1_job_id = prediction.inputs.get("v1_job_id") if prediction else None
+        model_id = _uuid(op.tool.get("model"))
+        out[op.seq] = AcceptedOut(
+            kind=(
+                "proposal"
+                if slot.startswith(artifacts.PROPOSAL_SLOTS)
+                else "prediction"
+            ),
+            model_id=model_id,
+            model_name=models.get(model_id),
+            v1_job_id=v1_job_id if isinstance(v1_job_id, str) else None,
+            roi_id=_uuid(op.tool.get("roi")),
+        )
+    return out
+
+
+async def _entries(
+    db, project_id: uuid.UUID, ops: Sequence[LabelOp]
+) -> list[HistoryEntryOut]:
+    """`ops` as the history shows them, with every name looked up at once."""
+    targets: dict[int, LabelOp] = {}
+    if wanted := {op.target_seq for op in ops if op.target_seq is not None}:
+        found = await db.scalars(
+            select(LabelOp).where(
+                LabelOp.project_id == project_id, LabelOp.seq.in_(wanted)
+            )
+        )
+        targets = {op.seq: op for op in found}
+    every = [*ops, *targets.values()]
+    usernames = await _lookup(db, User.id, User.username, {op.user_id for op in every})
+    job_kinds = await _lookup(db, Job.id, Job.kind, {op.job_id for op in every})
+    accepted = await _accepted(db, project_id, every)
+
+    def entry(op: LabelOp, target: HistoryEntryOut | None = None) -> HistoryEntryOut:
+        return HistoryEntryOut(
+            **_history_out(op).model_dump(),
+            username=usernames.get(op.user_id),
+            job_kind=job_kinds.get(op.job_id),
+            accepted=accepted.get(op.seq),
+            target=target,
+        )
+
+    return [
+        entry(op, entry(targets[op.target_seq]) if op.target_seq in targets else None)
+        for op in ops
+    ]
+
+
 @router.get("/ops")
 async def history(
     project: MemberProject,
     db: DbSession,
     before: Annotated[int | None, Query(ge=1, le=MAX_SEQ)] = None,
+    after: Annotated[int | None, Query(ge=0, le=MAX_SEQ)] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
-) -> list[HistoryOut]:
+    user_id: uuid.UUID | None = None,
+    source: Source | None = None,
+) -> list[HistoryEntryOut]:
+    """
+    The project's ops, newest first, `limit` at a time, between ops `after`
+    and `before` (neither included); only `user_id`'s, or only those of one
+    `source` (an undo or redo has its edit's), if asked. Each says who made
+    it and, for accepted labels, which model's prediction or proposal they
+    came from; an undo or redo comes with its edit.
+    """
     query = select(LabelOp).where(LabelOp.project_id == project.id)
     if before is not None:
         query = query.where(LabelOp.seq < before)
+    if after is not None:
+        query = query.where(LabelOp.seq > after)
+    if user_id is not None:
+        query = query.where(LabelOp.user_id == user_id)
+    if source is not None:
+        query = query.where(LabelOp.source == int(source))
     ops = (await db.scalars(query.order_by(LabelOp.seq.desc()).limit(limit))).all()
-    return [_history_out(op) for op in ops]
+    return await _entries(db, project.id, ops)
 
 
 class ChangeOut(BaseModel):
