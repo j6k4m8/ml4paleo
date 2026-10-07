@@ -17,11 +17,19 @@ export interface Session {
 	starter_limits: boolean;
 }
 
+export interface Member {
+	user_id: string;
+	username: string;
+	is_owner: boolean;
+}
+
 export interface Project {
 	id: string;
 	name: string;
 	owner: string;
 	created_at: string;
+	/** Everyone with access (the owner too); null in the list of projects. */
+	members: Member[] | null;
 }
 
 export interface Upload {

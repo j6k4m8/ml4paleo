@@ -4,6 +4,7 @@
 	import Shapes from "@lucide/svelte/icons/shapes";
 	import House from "@lucide/svelte/icons/house";
 	import RotateCcwClock from "@lucide/svelte/icons/rotate-ccw-clock";
+	import Settings from "@lucide/svelte/icons/settings";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
 	import { page } from "$app/state";
 
@@ -16,6 +17,7 @@
 		{ href: `/p/${pid}/models`, label: "Models", icon: Brain },
 		{ href: `/p/${pid}/results`, label: "Results", icon: Shapes },
 		{ href: `/p/${pid}/history`, label: "History", icon: RotateCcwClock },
+		{ href: `/p/${pid}/settings`, label: "Settings", icon: Settings },
 	]);
 </script>
 
