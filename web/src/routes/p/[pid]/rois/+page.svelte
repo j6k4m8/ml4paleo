@@ -202,7 +202,7 @@
 	</div>
 
 	<div class="flex flex-col gap-4 lg:self-start">
-		<Loop {pid} importHref="#import-labels" />
+		<Loop {pid} {hasImage} importHref="#import-labels" />
 		<LabelImport {pid} {hasImage} onimported={labelsImported} />
 	</div>
 </div>

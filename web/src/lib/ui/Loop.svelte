@@ -4,7 +4,16 @@
 	import { message } from "#lib/api.ts";
 	import { explore } from "#lib/rois.svelte.ts";
 
-	let { pid, importHref }: { pid: string; importHref: string } = $props();
+	let {
+		pid,
+		importHref,
+		hasImage = true,
+	}: {
+		pid: string;
+		importHref: string;
+		/** Whether the project has an image to explore; null until known. */
+		hasImage?: boolean | null;
+	} = $props();
 
 	let exploring = $state(false);
 	let error = $state("");
@@ -54,7 +63,12 @@
 		</li>
 	</ol>
 	<div class="flex flex-col gap-1.5 border-t border-edge p-3">
-		<button class="btn btn-primary self-start" onclick={go} disabled={exploring}>
+		<button
+			class="btn btn-primary self-start"
+			onclick={go}
+			disabled={exploring || !hasImage}
+			title={hasImage === false ? "Ingest a scan first" : undefined}
+		>
 			<Compass size={13} />
 			{exploring ? "Finding a place…" : "Explore a new place"}
 		</button>
