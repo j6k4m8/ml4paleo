@@ -12,14 +12,24 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
 from .. import audit
-from ..auth.deps import CurrentAuth, DbSession
+from ..auth import ratelimit
+from ..auth.deps import CurrentAuth, DbSession, EngineDep
+from ..auth.ratelimit import client_key
 from ..db import Project, ProjectMember, User
 from ..pipelines import train
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
+
+HOUR = datetime.timedelta(hours=1)
+# Usernames no active account has that each account may try adding in an
+# hour, and each address (more, since a lab can share one), so adding
+# collaborators can't be used to list the accounts.
+ACCOUNT_MISSES_PER_HOUR = 10
+ADDRESS_MISSES_PER_HOUR = 30
 
 
 async def member_project(
@@ -204,32 +214,56 @@ async def add_member(
     request: Request,
     auth: CurrentAuth,
     db: DbSession,
+    engine: EngineDep,
 ) -> list[MemberOut]:
+    """
+    Add someone by their username: 404 if no active account has it, 409 if
+    they're already a member. Names no one has are limited per account and
+    per address; past either limit, every name gets 429 until the hour is up.
+    """
     name = body.username.strip().lower()
-    user = await db.scalar(
-        select(User).where(User.username == name, User.status == "active")
+    # Count a miss before looking, and give it back if someone has the name,
+    # so lookups made at once can't get past the limits.
+    misses = await ratelimit.take_each(
+        engine,
+        [
+            (f"member-miss:user:{auth.user.id}", ACCOUNT_MISSES_PER_HOUR),
+            (f"member-miss:ip:{client_key(request)}", ADDRESS_MISSES_PER_HOUR),
+        ],
+        window=HOUR,
     )
+    try:
+        user = await db.scalar(
+            select(User).where(User.username == name, User.status == "active")
+        )
+    except BaseException:
+        await ratelimit.give_back_each(engine, misses)
+        raise
     if user is None:
         raise HTTPException(status_code=404, detail="No one with that username.")
-    already = await db.scalar(
-        select(func.count())
-        .select_from(ProjectMember)
-        .where(ProjectMember.project_id == project.id, ProjectMember.user_id == user.id)
+    await ratelimit.give_back_each(engine, misses)
+    # Inserts nothing for someone who's already a member, even one added a
+    # moment ago by someone else.
+    added = await db.scalar(
+        insert(ProjectMember)
+        .values(project_id=project.id, user_id=user.id, added_by=auth.user.id)
+        .on_conflict_do_nothing()
+        .returning(ProjectMember.user_id)
     )
-    if not already:
-        db.add(
-            ProjectMember(project_id=project.id, user_id=user.id, added_by=auth.user.id)
+    if added is None:
+        raise HTTPException(
+            status_code=409, detail=f"{user.username} is already a member."
         )
-        audit.record(
-            db,
-            actor_id=auth.user.id,
-            action="project.member.add",
-            target_type="project",
-            target_id=project.id,
-            request=request,
-            details={"user_id": str(user.id), "username": user.username},
-        )
-        await db.commit()
+    audit.record(
+        db,
+        actor_id=auth.user.id,
+        action="project.member.add",
+        target_type="project",
+        target_id=project.id,
+        request=request,
+        details={"user_id": str(user.id), "username": user.username},
+    )
+    await db.commit()
     return await _members(db, project)
 
 

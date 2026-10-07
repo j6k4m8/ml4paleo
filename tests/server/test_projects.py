@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 from helpers import make_admin, run_db, signup
 from ml4paleo_server import quotas
+from ml4paleo_server.api import projects as projects_api
 from ml4paleo_server.db import (
     AuditEvent,
     User,
@@ -90,8 +91,12 @@ def test_membership_changes(new_browser):
         for m in ada.post(url, json={"username": "bob"}).json()
         if m["username"] == "bob"
     )
-    # Adding twice is harmless.
-    assert len(ada.post(url, json={"username": "bob"}).json()) == 2
+    # Adding someone twice says so, and changes nothing.
+    again = ada.post(url, json={"username": "bob"})
+    assert again.status_code == 409
+    assert again.json()["detail"] == "bob is already a member."
+    assert ada.post(url, json={"username": "ada"}).status_code == 409
+    assert len(ada.get(url).json()) == 2
     # Nobody can remove the owner; a collaborator can leave.
     assert bob.request("DELETE", f"{url}/{ada_id}").status_code == 403
     assert bob.request("DELETE", f"{url}/{bob_id}").status_code == 204
@@ -107,6 +112,46 @@ def test_collaborators_cannot_be_found_by_email(new_browser):
     unregistered = ada.post(url, json={"username": "carol@example.org"})
     assert registered.status_code == unregistered.status_code == 404
     assert registered.json() == unregistered.json()
+
+
+def test_usernames_no_one_has_are_limited(new_browser):
+    ada = make_user(new_browser, "ada")
+    bob = make_user(new_browser, "bob")
+    make_user(new_browser, "carol")
+    url = f"/api/projects/{create_project(ada)['id']}/members"
+    limit = projects_api.ACCOUNT_MISSES_PER_HOUR
+
+    def miss(browser, url):
+        return browser.post(url, json={"username": "nobody"}).status_code
+
+    statuses = [miss(ada, url) for _ in range(limit - 1)]
+    # Finding someone isn't a miss, even when they're already a member.
+    assert ada.post(url, json={"username": "bob"}).status_code == 201
+    assert ada.post(url, json={"username": "bob"}).status_code == 409
+    statuses += [miss(ada, url), miss(ada, url)]
+    assert statuses == [404] * limit + [429]
+    # Past the limit, names people have are refused too, so they can't be told
+    # apart from names no one has.
+    assert ada.post(url, json={"username": "carol"}).status_code == 429
+    # Each account has its own.
+    assert miss(bob, f"/api/projects/{create_project(bob)['id']}/members") == 404
+
+
+def test_usernames_no_one_has_are_limited_per_address_too(new_browser, monkeypatch):
+    monkeypatch.setattr(projects_api, "ACCOUNT_MISSES_PER_HOUR", 2)
+    monkeypatch.setattr(projects_api, "ADDRESS_MISSES_PER_HOUR", 3)
+    # Everything the test client sends comes from one address.
+    ada = make_user(new_browser, "ada")
+    bob = make_user(new_browser, "bob")
+    ada_url = f"/api/projects/{create_project(ada)['id']}/members"
+    bob_url = f"/api/projects/{create_project(bob)['id']}/members"
+    nobody = {"username": "nobody"}
+    statuses = [ada.post(ada_url, json=nobody).status_code for _ in range(3)]
+    assert statuses == [404, 404, 429]
+    # Ada's refused try counted against nothing, so Bob's first miss is the
+    # address's third, and his next is refused.
+    statuses = [bob.post(bob_url, json=nobody).status_code for _ in range(2)]
+    assert statuses == [404, 429]
 
 
 def test_disabled_accounts_cannot_be_added(new_browser, migrated_database_url):
