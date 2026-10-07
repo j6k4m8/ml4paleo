@@ -18,7 +18,16 @@
 	import { uploadFile } from "#lib/upload.ts";
 	import type { LabelClass } from "#lib/viewer/labels.ts";
 
-	let { pid, onimported }: { pid: string; onimported?: () => void } = $props();
+	let {
+		pid,
+		hasImage,
+		onimported,
+	}: {
+		pid: string;
+		/** Whether the project has an image to put labels on; null until known. */
+		hasImage: boolean | null;
+		onimported?: () => void;
+	} = $props();
 
 	let imports = $state<LabelImport[]>([]);
 	// The import shown in full: one being checked, ready to import, or
@@ -32,6 +41,8 @@
 	let busy = $state(false);
 	let dragging = $state(false);
 	let error = $state("");
+	// Bumped to open the stream again when it breaks while the import runs.
+	let reconnect = $state(0);
 
 	const base = $derived(`/api/projects/${pid}/labels/imports`);
 	const ACTIVE = ["checking", "ready", "importing"];
@@ -83,16 +94,22 @@
 	$effect(() => {
 		if (!pid) return;
 		untrack(() => {
-			loadClasses().catch((e: unknown) => (error = message(e)));
-			void refresh();
+			// The classes first: a checked file's first choices use them.
+			loadClasses()
+				.catch((e: unknown) => (error = message(e)))
+				.then(() => refresh());
 		});
 	});
 
 	// Follow the check, then the import, until it ends. The server answers
-	// 204 for a pipeline that has ended, which closes the stream.
+	// 204 for a pipeline that has ended, which closes the stream; a stream
+	// that breaks otherwise (a proxy error while the server restarts, say)
+	// opens again shortly.
 	$effect(() => {
 		const id = following;
+		void reconnect;
 		if (!id) return;
+		let retry: ReturnType<typeof setTimeout> | undefined;
 		const source = new EventSource(`/api/projects/${untrack(() => pid)}/pipelines/${id}/events`);
 		source.addEventListener("status", (event) => {
 			const update = JSON.parse((event as MessageEvent<string>).data) as Pipeline;
@@ -100,9 +117,16 @@
 			if (!unfinished(update)) void refresh();
 		});
 		source.addEventListener("error", () => {
-			if (source.readyState === EventSource.CLOSED) void refresh();
+			if (source.readyState !== EventSource.CLOSED) return;
+			void refresh().then(() => {
+				// Once it's over this effect ends, and the extra bump does nothing.
+				retry = setTimeout(() => (reconnect += 1), 3000);
+			});
 		});
-		return () => source.close();
+		return () => {
+			source.close();
+			clearTimeout(retry);
+		};
 	});
 
 	/** Upload a picked or dropped file (resuming an unfinished upload of it), and have it checked. */
@@ -121,7 +145,14 @@
 				(u) => u.state === "uploading" && u.filename === chosen.name && u.size === chosen.size,
 			);
 			const done = await uploadFile(pid, chosen, (fraction) => (uploaded = fraction), existing);
-			const checking = await api<LabelImport>(base, { body: { upload_id: done.id } });
+			const checking = await api<LabelImport>(base, { body: { upload_id: done.id } }).catch(async (e: unknown) => {
+				// Nothing will check the file, so give its storage back. If the
+				// check started after all, its job holds the file and this is
+				// refused; the list then shows it.
+				await api(`/api/projects/${pid}/uploads/${done.id}`, { method: "DELETE" }).catch(() => {});
+				await refresh();
+				throw e;
+			});
 			imports = [checking, ...imports.filter((i) => i.id !== checking.id)];
 			show(checking);
 		} catch (e) {
@@ -328,7 +359,12 @@
 				{/if}
 				<button class="btn self-start" onclick={() => (current = null)}>Import another file</button>
 			{/if}
-		{:else}
+		{:else if hasImage === false}
+			<p class="text-ink-dim">
+				Labels go on the project's image, and it has none yet. Ingest a scan from the <a href="/p/{pid}">Overview</a> page
+				first.
+			</p>
+		{:else if hasImage}
 			<p class="text-ink-dim">
 				Labels made elsewhere, as a TIFF stack or a zip of TIFF or PNG slices the size of the image. You choose what
 				each value means before they come in.

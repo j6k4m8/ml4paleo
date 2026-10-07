@@ -19,6 +19,8 @@
 	let rois = $state<RoiList | null>(null);
 	let image = $state<ProjectImage | null>(null);
 	let levels: Level[] = $state([]);
+	// Whether the project has an image, once the page has asked.
+	let hasImage = $state<boolean | null>(null);
 	let colors = $state(new Map<number, string>());
 	let filter = $state<"all" | Roi["status"]>("all");
 	let error = $state("");
@@ -46,7 +48,12 @@
 		(async () => {
 			try {
 				await list.load();
-				image = await api<ProjectImage>(`/api/projects/${pid}/image`);
+				image = await api<ProjectImage>(`/api/projects/${pid}/image`).catch((e: unknown) => {
+					if (e instanceof ApiError && e.status === 404) return null;
+					throw e;
+				});
+				hasImage = image !== null;
+				if (!image) return;
 				await loadColors();
 				levels = await loadLevels(image.zarr_url, controller.signal);
 			} catch (e) {
@@ -196,6 +203,6 @@
 
 	<div class="flex flex-col gap-4 lg:self-start">
 		<Loop {pid} importHref="#import-labels" />
-		<LabelImport {pid} onimported={labelsImported} />
+		<LabelImport {pid} {hasImage} onimported={labelsImported} />
 	</div>
 </div>
