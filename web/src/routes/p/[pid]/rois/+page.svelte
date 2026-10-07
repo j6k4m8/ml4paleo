@@ -9,6 +9,7 @@
 	import type { LabelClass } from "#lib/viewer/labels.ts";
 	import type { Level } from "#lib/viewer/tiles.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
+	import LabelImport from "#lib/ui/LabelImport.svelte";
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
 	import Trash from "@lucide/svelte/icons/trash";
@@ -21,6 +22,8 @@
 	let filter = $state<"all" | Roi["status"]>("all");
 	let error = $state("");
 	let projectName = $state("");
+	// Bumped when labels come in from a file, so thumbnails draw them.
+	let imported = $state(0);
 
 	$effect(() => {
 		crumbs.set([{ label: "Projects", href: "/projects" }, { label: projectName || "…", href: `/p/${pid}` }, { label: "ROIs" }]);
@@ -43,8 +46,7 @@
 			try {
 				await list.load();
 				image = await api<ProjectImage>(`/api/projects/${pid}/image`);
-				const classes = await api<LabelClass[]>(`/api/projects/${pid}/labels/classes`);
-				colors = new Map(classes.map((c) => [c.value, c.color]));
+				await loadColors();
 				levels = await loadLevels(image.zarr_url, controller.signal);
 			} catch (e) {
 				if (!(e instanceof ApiError && e.status === 404)) error = message(e);
@@ -55,6 +57,17 @@
 			stopRefreshing();
 		};
 	});
+
+	async function loadColors() {
+		const classes = await api<LabelClass[]>(`/api/projects/${pid}/labels/classes`);
+		colors = new Map(classes.map((c) => [c.value, c.color]));
+	}
+
+	/** Labels came in from a file: draw the thumbnails again, in the classes' colors. */
+	async function labelsImported() {
+		await loadColors().catch(() => {});
+		imported += 1;
+	}
 
 	/** Draw a thumbnail once its card is on screen. */
 	function thumbnail(canvas: HTMLCanvasElement, roi: Roi) {
@@ -91,88 +104,94 @@
 
 <ProjectTabs {pid} />
 
-<div class="mx-auto flex max-w-6xl flex-col gap-4 p-6">
-	<div class="flex flex-wrap items-center gap-3">
-		<h1>ROIs</h1>
-		<div class="ml-auto flex rounded-sm border border-edge" role="radiogroup" aria-label="Show">
-			{#each ["all", "open", "complete", "skipped"] as option (option)}
-				<label
-					class="relative flex cursor-pointer items-center gap-1.5 px-2.5 py-1 capitalize first:rounded-l-[3px] last:rounded-r-[3px]
-						has-[:focus-visible]:z-10 has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-1 has-[:focus-visible]:outline-accent
-						{filter === option ? 'bg-accent-fill text-white' : 'bg-panel text-ink-dim hover:bg-raised hover:text-ink'}"
-				>
-					<input class="sr-only" type="radio" name="filter" value={option} bind:group={filter} />
-					{option}
-					<span class="font-mono text-2xs">
-						{option === "all" ? (rois?.items.length ?? 0) : (rois?.items.filter((r) => r.status === option).length ?? 0)}
-					</span>
-				</label>
-			{/each}
+<div class="mx-auto grid max-w-6xl gap-4 p-6 lg:grid-cols-[1fr_20rem]">
+	<div class="flex min-w-0 flex-col gap-4">
+		<div class="flex flex-wrap items-center gap-3">
+			<h1>ROIs</h1>
+			<div class="ml-auto flex rounded-sm border border-edge" role="radiogroup" aria-label="Show">
+				{#each ["all", "open", "complete", "skipped"] as option (option)}
+					<label
+						class="relative flex cursor-pointer items-center gap-1.5 px-2.5 py-1 capitalize first:rounded-l-[3px] last:rounded-r-[3px]
+							has-[:focus-visible]:z-10 has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-1 has-[:focus-visible]:outline-accent
+							{filter === option ? 'bg-accent-fill text-white' : 'bg-panel text-ink-dim hover:bg-raised hover:text-ink'}"
+					>
+						<input class="sr-only" type="radio" name="filter" value={option} bind:group={filter} />
+						{option}
+						<span class="font-mono text-2xs">
+							{option === "all" ? (rois?.items.length ?? 0) : (rois?.items.filter((r) => r.status === option).length ?? 0)}
+						</span>
+					</label>
+				{/each}
+			</div>
 		</div>
+
+		{#if rois?.loaded && rois.items.length === 0}
+			<div class="panel grid place-items-center gap-2 p-10 text-center">
+				<SquareDashed size={28} class="text-ink-faint" />
+				<p class="muted">No ROIs yet. In the annotator, pick the ROI tool (<span class="kbd">R</span>) and drag a box.</p>
+			</div>
+		{/if}
+
+		<ul class="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-3">
+			{#each shown as roi (roi.id)}
+				<li
+					class="panel flex flex-col overflow-hidden border-t-2
+						{roi.status === 'complete' ? 'border-t-ok' : roi.status === 'skipped' ? 'border-t-ink-faint' : 'border-t-warn'}"
+				>
+					{#key `${levels.length}/${imported}`}
+						<a href="/p/{pid}/annotate?roi={roi.id}" aria-label="Open the {describe(roi)} ROI in the annotator" class="block bg-black">
+							<!-- Drawn once per card; a status change doesn't redraw it. -->
+							<canvas
+								class="block aspect-square w-full object-contain [image-rendering:pixelated] [&.failed]:opacity-30"
+								{@attach (canvas) => untrack(() => thumbnail(canvas, roi))}
+							></canvas>
+						</a>
+					{/key}
+					<div class="flex flex-col gap-1.5 p-2">
+						<div class="flex items-baseline justify-between">
+							<span class="font-medium capitalize">{roi.kind}</span>
+							<span class="font-mono text-2xs text-ink-dim">{describe(roi).slice(roi.kind.length + 1)}</span>
+						</div>
+						<!-- Side by side when both fit, else one under the other. -->
+						<div class="flex flex-wrap gap-1">
+							<select
+								class="field w-auto flex-1"
+								aria-label="Status of the {describe(roi)} ROI"
+								value={roi.status}
+								onchange={async (e) => {
+									const select = e.currentTarget;
+									if (!(await rois?.update(roi.id, { status: select.value as Roi["status"] }))) revert(select, roi.status);
+								}}
+							>
+								<option value="open">open</option>
+								<option value="complete">complete</option>
+								<option value="skipped">skipped</option>
+							</select>
+							<select
+								class="field w-auto flex-1"
+								aria-label="Split of the {describe(roi)} ROI"
+								value={roi.split}
+								onchange={async (e) => {
+									const select = e.currentTarget;
+									if (!(await rois?.update(roi.id, { split: select.value as Roi["split"] }))) revert(select, roi.split);
+								}}
+							>
+								<option value="train">train</option>
+								<option value="val">validation</option>
+							</select>
+						</div>
+						<button class="btn btn-ghost btn-danger self-end" onclick={() => remove(roi)} aria-label="Delete the {describe(roi)} ROI">
+							<Trash size={13} /> Delete
+						</button>
+					</div>
+				</li>
+			{/each}
+		</ul>
+		{#if rois?.error}<p class="error" role="alert">{rois.error}</p>{/if}
+		{#if error}<p class="error" role="alert">{error}</p>{/if}
 	</div>
 
-	{#if rois?.loaded && rois.items.length === 0}
-		<div class="panel grid place-items-center gap-2 p-10 text-center">
-			<SquareDashed size={28} class="text-ink-faint" />
-			<p class="muted">No ROIs yet. In the annotator, pick the ROI tool (<span class="kbd">R</span>) and drag a box.</p>
-		</div>
-	{/if}
-
-	<ul class="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-3">
-		{#each shown as roi (roi.id)}
-			<li
-				class="panel flex flex-col overflow-hidden border-t-2
-					{roi.status === 'complete' ? 'border-t-ok' : roi.status === 'skipped' ? 'border-t-ink-faint' : 'border-t-warn'}"
-			>
-				{#key levels.length}
-					<a href="/p/{pid}/annotate?roi={roi.id}" aria-label="Open the {describe(roi)} ROI in the annotator" class="block bg-black">
-						<!-- Drawn once per card; a status change doesn't redraw it. -->
-						<canvas
-							class="block aspect-square w-full object-contain [image-rendering:pixelated] [&.failed]:opacity-30"
-							{@attach (canvas) => untrack(() => thumbnail(canvas, roi))}
-						></canvas>
-					</a>
-				{/key}
-				<div class="flex flex-col gap-1.5 p-2">
-					<div class="flex items-baseline justify-between">
-						<span class="font-medium capitalize">{roi.kind}</span>
-						<span class="font-mono text-2xs text-ink-dim">{describe(roi).slice(roi.kind.length + 1)}</span>
-					</div>
-					<!-- Side by side when both fit, else one under the other. -->
-					<div class="flex flex-wrap gap-1">
-						<select
-							class="field w-auto flex-1"
-							aria-label="Status of the {describe(roi)} ROI"
-							value={roi.status}
-							onchange={async (e) => {
-								const select = e.currentTarget;
-								if (!(await rois?.update(roi.id, { status: select.value as Roi["status"] }))) revert(select, roi.status);
-							}}
-						>
-							<option value="open">open</option>
-							<option value="complete">complete</option>
-							<option value="skipped">skipped</option>
-						</select>
-						<select
-							class="field w-auto flex-1"
-							aria-label="Split of the {describe(roi)} ROI"
-							value={roi.split}
-							onchange={async (e) => {
-								const select = e.currentTarget;
-								if (!(await rois?.update(roi.id, { split: select.value as Roi["split"] }))) revert(select, roi.split);
-							}}
-						>
-							<option value="train">train</option>
-							<option value="val">validation</option>
-						</select>
-					</div>
-					<button class="btn btn-ghost btn-danger self-end" onclick={() => remove(roi)} aria-label="Delete the {describe(roi)} ROI">
-						<Trash size={13} /> Delete
-					</button>
-				</div>
-			</li>
-		{/each}
-	</ul>
-	{#if rois?.error}<p class="error" role="alert">{rois.error}</p>{/if}
-	{#if error}<p class="error" role="alert">{error}</p>{/if}
+	<div class="flex flex-col gap-4 lg:self-start">
+		<LabelImport {pid} onimported={labelsImported} />
+	</div>
 </div>
