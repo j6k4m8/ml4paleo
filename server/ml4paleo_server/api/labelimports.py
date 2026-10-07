@@ -28,7 +28,7 @@ from ml4paleo.labels import BACKGROUND, MAX_CLASS
 
 from .. import audit, jobs, labels
 from ..auth.deps import CurrentAuth, DbSession
-from ..db import Job, LabelClass, Upload
+from ..db import Job, LabelClass, Project, Upload
 from ..pipelines import labelimport
 from ..uploads import now
 from .labels import ClassIn, allowed_values, new_class_values
@@ -264,6 +264,13 @@ async def start_import(
             status_code=422,
             detail=f"This project has no class {', '.join(map(str, unknown))}.",
         )
+    # The project before the file, the order starting a prediction takes
+    # them in (new classes need the project anyway).
+    await db.scalar(
+        select(Project.id)
+        .where(Project.id == project.id)
+        .with_for_update(key_share=True)
+    )
     upload = await _upload(db, probe.payload["upload_id"])
     if upload is None or not _kept(upload):
         raise HTTPException(
