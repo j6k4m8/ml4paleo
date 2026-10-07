@@ -120,7 +120,15 @@ class ZipMember:
             with self.archive.open(self.info) as member:
                 while chunk := member.read(READ_CHUNK):
                     data.write(chunk)
-        except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError) as exc:
+        except (
+            zipfile.BadZipFile,
+            zlib.error,
+            EOFError,
+            RuntimeError,
+            ValueError,
+            NotImplementedError,
+            struct.error,
+        ) as exc:
             raise IngestError(f"The archive is damaged ({self.name}: {exc}).") from None
         data.seek(0)
         return data
@@ -174,6 +182,9 @@ def open_archive(fileobj: BinaryIO) -> zipfile.ZipFile:
         return zipfile.ZipFile(fileobj)
     except zipfile.BadZipFile:
         raise IngestError(NOT_A_ZIP) from None
+    except (ValueError, EOFError, NotImplementedError, struct.error) as exc:
+        # For example a file name that isn't the UTF-8 it says it is.
+        raise IngestError(f"The archive is damaged ({exc}).") from None
 
 
 def slice_members(

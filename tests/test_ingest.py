@@ -269,3 +269,13 @@ def test_dicom_slices_are_sized_from_their_headers(tmp_path, make_dicom_series):
     with pytest.raises(IngestError, match="decodes to"):
         probe(opener(), SliceLimits(max_member_bytes=10**6, max_decoded_bytes=3999))
     assert probe(opener(), SliceLimits(10**6, 4000)).shape_xyz == (50, 40, 2)
+
+
+def test_names_that_arent_the_utf8_they_claim_are_refused(tmp_path):
+    name = "slice_\u00e9.png"
+    archive = _zip({name: _png(np.zeros((4, 4), np.uint8))})
+    # zipfile flags the name as UTF-8; make its bytes anything but.
+    encoded = name.encode()
+    damaged = archive.replace(encoded, encoded[:-6] + b"\xff\xfe" + encoded[-4:])
+    with pytest.raises(IngestError, match="The archive is damaged"):
+        probe(_stored(tmp_path, damaged)())
