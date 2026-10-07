@@ -1,6 +1,6 @@
 """
 The label writer and its API: classes, edits, strict edits, undo and redo,
-the change feed, the labels as zarr, and ROIs.
+the history and change feed, the labels as zarr, and ROIs.
 """
 
 import asyncio
@@ -14,8 +14,15 @@ import uuid
 import numpy as np
 import pytest
 from helpers import run_db, signup
-from ml4paleo_server import artifacts, labels
-from ml4paleo_server.db import Artifact, LabelOp, create_engine, create_sessionmaker
+from ml4paleo_server import artifacts, jobs, labels
+from ml4paleo_server.db import (
+    Artifact,
+    LabelOp,
+    TrainedModel,
+    TrainingSet,
+    create_engine,
+    create_sessionmaker,
+)
 from ml4paleo_server.storage import project_storage
 from sqlalchemy import func, select, update
 
@@ -371,7 +378,9 @@ def test_concurrent_retries_return_the_first_result(
     assert count == 2
 
 
-def add_prediction(settings, database_url, project: str, head_slot=None) -> str:
+def add_prediction(
+    settings, database_url, project: str, head_slot=None, inputs=None
+) -> str:
     """
     A committed prediction: bone in z 0..8, y 0..8, x 0..8, background
     elsewhere. With `head_slot`, it becomes that slot's head.
@@ -382,7 +391,7 @@ def add_prediction(settings, database_url, project: str, head_slot=None) -> str:
             db,
             project_id=uuid.UUID(project),
             kind="prediction",
-            inputs={"model_id": None},
+            inputs=inputs or {"model_id": None},
             head_slot=head_slot,
         )
         group = create_prediction(
@@ -592,11 +601,196 @@ def test_collection_waits_for_an_accept_in_progress(
     assert run_db(migrated_database_url, state) == "superseded"
 
 
+def add_model(database_url, project: str, name: str) -> str:
+    """A trained model's row, for the history to name."""
+
+    async def create(db):
+        training_set = TrainingSet(
+            id=uuid.uuid4().hex * 2, project_id=uuid.UUID(project), summary={}
+        )
+        db.add(training_set)
+        await db.flush()
+        model = TrainedModel(
+            project_id=uuid.UUID(project),
+            name=name,
+            plugin="rf",
+            params={},
+            training_set_id=training_set.id,
+            class_values=[2, 3],
+        )
+        db.add(model)
+        await db.flush()
+        return str(model.id)
+
+    return run_db(database_url, create)
+
+
+def accept_slice(browser, project, prediction, roi, z):
+    """Accept the prediction's bone on slice `z` (8 × 8 voxels)."""
+    return browser.post(
+        f"/api/projects/{project}/labels/accept",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "prediction_artifact_id": prediction,
+            "roi_id": roi,
+            "deltas": deltas_for(
+                np.ones((1, 8, 8), dtype=bool),
+                (z, 0, 0),
+                value=2,
+                only_if="unlabeled",
+            ),
+        },
+    )
+
+
+def add_roi(browser, project) -> str:
+    base = f"/api/projects/{project}/rois"
+    return browser.post(
+        base, json={"bbox": [0, 0, 0, 10, 10, 10], "kind": "cube"}
+    ).json()["id"]
+
+
+def test_the_history_names_people_and_models(
+    ada, project, new_browser, settings, migrated_database_url
+):
+    base = f"/api/projects/{project}/labels"
+    bob = new_browser()
+    signup(bob, username="bob")
+    members = ada.post(f"/api/projects/{project}/members", json={"username": "bob"})
+    bob_id = next(m["user_id"] for m in members.json() if m["username"] == "bob")
+    mask = np.ones((2, 2, 2), dtype=bool)
+    stroke = edit(ada, project, mask, (0, 0, 0), 2).json()["seq"]
+    edit(bob, project, mask, (0, 0, 4), 3)
+    undone = bob.post(
+        f"{base}/ops/{stroke}/undo", json={"client_op_id": str(uuid.uuid4())}
+    )
+    assert undone.status_code == 201
+    # Labels accepted from a model's prediction, and from ada's proposal.
+    model = add_model(migrated_database_url, project, "rf one")
+    roi = add_roi(ada, project)
+    me = uuid.UUID(ada.get("/api/auth/session").json()["user"]["id"])
+    for z, slot in [(2, "prediction"), (3, artifacts.proposal_slot(me))]:
+        prediction = add_prediction(
+            settings, migrated_database_url, project, slot, {"model_id": model}
+        )
+        assert accept_slice(ada, project, prediction, roi, z).status_code == 201
+    # People's own edits can't pass for accepted ones.
+    forged = ada.post(
+        f"{base}/ops",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "deltas": deltas_for(mask, (20, 0, 0), value=2),
+            "tool": {"name": "accept-prediction", "model": model, "roi": roi},
+        },
+    )
+    assert forged.status_code == 201
+
+    history = ada.get(f"{base}/ops").json()
+    assert [(h["kind"], h["username"]) for h in history] == [
+        ("edit", "ada"),
+        ("edit", "ada"),
+        ("edit", "ada"),
+        ("undo", "bob"),
+        ("edit", "bob"),
+        ("edit", "ada"),
+    ]
+    mine, proposed, predicted, undo, bobs, first = history
+    assert mine["accepted"] is None and mine["source"] == Source.HUMAN
+    assert predicted["accepted"] == {
+        "kind": "prediction",
+        "model_id": model,
+        "model_name": "rf one",
+        "v1_job_id": None,
+        "roi_id": roi,
+    }
+    assert proposed["accepted"]["kind"] == "proposal"
+    assert proposed["accepted"]["model_name"] == "rf one"
+    # An undo comes with its edit, as that is now.
+    assert undo["target_seq"] == first["seq"] == stroke
+    assert undo["target"]["username"] == "ada"
+    assert undo["target"]["live"] is False and undo["target"]["target"] is None
+    assert first["live"] is False and first["target"] is None
+    assert all(h["job_kind"] is None for h in history)
+
+    def seqs(query: str) -> list[int]:
+        response = ada.get(f"{base}/ops?{query}")
+        assert response.status_code == 200, response.text
+        return [h["seq"] for h in response.json()]
+
+    assert seqs(f"user_id={bob_id}") == [undo["seq"], bobs["seq"]]
+    assert seqs(f"user_id={bob_id}&before={undo['seq']}") == [bobs["seq"]]
+    assert seqs(f"after={undo['seq']}&limit=2") == [mine["seq"], proposed["seq"]]
+    assert seqs(f"after={first['seq']}&before={predicted['seq']}") == [
+        undo["seq"],
+        bobs["seq"],
+    ]
+    # An undo has its edit's source.
+    assert seqs(f"user_id={bob_id}&source=1&limit=1") == [undo["seq"]]
+    assert seqs(f"source={int(Source.MODEL_VERIFIED)}") == [
+        proposed["seq"],
+        predicted["seq"],
+    ]
+    assert seqs(f"source={int(Source.PROPAGATED)}") == []
+    assert ada.get(f"{base}/ops?source=9").status_code == 422
+    assert ada.get(f"{base}/ops?user_id=bob").status_code == 422
+    # Only members can read it.
+    eve = new_browser()
+    signup(eve, username="eve")
+    assert eve.get(f"{base}/ops?user_id={bob_id}").status_code == 404
+
+
+def test_the_history_names_the_job_that_imported_labels(
+    ada, project, settings, migrated_database_url
+):
+    pid = uuid.UUID(project)
+
+    async def import_sample(db):
+        job = await jobs.enqueue(db, "v1.labels", {}, project_id=pid)
+        result = await labels.apply_edit(
+            db,
+            settings,
+            pid,
+            client_op_id=uuid.uuid4(),
+            deltas=split_into_deltas(
+                np.ones((1, 4, 4), dtype=bool), (5, 0, 0), value=2
+            ),
+            tool={"name": "v1-import", "job": "ab12cd", "sample": "1700000000"},
+            job_id=job.id,
+        )
+        return result.seq
+
+    imported_seq = run_db(migrated_database_url, import_sample)
+    # Accepted from the prediction v1 made, which no model here did.
+    roi = add_roi(ada, project)
+    prediction = add_prediction(
+        settings,
+        migrated_database_url,
+        project,
+        "prediction",
+        {"model_id": None, "v1_job_id": "ab12cd"},
+    )
+    assert accept_slice(ada, project, prediction, roi, 0).status_code == 201
+
+    accepted, imported = ada.get(f"/api/projects/{project}/labels/ops").json()
+    assert imported["seq"] == imported_seq
+    assert (imported["username"], imported["job_kind"]) == (None, "v1.labels")
+    assert imported["source"] == Source.HUMAN and imported["accepted"] is None
+    assert accepted["accepted"] == {
+        "kind": "prediction",
+        "model_id": None,
+        "model_name": None,
+        "v1_job_id": "ab12cd",
+        "roi_id": roi,
+    }
+
+
 def test_out_of_range_numbers_are_refused(ada, project):
     base = f"/api/projects/{project}/labels"
     huge = "9" * 20
     assert ada.get(f"{base}/ops?limit=-1").status_code == 422
     assert ada.get(f"{base}/ops?before={huge}").status_code == 422
+    assert ada.get(f"{base}/ops?after={huge}").status_code == 422
+    assert ada.get(f"{base}/ops?after=-1").status_code == 422
     assert ada.get(f"{base}/changes?after={huge}").status_code == 422
     toggle = {"client_op_id": str(uuid.uuid4())}
     assert ada.post(f"{base}/ops/{huge}/undo", json=toggle).status_code == 422
