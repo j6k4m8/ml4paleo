@@ -27,7 +27,7 @@ from ml4paleo_server.db import (
     create_sessionmaker,
 )
 from ml4paleo_server.storage import project_storage
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 
 from ml4paleo.labels import LABEL_CHUNK_ZYX, Source
 from ml4paleo.labels.codec import decode_chunk
@@ -638,24 +638,43 @@ def test_predictions_labels_were_accepted_from_are_kept(
         assert (np.asarray(group["class"][:8, :8, :8]) == 2).all()  # type: ignore[index]
 
 
-def test_collection_waits_for_an_accept_in_progress(
-    project, settings, migrated_database_url
-):
-    # A replaced prediction, past every grace period...
-    replaced = add_prediction(settings, migrated_database_url, project, "prediction")
-    add_prediction(settings, migrated_database_url, project, "prediction")
+def replaced_and_aged(settings, database_url, project: str):
+    """
+    A prediction that another has replaced, past every grace period, and the
+    settings to collect it with.
+    """
+    replaced = add_prediction(settings, database_url, project, "prediction")
+    add_prediction(settings, database_url, project, "prediction")
     no_wait = settings.model_copy(
         update={
             "storage": settings.storage.model_copy(update={"keep_superseded_days": 0})
         }
     )
 
+    async def age(db):
+        long_ago = datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
+        await db.execute(update(Artifact).values(state_changed_at=long_ago))
+
+    run_db(database_url, age)
+    return replaced, no_wait
+
+
+async def prediction_state(db, prediction: str) -> str:
+    artifact = await db.get(Artifact, uuid.UUID(prediction))
+    return artifact.state
+
+
+def test_collection_waits_for_an_accept_in_progress(
+    project, settings, migrated_database_url
+):
+    replaced, no_wait = replaced_and_aged(settings, migrated_database_url, project)
+
     async def race():
         engine = create_engine(migrated_database_url)
         sessionmaker = create_sessionmaker(engine)
         try:
             async with sessionmaker() as accepting:
-                # ...that an accept has locked, as the API does, and is
+                # An accept has locked it, as the API does, and is
                 # recording labels from...
                 await accepting.scalar(
                     select(Artifact.id)
@@ -683,17 +702,85 @@ def test_collection_waits_for_an_accept_in_progress(
         finally:
             await engine.dispose()
 
-    async def age(db):
-        long_ago = datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
-        await db.execute(update(Artifact).values(state_changed_at=long_ago))
-
-    run_db(migrated_database_url, age)
     assert asyncio.run(race()) == 0
+    assert run_db(migrated_database_url, lambda db: prediction_state(db, replaced)) == (
+        "superseded"
+    )
 
-    async def state(db):
-        return (await db.get(Artifact, uuid.UUID(replaced))).state
 
-    assert run_db(migrated_database_url, state) == "superseded"
+def test_the_accept_endpoint_holds_collection_back_while_it_runs(
+    ada, project, settings, migrated_database_url, monkeypatch
+):
+    # The test above takes the accept's lock itself, so it holds whether or
+    # not the endpoint does. Here a real accept is held part way, reading the
+    # prediction, while collection starts on that prediction.
+    replaced, no_wait = replaced_and_aged(settings, migrated_database_url, project)
+    reading, release = threading.Event(), threading.Event()
+    real = api_labels.open_prediction
+
+    def hold(grant):
+        reading.set()
+        assert release.wait(30), "the accept was never let go"
+        return real(grant)
+
+    monkeypatch.setattr(api_labels, "open_prediction", hold)
+    accepted = {}
+    accepting = threading.Thread(
+        target=lambda: accepted.update(
+            response=accept_box(
+                ada,
+                project,
+                replaced,
+                [0, 0, 0, 10, 10, 10],
+                np.ones((8, 8, 8), dtype=bool),
+                (0, 0, 0),
+                2,
+            )
+        )
+    )
+
+    async def collect():
+        engine = create_engine(migrated_database_url)
+        try:
+            return await artifacts.collect_garbage(create_sessionmaker(engine), no_wait)
+        finally:
+            await engine.dispose()
+
+    collected = {}
+    collecting = threading.Thread(
+        target=lambda: collected.update(count=asyncio.run(collect()))
+    )
+
+    async def waiting_for_a_lock(db) -> int:
+        return await db.scalar(
+            text(
+                "select count(*) from pg_stat_activity "
+                "where datname = current_database() and wait_event_type = 'Lock'"
+            )
+        )
+
+    accepting.start()
+    try:
+        assert reading.wait(10), "the accept never got to reading the prediction"
+        collecting.start()
+        # Collection must be left waiting on the accept (not collect, nor finish).
+        deadline = time.monotonic() + 10
+        while collecting.is_alive() and not run_db(
+            migrated_database_url, waiting_for_a_lock
+        ):
+            assert time.monotonic() < deadline, "collection neither waited nor ended"
+            time.sleep(0.05)
+        assert collecting.is_alive(), "collection didn't wait for the accept"
+    finally:
+        release.set()
+    accepting.join(30)
+    collecting.join(30)
+    assert accepted["response"].status_code == 201, accepted["response"].text
+    # The accept's op is there for it to find, so it keeps the prediction.
+    assert collected["count"] == 0
+    assert run_db(migrated_database_url, lambda db: prediction_state(db, replaced)) == (
+        "superseded"
+    )
 
 
 def add_model(database_url, project: str, name: str) -> str:
