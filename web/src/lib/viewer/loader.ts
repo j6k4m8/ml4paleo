@@ -39,7 +39,14 @@ export class WorkerPool {
 		if (!waiting) return;
 		this.#waiting.delete(response.id);
 		if ("error" in response) waiting.reject(new LoadError(response.error, response.status));
-		else waiting.resolve({ data: response.data as Chunk["data"], shape: response.shape, version: response.version });
+		else {
+			waiting.resolve({
+				data: response.data as Chunk["data"],
+				shape: response.shape,
+				version: response.version,
+				pyramid: response.pyramid,
+			});
+		}
 	}
 
 	load(request: ArrayRegion, signal: AbortSignal): Promise<Chunk> {
@@ -94,5 +101,32 @@ export function labelLoader(pool: WorkerPool, url: string, shape: Vec3): Loader 
 	return (id, signal) => {
 		const [cz = 0, cy = 0, cx = 0] = parse(id);
 		return pool.load({ url, path: "class", region: chunkRegion([cz, cy, cx], shape) }, signal);
+	};
+}
+
+/**
+ * Loads chunks of a project's label zarr at any of its levels (the image's
+ * pyramid): ids `cz/cy/cx` for full resolution, `level/cz/cy/cx` for the
+ * coarser levels, which the server makes when asked for (so a 503 is asked
+ * again). A level the server turns out not to have (it answers 404 for the
+ * array) is handed to `missing`, and loads for it end quietly.
+ */
+export function labelLevelLoader(pool: WorkerPool, url: string, levels: () => Level[], missing: (level: number) => void): Loader {
+	return async (id, signal) => {
+		const parts = parse(id);
+		const level = parts.length > 3 ? (parts[0] ?? 0) : 0;
+		const [cz = 0, cy = 0, cx = 0] = parts.slice(-3);
+		const found = levels()[level];
+		if (!found) throw new DOMException("No such label level", "AbortError");
+		try {
+			const region = chunkRegion([cz, cy, cx], found.shape);
+			return await pool.load({ url, path: found.path, region, derived: level > 0 }, signal);
+		} catch (error) {
+			if (level > 0 && error instanceof LoadError && error.status === 404) {
+				missing(level);
+				throw new DOMException("No such label level", "AbortError");
+			}
+			throw error;
+		}
 	};
 }

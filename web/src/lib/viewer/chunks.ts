@@ -11,6 +11,12 @@ export interface Chunk {
 	shape: number[];
 	/** For label chunks, the version the server served. */
 	version?: number;
+	/**
+	 * For a coarser level of the labels, which the server makes from the
+	 * chunks under it, what it was made from (its `X-Pyramid-Version`). That
+	 * isn't the chunk's `version`, which an edit's base version comes from.
+	 */
+	pyramid?: number;
 }
 
 export type Loader = (id: string, signal: AbortSignal) => Promise<Chunk>;
