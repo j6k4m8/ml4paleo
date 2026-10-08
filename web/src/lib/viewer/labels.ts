@@ -84,7 +84,10 @@ const isTriple = (value: unknown): value is Vec3 =>
  * The levels of the labels that a project's label zarr lists in its group
  * metadata (`ml4paleo.label_levels`, one per level of the image's pyramid,
  * named `class`, `class_1`, ...), finest first, up to the first it lists
- * that doesn't make sense after the ones before. Without a list, or one
+ * that doesn't make sense after the ones before: a name that isn't the
+ * next, a shape or factor that isn't three whole numbers, a shape that isn't
+ * the image's divided by the factor and rounded up (as the server plans its
+ * levels), a level no coarser than the one before. Without a list, or one
  * whose full resolution isn't `shape`, only full resolution (the server
  * doesn't make the coarser levels, or the page can't tell what they are).
  */
@@ -95,6 +98,8 @@ export function labelLevels(group: unknown, shape: Vec3): Level[] {
 		for (const [index, entry] of listed.entries()) {
 			const { array, shape: size, factor_zyx: scale } = (entry ?? {}) as Record<string, unknown>;
 			if (array !== (index === 0 ? "class" : `class_${index}`) || !isTriple(size) || !isTriple(scale)) break;
+			// Its voxels are `scale` full resolution ones along each axis, so it has the image's shape divided by that, rounded up.
+			if (size.some((n, axis) => n !== Math.ceil(shape[axis]! / scale[axis]!))) break;
 			const finer = levels[index - 1]?.scale;
 			// Each level is coarser than the one before.
 			if (finer && !(scale.every((s, axis) => s >= finer[axis]!) && scale.some((s, axis) => s > finer[axis]!))) break;

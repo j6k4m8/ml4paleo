@@ -1015,9 +1015,63 @@ describe("labelLevels", () => {
 		const crossed = group([
 			[[256, 256, 256], [1, 1, 1]],
 			[[128, 128, 128], [2, 2, 2]],
-			[[128, 64, 64], [1, 4, 4]],
+			[[256, 64, 64], [1, 4, 4]],
 		]);
 		expect(labelLevels(crossed, shape).map((l) => l.path)).toEqual(["class", "class_1"]);
+	});
+
+	describe("a level's shape", () => {
+		const paths = (found: unknown, of: Vec3) => labelLevels(found, of).map((l) => l.path);
+
+		it("is the image's divided by its factor and rounded up, as the server plans it, so a level of an odd-sized image is a voxel larger than half", () => {
+			// What `plan_levels` gives for 257 × 257 × 257 voxels.
+			const odd: Vec3 = [257, 257, 257];
+			const planned: [Vec3, Vec3][] = [
+				[odd, [1, 1, 1]],
+				[[129, 129, 129], [2, 2, 2]],
+				[[65, 65, 65], [4, 4, 4]],
+				[[33, 33, 33], [8, 8, 8]],
+			];
+			expect(labelLevels(group(planned), odd).map((l) => [l.shape, l.scale])).toEqual(planned);
+		});
+
+		it("is checked: a level as big as its image, or rounded down, is no level of it, and the levels before it are kept", () => {
+			const odd: Vec3 = [257, 257, 257];
+			// Listed at the image's own size with a factor of two: its chunks would reach past the array the server has.
+			expect(paths(group([[odd, [1, 1, 1]], [odd, [2, 2, 2]]]), odd)).toEqual(["class"]);
+			expect(paths(group([[odd, [1, 1, 1]], [[128, 128, 128], [2, 2, 2]]]), odd)).toEqual(["class"]);
+			// A later level that is wrong ends the levels there.
+			const third = (size: Vec3) =>
+				group([
+					[odd, [1, 1, 1]],
+					[[129, 129, 129], [2, 2, 2]],
+					[size, [4, 4, 4]],
+				]);
+			expect(paths(third([65, 65, 65]), odd)).toEqual(["class", "class_1", "class_2"]);
+			for (const wrong of [[64, 64, 64], [66, 66, 66], [129, 129, 129], [65, 65, 64], [65, 64, 65], [64, 65, 65]] as Vec3[]) {
+				expect(paths(third(wrong), odd), String(wrong)).toEqual(["class", "class_1"]);
+			}
+		});
+
+		it("is checked along each axis by its own factor, for an odd-sized image whose voxels differ in size", () => {
+			// What `plan_levels` gives for 45 × 513 × 511 voxels, 4 × 1 × 1 apart.
+			const image: Vec3 = [45, 513, 511];
+			const planned: [Vec3, Vec3][] = [
+				[image, [1, 1, 1]],
+				[[45, 257, 256], [1, 2, 2]],
+				[[45, 129, 128], [1, 4, 4]],
+				[[23, 65, 64], [2, 8, 8]],
+				[[12, 33, 32], [4, 16, 16]],
+			];
+			expect(labelLevels(group(planned), image).map((l) => [l.shape, l.scale])).toEqual(planned);
+			// Any one axis of any one level off by a voxel ends the levels before it.
+			for (let level = 1; level < planned.length; level++) {
+				for (let axis = 0; axis < 3; axis++) {
+					const off = planned.map(([size, factor], i) => [i === level ? (size.map((n, a) => (a === axis ? n + 1 : n)) as Vec3) : size, factor] as [Vec3, Vec3]);
+					expect(paths(group(off), image).length, `level ${level}, axis ${axis}`).toBe(level);
+				}
+			}
+		});
 	});
 });
 
