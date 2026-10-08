@@ -45,19 +45,23 @@ const RECENT = 256;
 const RETRY_MS = 1000;
 const RETRY_LONGEST_MS = 30_000;
 const RETRY_SPREAD = 0.25;
-// Failing this many times in a row with a server error, a chunk isn't tried again.
-const SERVER_FAILURES = 8;
+// Failing this many times in a row, other than for the network, a chunk isn't tried again.
+const FAILURES = 8;
 
 /**
  * Whether a reload that failed is worth trying again, `failures` failures in
  * a row in. A network failure is: it ends when the network comes back. A
- * server error is for a while. Being signed out or refused isn't, and
- * neither is any other answer.
+ * server error, or a failure to read what it sent, is for a while. Being
+ * signed out or refused isn't, and neither is any other answer.
  */
 function worthRetrying(error: unknown, failures: number): boolean {
 	const status = error instanceof LoadError ? error.status : undefined;
-	if (status === undefined) return true;
-	if (status >= 500 || status === 408 || status === 425 || status === 429) return failures < SERVER_FAILURES;
+	if (status === undefined) {
+		// What the browser throws when fetch gets no answer is a TypeError.
+		const network = error instanceof Error && error.message.startsWith("TypeError");
+		return network || failures < FAILURES;
+	}
+	if (status >= 500 || status === 408 || status === 425 || status === 429) return failures < FAILURES;
 	return false;
 }
 

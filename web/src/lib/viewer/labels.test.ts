@@ -9,12 +9,13 @@ import { LoadError, type WorkerPool } from "./loader";
  * A worker pool whose label chunks come from a map the test controls. With
  * `held`, loads answer from the map as it is when they start but arrive
  * only when the test calls `release`. The next `failures.left` loads fail,
- * as if the server answered with `failures.status`, or the network failed.
+ * as if the server answered with `failures.status`, or, with none, as if
+ * the network failed (`failures.decode`: or what it sent couldn't be read).
  */
 function fakePool(server: Map<string, { value: number; version?: number }>, held = false) {
 	const loads: string[] = [];
 	const waiting: (() => void)[] = [];
-	const failures: { left: number; status?: number } = { left: 0 };
+	const failures: { left: number; status?: number; decode?: boolean } = { left: 0 };
 	const pool = {
 		load: async (request: { region: [number, number][] }): Promise<Chunk> => {
 			const id = request.region.map(([start]) => start / 64).join("/");
@@ -23,7 +24,8 @@ function fakePool(server: Map<string, { value: number; version?: number }>, held
 			if (held) await new Promise<void>((resolve) => waiting.push(resolve));
 			if (failures.left > 0) {
 				failures.left -= 1;
-				throw failures.status === undefined ? new Error("offline") : new LoadError("failed", failures.status);
+				if (failures.status !== undefined) throw new LoadError("Error: Unexpected response status", failures.status);
+				throw new LoadError(failures.decode ? "Error: Invalid zstd frame" : "TypeError: Failed to fetch");
 			}
 			return { data: new Uint8Array(8).fill(value), shape: [2, 2, 2], version };
 		},
@@ -509,7 +511,7 @@ describe("LabelLayer", () => {
 		 * A chunk loaded at version 1 whose reload, for someone's edit (2),
 		 * fails `failures` times, with the HTTP `status` if there's one.
 		 */
-		const loadedWithFailures = async (failures: number, held = false, status?: number) => {
+		const loadedWithFailures = async (failures: number, held = false, status?: number, decode = false) => {
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 			const server = new Map([["0/0/0", { value: 1, version: 1 }]]);
 			const pool = fakePool(server, held);
@@ -520,6 +522,7 @@ describe("LabelLayer", () => {
 			server.set("0/0/0", { value: 2, version: 2 });
 			pool.failures.left = failures;
 			pool.failures.status = status;
+			pool.failures.decode = decode;
 			layer.changed([{ key: [0, 0, 0], version: 2 }]);
 			pool.release();
 			await settled();
@@ -701,6 +704,16 @@ describe("LabelLayer", () => {
 			expect(vi.getTimerCount()).toBe(0);
 			await wait(10 * 60_000);
 			expect(loads).toHaveLength(9);
+		});
+
+		it("stops trying again after what the server sent couldn't be read eight times in a row", async () => {
+			const { loads, failures } = await loadedWithFailures(100, false, undefined, true);
+			await wait((1 + 2 + 4 + 8 + 16 + 30 + 30) * 1000 - 1);
+			expect(loads).toHaveLength(8);
+			await wait(1);
+			expect(loads).toHaveLength(9);
+			expect(failures.left).toBe(100 - 8);
+			expect(vi.getTimerCount()).toBe(0);
 		});
 
 		it("goes on trying again while the network is down, far past the tries a server error gets", async () => {
