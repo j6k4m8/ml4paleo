@@ -244,19 +244,24 @@
 		// What it draws stays cached; the margin loads ahead but may go.
 		const { tiles: wanted, shown } = tilesToLoad(levels, chosen, current);
 		images.want(plane.name, wanted.map(tileId), wanted.slice(0, shown).map(tileId));
+		const top = { level: chosen, slice: slices[chosen.index]!, tiles: visibleTiles(chosen, current, 0) };
+		const finer = levels[chosen.index - 1];
+		// Room on the GPU for every texture this frame may upload, made before
+		// any upload, so none pushes out another the frame draws: the chunks
+		// wanted, and the finer chunks under each of the level's still missing.
+		const under = finer ? (chosen.scale[plane.u] / finer.scale[plane.u]) * (chosen.scale[plane.v] / finer.scale[plane.v]) : 0;
+		const missing = under ? top.tiles.filter((key) => !renderer!.hasImage(key, top.slice)).length : 0;
+		renderer.reserve(wanted.length + missing * under, 4 * MAX_LABEL_TILES);
 		for (const key of wanted) loadImage(key, slices[key.level]!);
 		const layers: { level: Level; slice: number; tiles: TileKey[] }[] = [];
 		for (let i = levels.length - 1; i > chosen.index; i--) {
 			layers.push({ level: levels[i]!, slice: slices[i]!, tiles: visibleTiles(levels[i]!, current, 0) });
 		}
-		const top = { level: chosen, slice: slices[chosen.index]!, tiles: visibleTiles(chosen, current, 0) };
 		// Zooming out, what the finer level already has fills in until the
 		// chosen level's chunks arrive.
-		const finer = levels[chosen.index - 1];
 		const filling = finer ? { level: finer, slice: slices[finer.index]!, tiles: stopgaps(finer, top, current) } : null;
 		if (filling && filling.tiles.length > 0) layers.push(filling);
 		layers.push(top);
-		renderer.reserve(wanted.length + (filling?.tiles.length ?? 0), 4 * MAX_LABEL_TILES);
 
 		const full = levels[0]!;
 		const at = slices[0]!;
