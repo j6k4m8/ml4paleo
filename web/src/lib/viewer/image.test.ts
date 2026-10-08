@@ -125,6 +125,19 @@ describe("httpStatus", () => {
 		expect(failure(new TypeError("Failed to fetch"))).toEqual({ error: "TypeError: Failed to fetch", status: undefined });
 	});
 
+	it("says 404 for an array the server has no metadata for, which zarrita reports as not found", async () => {
+		const error = await zarr
+			.open(zarr.root(new zarr.FetchStore("http://test/labels/class_5/", { fetch: async () => new Response("no", { status: 404 }) })), { kind: "array" })
+			.then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+		expect(error).toBeInstanceOf(Error);
+		expect(httpStatus(error)).toBeUndefined();
+		expect(failure(error).status).toBe(404);
+		expect(failure(error).error).toContain("NotFoundError");
+	});
+
 	it("says nothing for failures that weren't an answer", () => {
 		expect(httpStatus(new TypeError("Failed to fetch"))).toBeUndefined();
 		expect(httpStatus(new DOMException("Aborted", "AbortError"))).toBeUndefined();

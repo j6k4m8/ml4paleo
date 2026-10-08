@@ -1,69 +1,17 @@
 /**
  * Fetches and decodes chunks off the main thread. Each request names a zarr
  * array (a store URL and a path in it) and a region; the answer is the
- * region's values, transferred without copying.
+ * region's values, transferred without copying (see decoding.ts).
  */
 
-import * as zarr from "zarrita";
-import { failure, shardedFetch } from "./image";
+import { failure } from "./image";
+import { type CancelRequest, createDecoder, type DecodeRequest } from "./decoding";
 import { useZstd } from "./zstd";
 
 useZstd();
 
-export type Region = [[number, number], [number, number], [number, number]];
-
-export interface ArrayRegion {
-	url: string;
-	path: string;
-	/** The (z, y, x) region to read. */
-	region: Region;
-	/** The channel to read, for arrays with a leading channel axis. */
-	channel?: number;
-}
-
-export interface DecodeRequest extends ArrayRegion {
-	type: "load";
-	id: number;
-}
-
-export interface CancelRequest {
-	type: "cancel";
-	id: number;
-}
-
-export type DecodeResponse =
-	| { id: number; data: ArrayBufferView; shape: number[]; version?: number }
-	| { id: number; error: string; status?: number };
-
-type OpenArray = zarr.Array<zarr.DataType, zarr.FetchStore>;
-
-const arrays = new Map<string, Promise<OpenArray>>();
+const decode = createDecoder();
 const running = new Map<number, AbortController>();
-// The label zarr says which version of a chunk it served (the next edit's
-// base version), by chunk URL.
-const versions = new Map<string, number>();
-
-async function fetchNoting(request: Request): Promise<Response> {
-	const response = await fetch(request);
-	const version = response.headers.get("x-chunk-version");
-	if (version !== null) versions.set(request.url, Number(version));
-	return response;
-}
-
-function openArray(url: string, path: string): Promise<OpenArray> {
-	const key = `${url}#${path}`;
-	let array = arrays.get(key);
-	if (!array) {
-		// Shard indexes are read with suffix ranges, which the gateway serves,
-		// instead of a HEAD request first.
-		const store = new zarr.FetchStore(url, { useSuffixRequest: true, fetch: shardedFetch(fetchNoting) });
-		array = zarr.open.v3(zarr.root(store).resolve(path), { kind: "array" });
-		// Let a later request try again after a failure.
-		array.catch(() => arrays.delete(key));
-		arrays.set(key, array);
-	}
-	return array;
-}
 
 self.onmessage = async (event: MessageEvent<DecodeRequest | CancelRequest>) => {
 	const message = event.data;
@@ -74,21 +22,14 @@ self.onmessage = async (event: MessageEvent<DecodeRequest | CancelRequest>) => {
 	const controller = new AbortController();
 	running.set(message.id, controller);
 	try {
-		const array = await openArray(message.url, message.path);
-		const [[z0, z1], [y0, y1], [x0, x1]] = message.region;
-		const spatial = [zarr.slice(z0, z1), zarr.slice(y0, y1), zarr.slice(x0, x1)];
-		const selection = message.channel === undefined ? spatial : [message.channel, ...spatial];
-		const chunk = await zarr.get(array, selection, { opts: { signal: controller.signal } });
-		const data = chunk.data as unknown as ArrayBufferView;
-		// One chunk's region names that chunk (unsharded arrays only).
-		const chunkUrl = `${message.url}${message.path}/c/${[z0, y0, x0].map((c) => Math.floor(c / 64)).join("/")}`;
-		const version = versions.get(chunkUrl);
-		versions.delete(chunkUrl);
-		const reply: DecodeResponse = { id: message.id, data, shape: chunk.shape, version };
-		(self as unknown as Worker).postMessage(reply, [data.buffer as ArrayBuffer]);
-	} catch (error) {
-		const reply: DecodeResponse = { id: message.id, ...failure(error) };
-		(self as unknown as Worker).postMessage(reply);
+		const { reply, transfer } = await decode(message, controller.signal);
+		try {
+			(self as unknown as Worker).postMessage(reply, transfer);
+		} catch (error) {
+			// A reply that can't be sent (a DataCloneError, say) is answered as a failed
+			// load, or the page's load would wait for it for good.
+			(self as unknown as Worker).postMessage({ id: message.id, ...failure(error) });
+		}
 	} finally {
 		running.delete(message.id);
 	}

@@ -5,14 +5,14 @@
 	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
 	import { withBackground } from "./background";
-import type { ChunkStore } from "./chunks";
+	import { Busy, type ChunkStore } from "./chunks";
 	import { isRightClick } from "./keymap";
 	import type { LabelLayer } from "./labels";
+	import { MAX_LABEL_TILES, labelsView, overlayHidden } from "./overlays";
 	import { type LabelTile, type Overlay, PlaneRenderer } from "./plane";
 	import type { ViewerState } from "./state.svelte";
 	import {
 		boxOnPlane,
-		countTiles,
 		type Level,
 		type Plane,
 		pixelsPerVoxel,
@@ -21,7 +21,6 @@ import type { ChunkStore } from "./chunks";
 		type TileKey,
 		tileCrosses,
 		tileId,
-		tilesShown,
 		tilesToLoad,
 		tilesUnder,
 		type Vec3,
@@ -72,17 +71,13 @@ import type { ChunkStore } from "./chunks";
 		onroi: (plane: Plane, slice: number, corners: [[number, number], [number, number]]) => void;
 	} = $props();
 
-	// Labels are full resolution only until the label pyramid exists, so
-	// zoomed far out they'd need too many chunks (each is 256 KiB; three
-	// views share a 128 MiB cache).
-	const MAX_LABEL_TILES = 128;
-	// Once hidden, overlays show again only when the view needs this many
-	// times fewer chunks, so zooming near the limit doesn't flicker them.
-	const OVERLAY_HYSTERESIS = 1.25;
 	// More image chunks than this drawn (the level's and the coarser ones
 	// under it), and the view uses a coarser level (each chunk is 64³ voxels,
 	// so this bounds the memory a view keeps on big screens).
 	const MAX_IMAGE_TILES = 400;
+	// How long after the store gave up waiting for a label chunk the server is
+	// still making the view asks for it again.
+	const UNFINISHED_RETRY_MS = 5000;
 	const AXIS_NAMES = ["z", "y", "x"];
 
 	let canvas: HTMLCanvasElement;
@@ -92,14 +87,31 @@ import type { ChunkStore } from "./chunks";
 	let error = $state("");
 	// Why chunks didn't load, until one does.
 	let loadError = $state("");
+	// Chunks of the labels the server was still making when the store gave up
+	// waiting for them: not an error. The view asks for them again every so
+	// often, and says so meanwhile.
+	const unfinished = new Set<string>();
+	let labelsUnfinished = $state(false);
+	let unfinishedTimer: ReturnType<typeof setTimeout> | undefined;
+	// Layers left out because zooming out put too many chunks in view: the
+	// labels (more than their coarsest level lets them be), and a prediction
+	// or segmentation (which have full resolution only).
 	let labelsHidden = $state(false);
+	let overlaysHidden = $state(false);
 	// The level this view showed last, which it keeps a little longer as it
-	// zooms in, so it doesn't flip between two levels.
+	// zooms in, so it doesn't flip between two levels; the image's, and the labels'.
 	let shownLevel: number | undefined;
+	let shownLabelLevel: number | undefined;
 	let frame = 0;
 	let destroyed = false;
 
 	const slice = $derived(Math.floor(viewer.position[plane.normal]));
+	const list = new Intl.ListFormat("en", { style: "long", type: "conjunction" });
+	const hiddenLayers = $derived([
+		...(labelsHidden ? ["labels"] : []),
+		...(overlaysHidden && viewer.showPrediction && (prediction || proposal) ? ["the prediction"] : []),
+		...(overlaysHidden && viewer.showSegmentation && segmentation ? ["the segmentation"] : []),
+	]);
 
 	// Loads this view is waiting for, so each gets one handler.
 	const waiting = new Set<string>();
@@ -160,6 +172,7 @@ import type { ChunkStore } from "./chunks";
 	onDestroy(() => {
 		destroyed = true;
 		cancelAnimationFrame(frame);
+		clearTimeout(unfinishedTimer);
 		images.want(plane.name, new Set());
 		labels?.store.want(plane.name, new Set());
 		prediction?.want(plane.name, new Set());
@@ -201,9 +214,12 @@ import type { ChunkStore } from "./chunks";
 			for (const id of ids) renderer?.dropLabels(id);
 			schedule();
 		});
+		// The server turned out to lack coarser levels the labels listed.
+		const stopLevels = labels.onLevels(schedule);
 		return () => {
 			stopClasses();
 			stop();
+			stopLevels();
 		};
 	});
 
@@ -241,6 +257,14 @@ import type { ChunkStore } from "./chunks";
 		loadError = e instanceof Error ? e.message : String(e);
 	}
 
+	/** The store gave up waiting for a label chunk the server is still making: say so, and have the next frame ask again soon. */
+	function stillMaking(id: string) {
+		unfinished.add(id);
+		labelsUnfinished = true;
+		clearTimeout(unfinishedTimer);
+		unfinishedTimer = setTimeout(schedule, UNFINISHED_RETRY_MS);
+	}
+
 	function render() {
 		if (destroyed || !renderer || levels.length === 0 || width === 0) return;
 		const current = view();
@@ -275,15 +299,12 @@ import type { ChunkStore } from "./chunks";
 
 		const full = levels[0]!;
 		const at = slices[0]!;
-		// Only layers that exist and are shown get hidden when zoomed out.
-		const overlaid = !!(
-			(viewer.showLabels && labels) ||
-			(viewer.showPrediction && (prediction || proposal)) ||
-			(viewer.showSegmentation && segmentation)
-		);
-		const needed = countTiles(full, current);
-		labelsHidden = overlaid && needed > (labelsHidden ? MAX_LABEL_TILES / OVERLAY_HYSTERESIS : MAX_LABEL_TILES);
-		const fullTiles = labelsHidden ? [] : visibleTiles(full, current, 0);
+		// A prediction or segmentation has full resolution only, so zoomed
+		// out far enough it's left out. Only layers that exist and are shown are.
+		const predicted = viewer.showPrediction && !!(prediction || proposal);
+		const segmented = viewer.showSegmentation && !!segmentation;
+		overlaysHidden = (predicted || segmented) && overlayHidden(full, current, overlaysHidden);
+		const fullTiles = overlaysHidden ? [] : visibleTiles(full, current, 0);
 		const overlays: Overlay[] = [];
 		/** Draw a layer's chunks in view (or just `keys`), leaving out `hole`. */
 		const add = (
@@ -297,7 +318,7 @@ import type { ChunkStore } from "./chunks";
 			if (!shown || keys.length === 0) return store.want(plane.name, []);
 			const tiles = keys.map((key) => ({ id: `${key.cz}/${key.cy}/${key.cx}`, key }));
 			store.want(plane.name, tiles.map((t) => t.id));
-			for (const tile of tiles) loadOverlay(store, prefix, tile, at);
+			for (const tile of tiles) loadOverlay(store, prefix, tile, levels, at);
 			overlays.push({ slice: at, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity, hole, background });
 		};
 		// A proposal shows in its box, in place of the prediction there.
@@ -307,17 +328,34 @@ import type { ChunkStore } from "./chunks";
 			keys: inlay ? fullTiles.filter((key) => tileCrosses(key, plane, inlay)) : [],
 		});
 		add(segmentation, "segmentation/", viewer.showSegmentation, viewer.segmentationOpacity);
-		// Zoomed out past the limit, this page's latest edits still show, so a
-		// stroke doesn't vanish as it's finished.
-		const edited = labelsHidden && labels ? tilesShown(labels.recent.map(labelTile), full, current).slice(0, MAX_LABEL_TILES) : fullTiles;
-		add(labels?.store, "", viewer.showLabels, viewer.opacity, { keys: edited, background: true });
+		// The labels come at the level that fits the view, with the coarser
+		// levels under it, and this page's latest edits over them, so a stroke
+		// doesn't vanish as it's finished however far out the view is.
+		if (labels && viewer.showLabels) {
+			const picked = labelsView(labels.levels, current, {
+				current: shownLabelLevel,
+				hidden: labelsHidden,
+				recent: labels.recent,
+				cached: labels.store.ids(),
+			});
+			shownLabelLevel = picked.level.index;
+			labelsHidden = picked.hidden;
+			labels.store.want(plane.name, picked.wanted, picked.shown);
+			for (const tile of picked.draw) loadOverlay(labels.store, "", tile, labels.levels, at);
+			overlays.push({ slice: at, tiles: picked.draw, opacity: viewer.opacity, background: true, level: picked.level.index });
+			if (unfinished.size > 0) {
+				// Not waiting for chunks the view no longer needs.
+				const wanted = new Set(picked.wanted);
+				for (const id of unfinished) if (!wanted.has(id)) unfinished.delete(id);
+				labelsUnfinished = unfinished.size > 0;
+			}
+		} else {
+			labels?.store.want(plane.name, []);
+			labelsHidden = false;
+			unfinished.clear();
+			labelsUnfinished = false;
+		}
 		renderer.draw(current, viewer.window, layers, overlays);
-	}
-
-	/** The level-0 chunk key of a label chunk id (`cz/cy/cx`). */
-	function labelTile(id: string): TileKey {
-		const [cz = 0, cy = 0, cx = 0] = id.split("/").map(Number);
-		return { level: 0, cz, cy, cx };
 	}
 
 	/**
@@ -364,12 +402,19 @@ import type { ChunkStore } from "./chunks";
 			.finally(() => waiting.delete(`image:${id}`));
 	}
 
-	/** Load an overlay chunk; its textures are named `prefix` + its id. */
-	function loadOverlay(store: ChunkStore, prefix: string, tile: LabelTile, at: number) {
+	/**
+	 * Load an overlay chunk, or take it from the store if it's there, and put
+	 * its slice on the GPU; its textures are named `prefix` + its id. `of` are
+	 * the levels its chunk key's level indexes, and `at` the slice of level 0
+	 * (`tile` may have a slice of its level's own).
+	 */
+	function loadOverlay(store: ChunkStore, prefix: string, tile: LabelTile, of: Level[], at: number) {
+		const level = of[tile.key.level];
+		const slice = tile.slice ?? at;
 		const named = { ...tile, id: prefix + tile.id };
-		if (!renderer || renderer.hasLabels(named.id, at)) return;
+		if (!renderer || !level || renderer.hasLabels(named.id, slice)) return;
 		const cached = store.get(tile.id);
-		if (cached) return renderer.uploadLabels(named, at, cached);
+		if (cached) return renderer.uploadLabels(named, slice, cached);
 		if (waiting.has(`overlay:${named.id}`)) return;
 		waiting.add(`overlay:${named.id}`);
 		store
@@ -377,11 +422,16 @@ import type { ChunkStore } from "./chunks";
 			.then((chunk) => {
 				// The layer may show another store by now, under the same names.
 				if (![prediction, proposal?.store, segmentation, labels?.store].includes(store)) return schedule();
-				if (!renderer || renderer.hasLabels(named.id, at)) return;
-				if (sliceIndex(levels[0]!, view()) !== at) return schedule();
-				renderer.uploadLabels(named, at, chunk);
+				if (store === labels?.store && unfinished.delete(tile.id)) labelsUnfinished = unfinished.size > 0;
+				if (!renderer || renderer.hasLabels(named.id, slice)) return;
+				if (sliceIndex(level, view()) !== slice) return schedule();
+				renderer.uploadLabels(named, slice, chunk);
 				schedule();
-			}, failed)
+			}, (e: unknown) => {
+				// A label chunk the server is still making isn't an error.
+				if (!(e instanceof Busy)) failed(e);
+				else if (store === labels?.store) stillMaking(tile.id);
+			})
 			.finally(() => waiting.delete(`overlay:${named.id}`));
 	}
 
@@ -789,7 +839,8 @@ import type { ChunkStore } from "./chunks";
 		{plane.name.toUpperCase()} · {AXIS_NAMES[plane.normal]}
 		{slice}
 		{#if labels && !viewer.showLabels}<span class="warn">· labels hidden (V)</span>{/if}
-		{#if labelsHidden}<span class="muted">· zoom in to see labels</span>{/if}
+		{#if hiddenLayers.length > 0}<span class="muted">· zoom in to see {list.format(hiddenLayers)}</span>{/if}
+		{#if labelsUnfinished}<span class="muted">· the server is still making the zoomed-out labels, retrying</span>{/if}
 	</div>
 	{#if error || loadError}<p class="error" role="alert">{error || loadError}</p>{/if}
 </div>
