@@ -5,6 +5,7 @@
  */
 
 import * as zarr from "zarrita";
+import { shardIndexesKept } from "./image";
 import { useZstd } from "./zstd";
 
 useZstd();
@@ -55,7 +56,7 @@ function openArray(url: string, path: string): Promise<OpenArray> {
 	if (!array) {
 		// Shard indexes are read with suffix ranges, which the gateway serves,
 		// instead of a HEAD request first.
-		const store = new zarr.FetchStore(url, { useSuffixRequest: true, fetch: fetchNoting });
+		const store = new zarr.FetchStore(url, { useSuffixRequest: true, fetch: shardIndexesKept(fetchNoting) });
 		array = zarr.open.v3(zarr.root(store).resolve(path), { kind: "array" });
 		// Let a later request try again after a failure.
 		array.catch(() => arrays.delete(key));

@@ -15,6 +15,22 @@ export function absolute(url: string): string {
 	return new URL(url, globalThis.location?.href ?? "http://localhost/").href;
 }
 
+/**
+ * A fetch for zarrita's FetchStore that reads shard indexes (the suffix
+ * ranges it asks for) whatever happens to the read that asked first.
+ * zarrita reads each shard's index once and shares it with every chunk of
+ * the shard, passing on the first read's abort signal: cancelling that one
+ * chunk would fail all the others waiting for the index.
+ */
+export function shardIndexesKept(
+	fetcher: (request: Request) => Promise<Response> = (request) => fetch(request),
+): (request: Request) => Promise<Response> {
+	return (request) => {
+		const suffix = request.headers.get("range")?.startsWith("bytes=-");
+		return fetcher(suffix ? new Request(request, { signal: null }) : request);
+	};
+}
+
 /** Level-0 voxels per voxel of each level, from the levels' scales. */
 export function levelFactors(multiscales: Multiscales): [number, number, number][] {
 	const scales = multiscales.datasets.map((dataset) => {
