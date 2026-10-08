@@ -19,6 +19,7 @@
 		type TileKey,
 		tileCrosses,
 		tileId,
+		tilesShown,
 		tilesToLoad,
 		type Vec3,
 		type View,
@@ -288,8 +289,17 @@
 			keys: inlay ? fullTiles.filter((key) => tileCrosses(key, plane, inlay)) : [],
 		});
 		add(segmentation, "segmentation/", viewer.showSegmentation, viewer.segmentationOpacity);
-		add(labels?.store, "", viewer.showLabels, viewer.opacity);
+		// Zoomed out past the limit, this page's latest edits still show, so a
+		// stroke doesn't vanish as it's finished.
+		const edited = labelsHidden && labels ? tilesShown(labels.recent.map(labelTile), full, current).slice(0, MAX_LABEL_TILES) : fullTiles;
+		add(labels?.store, "", viewer.showLabels, viewer.opacity, { keys: edited });
 		renderer.draw(current, viewer.window, layers, overlays);
+	}
+
+	/** The level-0 chunk key of a label chunk id (`cz/cy/cx`). */
+	function labelTile(id: string): TileKey {
+		const [cz = 0, cy = 0, cx = 0] = id.split("/").map(Number);
+		return { level: 0, cz, cy, cx };
 	}
 
 	/**

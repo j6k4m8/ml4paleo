@@ -32,6 +32,8 @@ interface LocalDelta {
 }
 
 const CACHE_BYTES = 128 * 1024 * 1024;
+// How many of the chunks this page edited last it remembers (`recent`).
+const RECENT = 256;
 
 export class LabelLayer {
 	store: ChunkStore;
@@ -43,6 +45,8 @@ export class LabelLayer {
 	// go over every copy that loads; after, only over copies older than the
 	// version the op made.
 	#local = new Map<string, Map<string, LocalDelta>>();
+	// Chunks this page edited, the latest last.
+	#recent = new Set<string>();
 	// Chunks loading again because they changed, and the version they changed to.
 	#awaited = new Map<string, number>();
 	/** Called if live updates stop for good (signed out, or removed from the project). */
@@ -76,6 +80,11 @@ export class LabelLayer {
 			}
 			if (stale) queueMicrotask(() => this.reload([id]));
 		};
+	}
+
+	/** Chunks this page edited (ids, `cz/cy/cx`), the latest last. */
+	get recent(): string[] {
+		return [...this.#recent];
 	}
 
 	#forget(op: string, id: string): void {
@@ -157,10 +166,16 @@ export class LabelLayer {
 			const { mask, written } = decodeDelta(delta);
 			local.set(id, { box: delta.box, mask, written, onlyIf: delta.only_if });
 			this.store.pin(id);
+			this.#recent.delete(id);
+			this.#recent.add(id);
 			const chunk = this.store.get(id);
 			if (chunk && applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, mask, written, delta.only_if) > 0) {
 				changed.push(id);
 			}
+		}
+		for (const id of this.#recent) {
+			if (this.#recent.size <= RECENT) break;
+			this.#recent.delete(id);
 		}
 		this.#local.set(op, local);
 		this.#emit(changed);

@@ -135,6 +135,14 @@ describe("LabelLayer", () => {
 		expect(loads).toHaveLength(2);
 	});
 
+	it("remembers the chunks it edited, the latest last", () => {
+		const { pool } = fakePool(new Map());
+		const layer = new LabelLayer("p", pool, [128, 128, 128]);
+		layer.applyLocal("a", [delta(1, [0, 0, 0]), delta(1, [0, 0, 1])]);
+		layer.applyLocal("b", [delta(2, [0, 0, 0])]);
+		expect(layer.recent).toEqual(["0/0/1", "0/0/0"]);
+	});
+
 	it("drops chunks no view shows instead of refreshing them", async () => {
 		const server = new Map([["0/0/0", { value: 1, version: 1 }]]);
 		const { pool, loads } = fakePool(server);
