@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 
+import httpx2
 import numpy as np
 import pytest
 from helpers import NOT_JSON, run_db, signup, strict_json
@@ -1384,6 +1385,44 @@ def test_numbers_json_cannot_hold_are_a_422_in_the_labels_api(
     assert ada.get(f"{base}/counts").json() == before
     assert len(ada.get(f"{base}/classes").json()) == 2
     assert ada.get(f"{base}/ops").json() == []
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_numbers_json_cannot_hold_get_their_422_over_a_real_connection(
+    ada, project, settings, migrated_database_url, live_server, literal
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    base = f"/api/projects/{project}/labels"
+    delta = deltas_for(np.ones((1, 1, 1), dtype=bool), (0, 0, 0), value=2)[0]
+    ops = {
+        "client_op_id": str(uuid.uuid4()),
+        "deltas": [{**delta, "base_version": "@n@"}],
+    }
+    accept = {
+        "client_op_id": str(uuid.uuid4()),
+        "prediction_artifact_id": prediction,
+        "box": [0, 0, 0, "@n@", 10, 10],
+        "deltas": [delta],
+    }
+    # The same session, on a real connection, where a request the server can't answer
+    # drops the connection instead of getting a 500.
+    cookies = {cookie.name: cookie.value for cookie in ada.client.cookies.jar}
+    headers = {"content-type": "application/json", "x-csrf-token": ada.csrf_token}
+    with httpx2.Client(base_url=live_server, cookies=cookies, timeout=10) as raw:
+        for url, body, place in (
+            (f"{base}/ops", ops, ["body", "deltas", 0, "base_version"]),
+            (f"{base}/accept", accept, ["body", "box", 3]),
+        ):
+            text = json.dumps(body).replace('"@n@"', literal)
+            response = raw.post(url, content=text, headers=headers)
+            assert response.status_code == 422, (
+                url,
+                response.status_code,
+                response.text,
+            )
+            [error] = strict_json(response.text)["detail"]
+            assert error["loc"] == place and error["input"] == NOT_JSON[literal]
+        assert raw.get(f"{base}/classes").status_code == 200
 
 
 def test_the_history_names_people_and_models(
