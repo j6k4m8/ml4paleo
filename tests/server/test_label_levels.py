@@ -5,6 +5,7 @@ from the full-resolution labels when a viewer asks, for display only.
 
 import asyncio
 import base64
+import hashlib
 import pathlib
 import shutil
 import threading
@@ -18,7 +19,7 @@ from ml4paleo_server import artifacts, label_pyramid
 from ml4paleo_server.app import create_app
 
 from ml4paleo.labels import LABEL_CHUNK_ZYX
-from ml4paleo.labels.codec import decode_chunk
+from ml4paleo.labels.codec import ZARR_CODECS, decode_chunk
 from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.labels.pyramid import downsample_labels
 from ml4paleo.ome import OmeImage, plan_levels
@@ -27,12 +28,16 @@ from ml4paleo.storage import StorageGrant
 # (z, y, x): levels of 4, with several chunks at the first two.
 SHAPE = (140, 150, 270)
 ANISOTROPIC = {"voxel_size_zyx": [4.0, 1.0, 1.0], "unit": "millimeter"}
+# The output of the rule on a fixed block (see the test that uses it).
+RULE_PIN = "0cc2d53744168f83e28faaba9970c0fd20c028bde561ce382a8abeb1dc0fd3a0"
 
 
-def make_project(browser, database_url, shape=SHAPE, **manifest) -> str:
-    project = browser.post("/api/projects", json={"name": "Skull"}).json()["id"]
+def add_image(database_url, project, shape=SHAPE, **manifest) -> None:
+    """
+    Make a new image (which has just this manifest) the project's current one.
+    """
 
-    async def add_image(db):
+    async def add(db):
         artifact = await artifacts.create_staging(
             db, project_id=uuid.UUID(project), kind="image", head_slot="image"
         )
@@ -40,7 +45,12 @@ def make_project(browser, database_url, shape=SHAPE, **manifest) -> str:
         artifact.manifest = {"shape_czyx": [1, *shape], **manifest}
         await artifacts.set_head(db, artifact)
 
-    run_db(database_url, add_image)
+    run_db(database_url, add)
+
+
+def make_project(browser, database_url, shape=SHAPE, **manifest) -> str:
+    project = browser.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    add_image(database_url, project, shape, **manifest)
     for name, color in [("bone", "#ffffff"), ("matrix", "#884400")]:
         browser.post(
             f"/api/projects/{project}/labels/classes",
@@ -682,6 +692,59 @@ def test_coarse_chunks_of_other_projects_and_people_stay_apart(
     assert get(new_browser(), project, 1, (0, 0, 0)).status_code == 401
 
 
+def test_replacing_the_image_changes_what_coarse_chunks_say(ada, migrated_database_url):
+    # These two images plan the same level 2, by way of different levels 1, so
+    # the same labels make different pixels there under one factor.
+    shape, one, other = (2, 200, 200), (1, 1, 1), (2.5, 1, 1)
+    first, second = plan_levels(shape, one), plan_levels(shape, other)
+    assert first[2].shape_zyx == second[2].shape_zyx
+    assert first[2].factor_zyx == second[2].factor_zyx == (2, 4, 4)
+    assert first[1].factor_zyx != second[1].factor_zyx
+    project = make_project(ada, migrated_database_url, shape, voxel_size_zyx=one)
+    volume = np.random.default_rng(5).integers(0, 4, shape).astype(np.uint8)
+    paint(ada, project, volume)
+    before = get(ada, project, 2, (0, 0, 0))
+    assert before.status_code == 200
+    np.testing.assert_array_equal(
+        decode_chunk(before.content),
+        expected_chunk(shrink(volume, first)[2], (0, 0, 0)),
+    )
+
+    add_image(migrated_database_url, project, shape, voxel_size_zyx=other)
+    after = get(ada, project, 2, (0, 0, 0))
+    assert after.status_code == 200
+    # No label changed, but what a viewer kept no longer holds.
+    assert after.headers["etag"] != before.headers["etag"]
+    assert after.content != before.content
+    stale = get(
+        ada, project, 2, (0, 0, 0), headers={"If-None-Match": before.headers["etag"]}
+    )
+    assert stale.status_code == 200
+    np.testing.assert_array_equal(
+        decode_chunk(stale.content),
+        expected_chunk(shrink(volume, second)[2], (0, 0, 0)),
+    )
+
+
+def test_the_rule_and_the_codec_are_pinned_to_the_rule_version():
+    # Viewers keep coarse chunks for as long as their ETag holds, which is only
+    # right for the rule and codec that made them. If this fails, bump
+    # `label_pyramid.RULE_VERSION`, then update what is pinned here.
+    labels = np.array([0, 1, 2, 3, 4, 9], dtype=np.uint8)[
+        (np.arange(8**3, dtype=np.uint64) * 2654435761 % 4294967296 >> 8) % 6
+    ].reshape(8, 8, 8)
+    # Some blocks with only background, and some with nothing.
+    labels[:2] %= 2
+    labels[:2, :, :4] = 0
+    shrunk = downsample_labels(labels, (2, 2, 2))
+    assert hashlib.sha256(shrunk.tobytes()).hexdigest() == RULE_PIN
+    assert ZARR_CODECS == [
+        {"name": "bytes"},
+        {"name": "zstd", "configuration": {"level": 3, "checksum": False}},
+    ]
+    assert label_pyramid.RULE_VERSION == 2
+
+
 def test_a_label_blob_gone_from_storage_is_an_error(ada, project, settings):
     paint(ada, project, messy_volume())
     root = pathlib.Path(settings.storage.url.removeprefix("file://"))
@@ -768,9 +831,11 @@ def test_a_cold_chunk_finishes_however_little_room_the_cache_has(
         assert get(ada, project, 2, key).status_code == 200
     level1 = [
         len(data) + label_pyramid.ENTRY_OVERHEAD
-        for (_, level, *_), data in pyramid._cache._items.items()
+        for (_, _, level, *_), data in pyramid._cache._items.items()
         if level == 1
     ]
+    # Eight under the first chunk, four more under the second.
+    assert len(level1) == (8, 12)[len(keys) - 1]
     # A cache with room for only some of the chunks of level 1 that these
     # chunks of level 2 are made of, and a request that makes just one.
     pyramid._cache = label_pyramid._Cache(int(room * sum(level1)))

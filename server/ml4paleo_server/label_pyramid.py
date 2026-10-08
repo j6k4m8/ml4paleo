@@ -23,7 +23,10 @@ from the full resolution chunks), when someone asks for it:
   the label chunk rows gives it, with how many of the chunks have labels. The
   sum is the chunk's `X-Chunk-Version`, and its `ETag` has it too, so a
   viewer's revalidation costs one query. A chunk with no labeled chunk under
-  it is simply missing (unlabeled), as at level 0.
+  it is simply missing (unlabeled), as at level 0. The `ETag` also names what
+  else the pixels follow: the image whose levels these are (replacing it can
+  change them, labels unchanged), and `RULE_VERSION`. It is only unique to its
+  URL: two chunks can have the same one.
 - A computed chunk is kept, as the bytes a viewer gets, in a cache that holds
   the most recently used ones under a memory limit. Its key includes that sum,
   so an edit leaves the stale copy behind rather than finding it. An edit
@@ -57,6 +60,7 @@ Each process has its own cache.
 import asyncio
 import contextlib
 import functools
+import hashlib
 import logging
 import time
 import uuid
@@ -82,9 +86,9 @@ log = logging.getLogger(__name__)
 ChunkKey = tuple[int, int, int]
 Box = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
 
-# Bump when `downsample_labels` changes what it makes, so viewers drop the
-# chunks they kept.
-RULE_VERSION = 1
+# Bump when `downsample_labels` or the chunk codec changes the bytes a chunk
+# is made of, so viewers drop the chunks they kept. A test pins both.
+RULE_VERSION = 2
 # Memory for cached chunks, in each API process.
 CACHE_BYTES = 64 * 1024 * 1024
 # How long one request works on a chunk, and how many stored chunks it reads,
@@ -122,7 +126,7 @@ class MissingBlob(Exception):
     """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Fingerprint:
     """
     Which state of the labels a chunk shows: how many full-resolution chunks
@@ -133,9 +137,24 @@ class Fingerprint:
     count: int
     versions: int
 
-    def etag(self, level: LevelSpec) -> str:
-        z, y, x = level.factor_zyx
-        return f'"p{RULE_VERSION}.{z}.{y}.{x}.{self.versions}"'
+
+@dataclass(frozen=True)
+class Plan:
+    """
+    What a project's coarse levels follow besides its labels: the image whose
+    levels they share.
+    """
+
+    image: uuid.UUID
+    levels: list[LevelSpec]
+
+    @functools.cached_property
+    def tag(self) -> str:
+        return hashlib.blake2s(self.image.bytes, digest_size=6).hexdigest()
+
+    def etag(self, level: int, state: Fingerprint) -> str:
+        z, y, x = self.levels[level].factor_zyx
+        return f'"p{RULE_VERSION}.{self.tag}.{z}.{y}.{x}.{state.versions}"'
 
 
 def array_name(level: int) -> str:
@@ -471,14 +490,14 @@ class LabelPyramid:
         db: AsyncSession,
         store,
         project_id: uuid.UUID,
-        levels: Sequence[LevelSpec],
+        plan: Plan,
         level: int,
         key: ChunkKey,
         state: Fingerprint,
     ) -> bytes | None:
         """
         A chunk of `level` (1 or more), as zarr chunk bytes; None if nothing
-        under it has labels. `state` says which state to compute, from
+        under it shows a label. `state` says which state to compute, from
         `fingerprint`. Raises `Busy` if that takes more than the budget. The
         session's connection is given back, as storage and computing are slow.
         """
@@ -486,7 +505,7 @@ class LabelPyramid:
             db,
             store,
             project_id,
-            levels,
+            plan,
             level,
             key,
             state,
@@ -499,14 +518,14 @@ class LabelPyramid:
         db: AsyncSession,
         store,
         project_id: uuid.UUID,
-        levels: Sequence[LevelSpec],
+        plan: Plan,
         level: int,
         key: ChunkKey,
         state: Fingerprint,
         budget: _Budget,
         pin: bool,
     ) -> bytes | None:
-        cached = _cache_key(project_id, levels, level, key, state)
+        cached = _cache_key(project_id, plan, level, key, state)
         if (data := self._cache.get(cached)) is not None:
             return data
         if (building := self._building.get(cached)) is not None:
@@ -518,7 +537,7 @@ class LabelPyramid:
         self._building[cached] = made
         try:
             data = await self._make(
-                db, store, project_id, levels, level, key, cached, budget, pin
+                db, store, project_id, plan, level, key, cached, budget, pin
             )
         except BaseException as exc:
             # Anyone waiting can only ask again, whatever stopped this.
@@ -544,13 +563,14 @@ class LabelPyramid:
         db: AsyncSession,
         store,
         project_id: uuid.UUID,
-        levels: Sequence[LevelSpec],
+        plan: Plan,
         level: int,
         key: ChunkKey,
         cached: Hashable,
         budget: _Budget,
         pin: bool,
     ) -> bytes | None:
+        levels = plan.levels
         step = _step(levels, level)
         origin = (key[0] * step[0], key[1] * step[1], key[2] * step[2])
         kept: list[Hashable] = []
@@ -576,7 +596,7 @@ class LabelPyramid:
                     db,
                     store,
                     project_id,
-                    levels,
+                    plan,
                     level - 1,
                     child,
                     child_state,
@@ -586,7 +606,7 @@ class LabelPyramid:
                 if made is not None:
                     parts.append((_position(child, origin), made))
                     kept.append(
-                        _cache_key(project_id, levels, level - 1, child, child_state)
+                        _cache_key(project_id, plan, level - 1, child, child_state)
                     )
             budget.spend()
             await db.rollback()
@@ -600,13 +620,9 @@ class LabelPyramid:
 
 
 def _cache_key(
-    project_id: uuid.UUID,
-    levels: Sequence[LevelSpec],
-    level: int,
-    key: ChunkKey,
-    state: Fingerprint,
+    project_id: uuid.UUID, plan: Plan, level: int, key: ChunkKey, state: Fingerprint
 ) -> Hashable:
-    return (project_id, level, key, levels[level].factor_zyx, state)
+    return (project_id, plan.tag, level, key, state)
 
 
 def _position(key: ChunkKey, origin: ChunkKey) -> ChunkKey:

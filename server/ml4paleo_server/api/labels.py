@@ -864,7 +864,7 @@ async def label_zarr(
     revalidate = {"Cache-Control": "private, no-cache"}
     project_id = project.id
     try:
-        levels = await labels.volume_levels(db, project_id)
+        image_id, levels = await labels.volume_levels(db, project_id)
     except labels.NoImage:
         raise HTTPException(
             status_code=404, detail="This project has no image yet."
@@ -898,7 +898,7 @@ async def label_zarr(
         raise HTTPException(status_code=404, detail="No such zarr key.")
     if level:
         return await _coarse_chunk(
-            request, db, settings, project_id, levels, level, (cz, cy, cx)
+            request, db, settings, project_id, image_id, levels, level, (cz, cy, cx)
         )
     row = await db.scalar(
         select(LabelChunk).where(
@@ -934,13 +934,13 @@ async def _coarse_chunk(
     db,
     settings,
     project_id: uuid.UUID,
+    image_id: uuid.UUID,
     levels: Sequence[LevelSpec],
     level: int,
     key: tuple[int, int, int],
 ) -> Response:
-    spec = levels[level]
     headers = {"Cache-Control": "private, no-cache"}
-    if any(k >= n for k, n in zip(key, label_pyramid.grid(spec), strict=True)):
+    if any(k >= n for k, n in zip(key, label_pyramid.grid(levels[level]), strict=True)):
         state = label_pyramid.Fingerprint(count=0, versions=0)
     else:
         state = await label_pyramid.fingerprint(db, project_id, levels, level, key)
@@ -948,14 +948,15 @@ async def _coarse_chunk(
     if state.count == 0:
         await db.rollback()
         return Response(status_code=404, headers=headers)
-    etag = state.etag(spec)
+    plan = label_pyramid.Plan(image_id, list(levels))
+    etag = plan.etag(level, state)
     if request.headers.get("if-none-match") == etag:
         await db.rollback()
         return Response(status_code=304, headers={**headers, "ETag": etag})
     pyramid: label_pyramid.LabelPyramid = request.app.state.label_pyramid
     store = object_store(labels.labels_root(settings, project_id))
     try:
-        data = await pyramid.chunk(db, store, project_id, levels, level, key, state)
+        data = await pyramid.chunk(db, store, project_id, plan, level, key, state)
     except label_pyramid.Busy:
         raise HTTPException(
             status_code=503,
