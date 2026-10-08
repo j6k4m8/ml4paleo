@@ -74,7 +74,7 @@ from ml4paleo.labels.codec import ZARR_CODECS, blob_key
 from ml4paleo.labels.deltas import ChunkDelta, unpack_mask, unpack_values
 from ml4paleo.ome import LevelSpec
 from ml4paleo.segmentation.predict import open_prediction
-from ml4paleo.storage import get_bytes, object_store
+from ml4paleo.storage import StorageGrant, get_bytes, object_store
 
 from .. import artifacts, audit, label_pyramid, labels, streams
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
@@ -422,7 +422,9 @@ async def apply_op(
     return _op_out(result)
 
 
-# The most of a prediction one accept may read (16 MiB of label values).
+# The most one accept may span, as a box or as the labels it sends (16 MiB of
+# label values): what a page takes in at once. What the server reads doesn't
+# depend on it (see `_check_against_prediction`).
 MAX_ACCEPT_VOXELS = 256**3
 
 
@@ -469,23 +471,37 @@ async def _check_current_image(db, project_id: uuid.UUID, prediction: Artifact) 
         )
 
 
-def _check_against_prediction(
-    deltas: list[ChunkDelta], predicted: np.ndarray, origin: Sequence[int]
-) -> None:
-    """Every voxel a delta selects must hold the value it writes."""
+def _check_against_prediction(grant: StorageGrant, deltas: list[ChunkDelta]) -> None:
+    """
+    Every voxel a delta selects must hold the value it writes, in the
+    prediction at `grant`, and the prediction must reach as far as the labels.
+
+    Each delta is read from its own region, which lies in one chunk of the
+    labels and so in one of the prediction's (both are 64 voxels a side). So
+    what is read is the chunks the labels are in, a chunk for each delta (at
+    most `MAX_DELTAS`) however far apart they lie, not every chunk between
+    them, as the box around them would be.
+    """
+    classes: Any = open_prediction(grant)["class"]
+    regions = []
     for delta in deltas:
         start = [
-            k * c + b - o
-            for k, c, b, o in zip(
-                delta.key, LABEL_CHUNK_ZYX, delta.box[:3], origin, strict=True
-            )
+            k * c + b
+            for k, c, b in zip(delta.key, LABEL_CHUNK_ZYX, delta.box[:3], strict=True)
         ]
-        shape = delta.box_shape
-        region = predicted[
-            tuple(slice(a, a + n) for a, n in zip(start, shape, strict=True))
-        ]
-        mask = unpack_mask(delta.mask, shape)
-        if (region[mask] != delta.value).any():
+        regions.append(
+            tuple(slice(a, a + n) for a, n in zip(start, delta.box_shape, strict=True))
+        )
+    # Before reading any of it: a read past the end of an array is cut short.
+    if any(
+        part.stop > n
+        for region in regions
+        for part, n in zip(region, classes.shape, strict=True)
+    ):
+        raise ValueError("That prediction doesn't cover those labels")
+    for delta, region in zip(deltas, regions, strict=True):
+        mask = unpack_mask(delta.mask, delta.box_shape)
+        if (np.asarray(classes[region])[mask] != delta.value).any():
             raise ValueError("Those labels don't match the prediction")
 
 
@@ -506,8 +522,10 @@ async def accept_prediction(
     0) into only unlabeled voxels inside the ROI or box, and the stored
     prediction has exactly that value at every voxel it selects. A box is
     checked as an ROI's is (whole voxels, not empty, inside the image). The
-    labels sent may span at most `MAX_ACCEPT_VOXELS` (and so may a box).
-    Undo and redo work as for any edit.
+    labels sent may span at most `MAX_ACCEPT_VOXELS` (and so may a box). Only
+    the chunks of the prediction the labels are in are read: a chunk for each
+    delta, at most `MAX_DELTAS`, whatever the box or ROI is like. Undo and
+    redo work as for any edit.
     """
     if done := await labels.existing(db, project.id, body.client_op_id):
         return _op_out(done)
@@ -560,13 +578,7 @@ async def accept_prediction(
         _check_size(box, place)
         await _check_current_image(db, project.id, prediction)
         grant = project_storage(settings).child(artifacts.artifact_path(prediction))
-        region = tuple(slice(box[a], box[a + 3]) for a in range(3))
-        predicted = await run_in_threadpool(
-            lambda: np.asarray(open_prediction(grant)["class"][region])  # type: ignore[index]
-        )
-        if predicted.shape != tuple(box[a + 3] - box[a] for a in range(3)):
-            raise ValueError("That prediction doesn't cover those labels")
-        await run_in_threadpool(_check_against_prediction, deltas, predicted, box[:3])
+        await run_in_threadpool(_check_against_prediction, grant, deltas)
         result = await labels.apply_edit(
             db,
             settings,

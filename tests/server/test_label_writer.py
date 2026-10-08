@@ -6,6 +6,7 @@ the history and change feed, the labels as zarr, and ROIs.
 import asyncio
 import base64
 import datetime
+import itertools
 import json
 import random
 import threading
@@ -16,6 +17,7 @@ import numpy as np
 import pytest
 from helpers import NOT_JSON, run_db, signup, strict_json
 from ml4paleo_server import artifacts, jobs, labels
+from ml4paleo_server.api import labels as api_labels
 from ml4paleo_server.db import (
     Artifact,
     LabelOp,
@@ -429,6 +431,77 @@ def add_prediction(
         return str(artifact.id)
 
     return run_db(database_url, create)
+
+
+def add_sparse_prediction(settings, database_url, project: str, shape, fills) -> str:
+    """
+    A committed prediction of `shape` that holds each value in the box (z0, y0,
+    x0, z1, y1, x1) given for it and 0 elsewhere, storing only the chunks those
+    boxes reach (so it can be as big as an image is).
+    """
+
+    async def create(db):
+        artifact = await artifacts.create_staging(
+            db,
+            project_id=uuid.UUID(project),
+            kind="prediction",
+            inputs={"model_id": None},
+            head_slot=None,
+        )
+        group = create_prediction(
+            project_storage(settings).child(artifacts.artifact_path(artifact)), shape
+        )
+        for box, value in fills:
+            region = tuple(slice(box[a], box[a + 3]) for a in range(3))
+            group["class"][region] = value  # type: ignore[index]
+        artifact.state = "committed"
+        artifact.manifest = {"kind": "prediction", "shape_zyx": list(shape)}
+        return str(artifact.id)
+
+    return run_db(database_url, create)
+
+
+class Reads:
+    """
+    What accepts read of a prediction's classes, noted as they go: the regions
+    asked for, and the (64 voxel) chunks of the prediction those reach into.
+    """
+
+    def __init__(self, monkeypatch):
+        self.regions: list[tuple[slice, ...]] = []
+        real = api_labels.open_prediction
+
+        def open_noting(grant):
+            group = real(grant)
+            return {"class": NotingArray(group["class"], self.regions)}
+
+        monkeypatch.setattr(api_labels, "open_prediction", open_noting)
+
+    @property
+    def chunks(self) -> set[tuple[int, ...]]:
+        reached = set()
+        for region in self.regions:
+            reached.update(
+                itertools.product(
+                    *(range(r.start // 64, (r.stop - 1) // 64 + 1) for r in region)
+                )
+            )
+        return reached
+
+
+class NotingArray:
+    """A zarr array that notes the regions read from it."""
+
+    def __init__(self, array, regions):
+        self._array = array
+        self._regions = regions
+
+    def __getattr__(self, name):
+        return getattr(self._array, name)
+
+    def __getitem__(self, region):
+        self._regions.append(region)
+        return self._array[region]
 
 
 def test_accepting_a_prediction_is_checked_against_it(
@@ -863,8 +936,9 @@ def test_a_box_accept_across_chunks_takes_a_predicted_value_at_a_time(
 
 
 def test_a_box_to_accept_at_once_holds_at_most_256_cubed(
-    ada, settings, migrated_database_url
+    ada, settings, migrated_database_url, monkeypatch
 ):
+    reads = Reads(monkeypatch)
     big = make_project(ada, settings, migrated_database_url, "Big", (300, 300, 300))
     prediction = add_prediction(
         settings, migrated_database_url, big, shape=(300, 300, 300)
@@ -887,8 +961,103 @@ def test_a_box_to_accept_at_once_holds_at_most_256_cubed(
         refused = accept(over)
         assert refused.status_code == 422, over
         assert refused.json()["detail"] == too_much
+    assert not reads.regions
+    # Only the chunk the one label is in is read, not the box's 64 of them.
     assert accept([0, 0, 0, 256, 256, 256]).status_code == 201
+    assert reads.chunks == {(0, 0, 0)}
     assert accept([0, 0, 0, 1, 300, 300]).status_code == 201
+
+
+@pytest.mark.parametrize("into", ["box", "roi"])
+def test_an_accept_reads_only_the_chunks_its_labels_are_in(
+    ada, settings, migrated_database_url, monkeypatch, into
+):
+    # A slab of the most voxels a box may hold, which has 4,096 chunks of the
+    # prediction in it, with a label in each of two corner ones.
+    shape = (64, 4096, 4096)
+    slab = [0, 0, 0, 1, 4096, 4096]
+    big = make_project(ada, settings, migrated_database_url, "Slab", shape)
+    prediction = add_sparse_prediction(
+        settings,
+        migrated_database_url,
+        big,
+        shape,
+        [([0, 0, 0, 1, 64, 64], 1), ([0, 4032, 4032, 1, 4096, 4096], 1)],
+    )
+    one = np.ones((1, 1, 1), dtype=bool)
+    deltas = deltas_for(one, (0, 0, 0), value=1, only_if="unlabeled")
+    deltas += deltas_for(one, (0, 4095, 4095), value=1, only_if="unlabeled")
+    if into == "roi":
+        roi = ada.post(
+            f"/api/projects/{big}/rois", json={"bbox": slab, "kind": "slice"}
+        )
+        where = {"roi_id": roi.json()["id"]}
+    else:
+        where = {"box": slab}
+    reads = Reads(monkeypatch)
+    response = ada.post(
+        f"/api/projects/{big}/labels/accept",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "prediction_artifact_id": prediction,
+            "deltas": deltas,
+            **where,
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert reads.chunks == {(0, 0, 0), (0, 63, 63)}
+    assert chunk(ada, big, (0, 0, 0))[0, 0, 0] == 1
+    assert chunk(ada, big, (0, 63, 63))[0, 63, 63] == 1
+
+
+def test_an_accept_of_as_many_labels_as_a_request_holds_reads_just_their_chunks(
+    ada, settings, migrated_database_url, monkeypatch
+):
+    # 512 labels, the most one request holds, that start and end part way along
+    # a row of the slab's chunks: the box around them has 576 chunks in it.
+    shape = (64, 4096, 4096)
+    box = [0, 0, 0, 1, 576, 4096]
+    big = make_project(ada, settings, migrated_database_url, "Slab", shape)
+    prediction = add_sparse_prediction(
+        settings, migrated_database_url, big, shape, [(box, 1)]
+    )
+    labels_in = [
+        ((1, 64, 2048), (0, 0, 2048)),
+        ((1, 448, 4096), (0, 64, 0)),
+        ((1, 64, 2048), (0, 512, 0)),
+    ]
+    chunks_of = (
+        {(0, 0, x) for x in range(32, 64)}
+        | {(0, y, x) for y in range(1, 8) for x in range(64)}
+        | {(0, 8, x) for x in range(32)}
+    )
+    assert len(chunks_of) == api_labels.MAX_DELTAS
+
+    def accept(parts):
+        deltas = []
+        for size, origin in parts:
+            mask = np.ones(size, dtype=bool)
+            deltas += deltas_for(mask, origin, value=1, only_if="unlabeled")
+        return ada.post(
+            f"/api/projects/{big}/labels/accept",
+            json={
+                "client_op_id": str(uuid.uuid4()),
+                "prediction_artifact_id": prediction,
+                "box": box,
+                "deltas": deltas,
+            },
+        )
+
+    reads = Reads(monkeypatch)
+    # One more is more than a request may hold, and nothing is read for it.
+    refused = accept([*labels_in, ((1, 64, 64), (0, 512, 2048))])
+    assert refused.status_code == 422, refused.text
+    assert "at most 512 items" in str(refused.json()["detail"])
+    assert not reads.regions
+    accepted = accept(labels_in)
+    assert accepted.status_code == 201, accepted.text
+    assert len(accepted.json()["chunks"]) == api_labels.MAX_DELTAS
+    assert reads.chunks == chunks_of
 
 
 def test_accepting_refuses_a_prediction_of_an_image_that_was_replaced(
@@ -929,8 +1098,9 @@ def test_accepting_refuses_a_prediction_of_an_image_that_was_replaced(
 
 
 def test_a_prediction_that_does_not_cover_the_labels_is_refused(
-    ada, project, settings, migrated_database_url
+    ada, project, settings, migrated_database_url, monkeypatch
 ):
+    reads = Reads(monkeypatch)
     # Made for a smaller image, and not saying which.
     small = add_prediction(settings, migrated_database_url, project, shape=(10, 10, 10))
     big = {"bbox": [0, 0, 0, 20, 20, 20], "kind": "cube"}
@@ -951,6 +1121,8 @@ def test_a_prediction_that_does_not_cover_the_labels_is_refused(
     for refused in (into_box, into_roi):
         assert refused.status_code == 422, refused.text
         assert refused.json()["detail"] == "That prediction doesn't cover those labels"
+    # It's seen from its shape, without reading any of it.
+    assert not reads.regions
 
 
 def test_predictions_labels_were_accepted_into_a_box_from_are_kept(
