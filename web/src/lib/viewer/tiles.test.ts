@@ -13,6 +13,7 @@ import {
 	tileId,
 	tilesShown,
 	tilesToLoad,
+	type Vec3,
 	type View,
 	viewLevel,
 	visibleTiles,
@@ -194,6 +195,24 @@ describe("tilesToLoad", () => {
 		expect(new Set(tiles.filter((t) => t.level === 1).map(tileId))).toEqual(
 			new Set(visibleTiles(levels[1] as Level, view({ width: 256, height: 256 }), 0).map(tileId)),
 		);
+	});
+
+	it("asks for a coarser chunk under every chunk the view shows, on every plane", () => {
+		for (const plane of [PLANES.xy, PLANES.xz, PLANES.yz]) {
+			for (const [position, zoom, aspect] of [
+				[[130, 500, 350], 1, [1, 1, 1]],
+				[[3, 999, 2], 2.5, [1, 1, 1]],
+				[[200, 37, 650], 0.7, [4, 1, 1]],
+				[[64, 640, 128], 1.3, [1, 2, 2]],
+			] as [Vec3, number, Vec3][]) {
+				const at = view({ plane, position, zoom, aspect, width: 300, height: 200 });
+				const level = levels[0] as Level;
+				const asked = new Set(tilesToLoad(levels, level, at).map(tileId));
+				for (const key of visibleTiles(level, at, 0)) {
+					for (const coarser of levels.slice(1)) expect(asked).toContain(tileId(coveringTile(key, level, coarser, at)));
+				}
+			}
+		}
 	});
 
 	it("asks for only the coarsest level when that is the one shown", () => {
