@@ -818,6 +818,73 @@ def test_builds_hold_only_what_their_slots_allow_and_a_long_queue_is_turned_away
         assert again.status_code == 200
 
 
+class Session:
+    """
+    Stands in for a database session, of which only `rollback` is used.
+    """
+
+    async def rollback(self):
+        pass
+
+
+def pyramid_that_makes(make, seconds=0.1):
+    """
+    A pyramid whose chunks are made by `make`, and a function that asks it for
+    one chunk (always the same).
+    """
+    pyramid = label_pyramid.LabelPyramid(seconds=seconds)
+    pyramid._make = make.__get__(pyramid)
+    project = uuid.uuid4()
+    plan = label_pyramid.Plan(uuid.uuid4(), plan_levels(SHAPE))
+    state = label_pyramid.Fingerprint(count=1, versions=1)
+
+    def ask():
+        return pyramid.chunk(Session(), None, project, plan, 1, (0, 0, 0), state)
+
+    return pyramid, ask
+
+
+def test_those_waiting_for_a_build_that_is_cancelled_are_told_to_ask_again():
+    async def scenario():
+        started = asyncio.Event()
+
+        async def make(self, *args):
+            started.set()
+            await asyncio.sleep(60)
+
+        pyramid, ask = pyramid_that_makes(make)
+        builder = asyncio.create_task(ask())
+        await started.wait()
+        waiters = [asyncio.create_task(ask()) for _ in range(3)]
+        await asyncio.sleep(0.05)
+        builder.cancel()
+        results = await asyncio.gather(builder, *waiters, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert all(isinstance(r, label_pyramid.Busy) for r in results[1:])
+        # Nothing is left claiming to be building it.
+        assert not pyramid._building
+
+    asyncio.run(scenario())
+
+
+def test_a_wait_for_a_build_that_never_ends_gives_up(monkeypatch):
+    async def scenario():
+        async def make(self, *args):
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(label_pyramid, "WAIT_SECONDS", 0.1)
+        _, ask = pyramid_that_makes(make, seconds=0)
+        builder = asyncio.create_task(ask())
+        await asyncio.sleep(0.02)
+        with pytest.raises(label_pyramid.Busy):
+            await ask()
+        assert not builder.done()
+        builder.cancel()
+        await asyncio.gather(builder, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
 def test_a_gate_turns_away_what_would_wait_too_long():
     async def scenario():
         gate = label_pyramid._Gate(slots=1, queue=1)
