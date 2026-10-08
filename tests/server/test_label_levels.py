@@ -105,6 +105,17 @@ def erase(browser, project, box) -> None:
     send(browser, project, split_into_deltas(mask, (z0, y0, x0), value=0), "eraser")
 
 
+def retire(browser, project, value) -> None:
+    """
+    Retire a class: its voxels stay in the chunks, but viewers draw them as
+    nothing.
+    """
+    removed = browser.request(
+        "DELETE", f"/api/projects/{project}/labels/classes/{value}"
+    )
+    assert removed.status_code == 204, removed.text
+
+
 def get(browser, project, level, key, **kwargs):
     array = label_pyramid.array_name(level)
     path = "/".join(str(k) for k in key)
@@ -764,20 +775,40 @@ def test_pixels_are_never_older_than_their_etag_says(
     np.testing.assert_array_equal(decode_chunk(again.content), expected)
 
 
-def test_a_chunk_erased_since_its_state_was_taken_is_missing(ada, project, monkeypatch):
+def test_a_chunk_erased_since_its_state_was_taken_is_missing(
+    ada, project, settings, monkeypatch
+):
     paint(ada, project, messy_volume())
+    real_leaves = label_pyramid._leaves
 
-    async def nothing(*args):
-        return []
+    async def leaves(db, project_id, *args):
+        # Another request erases everything under the chunk, after the state
+        # was taken.
+        async with AsyncSession(db.bind) as other:
+            await labels.apply_edit(
+                other,
+                settings,
+                uuid.UUID(project),
+                client_op_id=uuid.uuid4(),
+                deltas=split_into_deltas(
+                    np.ones((128, 128, 128), bool), (0, 0, 0), value=0
+                ),
+            )
+            await other.commit()
+        return await real_leaves(db, project_id, *args)
 
     with monkeypatch.context() as patch:
-        patch.setattr(label_pyramid, "_leaves", nothing)
+        patch.setattr(label_pyramid, "_leaves", leaves)
         response = get(ada, project, 1, (0, 0, 0))
     assert response.status_code == 404
     # It has a version, for what that says of a chunk made of labels.
-    assert int(response.headers["x-pyramid-version"]) > 0
+    taken = int(response.headers["x-pyramid-version"])
+    assert taken > 0
     assert "etag" not in response.headers
-    assert get(ada, project, 1, (0, 0, 0)).status_code == 200
+    # What was found isn't what a later request gets for the state it takes.
+    again = get(ada, project, 1, (0, 0, 0))
+    assert again.status_code == 404
+    assert int(again.headers["x-pyramid-version"]) > taken
 
 
 def test_a_waiting_request_gives_up_when_the_build_does(ada, project, monkeypatch):
@@ -1127,6 +1158,87 @@ def test_storage_trouble_doesnt_stop_coarse_chunks_being_made(
         response = get(ada, project, top, (0, 0, 0))
     assert response.status_code == 200
     np.testing.assert_array_equal(decode_chunk(response.content), expected)
+
+
+def until_ready(browser, project, level, key, limit=200):
+    """
+    Ask for a chunk until it isn't `503`, as a viewer does: the last answer, and
+    how many were asked for.
+    """
+    for asked in range(1, limit + 1):
+        response = get(browser, project, level, key)
+        if response.status_code != 503:
+            return response, asked
+    raise AssertionError(f"still busy after {limit} requests")
+
+
+def test_chunks_of_retired_classes_alone_are_kept_like_any_other(
+    ada, migrated_database_url, settings, reads
+):
+    # One class, with no background or other class anywhere, which is then
+    # retired: everything under every chunk is left out, which takes as much
+    # to find out as to make anything, and must not be found out twice.
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    paint(ada, project, one_label_in_each_chunk())
+    retire(ada, project, 2)
+    top = len(plan_levels(MANY)) - 1
+    ada.client.app.state.label_pyramid.blobs = 16
+    answers = []
+    for _ in range(100):
+        before = len(reads)
+        response = get(ada, project, top, (0, 0, 0))
+        answers.append((response.status_code, len(reads) - before))
+        if response.status_code != 503:
+            break
+    # Nothing shows, and it took several requests to find that out, none of
+    # which read much or read what an earlier one had.
+    assert answers[-1][0] == 404
+    assert [code for code, _ in answers[:-1]] == [503] * (len(answers) - 1)
+    assert len(answers) > 2
+    assert max(n for _, n in answers) <= 16
+    assert sum(n for _, n in answers) == len(reads) == 125
+    # Each chunk that showed nothing was let go of once the one above it was made.
+    assert ada.client.app.state.label_pyramid._cache.pinned_size == 0
+    # Asking again reads nothing, nor does a process that has never asked, which
+    # finds the chunks that stand for many in storage (as chunks that show
+    # nothing).
+    reads.clear()
+    assert get(ada, project, top, (0, 0, 0)).status_code == 404
+    another_process(ada.client.app)
+    assert get(ada, project, top, (0, 0, 0)).status_code == 404
+    assert reads == []
+    names = [name.split("/labels/")[1] for name in stored_chunks(settings, project)]
+    assert names == ["pyramid/2/0/0/0", "pyramid/3/0/0/0"]
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_a_retired_region_is_made_once_and_leaves_the_rest_as_it_is(
+    ada, project, reads, live
+):
+    levels = plan_levels(SHAPE)
+    top = len(levels) - 1
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    # Bone with no background, as a brush makes it; and perhaps matrix elsewhere.
+    volume[:, :, :128] = 2
+    if live:
+        volume[:, :, 192:] = 3
+    paint(ada, project, volume)
+    retire(ada, project, 2)
+    # Two chunks of level 1, which are 16 stored chunks, are all a request reads.
+    ada.client.app.state.label_pyramid.blobs = 16
+    response, asked = until_ready(ada, project, top, (0, 0, 0))
+    assert asked >= 2
+    shown = np.where(volume == 2, 0, volume)
+    expected = expected_chunk(shrink(shown, levels)[top], (0, 0, 0))
+    if live:
+        assert response.status_code == 200
+        np.testing.assert_array_equal(decode_chunk(response.content), expected)
+    else:
+        assert response.status_code == 404
+    assert len(reads) == labeled_chunks(volume)
+    reads.clear()
+    check_every_level(ada, project, volume, levels, shown)
+    assert reads == []
 
 
 def requests_to_make_the_top(ada, project, processes, top) -> int:

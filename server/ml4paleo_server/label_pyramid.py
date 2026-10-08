@@ -34,6 +34,9 @@ from the full resolution chunks), when someone asks for it:
   so an edit leaves the stale copy behind rather than finding it. An edit
   therefore costs recomputing the chunk above it at each level, each from one
   new chunk and seven cached ones, and an untouched chunk is never recomputed.
+  A chunk that is made and shows nothing (everything under it is of retired
+  classes) is kept like any other, as an empty one: it took the same work to
+  find out, and asking again must not do it again.
 - Nothing is cached below level 1, so the first request for a chunk high in
   the pyramid has to build everything under it, which can mean reading every
   labeled chunk below. One request works on that for about a second and a half,
@@ -130,6 +133,9 @@ STORED_COUNT = 64
 # for it, and a pinned one's pin. Measured for tiny chunks, which are the ones
 # it matters for: 253 bytes, or 333 pinned (a test checks).
 ENTRY_OVERHEAD = 320
+# What a chunk that shows nothing is, as kept in the cache and in storage (a
+# chunk is never empty otherwise).
+_NOTHING = b""
 
 
 class Busy(Exception):
@@ -586,7 +592,7 @@ class LabelPyramid:
         self._cache = _Cache(cache_bytes)
         self._gate = _Gate(slots, queue)
         # The chunks being built now, by cache key, and what each will be.
-        self._building: dict[Hashable, asyncio.Future[bytes | None]] = {}
+        self._building: dict[Hashable, asyncio.Future[bytes]] = {}
 
     async def chunk(
         self,
@@ -604,7 +610,7 @@ class LabelPyramid:
         `fingerprint`. Raises `Busy` if that takes more than the budget. The
         session's connection is given back, as storage and computing are slow.
         """
-        return await self._build(
+        made = await self._build(
             db,
             store,
             project_id,
@@ -615,6 +621,7 @@ class LabelPyramid:
             _Budget(self.seconds, self.blobs),
             pin=False,
         )
+        return made or None
 
     async def _build(
         self,
@@ -627,7 +634,7 @@ class LabelPyramid:
         state: Fingerprint,
         budget: _Budget,
         pin: bool,
-    ) -> bytes | None:
+    ) -> bytes:
         cached = _cache_key(project_id, plan, level, key, state)
         if (data := self._cache.get(cached)) is not None:
             return data
@@ -636,7 +643,7 @@ class LabelPyramid:
             # connection, and share whatever comes of it.
             await db.rollback()
             return await self._wait(building)
-        made: asyncio.Future[bytes | None] = asyncio.get_running_loop().create_future()
+        made: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
         self._building[cached] = made
         try:
             data = await self._make(
@@ -653,7 +660,7 @@ class LabelPyramid:
         finally:
             del self._building[cached]
 
-    async def _wait(self, building: asyncio.Future[bytes | None]) -> bytes | None:
+    async def _wait(self, building: asyncio.Future[bytes]) -> bytes:
         try:
             return await asyncio.wait_for(
                 asyncio.shield(building), self.seconds + WAIT_SECONDS
@@ -673,18 +680,18 @@ class LabelPyramid:
         cached: Hashable,
         budget: _Budget,
         pin: bool,
-    ) -> bytes | None:
+    ) -> bytes:
         stored = state.count >= STORED_COUNT
-        if stored and (data := await _load(store, plan, level, key, state)):
+        if stored and (data := await _load(store, plan, level, key, state)) is not None:
             self._cache.put(cached, data, pin=pin)
             return data
         data, kept = await self._assemble(
             db, store, project_id, plan, level, key, budget
         )
-        if data is not None:
-            self._cache.put(cached, data, pin=pin)
-            if stored:
-                await _save(store, plan, level, key, state, data)
+        # Even one that shows nothing: finding that out was the work.
+        self._cache.put(cached, data, pin=pin)
+        if stored:
+            await _save(store, plan, level, key, state, data)
         for child_key in kept:
             self._cache.unpin(child_key)
         return data
@@ -698,7 +705,7 @@ class LabelPyramid:
         level: int,
         key: ChunkKey,
         budget: _Budget,
-    ) -> tuple[bytes | None, list[Hashable]]:
+    ) -> tuple[bytes, list[Hashable]]:
         """
         A chunk made of the ones under it, and the cache keys of the chunks of
         the level below that were made into it.
@@ -718,13 +725,13 @@ class LabelPyramid:
                     for (at, _), blob in zip(leaves, blobs, strict=True)
                 ]
                 data = await run_in_threadpool(_combine, parts, step, plan.retired)
-            return data, kept
+            return data or _NOTHING, kept
         parts = []
         below = await _children(db, project_id, levels, level, key)
         for child, child_state in sorted(below.items()):
             # What is made of a chunk under this one is kept (pinned) until
             # this one is made, so a request that gives up before then leaves
-            # its work for the next.
+            # its work for the next. That includes chunks that show nothing.
             made = await self._build(
                 db,
                 store,
@@ -736,14 +743,16 @@ class LabelPyramid:
                 budget,
                 pin=True,
             )
-            if made is not None:
+            kept.append(_cache_key(project_id, plan, level - 1, child, child_state))
+            if made:
                 parts.append((_position(child, origin), made))
-                kept.append(_cache_key(project_id, plan, level - 1, child, child_state))
         budget.spend()
         await db.rollback()
+        if not parts:
+            return _NOTHING, kept
         async with self._gate():
             data = await run_in_threadpool(_combine, parts, step)
-        return data, kept
+        return data or _NOTHING, kept
 
 
 def _cache_key(
