@@ -245,13 +245,15 @@ describe("ChunkStore", () => {
 		expect(seen).toEqual(["a"]);
 	});
 
-	it("says what a refresh under way was asked for", async () => {
+	it("says which load of a chunk is under way, and what a refresh was asked for", async () => {
 		const { calls, load } = controlled();
 		const store = new ChunkStore(load, 1000);
 		const first = store.request("a");
+		expect(store.loading("a")).toBe(first);
 		expect(store.refreshing("a")).toBeUndefined();
 		calls[0]?.finish();
 		await first;
+		expect(store.loading("a")).toBeUndefined();
 		const again = store.refresh("a", 7);
 		expect(store.refreshing("a")).toBe(7);
 		calls[1]?.finish();

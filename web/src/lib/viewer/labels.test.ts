@@ -208,6 +208,26 @@ describe("LabelLayer", () => {
 		expect(layer.versionOf("0/0/0")).toBe(4);
 	});
 
+	it("lets go of an answered edit once the load it waited on is cancelled", async () => {
+		const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
+		const { pool, release } = fakePool(server, true);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		loaded(layer, "0/0/0").catch(() => {});
+		layer.applyLocal("op", [delta(5)]);
+		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
+		// The view moves away: the load the edit waited on stops.
+		layer.store.want("view", []);
+		await tick();
+		// Nothing waits on the chunk any more: a copy that somehow lacks the
+		// edit (a later load always has it) is left as it came.
+		const again = loaded(layer, "0/0/0");
+		release();
+		await again;
+		await tick();
+		expect(first(layer, "0/0/0")).toBe(0);
+		expect(layer.versionOf("0/0/0")).toBe(3);
+	});
+
 	it("remembers the chunks it edited, the latest last", () => {
 		const { pool } = fakePool(new Map());
 		const layer = new LabelLayer("p", pool, [128, 128, 128]);

@@ -24,10 +24,12 @@ interface LocalDelta {
 	onlyIf: string;
 	/**
 	 * Once the server has applied the op, the chunk version it made: copies
-	 * from then on have the edit, and only older ones need it put back.
+	 * from then on have the edit, and only older ones need it put back. Such
+	 * a delta lasts only as long as the load of its chunk that may predate
+	 * the op: any later load has the edit.
 	 */
 	made?: number;
-	/** A copy older than `made` arrived and was sent for again. */
+	/** A copy older than `made` arrived and the chunk was sent for once more. */
 	again?: boolean;
 }
 
@@ -59,7 +61,7 @@ export class LabelLayer {
 		this.store = new ChunkStore(labelLoader(pool, url, shape), CACHE_BYTES, 4);
 		// Whatever the server sends, this page's edits stay on screen.
 		this.store.onLoad = (id, chunk) => {
-			let stale = 0;
+			let stale = false;
 			for (const [op, deltas] of this.#local) {
 				const delta = deltas.get(id);
 				if (!delta) continue;
@@ -70,12 +72,16 @@ export class LabelLayer {
 					}
 					// A copy from before the edit (its load started first): show the
 					// edit on it, and load it once more.
-					if (!delta.again) stale = Math.max(stale, delta.made);
-					delta.again = true;
+					if (delta.again) {
+						this.#forget(op, id);
+					} else {
+						delta.again = true;
+						stale = true;
+					}
 				}
 				applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, delta.mask, delta.written, delta.onlyIf);
 			}
-			if (stale) queueMicrotask(() => this.reload([id], new Map([[id, stale]])));
+			if (stale) queueMicrotask(() => this.#reloadFor([id]));
 		};
 	}
 
@@ -88,6 +94,41 @@ export class LabelLayer {
 		const deltas = this.#local.get(op);
 		deltas?.delete(id);
 		if (deltas?.size === 0) this.#local.delete(op);
+	}
+
+	/** This page's confirmed edits still waiting on chunks, by op: chunk id → delta. */
+	*#confirmed(ids: string[]): Generator<[string, string, LocalDelta]> {
+		for (const [op, deltas] of this.#local) {
+			for (const id of ids) {
+				const delta = deltas.get(id);
+				if (delta?.made !== undefined) yield [op, id, delta];
+			}
+		}
+	}
+
+	/** Load chunks again for the confirmed edits still waiting on them. */
+	#reloadFor(ids: string[]): void {
+		const versions = new Map<string, number>();
+		for (const [, id, delta] of this.#confirmed(ids)) versions.set(id, Math.max(delta.made!, versions.get(id) ?? 0));
+		this.reload(ids, versions);
+		this.#tie(ids);
+	}
+
+	/**
+	 * Confirmed edits on these chunks last as long as the load of each that's
+	 * under way now, or end now if none is: a load started later has them.
+	 */
+	#tie(ids: string[]): void {
+		for (const [op, id, delta] of this.#confirmed(ids)) {
+			const loading = this.store.loading(id);
+			if (!loading) {
+				this.#forget(op, id);
+				continue;
+			}
+			loading.catch(() => {
+				if (this.#local.get(op)?.get(id) === delta) this.#forget(op, id);
+			});
+		}
 	}
 
 	/** Colors by label value (background, 1, has none). */
@@ -234,6 +275,7 @@ export class LabelLayer {
 		}
 		if (local.size === 0) this.#local.delete(op);
 		this.reload(again, made);
+		this.#tie([...local.keys()]);
 	}
 
 	#emit(ids: string[]): void {

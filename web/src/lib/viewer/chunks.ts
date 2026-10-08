@@ -75,6 +75,11 @@ export class ChunkStore {
 		return this.#pending.has(id);
 	}
 
+	/** The load of a chunk queued or running, if there is one (without starting one). */
+	loading(id: string): Promise<Chunk> | undefined {
+		return this.#pending.get(id)?.promise;
+	}
+
 	/** The version a queued or running refresh of a chunk was asked for, if any. */
 	refreshing(id: string): number | undefined {
 		const entry = this.#pending.get(id);
