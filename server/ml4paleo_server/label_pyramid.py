@@ -58,7 +58,8 @@ from the full resolution chunks), when someone asks for it:
   chunk of a higher level combined, only when one of a few slots is free, and a
   request that would queue behind too many others gets `Busy` at once. The
   slots are never held while waiting for another chunk, so they can't deadlock;
-  a request holds no database connection while it waits for one.
+  a request holds no database connection while it waits for one, or for
+  storage.
 - Each process has its own cache, so a build one process made is not another's:
   asked in turn, several processes would each make the same chunks, and they
   would start over after a restart. So a chunk that stands for many labeled
@@ -682,9 +683,13 @@ class LabelPyramid:
         pin: bool,
     ) -> bytes:
         stored = state.count >= STORED_COUNT
-        if stored and (data := await _load(store, plan, level, key, state)) is not None:
-            self._cache.put(cached, data, pin=pin)
-            return data
+        if stored:
+            # Storage can be slow, and a transaction is open from taking the
+            # state (or the chunks under this one).
+            await db.rollback()
+            if (data := await _load(store, plan, level, key, state)) is not None:
+                self._cache.put(cached, data, pin=pin)
+                return data
         data, kept = await self._assemble(
             db, store, project_id, plan, level, key, budget
         )

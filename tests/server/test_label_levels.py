@@ -611,8 +611,9 @@ class Spy:
     What label chunks were read to make coarse ones, and how many were held at
     once: read, but not yet combined. Reads take a little while, so requests
     that start together overlap. Also how many database connections were lent
-    out at each read and combine, which should be none: nobody holds one
-    while waiting on storage or computing.
+    out at each read and combine, and each time a chunk kept in storage was
+    looked for, which should be none: nobody holds one while waiting on
+    storage or computing.
     """
 
     def __init__(self, monkeypatch, app, delay=0.2):
@@ -620,8 +621,10 @@ class Spy:
         self.reads = self.combines = self.held = self.most_held = 0
         self.connections = []
         self.combining = []
+        self.stored = []
         self._lock = threading.Lock()
         real_read, real_combine = label_pyramid._read, label_pyramid._combine
+        real_get = label_pyramid.obstore.get_async
 
         async def read(store, sha):
             await asyncio.sleep(delay)
@@ -645,8 +648,16 @@ class Spy:
                     self.combines += 1
                     self.held -= len(parts)
 
+        async def get(store, path, *args, **kwargs):
+            if path.startswith("pyramid/"):
+                with self._lock:
+                    self.stored.append(self.engine.pool.checkedout())
+                await asyncio.sleep(delay)
+            return await real_get(store, path, *args, **kwargs)
+
         monkeypatch.setattr(label_pyramid, "_read", read)
         monkeypatch.setattr(label_pyramid, "_combine", combine)
+        monkeypatch.setattr(label_pyramid.obstore, "get_async", get)
 
 
 def concurrently(count, function):
@@ -1239,6 +1250,25 @@ def test_a_retired_region_is_made_once_and_leaves_the_rest_as_it_is(
     reads.clear()
     check_every_level(ada, project, volume, levels, shown)
     assert reads == []
+
+
+def test_no_connection_is_held_while_chunks_kept_in_storage_are_looked_for(
+    ada, migrated_database_url, monkeypatch
+):
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    paint(ada, project, one_label_in_each_chunk())
+    top = len(plan_levels(MANY)) - 1
+    spy = Spy(monkeypatch, ada.client.app, delay=0.05)
+    assert get(ada, project, top, (0, 0, 0)).status_code == 200
+    # The top chunk and the first of level 2 stand for enough to be kept, so
+    # were looked for in storage, where there was nothing yet.
+    assert len(spy.stored) == 2
+    another_process(ada.client.app)
+    assert get(ada, project, top, (0, 0, 0)).status_code == 200
+    assert len(spy.stored) == 3
+    # The state of the labels is taken in a transaction, which is given back
+    # before the wait.
+    assert spy.stored == [0, 0, 0]
 
 
 def requests_to_make_the_top(ada, project, processes, top) -> int:
