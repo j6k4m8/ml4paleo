@@ -10,7 +10,9 @@ same block of the volume as the image's voxel there. Chunks stay 64-cubed.
 These levels exist only to be looked at. Nothing stores them, edits never
 touch them, and training, exports, accepts, and segmentation read the full
 resolution labels. How a level shrinks the one below it (`downsample_labels`)
-is in `ml4paleo.labels.pyramid`.
+is in `ml4paleo.labels.pyramid`. A class that has been retired still has its
+voxels in the chunks, but viewers draw them as nothing, so here they count as
+unlabeled and can't outvote a class that shows.
 
 A chunk of level k is made from the chunks of level k - 1 under it (level 1,
 from the full resolution chunks), when someone asks for it:
@@ -25,8 +27,8 @@ from the full resolution chunks), when someone asks for it:
   viewer's revalidation costs one query. A chunk with no labeled chunk under
   it is simply missing (unlabeled), as at level 0. The `ETag` also names what
   else the pixels follow: the image whose levels these are (replacing it can
-  change them, labels unchanged), and `RULE_VERSION`. It is only unique to its
-  URL: two chunks can have the same one.
+  change them, labels unchanged), the retired classes, and `RULE_VERSION`.
+  It is only unique to its URL: two chunks can have the same one.
 - A computed chunk is kept, as the bytes a viewer gets, in a cache that holds
   the most recently used ones under a memory limit. Its key includes that sum,
   so an edit leaves the stale copy behind rather than finding it. An edit
@@ -74,12 +76,12 @@ from sqlalchemy import Integer, and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
-from ml4paleo.labels import LABEL_CHUNK_ZYX
+from ml4paleo.labels import LABEL_CHUNK_ZYX, UNLABELED
 from ml4paleo.labels.codec import blob_key, decode_chunk, encode_chunk
 from ml4paleo.labels.pyramid import downsample_labels
 from ml4paleo.ome import DEFAULT_CHUNK_ZYX, LevelSpec, plan_levels
 
-from .db import LabelChunk
+from .db import LabelChunk, LabelClass
 
 log = logging.getLogger(__name__)
 
@@ -142,15 +144,18 @@ class Fingerprint:
 class Plan:
     """
     What a project's coarse levels follow besides its labels: the image whose
-    levels they share.
+    levels they share, and the classes retired, which they leave out.
     """
 
     image: uuid.UUID
     levels: list[LevelSpec]
+    retired: frozenset[int] = frozenset()
 
     @functools.cached_property
     def tag(self) -> str:
-        return hashlib.blake2s(self.image.bytes, digest_size=6).hexdigest()
+        digest = hashlib.blake2s(self.image.bytes, digest_size=6)
+        digest.update(bytes(sorted(self.retired)))
+        return digest.hexdigest()
 
     def etag(self, level: int, state: Fingerprint) -> str:
         z, y, x = self.levels[level].factor_zyx
@@ -305,6 +310,18 @@ async def _leaves(
     return [((z, y, x), sha) for z, y, x, sha in rows if sha is not None]
 
 
+async def retired_classes(db: AsyncSession, project_id: uuid.UUID) -> frozenset[int]:
+    """
+    The values of the project's retired classes.
+    """
+    rows = await db.scalars(
+        select(LabelClass.value).where(
+            LabelClass.project_id == project_id, LabelClass.deleted_at.is_not(None)
+        )
+    )
+    return frozenset(rows)
+
+
 async def _read(store, sha: str) -> bytes:
     try:
         result = await obstore.get_async(store, blob_key(sha))
@@ -313,17 +330,26 @@ async def _read(store, sha: str) -> bytes:
     return bytes(await result.bytes_async())
 
 
-def _combine(parts: Sequence[tuple[ChunkKey, bytes]], step: ChunkKey) -> bytes | None:
+def _combine(
+    parts: Sequence[tuple[ChunkKey, bytes]],
+    step: ChunkKey,
+    retired: frozenset[int] = frozenset(),
+) -> bytes | None:
     """
     Make the chunk covering `parts`, which are chunks (as stored) at the given
-    positions among the `step` chunks along each axis that it covers.
+    positions among the `step` chunks along each axis that it covers. The
+    `retired` values count as unlabeled.
     """
     made = np.zeros(LABEL_CHUNK_ZYX, dtype=np.uint8)
     size = [n // s for n, s in zip(LABEL_CHUNK_ZYX, step, strict=True)]
+    keep = np.arange(256, dtype=np.uint8)
+    if retired:
+        keep[list(retired)] = UNLABELED
     for position, data in parts:
         start = [p * n for p, n in zip(position, size, strict=True)]
         place = tuple(slice(a, a + n) for a, n in zip(start, size, strict=True))
-        made[place] = downsample_labels(decode_chunk(data), step)
+        chunk = decode_chunk(data)
+        made[place] = downsample_labels(keep[chunk] if retired else chunk, step)
     return encode_chunk(made) if made.any() else None
 
 
@@ -584,7 +610,7 @@ class LabelPyramid:
                     (_position(at, origin), blob)
                     for (at, _), blob in zip(leaves, blobs, strict=True)
                 ]
-                data = await run_in_threadpool(_combine, parts, step)
+                data = await run_in_threadpool(_combine, parts, step, plan.retired)
         else:
             parts = []
             below = await _children(db, project_id, levels, level, key)

@@ -948,7 +948,8 @@ async def _coarse_chunk(
     if state.count == 0:
         await db.rollback()
         return Response(status_code=404, headers=headers)
-    plan = label_pyramid.Plan(image_id, list(levels))
+    retired = await label_pyramid.retired_classes(db, project_id)
+    plan = label_pyramid.Plan(image_id, list(levels), retired)
     etag = plan.etag(level, state)
     if request.headers.get("if-none-match") == etag:
         await db.rollback()
@@ -968,7 +969,8 @@ async def _coarse_chunk(
             status_code=500, detail="A label chunk is missing from storage."
         ) from None
     if data is None:
-        # Everything under it was erased since the fingerprint.
+        # Nothing under it shows a label: all erased since the fingerprint, or
+        # all of retired classes.
         return Response(status_code=404, headers=headers)
     return Response(
         data, media_type="application/octet-stream", headers={**headers, "ETag": etag}

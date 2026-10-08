@@ -139,12 +139,15 @@ def expected_chunk(array, key) -> np.ndarray:
     return out
 
 
-def check_every_level(browser, project, volume, levels) -> None:
+def check_every_level(browser, project, volume, levels, shown=None) -> None:
     """
     Every chunk of every level is the whole volume shrunk to that level, and
-    missing exactly where that is all unlabeled.
+    missing exactly where that is all unlabeled. Coarse levels are made of
+    `shown` if the volume has voxels (of retired classes) they leave out.
     """
-    for level, array in enumerate(shrink(volume, levels)):
+    arrays = shrink(volume if shown is None else shown, levels)
+    arrays[0] = volume
+    for level, array in enumerate(arrays):
         for key in np.ndindex(*(-(-n // 64) for n in array.shape)):
             expected = expected_chunk(array, key)
             got = chunk(browser, project, level, key)
@@ -724,6 +727,34 @@ def test_replacing_the_image_changes_what_coarse_chunks_say(ada, migrated_databa
         decode_chunk(stale.content),
         expected_chunk(shrink(volume, second)[2], (0, 0, 0)),
     )
+
+
+def test_retired_classes_count_as_unlabeled_in_coarse_levels(ada, project):
+    levels = plan_levels(SHAPE)
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    # Bone, with one voxel of matrix in every block of eight, which bone
+    # outvotes; and a patch of bone alone.
+    volume[0:64, 0:64, 0:64] = 2
+    volume[0:64:2, 0:64:2, 0:64:2] = 3
+    volume[100:110, 100:110, 100:110] = 2
+    paint(ada, project, volume)
+    before = get(ada, project, 1, (0, 0, 0))
+    assert (decode_chunk(before.content)[:32, :32, :32] == 2).all()
+
+    removed = ada.request("DELETE", f"/api/projects/{project}/labels/classes/2")
+    assert removed.status_code == 204
+    # Viewers draw bone as nothing, so it can't hide the matrix: that shows,
+    # and where only bone was, there is nothing to show.
+    shown = np.where(volume == 2, 0, volume)
+    check_every_level(ada, project, volume, levels, shown)
+    after = get(ada, project, 1, (0, 0, 0))
+    assert after.headers["etag"] != before.headers["etag"]
+    assert (decode_chunk(after.content)[:32, :32, :32] == 3).all()
+    stale = get(
+        ada, project, 1, (0, 0, 0), headers={"If-None-Match": before.headers["etag"]}
+    )
+    assert stale.status_code == 200
+    assert get(ada, project, 1, (1, 1, 1)).status_code == 404
 
 
 def test_the_rule_and_the_codec_are_pinned_to_the_rule_version():
