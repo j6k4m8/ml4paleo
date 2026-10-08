@@ -13,6 +13,7 @@ from PIL import Image
 
 from ml4paleo.ingest import (
     IngestError,
+    SliceLimits,
     SourceIndex,
     intensity_summary,
     natural_key,
@@ -162,9 +163,53 @@ def test_many_files_of_an_unknown_kind_are_refused(tmp_path):
     entries = {
         f"slice_{z}.png": _png(np.full((4, 6), z, dtype=np.uint8)) for z in range(3)
     }
-    entries |= {f"slice_{z}.jp2": b"\x00\x00\x00\x0cjP  " for z in range(3, 10)}
+    entries |= {f"slice_{z}.raw": b"\x01\x02\x03" * 50 for z in range(3, 10)}
     with pytest.raises(IngestError, match="doesn't read as slices"):
         probe(_stored(tmp_path, _zip(entries))())
+
+
+def test_a_damaged_slice_is_named_not_left_out(tmp_path):
+    entries = {
+        f"slice_{z}.png": _png(np.full((4, 6), z, dtype=np.uint8)) for z in range(4)
+    }
+    entries["slice_2.png"] = b""
+    archive = _zip(entries)
+    index = probe(_stored(tmp_path, archive)())
+    # It's a slice by its name, so it stays in the stack...
+    assert "slice_2.png" in index.members and index.skipped == []
+    # ...and reading it names it, rather than every later slice moving up.
+    with pytest.raises(ValueError, match="slice_2.png"):
+        slab_provider(_stored(tmp_path, archive)(), index)[:, :, :]
+
+
+def test_a_stack_named_without_extensions_is_read_by_its_first_bytes(tmp_path):
+    def gif(z: int) -> bytes:
+        out = io.BytesIO()
+        Image.fromarray(np.full((4, 6), z * 10, dtype=np.uint8)).save(out, format="GIF")
+        return out.getvalue()
+
+    entries = {f"scan/{z:03d}": gif(z) for z in range(3)}
+    index = probe(_stored(tmp_path, _zip(entries))())
+    assert (index.kind, index.shape_xyz, index.skipped) == ("images", (6, 4, 3), [])
+
+
+def test_an_unreadable_file_among_dicom_files_is_refused(tmp_path, make_dicom_series):
+    paths = make_dicom_series(tmp_path / "series", lambda i: np.zeros((4, 4)), count=2)
+    entries = {f"DICOM/{path.stem}": path.read_bytes() for path in paths}
+    entries["DICOM/0000BEEF"] = b"not a dicom file" * 20
+    with pytest.raises(IngestError, match="0000BEEF isn't"):
+        probe(_stored(tmp_path, _zip(entries))())
+
+
+def test_a_large_file_that_isnt_a_slice_is_left_out(tmp_path):
+    entries = {
+        f"slice_{z}.png": _png(np.full((4, 6), z, dtype=np.uint8)) for z in range(2)
+    }
+    entries["report.pdf"] = bytes(4096)
+    limits = SliceLimits(max_member_bytes=1024, max_decoded_bytes=1024)
+    archive = _zip(entries, compression=zipfile.ZIP_STORED)
+    index = probe(_stored(tmp_path, archive)(), limits)
+    assert index.skipped == ["report.pdf"]
 
 
 @pytest.mark.parametrize(

@@ -215,11 +215,15 @@ def open_archive(fileobj: BinaryIO) -> zipfile.ZipFile:
 
 
 def slice_members(
-    archive: zipfile.ZipFile, limits: SliceLimits = DEFAULT_LIMITS
+    archive: zipfile.ZipFile,
+    limits: SliceLimits = DEFAULT_LIMITS,
+    *,
+    check_sizes: bool = True,
 ) -> list[ZipMember]:
     """
     The archive's slices in name order, after checking the archive is safe
-    to read.
+    to read. With `check_sizes` false, members' sizes are left for the caller
+    to check (once it knows which are slices).
     """
     files = [info for info in archive.infolist() if not info.is_dir()]
     # Check every name, including ones skipped below: a name that climbs out
@@ -234,11 +238,8 @@ def slice_members(
     if len(infos) > MAX_MEMBERS:
         raise IngestError(f"The archive has more than {MAX_MEMBERS} files.")
     for info in infos:
-        if info.file_size > limits.max_member_bytes:
-            raise IngestError(
-                f"{info.filename} is {_megabytes(info.file_size)}; this server "
-                f"reads slices of up to {_megabytes(limits.max_member_bytes)}."
-            )
+        if check_sizes:
+            _check_member_size(info, limits)
         if info.flag_bits & 0x1:
             raise IngestError("The archive is encrypted; upload it without a password.")
         if info.compress_type not in SUPPORTED_COMPRESSION:
@@ -252,6 +253,14 @@ def slice_members(
         raise IngestError("The archive expands too much to be a scan.")
     infos.sort(key=lambda info: natural_key(info.filename))
     return [ZipMember(archive, info) for info in infos]
+
+
+def _check_member_size(info: zipfile.ZipInfo, limits: SliceLimits) -> None:
+    if info.file_size > limits.max_member_bytes:
+        raise IngestError(
+            f"{info.filename} is {_megabytes(info.file_size)}; this server "
+            f"reads slices of up to {_megabytes(limits.max_member_bytes)}."
+        )
 
 
 @dataclass(frozen=True)
@@ -319,20 +328,60 @@ def _check_dicom_size(dataset, name: str, limits: SliceLimits) -> None:
         )
 
 
-# The first bytes of the image formats slices come in.
-IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"II*\x00", b"MM\x00*", b"\xff\xd8\xff", b"BM")
+# Slices' file name extensions: images Pillow reads, and DICOM files.
+IMAGE_EXTENSIONS = frozenset(
+    {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+    | {".jp2", ".j2k", ".jpx", ".pgm", ".ppm", ".pnm", ".pbm"}
+)
+DICOM_EXTENSIONS = frozenset({".dcm", ".dicom", ".ima"})
+# The first bytes of the same image formats, for slices named without an
+# extension (WebP is checked apart: "RIFF", then "WEBP" at offset 8).
+IMAGE_MAGIC = (
+    b"\x89PNG\r\n\x1a\n",
+    b"II*\x00",  # TIFF
+    b"MM\x00*",
+    b"II+\x00",  # BigTIFF
+    b"MM\x00+",
+    b"\xff\xd8\xff",  # JPEG
+    b"BM",
+    b"GIF87a",
+    b"GIF89a",
+    b"\x00\x00\x00\x0cjP  \r\n\x87\n",  # JPEG 2000
+    b"\xffO\xffQ",
+    b"P2",  # Netpbm
+    b"P3",
+    b"P5",
+    b"P6",
+)
+# Longest skipped name the index keeps, so a manifest stays small.
+MAX_SKIPPED_NAME = 256
+
+Kind = Literal["dicom", "image", "extra", "unknown"]
 
 
-def _kind(member: ZipMember) -> Literal["dicom", "image", "other"]:
-    """What a member is, from its name and first bytes."""
+def _suffix(name: str) -> str:
+    base = re.split(r"[/\\]", name)[-1]
+    return base[base.rindex(".") :].lower() if "." in base else ""
+
+
+def _kind(member: ZipMember) -> Kind:
+    """
+    What a member is: a DICOM file, an image, a file scans come with, or
+    unknown. A member is opened only when its name doesn't tell.
+    """
     if _known_extra(member.name):
-        return "other"
+        return "extra"
+    suffix = _suffix(member.name)
+    if suffix in IMAGE_EXTENSIONS:
+        return "image"
+    if suffix in DICOM_EXTENSIONS:
+        return "dicom"
     head = member.head(132)
     if head[128:132] == b"DICM":
         return "dicom"
-    if head.startswith(IMAGE_MAGIC):
+    if head.startswith(IMAGE_MAGIC) or (head[:4] == b"RIFF" and head[8:12] == b"WEBP"):
         return "image"
-    return "other"
+    return "unknown"
 
 
 def _examples(members: list[ZipMember]) -> str:
@@ -346,10 +395,19 @@ def probe(fileobj: BinaryIO, limits: SliceLimits = DEFAULT_LIMITS) -> SourceInde
     large for `limits` before decoding them. Files that aren't slices are
     left out and named in the index.
     """
-    by_kind: dict[str, list[ZipMember]] = {"dicom": [], "image": [], "other": []}
-    for member in slice_members(open_archive(fileobj), limits):
+    members = slice_members(open_archive(fileobj), limits, check_sizes=False)
+    by_kind: dict[Kind, list[ZipMember]] = {
+        "dicom": [],
+        "image": [],
+        "extra": [],
+        "unknown": [],
+    }
+    # In archive order, so looking at members' first bytes reads forward.
+    for member in sorted(members, key=lambda member: member.info.header_offset):
         by_kind[_kind(member)].append(member)
-    dicoms, images, skipped = by_kind["dicom"], by_kind["image"], by_kind["other"]
+    for found in by_kind.values():
+        found.sort(key=lambda member: natural_key(member.name))
+    dicoms, images, unknown = by_kind["dicom"], by_kind["image"], by_kind["unknown"]
     if dicoms and images:
         raise IngestError(
             "The archive has both DICOM files and other images (for example "
@@ -357,19 +415,27 @@ def probe(fileobj: BinaryIO, limits: SliceLimits = DEFAULT_LIMITS) -> SourceInde
         )
     if not dicoms and not images:
         raise IngestError(
-            f"The archive has no DICOM files or images ml4paleo reads ({_examples(skipped)})."
+            "The archive has no DICOM files or images ml4paleo reads "
+            f"({_examples(unknown or by_kind['extra'])})."
         )
-    # Files of a kind ml4paleo knows aren't slices are fine to leave out;
-    # many of a kind it doesn't know look like slices it can't read.
-    unknown = [m for m in skipped if not _known_extra(m.name)]
+    # Among DICOM files, a file whose name and first bytes say nothing is most
+    # likely a DICOM file ml4paleo can't read, so it isn't skipped quietly.
+    if dicoms and unknown:
+        raise IngestError(
+            f"{_examples(unknown)} {'isn' if len(unknown) == 1 else 'aren'}'t DICOM "
+            "files ml4paleo can read. Upload the series without them."
+        )
     if len(unknown) > MAX_UNKNOWN:
         raise IngestError(
             f"The archive has {len(unknown)} files ml4paleo doesn't read as slices "
             f"({_examples(unknown)}). Upload only the slices, or one kind of slice."
         )
+    for member in dicoms or images:
+        _check_member_size(member.info, limits)
+    skipped = by_kind["extra"] + unknown
     if dicoms:
         index, without_images = _probe_dicom(dicoms, limits)
-        skipped = skipped + without_images
+        skipped += without_images
     else:
         index = _probe_images(images, limits)
     if not skipped:
@@ -377,7 +443,7 @@ def probe(fileobj: BinaryIO, limits: SliceLimits = DEFAULT_LIMITS) -> SourceInde
     skipped.sort(key=lambda member: natural_key(member.name))
     return replace(
         index,
-        skipped=[member.name for member in skipped[:SKIPPED_NAMES]],
+        skipped=[m.name[:MAX_SKIPPED_NAME] for m in skipped[:SKIPPED_NAMES]],
         skipped_count=len(skipped),
     )
 
@@ -385,9 +451,7 @@ def probe(fileobj: BinaryIO, limits: SliceLimits = DEFAULT_LIMITS) -> SourceInde
 def _known_extra(name: str) -> bool:
     """Whether a file is one that scans often come with, rather than a slice."""
     base = re.split(r"[/\\]", name)[-1]
-    return base.upper() == "DICOMDIR" or (
-        "." in base and base[base.rindex(".") :].lower() in NOT_SLICES
-    )
+    return base.upper() == "DICOMDIR" or _suffix(name) in NOT_SLICES
 
 
 def _probe_dicom(
@@ -403,7 +467,13 @@ def _probe_dicom(
 
     slices, without_images, series = [], [], set()
     for member in members:
-        header = pydicom.dcmread(member.open(), stop_before_pixels=True)
+        data = member.open()  # IngestError if the archive is damaged
+        try:
+            header = pydicom.dcmread(data, stop_before_pixels=True)
+        except Exception as exc:  # pydicom raises many kinds for damaged headers
+            raise IngestError(
+                f"{member.name} is a damaged DICOM file ({exc})."
+            ) from None
         if not hasattr(header, "Rows") or not hasattr(header, "Columns"):
             without_images.append(member)
             continue
