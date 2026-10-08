@@ -637,6 +637,55 @@ describe("ChunkStore, for chunks the server is still making", () => {
 		expect(calls).toHaveLength(1);
 	});
 
+	it("stops its timer when every load that waits is cancelled, so nothing keeps the store alive", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		store.request("a").catch(() => {});
+		store.request("b").catch(() => {});
+		calls[0]?.fail(new Busy(30_000));
+		calls[1]?.fail(new Busy(45_000));
+		await settle();
+		expect(vi.getTimerCount()).toBe(1);
+		store.keepOnly(new Set(["b"]));
+		// b still waits.
+		expect(vi.getTimerCount()).toBe(1);
+		store.keepOnly(new Set());
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("stops its timer when the load that waits is invalidated, or taken over by a refresh that has started", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		store.request("a").catch(() => {});
+		calls[0]?.fail(new Busy(30_000));
+		await settle();
+		expect(vi.getTimerCount()).toBe(1);
+		store.invalidate("a");
+		expect(vi.getTimerCount()).toBe(0);
+		store.request("b").catch(() => {});
+		calls[1]?.fail(new Busy(30_000));
+		await settle();
+		expect(vi.getTimerCount()).toBe(1);
+		store.refresh("b").catch(() => {});
+		expect(calls).toHaveLength(3);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("keeps its timer for a load that waits on, and asks again for it when it is due", async () => {
+		const { calls, load } = controlled();
+		const start = Date.now();
+		const store = new ChunkStore(load, 1000);
+		store.request("a").catch(() => {});
+		store.request("b").catch(() => {});
+		calls[0]?.fail(new Busy(30_000));
+		calls[1]?.fail(new Busy(60_000));
+		await settle();
+		store.keepOnly(new Set(["b"]));
+		await vi.advanceTimersByTimeAsync(59_999);
+		expect(calls).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(asked(calls, start)).toEqual(["a@0", "b@0", "b@60000"]);
+	});
 });
 
 describe("ChunkStore, for chunks the server takes long to make", () => {

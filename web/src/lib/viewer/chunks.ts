@@ -237,6 +237,7 @@ export class ChunkStore {
 		const gone = new Set(cancelled);
 		this.#queue = this.#queue.filter((queued) => !gone.has(queued));
 		for (const entry of cancelled) this.#stop(entry, "No longer needed", true);
+		this.#unwake();
 	}
 
 	#cancel(id: string, reason: string, dropStale = true): void {
@@ -244,6 +245,7 @@ export class ChunkStore {
 		if (!entry) return;
 		this.#queue = this.#queue.filter((queued) => queued !== entry);
 		this.#stop(entry, reason, dropStale);
+		this.#unwake();
 	}
 
 	/**
@@ -347,6 +349,14 @@ export class ChunkStore {
 			this.#wakeAt = Number.POSITIVE_INFINITY;
 			this.#pump();
 		}, ms);
+	}
+
+	/** Stop the timer once nothing is queued for it to wake, so a store nobody uses isn't kept alive by it. */
+	#unwake(): void {
+		if (this.#queue.length > 0) return;
+		clearTimeout(this.#timer);
+		this.#timer = undefined;
+		this.#wakeAt = Number.POSITIVE_INFINITY;
 	}
 
 	/**
