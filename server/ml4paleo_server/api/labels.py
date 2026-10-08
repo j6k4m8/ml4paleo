@@ -6,6 +6,7 @@ feed collaborators follow, and the labels as a zarr group for viewers.
     POST   /api/projects/{id}/labels/classes             {name, color}
     PATCH  /api/projects/{id}/labels/classes/{value}     {name?, color?}
     DELETE /api/projects/{id}/labels/classes/{value}
+    GET    /api/projects/{id}/labels/counts              voxels labeled with each value
     POST   /api/projects/{id}/labels/ops                 apply an edit
     POST   /api/projects/{id}/labels/ops/{seq}/undo      {client_op_id}
     POST   /api/projects/{id}/labels/ops/{seq}/redo      {client_op_id}

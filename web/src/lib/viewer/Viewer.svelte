@@ -154,7 +154,10 @@
 				const found = SHOW_ROIS ? rois.items.find((r) => r.id === firstRoi) : undefined;
 				if (found) goTo(found);
 				else if (firstBox) showBox(firstBox);
-				else if (firstRoi && SHOW_ROIS) rois.error = "That ROI isn't in this project any more.";
+				else if (firstRoi) {
+					if (SHOW_ROIS) rois.error = "That ROI isn't in this project any more.";
+					else notice = "That link points at an ROI, and ROIs are hidden for now.";
+				}
 			});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
@@ -185,7 +188,10 @@
 			labels = layer;
 			classes = layer.classes;
 			// Classes added here or elsewhere reach the list, and the palette.
-			layer.onClasses(() => (classes = layer.classes));
+			layer.onClasses(() => {
+				classes = layer.classes;
+				viewer.activeClass ??= classes[0]?.value ?? null;
+			});
 			viewer.activeClass ??= classes[0]?.value ?? null;
 			layer.counts().then(
 				(counts) => (hasBackground = paintedBackground || (counts.get(BACKGROUND_VALUE) ?? 0) > 0),
@@ -434,7 +440,7 @@
 		// for after it shows, even if the prediction was done later.
 		proposal = show(
 			proposal,
-			proposed?.box && (!whole || Date.parse(proposed.started_at) > Date.parse(whole.started_at)) ? proposed : null,
+			SHOW_ROIS && proposed?.box && (!whole || Date.parse(proposed.started_at) > Date.parse(whole.started_at)) ? proposed : null,
 			"proposal",
 		);
 	}
@@ -919,7 +925,7 @@
 		event.preventDefault();
 		const name = className.trim();
 		if (!labels || !name || savingClass) return;
-		if (classes.some((c) => c.name.trim().toLowerCase() === name.toLowerCase())) {
+		if (pickable.some((c) => c.name.trim().toLowerCase() === name.toLowerCase())) {
 			classError = `There's a class called ${name} already.`;
 			return;
 		}
@@ -1255,7 +1261,7 @@
 							class="btn self-start"
 							onclick={() => {
 								viewer.activeClass = BACKGROUND_VALUE;
-								if (viewer.tool === "navigate") setTool("brush");
+								if (viewer.tool !== "brush" && viewer.tool !== "polygon") setTool("brush");
 							}}
 						>
 							Paint Background

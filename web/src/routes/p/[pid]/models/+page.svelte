@@ -52,6 +52,9 @@
 	let classesLoaded = $state(false);
 	// Voxels labeled with each value (background is 1), once known.
 	let counts: Record<string, number> | null = $state(null);
+	// Whether the project has any ROIs, once known. They're hidden now, but a complete one
+	// made earlier makes the voxels in it background, which the counts don't show.
+	let hasRois: boolean | null = $state(null);
 	let quota: Quota | null = $state(null);
 	let progress: Record<string, number> = $state({});
 	let prediction: { model_id: string | null; model_name: string | null } | null = $state(null);
@@ -76,6 +79,9 @@
 	// What has been labeled, background and classes, and so whether there are two things to tell apart.
 	const labeledNow = $derived(withBackground(classes).filter((c) => (counts?.[c.value] ?? 0) > 0));
 	const tooLittle = $derived(counts !== null && classesLoaded && labeledNow.length < 2);
+	// Training can't work: nothing painted would make up for it, so Train waits. With ROIs around
+	// it only warns, and the trainer says if it really can't.
+	const blocked = $derived(tooLittle && hasRois === false);
 	const whyTooLittle = $derived.by(() => {
 		const only = labeledNow[0];
 		if (!only) return "Nothing is labeled yet. In the annotator, label what you're looking for, and some background.";
@@ -99,6 +105,7 @@
 			).catch(() => null);
 			predictions = latestPredictions(await api<Pipeline[]>(`/api/projects/${pid}/pipelines`));
 			counts = await api<Record<string, number>>(`/api/projects/${pid}/labels/counts`).catch(() => null);
+			hasRois = await api<unknown[]>(`/api/projects/${pid}/rois`).then((list) => list.length > 0, () => null);
 		} catch (e) {
 			error = message(e);
 		}
@@ -256,7 +263,7 @@
 				</div>
 			{/if}
 			{#if error}<p class="error" role="alert">{error}</p>{/if}
-			<button class="btn btn-primary h-7" disabled={busy || tooLittle} title={tooLittle ? whyTooLittle : undefined}><Brain size={14} /> Train</button>
+			<button class="btn btn-primary h-7" disabled={busy || blocked} title={blocked ? whyTooLittle : undefined}><Brain size={14} /> Train</button>
 		</form>
 	</section>
 

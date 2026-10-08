@@ -353,12 +353,17 @@ def test_training_needs_two_classes(tmp_path):
             pass
 
     # It says what has labels, and what to do about it.
-    for value, only in ((BONE, "one class"), (1, "background")):
+    for value, only, fix in (
+        (BONE, "one class", "Paint some Background, or label another class"),
+        (1, "background", "Label what you're looking for too"),
+    ):
         labels = np.zeros(SHAPE, dtype=np.uint8)
         labels[20, 20, 20:30] = value
         source = DictLabels(labels)
         data = TrainingSet(image, source, source.chunks, [], [BONE], (200.0, 800.0))
-        with pytest.raises(ValueError, match=f"two classes.*only {only} has any"):
+        with pytest.raises(
+            ValueError, match=f"two classes.*only {only} has any. {fix}"
+        ):
             plugin.train(data, plugin.Params(sigma_max=1.0), tmp_path, Ctx())
 
 
