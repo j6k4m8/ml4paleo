@@ -120,16 +120,19 @@ describe("LabelLayer", () => {
 
 	it("loads again the chunks an undo changed", async () => {
 		const server = new Map([["0/0/0", { value: 5, version: 4 }]]);
-		const { pool } = fakePool(server);
+		const { pool, loads } = fakePool(server);
 		const layer = new LabelLayer("p", pool, [2, 2, 2]);
 		await loaded(layer, "0/0/0");
 		server.set("0/0/0", { value: 0, version: 5 });
 		layer.changed([{ key: [0, 0, 0], version: 5 }]);
 		// What's on screen stays until the new copy arrives.
 		expect(first(layer, "0/0/0")).toBe(5);
+		// Its change event, arriving while that copy loads, doesn't start another.
+		layer.changed([{ key: [0, 0, 0], version: 5 }]);
 		await tick();
 		expect(first(layer, "0/0/0")).toBe(0);
 		expect(layer.versionOf("0/0/0")).toBe(5);
+		expect(loads).toHaveLength(2);
 	});
 
 	it("drops chunks no view shows instead of refreshing them", async () => {

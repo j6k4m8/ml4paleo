@@ -43,6 +43,8 @@ export class LabelLayer {
 	// go over every copy that loads; after, only over copies older than the
 	// version the op made.
 	#local = new Map<string, Map<string, LocalDelta>>();
+	// Chunks loading again because they changed, and the version they changed to.
+	#awaited = new Map<string, number>();
 	/** Called if live updates stop for good (signed out, or removed from the project). */
 	onStopped: (() => void) | null = null;
 
@@ -55,6 +57,7 @@ export class LabelLayer {
 		this.store = new ChunkStore(labelLoader(pool, url, shape), CACHE_BYTES, 4);
 		// Whatever the server sends, this page's edits stay on screen.
 		this.store.onLoad = (id, chunk) => {
+			this.#awaited.delete(id);
 			let stale = false;
 			for (const [op, deltas] of this.#local) {
 				const delta = deltas.get(id);
@@ -108,9 +111,14 @@ export class LabelLayer {
 	 */
 	changed(chunks: { key: Vec3; version: number }[]): void {
 		const stale = chunks.filter(({ key, version }) => {
-			const chunk = this.store.peek(key.join("/"));
-			return chunk?.version === undefined || chunk.version < version;
+			const id = key.join("/");
+			const chunk = this.store.peek(id);
+			if (chunk?.version !== undefined && chunk.version >= version) return false;
+			// Already loading again since this version was made (an undo's
+			// answer and its change event both name it).
+			return !(this.store.isLoading(id) && (this.#awaited.get(id) ?? -1) >= version);
 		});
+		for (const { key, version } of stale) this.#awaited.set(key.join("/"), version);
 		this.reload(stale.map(({ key }) => key.join("/")));
 	}
 
