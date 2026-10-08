@@ -321,8 +321,9 @@
 
 	// --- pointer and wheel ---------------------------------------------------
 
-	// `draws`: the press added a polygon point, so dragging on draws freehand.
-	let press: { x: number; y: number; moved: boolean; pan: boolean; pointer: number; draws: boolean } | null = null;
+	// `draws`: the press added a polygon point, so dragging on draws freehand;
+	// `before`: how many points the polygon had before the press.
+	let press: { x: number; y: number; moved: boolean; pan: boolean; pointer: number; draws: boolean; before: number } | null = null;
 	let stroke: (Stroke & { last: [number, number] }) | null = null;
 	let rectangle: { from: [number, number]; to: [number, number] } | null = $state(null);
 	let cursor: [number, number] | null = $state(null);
@@ -386,7 +387,7 @@
 		canvas.focus();
 		viewer.noteKeys(event);
 		const pan = viewer.tool === "navigate" || viewer.panning || event.button === 1;
-		press = { x: event.clientX, y: event.clientY, moved: false, pan, pointer: event.pointerId, draws: false };
+		press = { x: event.clientX, y: event.clientY, moved: false, pan, pointer: event.pointerId, draws: false, before: 0 };
 		if (pan || event.button !== 0 || !canEdit()) return;
 		if (painting) {
 			const point = planePoint(event);
@@ -414,6 +415,7 @@
 			if (current && closesAt(current.points, point, scale(), CLOSE_PIXELS * reach(event))) return onpolygon(cuts(event));
 			viewer.polygon = current ? { ...current, points: [...current.points, point] } : { plane: plane.name, slice, points: [point] };
 			press.draws = true;
+			press.before = current?.points.length ?? 0;
 		}
 	}
 
@@ -498,6 +500,10 @@
 	}
 
 	function cancel() {
+		// A drag the browser called off (for a system gesture, say) takes back the points it added.
+		if (press?.draws && viewer.lassoing && polygonHere) {
+			viewer.polygon = press.before > 0 ? { ...polygonHere, points: polygonHere.points.slice(0, press.before) } : null;
+		}
 		if (press?.draws) viewer.lassoing = false;
 		press = null;
 		stroke = null;
