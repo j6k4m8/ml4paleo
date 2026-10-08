@@ -340,10 +340,6 @@ def test_random_forest_samples_fit_the_memory_budget(tmp_path):
 
 def test_training_needs_two_classes(tmp_path):
     image, _ = synthetic()
-    labels = np.zeros(SHAPE, dtype=np.uint8)
-    labels[20, 20, 20:30] = BONE
-    source = DictLabels(labels)
-    data = TrainingSet(image, source, source.chunks, [], [BONE], (200.0, 800.0))
     plugin = get_plugin("rf")()
 
     class Ctx:
@@ -356,8 +352,14 @@ def test_training_needs_two_classes(tmp_path):
         def check(self):
             pass
 
-    with pytest.raises(ValueError, match="two classes"):
-        plugin.train(data, plugin.Params(sigma_max=1.0), tmp_path, Ctx())
+    # It says which class has labels, by value, and what to do about it.
+    for value, only in ((BONE, "class 2"), (1, "background")):
+        labels = np.zeros(SHAPE, dtype=np.uint8)
+        labels[20, 20, 20:30] = value
+        source = DictLabels(labels)
+        data = TrainingSet(image, source, source.chunks, [], [BONE], (200.0, 800.0))
+        with pytest.raises(ValueError, match=f"two classes.*only {only} has any"):
+            plugin.train(data, plugin.Params(sigma_max=1.0), tmp_path, Ctx())
 
 
 def test_plugins_are_listed_and_check_their_params():

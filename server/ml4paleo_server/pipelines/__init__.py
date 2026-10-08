@@ -7,6 +7,9 @@ transaction that records the success, so they are never lost). Each pipeline
 kind lives in its own module.
 """
 
+import uuid
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import Job
@@ -55,6 +58,21 @@ _RESULT_CHECKS = {
 }
 
 
+async def failure(db: AsyncSession, root_id: uuid.UUID) -> str | None:
+    """
+    Why a pipeline failed, in a sentence: the first line of the error of its
+    first job to fail (the rest is a traceback, for whoever runs the site).
+    """
+    error = await db.scalar(
+        select(Job.error)
+        .where(Job.root_id == root_id, Job.status == "failed")
+        .order_by(Job.finished_at)
+        .limit(1)
+    )
+    lines = (error or "").strip().splitlines()
+    return lines[0][:500] if lines else None
+
+
 def check_result(job: Job, result: dict) -> None:
     """
     Raise ValueError if a job's result can't continue its pipeline. Runs
@@ -78,6 +96,7 @@ __all__ = [
     "check_result",
     "compose",
     "export",
+    "failure",
     "ingest",
     "labelimport",
     "mesh",

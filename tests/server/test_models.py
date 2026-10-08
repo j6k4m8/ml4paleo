@@ -259,6 +259,39 @@ def test_failed_trainings_give_back_slots_across_projects(
     assert ada.get("/api/me/quota").json()["trained_models_used"] == 1
 
 
+def test_a_failed_training_says_why(ada, settings, migrated_database_url):
+    project = labeled_project(ada, settings, migrated_database_url)
+    base = f"/api/projects/{project}/models"
+    model = ada.post(base, json={}).json()
+    assert ada.get(f"{base}/{model['id']}").json()["error"] is None
+
+    def fail(error):
+        async def run(db):
+            await db.execute(
+                update(Job)
+                .where(Job.id == uuid.UUID(model["pipeline_id"]))
+                .values(status="failed", error=error)
+            )
+
+        run_db(migrated_database_url, run)
+
+    def pipeline_error():
+        url = f"/api/projects/{project}/pipelines/{model['pipeline_id']}"
+        return ada.get(url).json()["error"]
+
+    # The first line says why; the traceback under it stays with the site.
+    fail('Needs two classes\n\nTraceback (most recent call last):\n  File "w.py"')
+    shown = ada.get(f"{base}/{model['id']}").json()
+    assert (shown["status"], shown["error"]) == ("failed", "Needs two classes")
+    assert [m["error"] for m in ada.get(base).json()] == ["Needs two classes"]
+    assert pipeline_error() == "Needs two classes"
+    # A failure that says nothing still shows as failed.
+    fail("  \n")
+    shown = ada.get(f"{base}/{model['id']}").json()
+    assert (shown["status"], shown["error"]) == ("failed", None)
+    assert pipeline_error() is None
+
+
 def test_deleting_a_project_gives_back_its_model_slots(
     new_browser, settings, migrated_database_url
 ):

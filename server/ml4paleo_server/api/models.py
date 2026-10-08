@@ -28,7 +28,7 @@ from sqlalchemy import select
 
 from ml4paleo.segmentation.plugin import get_plugin, plugins
 
-from .. import artifacts, audit, jobs, quotas, training
+from .. import artifacts, audit, jobs, pipelines, quotas, training
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import Artifact, Job, Project, Roi, TrainedModel, TrainingSet, User
 from ..pipelines import predict, train
@@ -71,6 +71,8 @@ class ModelOut(BaseModel):
     plugin_version: str | None
     params: dict[str, Any]
     status: str
+    # Why a failed training failed, in a sentence (if it says).
+    error: str | None = None
     class_values: list[int]
     metrics: dict[str, Any] | None
     # The training pipeline (see /pipelines/{id}).
@@ -91,13 +93,18 @@ async def _model_out(db, model: TrainedModel) -> ModelOut:
         else None
     )
     training_set = await db.get(TrainingSet, model.training_set_id)
+    status = train.model_status(model, job_status, artifact_state)
+    error = None
+    if status == "failed" and model.job_id:
+        error = await pipelines.failure(db, model.job_id)
     return ModelOut(
         id=model.id,
         name=model.name,
         plugin=model.plugin,
         plugin_version=model.plugin_version,
         params=model.params,
-        status=train.model_status(model, job_status, artifact_state),
+        status=status,
+        error=error,
         class_values=list(model.class_values),
         metrics=model.metrics,
         pipeline_id=model.job_id,
