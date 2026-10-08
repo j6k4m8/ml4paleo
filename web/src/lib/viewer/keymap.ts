@@ -49,7 +49,7 @@ export const KEYMAP: Binding[] = [
 	{ action: "navigate", keys: ["n"], label: "Navigate" },
 	{ action: "brush", keys: ["b"], label: "Brush" },
 	{ action: "eraser", keys: ["e"], label: "Eraser" },
-	{ action: "polygon", keys: ["p"], label: "Polygon: click points or drag freehand (with Alt when closing: erase that class)" },
+	{ action: "polygon", keys: ["p"], label: "Polygon: click points or drag freehand; Add fills, Subtract cuts out" },
 	{ action: "roi", keys: ["r"], label: "Draw an ROI" },
 	{ action: "next-roi", keys: ["g"], label: "Go to the next open ROI" },
 	{ action: "complete-roi", keys: ["c"], label: "Mark the selected ROI complete (with Shift: reopen)" },
@@ -57,7 +57,7 @@ export const KEYMAP: Binding[] = [
 	{ action: "smaller", keys: ["["], label: "Smaller brush" },
 	{ action: "bigger", keys: ["]"], label: "Bigger brush" },
 	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class" },
-	{ action: "close-polygon", keys: ["Enter"], label: "Close the polygon (or click its first point, or double-click)" },
+	{ action: "close-polygon", keys: ["Enter"], label: "Close the polygon (with Alt: cut it out of the class; with Shift: fill it)" },
 	{ action: "remove-point", keys: ["Backspace"], label: "Remove the polygon's last point" },
 	{ action: "cancel", keys: ["Escape"], label: "Drop the polygon, then go back to navigating" },
 	{ action: "undo", keys: ["mod+z"], label: "Undo your last edit" },
@@ -74,6 +74,8 @@ export const MOUSE: [string, string][] = [
 	["Drag (brush, eraser)", "Paint"],
 	["Click (polygon)", "Add a point; on the first point, close the polygon"],
 	["Drag (polygon)", "Draw freehand; letting go closes the polygon"],
+	["Double-click (polygon)", "Close the polygon"],
+	["Alt or Shift while closing (polygon)", "Cut out of the active class, or fill, whatever the mode"],
 	["Drag (ROI)", "Draw an ROI on this slice"],
 ];
 

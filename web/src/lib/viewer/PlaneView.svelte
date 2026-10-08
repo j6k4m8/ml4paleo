@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from "svelte";
-	import { CLOSE_PIXELS, closesAt, DRAG_PIXELS, lassoPoints, type Point, type Scale } from "../labels/polygon";
+	import { CLOSE_PIXELS, closesAt, closingMode, DRAG_PIXELS, lassoPoints, type Point, type Scale } from "../labels/polygon";
 	import { PlaneMask } from "../labels/raster";
 	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
@@ -59,8 +59,8 @@
 		onresize: (plane: Plane, width: number, height: number) => void;
 		/** A finished brush or eraser stroke, with the settings it began with. */
 		onstroke: (stroke: Stroke) => void;
-		/** Close the polygon being drawn. */
-		onpolygon: () => void;
+		/** Close the polygon being drawn: fill it, or with `cut`, cut it out of the active class. */
+		onpolygon: (cut: boolean) => void;
 		rois: Roi[];
 		/** A rectangle drawn with the ROI tool, in plane voxels, at `slice`. */
 		onroi: (plane: Plane, slice: number, corners: [[number, number], [number, number]]) => void;
@@ -360,6 +360,9 @@
 	/** Fingers are less exact than a mouse, so they get twice the room. */
 	const reach = (event: PointerEvent) => (event.pointerType === "touch" ? 2 : 1);
 
+	/** Whether closing the polygon with this event's keys held cuts it out. */
+	const cuts = (event: MouseEvent) => closingMode(viewer.polygonMode, event) === "subtract";
+
 	/** Where a plane point is on screen, in CSS pixels. */
 	function screen(u: number, v: number): [number, number] {
 		const px = pixelsPerVoxel(view());
@@ -383,6 +386,7 @@
 		if (press) return;
 		canvas.setPointerCapture(event.pointerId);
 		canvas.focus();
+		viewer.noteKeys(event);
 		const pan = viewer.tool === "navigate" || viewer.panning || event.button === 1;
 		press = { x: event.clientX, y: event.clientY, moved: false, pan, pointer: event.pointerId, draws: false };
 		if (pan || event.button !== 0 || !canEdit()) return;
@@ -409,7 +413,7 @@
 			const point = planePoint(event);
 			const current = polygonHere;
 			// Clicking the first point again closes the polygon.
-			if (current && closesAt(current.points, point, scale(), CLOSE_PIXELS * reach(event))) return onpolygon();
+			if (current && closesAt(current.points, point, scale(), CLOSE_PIXELS * reach(event))) return onpolygon(cuts(event));
 			viewer.polygon = current ? { ...current, points: [...current.points, point] } : { plane: plane.name, slice, points: [point] };
 			press.draws = true;
 		}
@@ -418,6 +422,7 @@
 	function pointerMove(event: PointerEvent) {
 		onhover(plane);
 		if (press && event.pointerId !== press.pointer) return;
+		viewer.noteKeys(event);
 		cursor = offset(event).map((d, i) => (d + (i === 0 ? width : height) / 2) / ratio()) as [number, number];
 		if (rectangle) {
 			if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) >= 3) press.moved = true;
@@ -485,7 +490,7 @@
 				const end = planePoint(event);
 				const last = current.points.at(-1);
 				if (!last || last[0] !== end[0] || last[1] !== end[1]) viewer.polygon = { ...current, points: [...current.points, end] };
-				onpolygon();
+				onpolygon(cuts(event));
 			}
 		} else if (press?.pan && !press.moved && viewer.tool === "navigate") {
 			viewer.autoFit = false;
@@ -572,6 +577,9 @@
 		viewer.polygon && viewer.polygon.plane === plane.name && viewer.polygon.slice === slice ? viewer.polygon : null,
 	);
 
+	// Closing the polygon now would cut it out of the active class.
+	const cutting = $derived(viewer.tool === "polygon" && closingMode(viewer.polygonMode, viewer.held) === "subtract");
+
 	/**
 	 * The polygon being drawn here, on screen: its outline so far (to the
 	 * pointer), its first point once a click there can close it, and whether
@@ -635,7 +643,7 @@
 		onpointercancel={cancel}
 		onpointerenter={() => onhover(plane)}
 		onpointerleave={() => (cursor = null)}
-		ondblclick={() => viewer.tool === "polygon" && onpolygon()}
+		ondblclick={(event) => viewer.tool === "polygon" && onpolygon(cuts(event))}
 		onfocus={() => onhover(plane)}
 		onwheel={wheel}
 		class:editing={viewer.tool !== "navigate" && !viewer.panning}
@@ -656,12 +664,14 @@
 			<rect class="roi roi-new" x={rectangleOutline.x} y={rectangleOutline.y} width={rectangleOutline.w} height={rectangleOutline.h} />
 		{/if}
 		{#if polygonShape}
+			<!-- A cutout shows dashed over a darker fill. -->
 			<polyline
 				points={polygonShape.outline}
-				fill={activeColor}
-				fill-opacity="0.25"
+				fill={cutting ? "#000000" : activeColor}
+				fill-opacity={cutting ? 0.35 : 0.25}
 				stroke={activeColor}
 				stroke-width="1.5"
+				stroke-dasharray={cutting ? "5 3" : undefined}
 			/>
 			{#if polygonShape.first}
 				<!-- Click here to close; it grows and fills once the pointer is close enough. -->
@@ -674,6 +684,13 @@
 					stroke={activeColor}
 				/>
 			{/if}
+		{/if}
+		{#if cutting && cursor && viewer.activeClass !== null}
+			<!-- A minus beside the pointer, as image editors show for subtracting. -->
+			<g class="cut-mark" transform="translate({cursor[0] + 11} {cursor[1] + 11})">
+				<circle r="6" />
+				<line x1="-3" x2="3" y1="0" y2="0" />
+			</g>
 		{/if}
 		{#if brushOutline}
 			<ellipse
@@ -755,6 +772,15 @@
 	.start.closing {
 		fill: #fff;
 		stroke-width: 2;
+	}
+	.cut-mark circle {
+		fill: rgb(0 0 0 / 0.7);
+		stroke: #fff;
+		stroke-width: 1;
+	}
+	.cut-mark line {
+		stroke: #fff;
+		stroke-width: 1.5;
 	}
 	.overlay {
 		position: absolute;

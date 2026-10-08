@@ -1,6 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { apart, CLOSE_PIXELS, closesAt, LASSO_SPACING, lassoPoints, type Point, type Scale } from "./polygon";
-import { PlaneMask } from "./raster";
+import { PLANES } from "../viewer/tiles";
+import { applyLocally, decodeDelta, splitIntoDeltas } from "./deltas";
+import {
+	apart,
+	CLOSE_PIXELS,
+	closesAt,
+	closingMode,
+	LASSO_SPACING,
+	lassoPoints,
+	type Point,
+	type Polygon,
+	polygonEdit,
+	type Scale,
+} from "./polygon";
+
+const square = (u0: number, v0: number, u1: number, v1: number): Point[] => [
+	[u0, v0],
+	[u1, v0],
+	[u1, v1],
+	[u0, v1],
+];
 
 describe("closesAt", () => {
 	const triangle: Point[] = [
@@ -101,9 +120,108 @@ describe("lassoPoints", () => {
 	});
 
 	it("rasterizes a lasso drawn round a circle as that circle", () => {
-		const mask = new PlaneMask(100, 100);
-		mask.polygon(lassoPoints(undefined, circle(20, 0.1), [1, 1]));
-		expect(mask.count).toBeGreaterThan(Math.PI * 400 * 0.97);
-		expect(mask.count).toBeLessThan(Math.PI * 400 * 1.03);
+		const polygon: Polygon = { plane: "xy", slice: 0, points: lassoPoints(undefined, circle(20, 0.1), [1, 1]) };
+		const edit = polygonEdit(polygon, "add", 2, false, [100, 100]);
+		expect(edit?.mask.count).toBeGreaterThan(Math.PI * 400 * 0.97);
+		expect(edit?.mask.count).toBeLessThan(Math.PI * 400 * 1.03);
+	});
+});
+
+describe("closingMode", () => {
+	const none = { altKey: false, shiftKey: false };
+
+	it("follows the mode with no keys held", () => {
+		expect(closingMode("add", none)).toBe("add");
+		expect(closingMode("subtract", none)).toBe("subtract");
+	});
+
+	it("cuts out with Alt and fills with Shift, whatever the mode", () => {
+		expect(closingMode("add", { ...none, altKey: true })).toBe("subtract");
+		expect(closingMode("subtract", { ...none, altKey: true })).toBe("subtract");
+		expect(closingMode("subtract", { ...none, shiftKey: true })).toBe("add");
+		expect(closingMode("add", { ...none, shiftKey: true })).toBe("add");
+		expect(closingMode("add", { altKey: true, shiftKey: true })).toBe("subtract");
+	});
+});
+
+describe("polygonEdit", () => {
+	const SIZE = 32;
+
+	/** One XY slice of label values, SIZE × SIZE, as a chunk at the image's corner. */
+	function slice(): Uint8Array {
+		return new Uint8Array(SIZE * SIZE);
+	}
+
+	/** Apply an edit to the slice, as the label overlay does before the server answers. */
+	function apply(labels: Uint8Array, polygon: Polygon, mode: "add" | "subtract", value: number, protect = false) {
+		const edit = polygonEdit(polygon, mode, value, protect, [SIZE, SIZE]);
+		if (!edit) throw new Error("The polygon covers nothing");
+		const volume = edit.mask.toVolume(PLANES.xy, polygon.slice);
+		for (const delta of splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value: edit.value, onlyIf: edit.onlyIf })) {
+			const { mask, written } = decodeDelta(delta);
+			applyLocally(labels, [1, SIZE, SIZE], delta.box, mask, written, delta.only_if);
+		}
+		return edit;
+	}
+
+	const at = (labels: Uint8Array, u: number, v: number) => labels[v * SIZE + u];
+
+	it("cuts a hole out of the active class, leaving other classes inside", () => {
+		const labels = slice();
+		apply(labels, { plane: "xy", slice: 0, points: square(4, 4, 28, 28) }, "add", 2);
+		// Someone labeled a voxel of another class where the hole goes.
+		labels[16 * SIZE + 16] = 3;
+		const edit = apply(labels, { plane: "xy", slice: 0, points: square(10, 10, 22, 22) }, "subtract", 2);
+		expect(edit.value).toBe(0);
+		expect(edit.onlyIf).toBe("class:2");
+		expect(edit.tool.name).toBe("polygon-erase");
+		// The ring stays, the hole is unlabeled, and the other class is kept.
+		expect(at(labels, 4, 4)).toBe(2);
+		expect(at(labels, 27, 27)).toBe(2);
+		expect(at(labels, 9, 16)).toBe(2);
+		expect(at(labels, 22, 16)).toBe(2);
+		expect(at(labels, 10, 10)).toBe(0);
+		expect(at(labels, 21, 21)).toBe(0);
+		expect(at(labels, 16, 16)).toBe(3);
+		expect(at(labels, 3, 3)).toBe(0);
+		expect(at(labels, 28, 28)).toBe(0);
+		const counts = [0, 2, 3].map((value) => labels.filter((l) => l === value).length);
+		expect(counts).toEqual([SIZE * SIZE - (24 * 24 - 12 * 12) - 1, 24 * 24 - 12 * 12, 1]);
+	});
+
+	it("cuts a hole a lasso drew, and leaves the class alone outside what was filled", () => {
+		const labels = slice();
+		apply(labels, { plane: "xy", slice: 0, points: square(0, 0, 16, 32) }, "add", 2);
+		apply(labels, { plane: "xy", slice: 0, points: square(16, 0, 32, 32) }, "add", 4);
+		// A cutout across both halves takes out only class 2.
+		apply(labels, { plane: "xy", slice: 0, points: square(8, 8, 24, 24) }, "subtract", 2);
+		expect(at(labels, 12, 12)).toBe(0);
+		expect(at(labels, 20, 12)).toBe(4);
+		expect(at(labels, 4, 12)).toBe(2);
+	});
+
+	it("fills with the class, only into unlabeled voxels when asked", () => {
+		const labels = slice();
+		labels[5 * SIZE + 5] = 3;
+		const edit = apply(labels, { plane: "xy", slice: 0, points: square(2, 2, 8, 8) }, "add", 2, true);
+		expect(edit).toMatchObject({ value: 2, onlyIf: "unlabeled", tool: { name: "polygon", plane: "xy", slice: 0 } });
+		expect(at(labels, 5, 5)).toBe(3);
+		expect(at(labels, 4, 4)).toBe(2);
+		expect(polygonEdit({ plane: "xy", slice: 0, points: square(2, 2, 8, 8) }, "add", 2, false, [SIZE, SIZE])?.onlyIf).toBe("any");
+	});
+
+	it("records the outline, rounded, unless it's very long", () => {
+		const edit = polygonEdit({ plane: "yz", slice: 3, points: [[1.234, 2], [9.87, 2], [5, 7.06]] }, "add", 2, false, [SIZE, SIZE]);
+		expect(edit?.tool).toEqual({ name: "polygon", plane: "yz", slice: 3, points: [[1.2, 2], [9.9, 2], [5, 7.1]] });
+		const long = Array.from({ length: 600 }, (_, i): Point => {
+			const angle = (2 * Math.PI * i) / 600;
+			return [16 + 10 * Math.cos(angle), 16 + 10 * Math.sin(angle)];
+		});
+		expect(polygonEdit({ plane: "xy", slice: 0, points: long }, "add", 2, false, [SIZE, SIZE])?.tool.points).toBeUndefined();
+	});
+
+	it("makes nothing of a polygon with no voxel centers inside", () => {
+		expect(polygonEdit({ plane: "xy", slice: 0, points: [[1, 1], [5, 1]] }, "add", 2, false, [SIZE, SIZE])).toBeNull();
+		expect(polygonEdit({ plane: "xy", slice: 0, points: [[1, 1], [5, 1], [9, 1]] }, "subtract", 2, false, [SIZE, SIZE])).toBeNull();
 	});
 });
