@@ -703,7 +703,88 @@ def test_the_cache_keeps_the_most_recent_chunks_under_its_limit():
     cache.put("big", b"x" * 1000)
     assert cache.get("big") is None and cache.get("a") is not None
     cache.put("a", b"y" * 50)
-    assert cache.get("a") == b"y" * 50 and cache.size == 2 * size + 50 + 256
+    assert cache.get("a") == b"y" * 50
+    assert cache.size == 2 * size + 50 + label_pyramid.ENTRY_OVERHEAD
+
+
+def test_pinned_chunks_stay_until_let_go_unused_or_too_many():
+    size = 100 + label_pyramid.ENTRY_OVERHEAD
+    now = [0.0]
+
+    def make(limit, pin_limit=100 * size):
+        return label_pyramid._Cache(
+            limit * size, pin_limit, pin_seconds=10, clock=lambda: now[0]
+        )
+
+    # The limit is for the others: pinned ones are over it, and stay.
+    cache = make(limit=2)
+    for name in "abc":
+        cache.put(name, b"x" * 100, pin=True)
+    for name in "def":
+        cache.put(name, b"x" * 100)
+    assert [cache.get(name) is not None for name in "abcdef"] == [True] * 3 + [
+        False,
+        True,
+        True,
+    ]
+    assert (cache.size, cache.pinned_size) == (2 * size, 3 * size)
+    # Letting one go makes it an ordinary entry, which the limit then counts.
+    cache.unpin("a")
+    assert cache.get("a") is not None and cache.get("d") is None
+    assert (cache.size, cache.pinned_size) == (2 * size, 2 * size)
+
+    # A pin nobody uses for ten seconds ends; using it starts it over.
+    cache = make(limit=2)
+    now[0] = 0
+    for name in "ab":
+        cache.put(name, b"x" * 100, pin=True)
+    now[0] = 8
+    assert cache.get("a") is not None
+    now[0] = 12
+    cache.put("c", b"x" * 100)
+    cache.put("d", b"x" * 100)
+    # "b" ended, and went first of the others.
+    assert [cache.get(name) is not None for name in "abcd"] == [True, False, True, True]
+    assert cache.pinned_size == size
+
+    # Too many pinned: the ones pinned longest ago are let go.
+    cache = make(limit=10, pin_limit=2 * size)
+    for name in "abc":
+        cache.put(name, b"x" * 100, pin=True)
+    assert cache.pinned_size == 2 * size and cache.size == size
+    assert [cache.get(name) is not None for name in "abc"] == [True] * 3
+
+
+@pytest.mark.parametrize("room", [0.5, 0.8, 1.2])
+@pytest.mark.parametrize("keys", [[(0, 0, 0)], [(0, 0, 0), (0, 0, 1)]])
+def test_a_cold_chunk_finishes_however_little_room_the_cache_has(
+    ada, project, room, keys
+):
+    # Dense labels, so every chunk of level 1 has plenty to keep.
+    dense = np.random.default_rng(1).integers(0, 4, SHAPE).astype(np.uint8)
+    paint(ada, project, dense)
+    pyramid = ada.client.app.state.label_pyramid
+    for key in keys:
+        assert get(ada, project, 2, key).status_code == 200
+    level1 = [
+        len(data) + label_pyramid.ENTRY_OVERHEAD
+        for (_, level, *_), data in pyramid._cache._items.items()
+        if level == 1
+    ]
+    # A cache with room for only some of the chunks of level 1 that these
+    # chunks of level 2 are made of, and a request that makes just one.
+    pyramid._cache = label_pyramid._Cache(int(room * sum(level1)))
+    pyramid.blobs = 1
+    attempts = {}
+    for attempt in range(1, 41):
+        for key in keys:
+            if key not in attempts and get(ada, project, 2, key).status_code == 200:
+                attempts[key] = attempt
+    # It takes as many requests as it has chunks under it, and then one.
+    assert sorted(attempts) == keys
+    assert max(attempts.values()) <= 9 + len(keys) - 1
+    # Nothing is left pinned once what they were pinned for is made.
+    assert pyramid._cache.pinned_size == 0
 
 
 def test_the_cache_follows_the_setting(settings):

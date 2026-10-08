@@ -37,6 +37,12 @@ from the full resolution chunks), when someone asks for it:
   it made. The viewer asks again and carries on from there, so no request holds
   the server for long however big the volume, and each is cheap once the levels
   below it are cached.
+- What a build finished is kept until the chunk above it is made. A request
+  that gives up has only its finished chunks (the ones under a chunk not yet
+  made) to show for it, and the next request, perhaps in another process's
+  turn, needs them. So they are pinned: they go last when the cache is full,
+  and are released when the chunk above them is made, or after two minutes if
+  nobody asks again, so a build nobody comes back to can't hold memory.
 - Requests share the work, and the memory it takes is bounded. A chunk is
   built by one request at a time: another that wants it waits for that build
   (and gets `Busy` if it gives up). A chunk of level 1 is read and shrunk, or a
@@ -94,6 +100,11 @@ BUILD_SLOTS = 2
 BUILD_QUEUE = 8
 # How much longer than its own budget a request waits for another's build.
 WAIT_SECONDS = 5
+# How long chunks a build finished stay pinned without anyone using them, and
+# the least memory (more, if the cache is bigger) they may take in all. A build
+# has at most seven chunks per level pinned, so this is room for several.
+PIN_SECONDS = 120
+PIN_BYTES = 16 * 1024 * 1024
 # What a cached chunk costs besides its bytes (its key, and the cache's).
 ENTRY_OVERHEAD = 256
 
@@ -299,31 +310,94 @@ def _combine(parts: Sequence[tuple[ChunkKey, bytes]], step: ChunkKey) -> bytes |
 
 class _Cache:
     """
-    Byte strings under a memory limit, least recently used first to go.
+    Byte strings under a memory limit, least recently used first to go. Some
+    can be pinned, which exempts them from the limit (they go last, and only
+    when the pinned ones themselves exceed `pin_limit`, oldest first) until
+    they are unpinned or go unused for `pin_seconds`.
     """
 
-    def __init__(self, limit: int):
+    def __init__(
+        self,
+        limit: int,
+        pin_limit: int | None = None,
+        pin_seconds: float = PIN_SECONDS,
+        clock=time.monotonic,
+    ):
         self.limit = limit
+        self.pin_limit = max(limit, PIN_BYTES) if pin_limit is None else pin_limit
+        self.pin_seconds = pin_seconds
         self.size = 0
+        self.pinned_size = 0
+        self._clock = clock
         self._items = OrderedDict[Hashable, bytes]()
+        # Pinned entries, in the order their pins end.
+        self._pinned = OrderedDict[Hashable, tuple[bytes, float]]()
 
     def get(self, key: Hashable) -> bytes | None:
-        data = self._items.get(key)
-        if data is not None:
+        if (data := self._items.get(key)) is not None:
             self._items.move_to_end(key)
-        return data
+            return data
+        if (held := self._pinned.get(key)) is not None:
+            # Still wanted: the pin starts over.
+            self._pinned[key] = (held[0], self._clock() + self.pin_seconds)
+            self._pinned.move_to_end(key)
+            return held[0]
+        return None
 
-    def put(self, key: Hashable, data: bytes) -> None:
+    def put(self, key: Hashable, data: bytes, pin: bool = False) -> None:
         cost = len(data) + ENTRY_OVERHEAD
-        if cost > self.limit:
+        if cost > (self.pin_limit if pin else self.limit):
             return
+        self._drop(key)
+        if pin:
+            self._pinned[key] = (data, self._clock() + self.pin_seconds)
+            self.pinned_size += cost
+        else:
+            self._items[key] = data
+            self.size += cost
+        self._trim()
+
+    def unpin(self, key: Hashable) -> None:
+        """
+        Let go of a pin: the entry stays, as the most recently used.
+        """
+        if (held := self._pinned.pop(key, None)) is not None:
+            cost = len(held[0]) + ENTRY_OVERHEAD
+            self.pinned_size -= cost
+            self.size += cost
+            self._items[key] = held[0]
+            self._trim()
+
+    def _drop(self, key: Hashable) -> None:
         if (old := self._items.pop(key, None)) is not None:
             self.size -= len(old) + ENTRY_OVERHEAD
-        self._items[key] = data
+        if (held := self._pinned.pop(key, None)) is not None:
+            self.pinned_size -= len(held[0]) + ENTRY_OVERHEAD
+
+    def _release(self, key: Hashable, first: bool) -> None:
+        data, _ = self._pinned.pop(key)
+        cost = len(data) + ENTRY_OVERHEAD
+        self.pinned_size -= cost
         self.size += cost
+        self._items[key] = data
+        if first:
+            self._items.move_to_end(key, last=False)
+
+    def _trim(self) -> None:
+        # Pins that nobody came back for end; the oldest go if there are too many.
+        now = self._clock()
+        while self._pinned:
+            key, (_, until) = next(iter(self._pinned.items()))
+            if until > now and self.pinned_size <= self.pin_limit:
+                break
+            self._release(key, first=True)
         while self.size > self.limit:
-            _, evicted = self._items.popitem(last=False)
-            self.size -= len(evicted) + ENTRY_OVERHEAD
+            _, gone = self._items.popitem(last=False)
+            self.size -= len(gone) + ENTRY_OVERHEAD
+
+    @property
+    def total(self) -> int:
+        return self.size + self.pinned_size
 
 
 class _Budget:
@@ -417,6 +491,7 @@ class LabelPyramid:
             key,
             state,
             _Budget(self.seconds, self.blobs),
+            pin=False,
         )
 
     async def _build(
@@ -429,8 +504,9 @@ class LabelPyramid:
         key: ChunkKey,
         state: Fingerprint,
         budget: _Budget,
+        pin: bool,
     ) -> bytes | None:
-        cached = (project_id, level, key, levels[level].factor_zyx, state)
+        cached = _cache_key(project_id, levels, level, key, state)
         if (data := self._cache.get(cached)) is not None:
             return data
         if (building := self._building.get(cached)) is not None:
@@ -442,7 +518,7 @@ class LabelPyramid:
         self._building[cached] = made
         try:
             data = await self._make(
-                db, store, project_id, levels, level, key, cached, budget
+                db, store, project_id, levels, level, key, cached, budget, pin
             )
         except BaseException as exc:
             # Anyone waiting can only ask again, whatever stopped this.
@@ -473,9 +549,11 @@ class LabelPyramid:
         key: ChunkKey,
         cached: Hashable,
         budget: _Budget,
+        pin: bool,
     ) -> bytes | None:
         step = _step(levels, level)
         origin = (key[0] * step[0], key[1] * step[1], key[2] * step[2])
+        kept: list[Hashable] = []
         if level == 1:
             leaves = await _leaves(db, project_id, levels, key)
             budget.spend(len(leaves))
@@ -491,18 +569,44 @@ class LabelPyramid:
             parts = []
             below = await _children(db, project_id, levels, level, key)
             for child, child_state in sorted(below.items()):
+                # What is made of a chunk under this one is kept (pinned)
+                # until this one is made, so a request that gives up before
+                # then leaves its work for the next.
                 made = await self._build(
-                    db, store, project_id, levels, level - 1, child, child_state, budget
+                    db,
+                    store,
+                    project_id,
+                    levels,
+                    level - 1,
+                    child,
+                    child_state,
+                    budget,
+                    pin=True,
                 )
                 if made is not None:
                     parts.append((_position(child, origin), made))
+                    kept.append(
+                        _cache_key(project_id, levels, level - 1, child, child_state)
+                    )
             budget.spend()
             await db.rollback()
             async with self._gate():
                 data = await run_in_threadpool(_combine, parts, step)
         if data is not None:
-            self._cache.put(cached, data)
+            self._cache.put(cached, data, pin=pin)
+        for child_key in kept:
+            self._cache.unpin(child_key)
         return data
+
+
+def _cache_key(
+    project_id: uuid.UUID,
+    levels: Sequence[LevelSpec],
+    level: int,
+    key: ChunkKey,
+    state: Fingerprint,
+) -> Hashable:
+    return (project_id, level, key, levels[level].factor_zyx, state)
 
 
 def _position(key: ChunkKey, origin: ChunkKey) -> ChunkKey:
