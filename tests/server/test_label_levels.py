@@ -1489,6 +1489,208 @@ def test_retiring_a_class_changes_only_the_chunks_it_is_in(ada, project):
     check_every_level(ada, project, volume, levels, shown)
 
 
+def test_a_chunk_is_tested_for_retired_voxels_with_one_column_up_to_a_limit():
+    # The test is made on every request, over every label row in the chunk's
+    # box, so what it costs mustn't grow with each class retired.
+    assert label_pyramid._seen(frozenset()) == []
+    for count in (1, 2, label_pyramid.TESTED_RETIRED):
+        assert len(label_pyramid._seen(frozenset(range(2, 2 + count)))) == 1, count
+    too_many = frozenset(range(2, 2 + label_pyramid.TESTED_RETIRED + 1))
+    assert label_pyramid._seen(too_many) == []
+    some = frozenset({2, 5})
+    assert label_pyramid._present(some, [True]) == some
+    assert label_pyramid._present(some, [False]) == frozenset()
+    assert label_pyramid._present(frozenset(), []) == frozenset()
+    # Past the limit there is no test, and every chunk follows them.
+    assert label_pyramid._present(too_many, []) == too_many
+
+
+def test_a_chunk_with_voxels_of_one_retired_class_follows_every_retired_class(
+    ada, project, migrated_database_url
+):
+    levels = plan_levels(SHAPE)
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    # Bone and matrix in far corners; teeth, a third class, nowhere.
+    volume[0:60, 0:60, 0:60] = 2
+    volume[130:140, 140:150, 260:270] = 3
+    paint(ada, project, volume)
+    teeth = ada.post(
+        f"/api/projects/{project}/labels/classes",
+        json={"name": "teeth", "color": "#112233"},
+    )
+    assert teeth.status_code == 201, teeth.text
+    retired = frozenset({3, teeth.json()["value"]})
+    for value in retired:
+        retire(ada, project, value)
+
+    async def fingerprints(db):
+        return [
+            await label_pyramid.fingerprint(
+                db, uuid.UUID(project), levels, level, key, retired
+            )
+            for level, key in [(1, (0, 0, 0)), (1, (1, 1, 2)), (3, (0, 0, 0))]
+        ]
+
+    bone, matrix, top = run_db(migrated_database_url, fingerprints)
+    # Bone has none of them in it; the chunk with matrix follows both, and so
+    # does the top chunk, which has matrix in it.
+    assert bone.retired == frozenset()
+    assert matrix.retired == top.retired == retired
+    assert bone.count and matrix.count and top.count == bone.count + matrix.count
+
+
+def test_past_the_classes_it_tests_for_every_chunk_follows_the_retired_ones(
+    ada, project, monkeypatch
+):
+    monkeypatch.setattr(label_pyramid, "TESTED_RETIRED", 1)
+    levels = plan_levels(SHAPE)
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    volume[0:60, 0:60, 0:60] = 2
+    volume[130:140, 140:150, 260:270] = 3
+    volume[100:110, 100:110, 100:110] = 4
+    # Teeth need a class to be painted with.
+    teeth = ada.post(
+        f"/api/projects/{project}/labels/classes",
+        json={"name": "teeth", "color": "#112233"},
+    )
+    assert teeth.json()["value"] == 4
+    paint(ada, project, volume)
+    matrix = (1, 1, 2)
+    etag = get(ada, project, 1, matrix).headers["etag"]
+
+    def revalidate():
+        return get(ada, project, 1, matrix, headers={"If-None-Match": etag})
+
+    retire(ada, project, 2)
+    # One class is within what it tests for: the chunk with matrix only keeps its ETag.
+    assert revalidate().status_code == 304
+    shown = np.where(volume == 2, 0, volume)
+    check_every_level(ada, project, volume, levels, shown)
+    retire(ada, project, 4)
+    # Two are past it, so the chunk follows them though it has none of their
+    # voxels, and what it shows is as it was.
+    again = revalidate()
+    assert again.status_code == 200
+    assert again.headers["etag"] != etag
+    shown = np.where(np.isin(volume, (2, 4)), 0, volume)
+    check_every_level(ada, project, volume, levels, shown)
+    np.testing.assert_array_equal(
+        decode_chunk(again.content),
+        expected_chunk(shrink(shown, levels)[1], matrix),
+    )
+
+
+def full_resolution(browser, project, shape) -> np.ndarray:
+    """
+    The labels at full resolution, read chunk by chunk as a viewer does.
+    """
+    out = np.zeros(shape, dtype=np.uint8)
+    for key in np.ndindex(*(-(-n // 64) for n in shape)):
+        got = chunk(browser, project, 0, key)
+        if got is not None:
+            part = tuple(
+                slice(k * 64, min((k + 1) * 64, n))
+                for k, n in zip(key, shape, strict=True)
+            )
+            out[part] = got[tuple(slice(0, p.stop - p.start) for p in part)]
+    return out
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_retired_voxels_coming_and_going_by_edits_undo_and_redo(
+    ada, migrated_database_url, fresh
+):
+    # A retired class's voxels covered by an edit, brought back by undoing it,
+    # covered again by redoing it, and a new image, step by step, in this
+    # process or, with `fresh`, in a new one at each step (so chunks come from
+    # storage, and "nothing" from what was kept). After each step every coarse
+    # chunk must be the full resolution labels shrunk, retired classes left
+    # out, and no ETag a viewer kept from an earlier step may be taken for the
+    # same pixels when they differ.
+    shape = MANY
+    project = make_project(ada, migrated_database_url, shape=shape)
+    levels = plan_levels(shape)
+    keys = [
+        (level, key)
+        for level in range(1, len(levels))
+        for key in np.ndindex(*(-(-n // 64) for n in levels[level].shape_zyx))
+    ]
+    retired = set()
+    kept = {}
+
+    def check(step):
+        if fresh:
+            pyramid = another_process(ada.client.app)
+            pyramid.seconds, pyramid.blobs = 3600, 10**9
+        shown = full_resolution(ada, project, shape)
+        for value in retired:
+            shown[shown == value] = 0
+        arrays = shrink(shown, levels)
+        for level, key in keys:
+            expected = expected_chunk(arrays[level], key)
+            response = get(ada, project, level, key)
+            if expected.any():
+                assert response.status_code == 200, (step, level, key)
+                np.testing.assert_array_equal(
+                    decode_chunk(response.content),
+                    expected,
+                    err_msg=f"{step} {level} {key}",
+                )
+                kept.setdefault((level, key), {})[response.headers["etag"]] = (
+                    response.content
+                )
+            else:
+                assert response.status_code == 404, (step, level, key)
+            for etag, content in kept.get((level, key), {}).items():
+                again = get(ada, project, level, key, headers={"If-None-Match": etag})
+                if again.status_code == 304:
+                    np.testing.assert_array_equal(
+                        decode_chunk(content),
+                        expected,
+                        err_msg=f"{step} {level} {key} {etag}",
+                    )
+
+    # Class 2 in every chunk, and class 3 in a block under the first chunks.
+    volume = one_label_in_each_chunk(shape)
+    volume[60:70, 60:70, 60:70] = 3
+    paint(ada, project, volume)
+    check("painted")
+    retire(ada, project, 3)
+    retired.add(3)
+    check("retired 3")
+    # Cover all of class 3 with background: no retired voxels are left.
+    over = send(
+        ada,
+        project,
+        split_into_deltas(np.ones((10, 10, 10), bool), (60, 60, 60), value=1),
+        "brush",
+    )
+    check("covered 3")
+    undo = ada.post(
+        f"/api/projects/{project}/labels/ops/{over['seq']}/undo",
+        json={"client_op_id": str(uuid.uuid4())},
+    )
+    assert undo.status_code == 201
+    check("undo brings 3 back")
+    redo = ada.post(
+        f"/api/projects/{project}/labels/ops/{over['seq']}/redo",
+        json={"client_op_id": str(uuid.uuid4())},
+    )
+    assert redo.status_code == 201
+    check("redo covers it again")
+    add_image(migrated_database_url, project, shape)
+    check("a new image")
+    retire(ada, project, 2)
+    retired.add(2)
+    check("retired 2: only background is left to show")
+    undo = ada.post(
+        f"/api/projects/{project}/labels/ops/{over['seq']}/undo",
+        json={"client_op_id": str(uuid.uuid4())},
+    )
+    assert undo.status_code == 201
+    check("undo again: retired classes only, nothing shows")
+
+
 def test_a_build_that_took_an_older_state_leaves_a_stored_chunk_of_a_newer_one(
     ada, migrated_database_url, settings
 ):
