@@ -714,15 +714,23 @@ def test_accepting_a_prediction_into_a_box_is_checked_against_it(
     def accept(mask, origin, value, where=box, **kw):
         return accept_box(ada, project, prediction, where, mask, origin, value, **kw)
 
+    def refused(response, why):
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == why
+
     # The prediction doesn't say tooth (3) there, or bone outside its cube.
-    assert accept(bone, (0, 0, 0), 3).status_code == 422
-    assert accept(np.ones((2, 2, 2), dtype=bool), (7, 7, 7), 2).status_code == 422
+    differs = "Those labels don't match the prediction"
+    refused(accept(bone, (0, 0, 0), 3), differs)
+    refused(accept(np.ones((2, 2, 2), dtype=bool), (7, 7, 7), 2), differs)
     # Accepted labels go only into unlabeled voxels, and stay in the box.
-    assert accept(bone, (0, 0, 0), 2, only_if="any").status_code == 422
-    assert accept(np.ones((1, 1, 1), dtype=bool), (10, 0, 0), 1).status_code == 422
-    short = accept(bone, (0, 0, 0), 2, where=[0, 0, 0, 8, 8, 7])
-    assert short.status_code == 422
-    assert short.json()["detail"] == "Those labels reach outside the box"
+    refused(
+        accept(bone, (0, 0, 0), 2, only_if="any"),
+        "An accepted prediction writes one predicted value per chunk, "
+        "only into unlabeled voxels",
+    )
+    outside = "Those labels reach outside the box"
+    refused(accept(np.ones((1, 1, 1), dtype=bool), (10, 0, 0), 1), outside)
+    refused(accept(bone, (0, 0, 0), 2, where=[0, 0, 0, 8, 8, 7]), outside)
     # Nobody can claim the result is anything but the server's call.
     assert accept(bone, (0, 0, 0), 2, tool={"name": "mine"}).status_code == 422
     # A prediction that isn't the project's.
@@ -733,7 +741,7 @@ def test_accepting_a_prediction_into_a_box_is_checked_against_it(
 
     # A box is whole voxels, has some, and is inside the image (70 × 130 × 100).
     one = np.ones((1, 1, 1), dtype=bool)
-    for outside in (
+    for off in (
         [0, 0, 0, 71, 10, 10],
         [0, 0, 0, 10, 131, 10],
         [0, 0, 0, 10, 10, 101],
@@ -741,11 +749,13 @@ def test_accepting_a_prediction_into_a_box_is_checked_against_it(
         [5, 0, 0, 5, 10, 10],
         [9, 0, 0, 3, 10, 10],
     ):
-        refused = accept(one, (0, 0, 0), 2, where=outside)
-        assert refused.status_code == 422, outside
-        assert refused.json()["detail"] == "The box must be inside the image."
-    assert accept(one, (0, 0, 0), 2, where=[0, 0, 0, 10.5, 10, 10]).status_code == 422
-    assert accept(one, (0, 0, 0), 2, where=[0, 0, 0, 10, 10]).status_code == 422
+        refused(
+            accept(one, (0, 0, 0), 2, where=off), "The box must be inside the image."
+        )
+    for malformed in ([0, 0, 0, 10.5, 10, 10], [0, 0, 0, 10, 10], "0,0,0,10,10,10"):
+        response = accept(one, (0, 0, 0), 2, where=malformed)
+        assert response.status_code == 422
+        assert "box" in str(response.json()["detail"])
     assert accept(one, (0, 0, 0), 2, where=[0, 0, 0, 70, 130, 100]).status_code == 201
 
     # Exactly one of an ROI and a box says where.
@@ -761,7 +771,9 @@ def test_accepting_a_prediction_into_a_box_is_checked_against_it(
         {"roi_id": None, "box": None},
         {"roi_id": roi, "box": box},
     ):
-        assert ada.post(url, json={**place, **both_or_neither}).status_code == 422
+        response = ada.post(url, json={**place, **both_or_neither})
+        assert response.status_code == 422
+        assert "exactly one of roi_id and box" in str(response.json()["detail"])
     # A null for the one that isn't used is the same as leaving it out.
     assert ada.post(url, json={**place, "roi_id": None, "box": box}).status_code == 201
 
@@ -921,17 +933,24 @@ def test_a_prediction_that_does_not_cover_the_labels_is_refused(
 ):
     # Made for a smaller image, and not saying which.
     small = add_prediction(settings, migrated_database_url, project, shape=(10, 10, 10))
-    refused = accept_box(
-        ada,
-        project,
-        small,
-        [0, 0, 0, 20, 20, 20],
-        np.ones((1, 1, 15), dtype=bool),
-        (0, 0, 0),
-        1,
+    big = {"bbox": [0, 0, 0, 20, 20, 20], "kind": "cube"}
+    roi = ada.post(f"/api/projects/{project}/rois", json=big).json()["id"]
+    mask = np.ones((1, 1, 15), dtype=bool)
+    into_box = accept_box(
+        ada, project, small, [0, 0, 0, 20, 20, 20], mask, (0, 0, 0), 1
     )
-    assert refused.status_code == 422, refused.text
-    assert refused.json()["detail"] == "That prediction doesn't cover those labels"
+    into_roi = ada.post(
+        f"/api/projects/{project}/labels/accept",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "prediction_artifact_id": small,
+            "roi_id": roi,
+            "deltas": deltas_for(mask, (0, 0, 0), value=1, only_if="unlabeled"),
+        },
+    )
+    for refused in (into_box, into_roi):
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["detail"] == "That prediction doesn't cover those labels"
 
 
 def test_predictions_labels_were_accepted_into_a_box_from_are_kept(
