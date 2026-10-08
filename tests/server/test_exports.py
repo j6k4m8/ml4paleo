@@ -20,7 +20,7 @@ import pytest
 import zarr
 from helpers import SECRET_KEY, add_worker, bearer, run_db, signup
 from ml4paleo_server import artifacts
-from ml4paleo_server.db import Artifact, create_sessionmaker
+from ml4paleo_server.db import Artifact, Job, create_sessionmaker
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
 from ml4paleo_worker.client import ServerClient
@@ -313,6 +313,26 @@ def test_stopping_an_export_then_asking_again_starts_over(
     again = ada.post(base, json={"source": "image", "format": "tiff"})
     assert again.status_code == 202
     assert again.json()["id"] != first["id"]
+
+
+def test_a_failed_export_with_a_blank_error_still_lists(
+    new_browser, settings, migrated_database_url
+):
+    ada, project = project_with_heads(new_browser, settings, migrated_database_url)
+    base = f"/api/projects/{project}/exports"
+    export = ada.post(base, json={"source": "image", "format": "tiff"}).json()
+
+    async def fail(db):
+        await db.execute(
+            update(Job)
+            .where(Job.id == uuid.UUID(export["pipeline_id"]))
+            .values(status="failed", error="  \n")
+        )
+
+    run_db(migrated_database_url, fail)
+    listed = ada.get(base)
+    assert listed.status_code == 200
+    assert [item["error"] for item in listed.json()] == ["The export didn't finish."]
 
 
 def test_exports_that_cant_work_are_refused_up_front(

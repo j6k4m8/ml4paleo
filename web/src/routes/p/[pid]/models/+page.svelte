@@ -22,6 +22,8 @@
 		name: string;
 		plugin: string;
 		status: "training" | "ready" | "failed";
+		/** Why training failed, if it says. */
+		error?: string | null;
 		params: Record<string, number>;
 		class_values: number[];
 		metrics: {
@@ -259,6 +261,9 @@
 							<progress class="h-1 w-full" max="1" value={progress[model.pipeline_id ?? ""] ?? 0}></progress>
 						{:else if last && predicting[model.id]}
 							<progress class="h-1 w-full" max="1" value={progress[last.id] ?? last.progress}></progress>
+						{/if}
+						{#if model.status === "failed"}
+							<p class="error text-2xs" role="alert">Training failed{model.error ? `: ${model.error}` : "."}</p>
 						{/if}
 						{#if last?.status === "failed"}
 							<p class="error text-2xs" role="alert">The last prediction failed{last.error ? `: ${last.error}` : "."}</p>

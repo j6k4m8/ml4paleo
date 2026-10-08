@@ -7,6 +7,17 @@ import type { Chunk, Loader } from "./chunks";
 import type { ArrayRegion, DecodeResponse, Region } from "./decode.worker";
 import { CHUNK, type Level, type Vec3 } from "./tiles";
 
+/** A load that failed: what went wrong, and the HTTP status the server answered with, if it did. */
+export class LoadError extends Error {
+	constructor(
+		message: string,
+		readonly status?: number,
+	) {
+		super(message);
+		this.name = "LoadError";
+	}
+}
+
 export class WorkerPool {
 	#workers: Worker[];
 	#next = 0;
@@ -27,7 +38,7 @@ export class WorkerPool {
 		const waiting = this.#waiting.get(response.id);
 		if (!waiting) return;
 		this.#waiting.delete(response.id);
-		if ("error" in response) waiting.reject(new Error(response.error));
+		if ("error" in response) waiting.reject(new LoadError(response.error, response.status));
 		else waiting.resolve({ data: response.data as Chunk["data"], shape: response.shape, version: response.version });
 	}
 

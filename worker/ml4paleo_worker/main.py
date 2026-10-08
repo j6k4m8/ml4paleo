@@ -223,7 +223,8 @@ class Worker:
             permanent = isinstance(exc, PermanentError)
             log.warning("Job %s failed: %s", lease.job_id, exc)
             # The first line is the message people see; the rest is detail.
-            error = f"{exc}\n\n{traceback.format_exc()}"[:MAX_ERROR_CHARS]
+            message = str(exc) or type(exc).__name__
+            error = f"{message}\n\n{traceback.format_exc()}"[:MAX_ERROR_CHARS]
             self._report(
                 ctx,
                 "failure",

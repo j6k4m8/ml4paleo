@@ -36,7 +36,7 @@
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
 	import { acceptParts, MAX_ACCEPT_VOXELS, readBox } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
-	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
+	import { indexedDbStorage, OpQueue, type QueuedEdit, saveState } from "../labels/opqueue.svelte";
 	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
 	import type { PlaneMask } from "../labels/raster";
 	import {
@@ -55,7 +55,7 @@
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
 	import { type Action, actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
-	import { type LabelClass, LabelLayer } from "./labels";
+	import { type LabelClass, LabelLayer, strictOn } from "./labels";
 	import { imageLoader, labelLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
 	import { LAYOUTS, type Stroke, ViewerState } from "./state.svelte";
@@ -129,12 +129,7 @@
 	// Strict edits compare against the chunk versions current when they're
 	// sent, after this page's earlier edits have landed; if any version is
 	// unknown, the edit applies like a brush stroke instead.
-	queue.beforeSend = (op: QueuedEdit) => {
-		if (!op.strict || !labels) return op;
-		const versions = op.deltas.map((d) => labels!.versionOf(d.key.join("/")));
-		if (versions.some((v) => v === undefined)) return { ...op, strict: false };
-		return { ...op, deltas: op.deltas.map((d, i) => ({ ...d, base_version: versions[i]! })) };
-	};
+	queue.beforeSend = (op: QueuedEdit) => (labels ? strictOn(labels, op) : op);
 	const rois = new RoiList(project);
 	const firstRoi = untrack(() => startRoi);
 	const firstBox = untrack(() => startBox);
@@ -188,7 +183,7 @@
 				if ("cancelled" in outcome) {
 					layer.settle(outcome.op.local, null);
 				} else if (outcome.op.kind !== "edit") {
-					if ("result" in outcome) layer.noteVersions(outcome.result.chunks);
+					if ("result" in outcome) layer.changed(outcome.result.chunks);
 					else if (!outcome.alreadyDone) notice = `That ${outcome.op.kind} didn't go through: ${outcome.error}`;
 				} else if ("result" in outcome) {
 					layer.settle(outcome.op.local, outcome.result.chunks);
@@ -230,7 +225,6 @@
 	$effect(() => {
 		void [
 			viewer.opacity,
-			viewer.showLabels,
 			viewer.layout,
 			viewer.brushRadius,
 			viewer.protectLabels,
@@ -276,6 +270,7 @@
 		const deltas = splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value, onlyIf });
 		notice = "";
 		for (const op of queue.edit(deltas, { strict, tool })) labels.applyLocal(op.local, op.deltas);
+		viewer.revealLabels();
 	}
 
 	function stroke(drawn: Stroke) {
@@ -631,6 +626,7 @@
 			const ops = queue.editMany(parts, { accept: { prediction: artifact, roi: roi.id } });
 			for (const op of ops) labels.applyLocal(op.local, op.deltas);
 			if (ops.length === 0) notice = `The ${kind} has nothing in that ROI.`;
+			else viewer.revealLabels();
 		} catch (e) {
 			notice = `Couldn't read the ${kind}: ${e instanceof Error ? e.message : String(e)}`;
 		} finally {
@@ -674,13 +670,13 @@
 	}
 
 	const status = $derived(
-		queue.error
-			? queue.error
-			: queue.offline
-				? `Offline · ${queue.pending} waiting`
-				: queue.pending > 0
-					? `Saving ${queue.pending}`
-					: "Saved",
+		{
+			offline: `Offline · ${queue.pending} waiting`,
+			retrying: `Can't save right now · ${queue.pending} waiting`,
+			error: queue.error,
+			saving: `Saving ${queue.pending}`,
+			saved: "Saved",
+		}[saveState(queue)],
 	);
 
 	function keyUp(event: KeyboardEvent) {
@@ -932,7 +928,7 @@
 	const zoomPercent = $derived(Math.round((viewer.zoom / (globalThis.devicePixelRatio || 1)) * 100));
 	const [, imageZ, imageY, imageX] = manifest.shape_czyx;
 	const histogram = manifest.histogram && !Array.isArray(manifest.histogram) ? manifest.histogram : null;
-	const saveState = $derived(queue.error ? "error" : queue.offline ? "offline" : queue.pending > 0 ? "saving" : "saved");
+	const chip = $derived(saveState(queue));
 
 	const hint = $derived(
 		{
@@ -1346,8 +1342,8 @@
 			<span class="text-axis-z">z</span>{Math.floor(viewer.position[0])}
 		</span>
 		<span class="hidden sm:inline">{LAYOUT_NAMES[viewer.layout]}</span>
-		<span class="ml-auto flex items-center gap-1.5 font-sans {saveState === 'error' ? 'text-danger' : saveState === 'offline' ? 'text-warn' : ''}" role="status">
-			{#if saveState === "saved"}<Check size={12} class="text-ok" />{:else if saveState === "saving"}<LoaderCircle size={12} class="animate-spin" />{:else}<CloudOff size={12} />{/if}
+		<span class="ml-auto flex items-center gap-1.5 font-sans {chip === 'error' ? 'text-danger' : chip === 'offline' || chip === 'retrying' ? 'text-warn' : ''}" role="status">
+			{#if chip === "saved"}<Check size={12} class="text-ok" />{:else if chip === "saving"}<LoaderCircle size={12} class="animate-spin" />{:else}<CloudOff size={12} />{/if}
 			{status}
 		</span>
 	</footer>

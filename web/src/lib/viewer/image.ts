@@ -15,6 +15,46 @@ export function absolute(url: string): string {
 	return new URL(url, globalThis.location?.href ?? "http://localhost/").href;
 }
 
+/**
+ * A fetch for zarrita's FetchStore reading sharded arrays, where each chunk
+ * is a byte range of its shard's one URL.
+ *
+ * Ranges skip the browser's HTTP cache, which lets one request per URL
+ * through at a time, so a shard's chunks would load one by one (decoded
+ * chunks are cached in memory instead, by `ChunkStore`). And shard indexes
+ * (suffix ranges) are read whatever happens to the read that asked first:
+ * zarrita reads each index once for every chunk of its shard, passing on the
+ * first read's abort signal, so cancelling that one chunk would fail all the
+ * others waiting for the index.
+ */
+export function shardedFetch(
+	fetcher: (request: Request) => Promise<Response> = (request) => fetch(request),
+): (request: Request) => Promise<Response> {
+	return (request) => {
+		const range = request.headers.get("range");
+		if (!range) return fetcher(request);
+		const index = range.startsWith("bytes=-");
+		return fetcher(new Request(request, { cache: "no-store", ...(index ? { signal: null } : {}) }));
+	};
+}
+
+/**
+ * The HTTP status in the error zarrita throws for a response that is neither
+ * a chunk nor a missing one (404), if `error` is that.
+ */
+export function httpStatus(error: unknown): number | undefined {
+	const match = /Unexpected response status (\d{3})/.exec(error instanceof Error ? error.message : String(error));
+	return match ? Number(match[1]) : undefined;
+}
+
+/**
+ * What a decode worker tells the page about a read that failed: the error,
+ * and the HTTP status the server answered with, if it did.
+ */
+export function failure(error: unknown): { error: string; status?: number } {
+	return { error: String(error), status: httpStatus(error) };
+}
+
 /** Level-0 voxels per voxel of each level, from the levels' scales. */
 export function levelFactors(multiscales: Multiscales): [number, number, number][] {
 	const scales = multiscales.datasets.map((dataset) => {

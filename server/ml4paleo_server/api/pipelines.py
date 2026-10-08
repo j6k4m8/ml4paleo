@@ -59,15 +59,7 @@ class PipelineOut(BaseModel):
 
 async def pipeline_out(db, root: Job) -> PipelineOut:
     status = await jobs.pipeline_status(db, root.id)
-    error = None
-    if status.status == "failed":
-        failed = await db.scalar(
-            select(Job.error)
-            .where(Job.root_id == root.id, Job.status == "failed")
-            .order_by(Job.finished_at)
-            .limit(1)
-        )
-        error = (failed or "").strip().splitlines()[0][:500] if failed else None
+    error = await pipelines.failure(db, root.id) if status.status == "failed" else None
     return PipelineOut(
         id=root.id,
         kind=pipelines.NAMES.get(root.kind, root.kind),
