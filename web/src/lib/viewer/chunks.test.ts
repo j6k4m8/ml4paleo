@@ -245,6 +245,20 @@ describe("ChunkStore", () => {
 		expect(seen).toEqual(["a"]);
 	});
 
+	it("keeps the cached copy when a refresh replaces another", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		const first = store.request("a");
+		calls[0]?.finish(10);
+		const old = await first;
+		store.refresh("a").catch(() => {});
+		const again = store.refresh("a");
+		expect(calls[1]?.signal.aborted).toBe(true);
+		expect(store.peek("a")).toBe(old);
+		calls[2]?.finish(30);
+		expect((await again).data.byteLength).toBe(30);
+	});
+
 	it("drops an out-of-date copy when its refresh is cancelled", async () => {
 		const { calls, load } = controlled();
 		const store = new ChunkStore(load, 1000);

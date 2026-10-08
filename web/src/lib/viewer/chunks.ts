@@ -87,7 +87,7 @@ export class ChunkStore {
 	 * cached copy in use until the new one replaces it.
 	 */
 	refresh(id: string): Promise<Chunk> {
-		this.#cancel(id, "Changed while loading");
+		this.#cancel(id, "Changed while loading", false);
 		return this.#enqueue(id, true);
 	}
 
@@ -150,15 +150,18 @@ export class ChunkStore {
 		}
 	}
 
-	#cancel(id: string, reason: string): void {
+	/**
+	 * Stop a queued or running load. A refresh stopped for good leaves an
+	 * out-of-date copy, which goes too (unless another refresh follows), so
+	 * the next request loads afresh.
+	 */
+	#cancel(id: string, reason: string, dropStale = true): void {
 		const entry = this.#pending.get(id);
 		if (!entry) return;
 		entry.controller.abort();
 		this.#pending.delete(id);
 		this.#queue = this.#queue.filter((queued) => queued !== entry);
-		// A cancelled refresh leaves an out-of-date copy: drop it, so the
-		// next request loads afresh.
-		if (entry.refresh) this.#drop(id);
+		if (entry.refresh && dropStale) this.#drop(id);
 		entry.reject(new DOMException(reason, "AbortError"));
 	}
 
