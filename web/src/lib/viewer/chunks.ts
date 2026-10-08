@@ -23,6 +23,8 @@ interface Pending {
 	controller: AbortController;
 	/** Replaces a cached copy that is now out of date. */
 	refresh: boolean;
+	/** For a refresh, the version the new copy is asked for (see `refresh`). */
+	version?: number;
 }
 
 // Where a chunk nobody wants waits: after every wanted one.
@@ -73,6 +75,12 @@ export class ChunkStore {
 		return this.#pending.has(id);
 	}
 
+	/** The version a queued or running refresh of a chunk was asked for, if any. */
+	refreshing(id: string): number | undefined {
+		const entry = this.#pending.get(id);
+		return entry?.refresh ? entry.version : undefined;
+	}
+
 	/** Load a chunk (once), queueing it behind chunks wanted more. */
 	request(id: string): Promise<Chunk> {
 		const cached = this.get(id);
@@ -84,11 +92,13 @@ export class ChunkStore {
 
 	/**
 	 * Load a chunk again (for example after someone edited it), keeping the
-	 * cached copy in use until the new one replaces it.
+	 * cached copy in use until the new one replaces it. `version` notes what
+	 * the new copy will be at least (a label chunk's version, say), for
+	 * `refreshing`.
 	 */
-	refresh(id: string): Promise<Chunk> {
+	refresh(id: string, version?: number): Promise<Chunk> {
 		this.#cancel(id, "Changed while loading", false);
-		return this.#enqueue(id, true);
+		return this.#enqueue(id, true, version);
 	}
 
 	/** Whether any view needs this chunk now. */
@@ -96,14 +106,14 @@ export class ChunkStore {
 		return this.#rank.has(id);
 	}
 
-	#enqueue(id: string, refresh: boolean): Promise<Chunk> {
+	#enqueue(id: string, refresh: boolean, version?: number): Promise<Chunk> {
 		let resolve!: (chunk: Chunk) => void;
 		let reject!: (error: unknown) => void;
 		const promise = new Promise<Chunk>((ok, fail) => {
 			resolve = ok;
 			reject = fail;
 		});
-		const entry: Pending = { id, promise, resolve, reject, controller: new AbortController(), refresh };
+		const entry: Pending = { id, promise, resolve, reject, controller: new AbortController(), refresh, version };
 		this.#pending.set(id, entry);
 		this.#queue.push(entry);
 		this.#sorted = false;

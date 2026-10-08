@@ -47,8 +47,6 @@ export class LabelLayer {
 	#local = new Map<string, Map<string, LocalDelta>>();
 	// Chunks this page edited, the latest last.
 	#recent = new Set<string>();
-	// Chunks loading again because they changed, and the version they changed to.
-	#awaited = new Map<string, number>();
 	/** Called if live updates stop for good (signed out, or removed from the project). */
 	onStopped: (() => void) | null = null;
 
@@ -61,8 +59,7 @@ export class LabelLayer {
 		this.store = new ChunkStore(labelLoader(pool, url, shape), CACHE_BYTES, 4);
 		// Whatever the server sends, this page's edits stay on screen.
 		this.store.onLoad = (id, chunk) => {
-			this.#awaited.delete(id);
-			let stale = false;
+			let stale = 0;
 			for (const [op, deltas] of this.#local) {
 				const delta = deltas.get(id);
 				if (!delta) continue;
@@ -73,12 +70,12 @@ export class LabelLayer {
 					}
 					// A copy from before the edit (its load started first): show the
 					// edit on it, and load it once more.
-					stale ||= !delta.again;
+					if (!delta.again) stale = Math.max(stale, delta.made);
 					delta.again = true;
 				}
 				applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, delta.mask, delta.written, delta.onlyIf);
 			}
-			if (stale) queueMicrotask(() => this.reload([id]));
+			if (stale) queueMicrotask(() => this.reload([id], new Map([[id, stale]])));
 		};
 	}
 
@@ -123,24 +120,28 @@ export class LabelLayer {
 			const id = key.join("/");
 			const chunk = this.store.peek(id);
 			if (chunk?.version !== undefined && chunk.version >= version) return false;
-			// Already loading again since this version was made (an undo's
+			// Already loading again for this version or a later one (an undo's
 			// answer and its change event both name it).
-			return !(this.store.isLoading(id) && (this.#awaited.get(id) ?? -1) >= version);
+			return (this.store.refreshing(id) ?? -1) < version;
 		});
-		for (const { key, version } of stale) this.#awaited.set(key.join("/"), version);
-		this.reload(stale.map(({ key }) => key.join("/")));
+		this.reload(
+			stale.map(({ key }) => key.join("/")),
+			new Map(stale.map(({ key, version }) => [key.join("/"), version])),
+		);
 	}
 
 	/**
 	 * Fetch chunks again. Ones a view shows reload in the background (what's
 	 * on screen stays until the new copy arrives); others are dropped, along
 	 * with any load in flight, so the next look fetches them afresh.
+	 * `versions` says what each reload is for (the version the new copy will
+	 * have at least), so a change event for that version doesn't restart it.
 	 */
-	reload(ids: string[]): void {
+	reload(ids: string[], versions?: Map<string, number>): void {
 		const dropped: string[] = [];
 		for (const id of ids) {
 			if (this.store.get(id) && this.store.isWanted(id)) {
-				this.store.refresh(id).then(
+				this.store.refresh(id, versions?.get(id)).then(
 					() => this.#emit([id]),
 					() => {
 						// Stopped for good (no view wants it now) or failed: the
@@ -232,7 +233,7 @@ export class LabelLayer {
 			else local.delete(id);
 		}
 		if (local.size === 0) this.#local.delete(op);
-		this.reload(again);
+		this.reload(again, made);
 	}
 
 	#emit(ids: string[]): void {

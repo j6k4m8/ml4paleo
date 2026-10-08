@@ -168,6 +168,46 @@ describe("LabelLayer", () => {
 		expect(told).toEqual([["0/0/0"]]);
 	});
 
+	it("doesn't restart the reload an answered edit started when the edit's change event comes", async () => {
+		const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
+		const { pool, loads, release } = fakePool(server, true);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		const loading = loaded(layer, "0/0/0");
+		release();
+		await loading;
+		layer.applyLocal("op", [delta(5)]);
+		// Someone else's edit and ours landed: the answer sends for the chunk again.
+		server.set("0/0/0", { value: 5, version: 7 });
+		layer.settle("op", [{ key: [0, 0, 0], version: 7 }]);
+		expect(loads).toHaveLength(2);
+		layer.changed([{ key: [0, 0, 0], version: 7 }]);
+		expect(loads).toHaveLength(2);
+		release();
+		await tick();
+		expect(layer.versionOf("0/0/0")).toBe(7);
+		expect(first(layer, "0/0/0")).toBe(5);
+	});
+
+	it("doesn't restart the reload a copy older than an edit started when the edit's change event comes", async () => {
+		const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
+		const { pool, loads, release } = fakePool(server, true);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		const loading = loaded(layer, "0/0/0");
+		layer.applyLocal("op", [delta(5)]);
+		server.set("0/0/0", { value: 5, version: 4 });
+		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
+		release();
+		await loading;
+		await tick();
+		// The copy predated the edit, so the chunk was sent for once more.
+		expect(loads).toHaveLength(2);
+		layer.changed([{ key: [0, 0, 0], version: 4 }]);
+		expect(loads).toHaveLength(2);
+		release();
+		await tick();
+		expect(layer.versionOf("0/0/0")).toBe(4);
+	});
+
 	it("remembers the chunks it edited, the latest last", () => {
 		const { pool } = fakePool(new Map());
 		const layer = new LabelLayer("p", pool, [128, 128, 128]);
