@@ -1,8 +1,9 @@
 /**
  * A cache of decoded chunks, kept under a byte budget (least recently used
  * chunks go first), that loads each chunk once however often it is asked
- * for, runs a limited number of loads at a time, most wanted first, and
- * drops loads that no view needs any more.
+ * for, runs a limited number of loads at a time, most wanted first, drops
+ * loads that no view needs any more, and asks again, without holding one of
+ * its places meanwhile, for chunks a server is still making (`Busy`).
  */
 
 export interface Chunk {
@@ -21,6 +22,32 @@ export interface Chunk {
 
 export type Loader = (id: string, signal: AbortSignal) => Promise<Chunk>;
 
+/**
+ * What a loader throws for a chunk that isn't ready but will be (a coarser
+ * level of the labels, which the server makes from the chunks under it, and
+ * answers 503 while it works): the store asks again after `delay`
+ * milliseconds, and the chunk takes no place in line meanwhile. `cause` is
+ * what the server answered. A chunk still busy after `PATIENCE_MS` fails
+ * with the last `Busy`.
+ */
+export class Busy extends Error {
+	constructor(
+		readonly delay: number,
+		cause?: unknown,
+	) {
+		super("The server is still making this chunk", { cause });
+		this.name = "Busy";
+	}
+}
+
+/** The longest a chunk answered busy is waited for, counted from the start of its first load. */
+export const PATIENCE_MS = 120_000;
+/**
+ * The least time between one chunk being asked for again and the next, across
+ * the store: however many wait, a busy server sees only a trickle of asks.
+ */
+export const RETRY_GAP_MS = 250;
+
 interface Pending {
 	id: string;
 	promise: Promise<Chunk>;
@@ -31,6 +58,13 @@ interface Pending {
 	refresh: boolean;
 	/** For a refresh, the version the new copy is asked for (see `refresh`). */
 	version?: number;
+	/** When its first load began, which its patience is counted from. */
+	began?: number;
+	/**
+	 * While a load answered busy waits to be asked again (in the queue, with
+	 * no place taken): the earliest it may be.
+	 */
+	retryAt?: number;
 }
 
 // Where a chunk nobody wants waits: after every wanted one.
@@ -40,9 +74,15 @@ export class ChunkStore {
 	#cache = new Map<string, Chunk>();
 	#bytes = 0;
 	#pending = new Map<string, Pending>();
+	// Loads waiting for a place, and loads waiting to be asked again.
 	#queue: Pending[] = [];
 	#sorted = true;
 	#running = 0;
+	// When the next load asked again may start, and the timer that wakes the
+	// queue for one that isn't due yet (with the time it is set for).
+	#retryFrom = 0;
+	#timer: ReturnType<typeof setTimeout> | undefined;
+	#wakeAt = Number.POSITIVE_INFINITY;
 	#pinned = new Set<string>();
 	#wanted = new Map<string, string[]>();
 	#protected = new Map<string, Set<string>>();
@@ -81,12 +121,12 @@ export class ChunkStore {
 		return this.#cache.keys();
 	}
 
-	/** Whether a load of the chunk is queued or running. */
+	/** Whether a load of the chunk is queued, running, or waiting to be asked again. */
 	isLoading(id: string): boolean {
 		return this.#pending.has(id);
 	}
 
-	/** The load of a chunk queued or running, if there is one (without starting one). */
+	/** The load of a chunk queued, running or waiting to be asked again, if there is one (without starting one). */
 	loading(id: string): Promise<Chunk> | undefined {
 		return this.#pending.get(id)?.promise;
 	}
@@ -169,7 +209,7 @@ export class ChunkStore {
 		return false;
 	}
 
-	/** Cancel queued and running loads of chunks not in `wanted`. */
+	/** Cancel queued, running and waiting loads of chunks not in `wanted`. */
 	keepOnly(wanted: Set<string>): void {
 		const cancelled = [...this.#pending.values()].filter((entry) => !wanted.has(entry.id));
 		if (cancelled.length === 0) return;
@@ -224,21 +264,63 @@ export class ChunkStore {
 		}
 	}
 
-	/** The queued load to start next: the most wanted. */
+	/**
+	 * The queued load to start next: the most wanted, and any never started
+	 * before those asked again (in the order they came due), which wait
+	 * until they are due, a few at a time.
+	 */
 	#next(): Pending | undefined {
 		if (!this.#sorted) {
 			const rank = (entry: Pending) => this.#rank.get(entry.id) ?? UNRANKED;
 			// Stable, so equally wanted chunks load in the order asked for.
-			this.#queue.sort((a, b) => rank(a) - rank(b));
+			this.#queue.sort((a, b) => {
+				if (a.retryAt === undefined) return b.retryAt === undefined ? rank(a) - rank(b) : -1;
+				return b.retryAt === undefined ? 1 : a.retryAt - b.retryAt;
+			});
 			this.#sorted = true;
 		}
+		const entry = this.#queue[0];
+		if (entry?.retryAt !== undefined) {
+			const now = Date.now();
+			const at = Math.max(entry.retryAt, this.#retryFrom);
+			if (at > now) return this.#wake(at - now);
+			this.#retryFrom = now + RETRY_GAP_MS;
+		}
 		return this.#queue.shift();
+	}
+
+	/** Start the queue again in `ms`, unless it is to be woken sooner anyway. */
+	#wake(ms: number): undefined {
+		const at = Date.now() + ms;
+		if (at >= this.#wakeAt) return;
+		clearTimeout(this.#timer);
+		this.#wakeAt = at;
+		this.#timer = setTimeout(() => {
+			this.#timer = undefined;
+			this.#wakeAt = Number.POSITIVE_INFINITY;
+			this.#pump();
+		}, ms);
+	}
+
+	/**
+	 * Queue a load that was answered busy to be asked again, unless the wait
+	 * would end past its patience.
+	 */
+	#park(entry: Pending, busy: Busy): boolean {
+		const now = Date.now();
+		if (now + busy.delay - (entry.began ?? now) > PATIENCE_MS) return false;
+		entry.retryAt = now + busy.delay;
+		this.#queue.push(entry);
+		this.#sorted = false;
+		return true;
 	}
 
 	#pump(): void {
 		while (this.#running < this.concurrency) {
 			const entry = this.#next();
-			if (!entry) return;
+			if (!entry) break;
+			entry.began ??= Date.now();
+			entry.retryAt = undefined;
 			this.#running += 1;
 			let loading: Promise<Chunk>;
 			try {
@@ -259,7 +341,11 @@ export class ChunkStore {
 					entry.resolve(chunk);
 				})
 				.catch((error: unknown) => {
-					if (this.#pending.get(entry.id) === entry) this.#pending.delete(entry.id);
+					if (this.#pending.get(entry.id) === entry) {
+						// The server is making it: wait to be asked again, in no one's way.
+						if (error instanceof Busy && this.#park(entry, error)) return;
+						this.#pending.delete(entry.id);
+					}
 					entry.reject(error);
 				})
 				.finally(() => {

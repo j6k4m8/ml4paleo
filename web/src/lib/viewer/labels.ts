@@ -56,8 +56,10 @@ const COVERED = 4096;
 /**
  * Whether a reload that failed is worth trying again, `failures` failures in
  * a row in. A network failure is: it ends when the network comes back. A
- * server error, or a failure to read what it sent, is for a while. Being
- * signed out or refused isn't, and neither is any other answer.
+ * server error, or a failure to read what it sent, is for a while, and so
+ * is a chunk the server was still making when the store gave up waiting for
+ * it (`Busy`, which isn't a `LoadError`). Being signed out or refused isn't,
+ * and neither is any other answer.
  */
 function worthRetrying(error: unknown, failures: number): boolean {
 	const status = error instanceof LoadError ? error.status : undefined;

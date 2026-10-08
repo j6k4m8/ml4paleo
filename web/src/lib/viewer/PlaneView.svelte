@@ -5,7 +5,7 @@
 	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
 	import { withBackground } from "./background";
-import type { ChunkStore } from "./chunks";
+	import { Busy, type ChunkStore } from "./chunks";
 	import { isRightClick } from "./keymap";
 	import type { LabelLayer } from "./labels";
 	import { MAX_LABEL_TILES, labelsView, overlayHidden } from "./overlays";
@@ -75,6 +75,9 @@ import type { ChunkStore } from "./chunks";
 	// under it), and the view uses a coarser level (each chunk is 64³ voxels,
 	// so this bounds the memory a view keeps on big screens).
 	const MAX_IMAGE_TILES = 400;
+	// How long after the store gave up waiting for a label chunk the server is
+	// still making the view asks for it again.
+	const UNFINISHED_RETRY_MS = 5000;
 	const AXIS_NAMES = ["z", "y", "x"];
 
 	let canvas: HTMLCanvasElement;
@@ -84,6 +87,12 @@ import type { ChunkStore } from "./chunks";
 	let error = $state("");
 	// Why chunks didn't load, until one does.
 	let loadError = $state("");
+	// Chunks of the labels the server was still making when the store gave up
+	// waiting for them: not an error. The view asks for them again every so
+	// often, and says so meanwhile.
+	const unfinished = new Set<string>();
+	let labelsUnfinished = $state(false);
+	let unfinishedTimer: ReturnType<typeof setTimeout> | undefined;
 	// Layers left out because zooming out put too many chunks in view: the
 	// labels (more than their coarsest level lets them be), and a prediction
 	// or segmentation (which have full resolution only).
@@ -163,6 +172,7 @@ import type { ChunkStore } from "./chunks";
 	onDestroy(() => {
 		destroyed = true;
 		cancelAnimationFrame(frame);
+		clearTimeout(unfinishedTimer);
 		images.want(plane.name, new Set());
 		labels?.store.want(plane.name, new Set());
 		prediction?.want(plane.name, new Set());
@@ -247,6 +257,14 @@ import type { ChunkStore } from "./chunks";
 		loadError = e instanceof Error ? e.message : String(e);
 	}
 
+	/** The store gave up waiting for a label chunk the server is still making: say so, and have the next frame ask again soon. */
+	function stillMaking(id: string) {
+		unfinished.add(id);
+		labelsUnfinished = true;
+		clearTimeout(unfinishedTimer);
+		unfinishedTimer = setTimeout(schedule, UNFINISHED_RETRY_MS);
+	}
+
 	function render() {
 		if (destroyed || !renderer || levels.length === 0 || width === 0) return;
 		const current = view();
@@ -325,9 +343,17 @@ import type { ChunkStore } from "./chunks";
 			labels.store.want(plane.name, picked.wanted, picked.shown);
 			for (const tile of picked.draw) loadOverlay(labels.store, "", tile, labels.levels, at);
 			overlays.push({ slice: at, tiles: picked.draw, opacity: viewer.opacity, background: true });
+			if (unfinished.size > 0) {
+				// Not waiting for chunks the view no longer needs.
+				const wanted = new Set(picked.wanted);
+				for (const id of unfinished) if (!wanted.has(id)) unfinished.delete(id);
+				labelsUnfinished = unfinished.size > 0;
+			}
 		} else {
 			labels?.store.want(plane.name, []);
 			labelsHidden = false;
+			unfinished.clear();
+			labelsUnfinished = false;
 		}
 		renderer.draw(current, viewer.window, layers, overlays);
 	}
@@ -396,11 +422,16 @@ import type { ChunkStore } from "./chunks";
 			.then((chunk) => {
 				// The layer may show another store by now, under the same names.
 				if (![prediction, proposal?.store, segmentation, labels?.store].includes(store)) return schedule();
+				if (store === labels?.store && unfinished.delete(tile.id)) labelsUnfinished = unfinished.size > 0;
 				if (!renderer || renderer.hasLabels(named.id, slice)) return;
 				if (sliceIndex(level, view()) !== slice) return schedule();
 				renderer.uploadLabels(named, slice, chunk);
 				schedule();
-			}, failed)
+			}, (e: unknown) => {
+				// A label chunk the server is still making isn't an error.
+				if (!(e instanceof Busy)) failed(e);
+				else if (store === labels?.store) stillMaking(tile.id);
+			})
 			.finally(() => waiting.delete(`overlay:${named.id}`));
 	}
 
@@ -809,6 +840,7 @@ import type { ChunkStore } from "./chunks";
 		{slice}
 		{#if labels && !viewer.showLabels}<span class="warn">· labels hidden (V)</span>{/if}
 		{#if hiddenLayers.length > 0}<span class="muted">· zoom in to see {list.format(hiddenLayers)}</span>{/if}
+		{#if labelsUnfinished}<span class="muted">· the server is still making the zoomed-out labels, retrying</span>{/if}
 	</div>
 	{#if error || loadError}<p class="error" role="alert">{error || loadError}</p>{/if}
 </div>

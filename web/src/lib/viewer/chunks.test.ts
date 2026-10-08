@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { type Chunk, ChunkStore } from "./chunks";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Busy, type Chunk, ChunkStore, PATIENCE_MS, RETRY_GAP_MS } from "./chunks";
 
 function chunk(bytes: number): Chunk {
 	return { data: new Uint8Array(bytes), shape: [1, 1, bytes] };
@@ -7,10 +7,10 @@ function chunk(bytes: number): Chunk {
 
 /** A loader whose loads finish when the test says so. */
 function controlled() {
-	const calls: { id: string; signal: AbortSignal; finish: (bytes?: number) => void; fail: (e: unknown) => void }[] = [];
+	const calls: { id: string; signal: AbortSignal; at: number; finish: (bytes?: number) => void; fail: (e: unknown) => void }[] = [];
 	const load = (id: string, signal: AbortSignal) =>
 		new Promise<Chunk>((resolve, reject) => {
-			calls.push({ id, signal, finish: (bytes = 10) => resolve(chunk(bytes)), fail: reject });
+			calls.push({ id, signal, at: Date.now(), finish: (bytes = 10) => resolve(chunk(bytes)), fail: reject });
 		});
 	return { calls, load };
 }
@@ -339,5 +339,301 @@ describe("ChunkStore", () => {
 		store.invalidate("a");
 		expect(store.get("a")).toBeUndefined();
 		expect(store.bytes).toBe(0);
+	});
+});
+
+describe("ChunkStore, for chunks the server is still making", () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	/** Lets the loads that settled run what follows (a store reacts a few promises on). */
+	const settle = () => vi.advanceTimersByTimeAsync(0);
+	/** What a store does with a load: how often each id was asked for, and when, in order, since `start`. */
+	const asked = (calls: { id: string; at: number }[], start: number) => calls.map((c) => `${c.id}@${c.at - start}`);
+
+	it("gives up the load's place at once, so the chunks behind it go on, and asks again after the delay", async () => {
+		const { calls, load } = controlled();
+		const start = Date.now();
+		const store = new ChunkStore(load, 1000, 1);
+		const a = store.request("a");
+		store.request("b");
+		store.request("c");
+		calls[0]?.fail(new Busy(1000));
+		await settle();
+		expect(asked(calls, start)).toEqual(["a@0", "b@0"]);
+		calls[1]?.finish();
+		await settle();
+		calls[2]?.finish();
+		await settle();
+		await vi.advanceTimersByTimeAsync(999);
+		expect(calls).toHaveLength(3);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(asked(calls, start)).toEqual(["a@0", "b@0", "c@0", "a@1000"]);
+		calls[3]?.finish(20);
+		expect((await a).data.byteLength).toBe(20);
+		expect(store.isLoading("a")).toBe(false);
+		expect(store.get("a")).toBeDefined();
+		// Nothing is left to wake the store.
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("keeps the chunk loading while it waits, for the views asking and for a refresh's copy", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		const first = store.request("a");
+		calls[0]?.finish(10);
+		const old = await first;
+		const again = store.refresh("a", 7);
+		calls[1]?.fail(new Busy(1000));
+		await settle();
+		expect(store.isLoading("a")).toBe(true);
+		expect(store.loading("a")).toBe(again);
+		expect(store.refreshing("a")).toBe(7);
+		// The copy shown stays, and a view's asking for the chunk doesn't start another load.
+		expect(store.get("a")).toBe(old);
+		expect(await store.request("a")).toBe(old);
+		expect(calls).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(calls).toHaveLength(3);
+		calls[2]?.finish(30);
+		expect((await again).data.byteLength).toBe(30);
+		expect(store.get("a")).not.toBe(old);
+		expect(store.refreshing("a")).toBeUndefined();
+	});
+
+	it("loads the chunks never asked for first, whatever they rank against one asked again", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000, 1);
+		store.want("xy", ["a", "b", "c"]);
+		for (const id of ["a", "b", "c"]) store.request(id).catch(() => {});
+		calls[0]?.fail(new Busy(100));
+		await settle();
+		// b holds the only place until after a is due.
+		await vi.advanceTimersByTimeAsync(500);
+		calls[1]?.finish();
+		await settle();
+		calls[2]?.finish();
+		await settle();
+		expect(calls.map((c) => c.id)).toEqual(["a", "b", "c", "a"]);
+	});
+
+	it("doesn't let chunks the server is making hold up the ones it isn't, however many wait", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1e9, 4);
+		const coarse = Array.from({ length: 20 }, (_, i) => `coarse${i}`);
+		const fine = Array.from({ length: 66 }, (_, i) => `fine${i}`);
+		store.want("xy", [...coarse, ...fine]);
+		for (const id of [...coarse, ...fine]) store.request(id).catch(() => {});
+		// The server is making the coarse chunks, which takes a while, and sends the rest as they come.
+		let answered = 0;
+		while (answered < calls.length) {
+			const call = calls[answered++]!;
+			if (call.id.startsWith("coarse")) call.fail(new Busy(1000));
+			else call.finish();
+			await settle();
+		}
+		// None of the 66 waited for a coarse chunk to be made, or for a place a coarse chunk's waiting held.
+		for (const id of fine) expect(store.peek(id)).toBeDefined();
+		expect(calls).toHaveLength(86);
+		for (const id of coarse) expect(store.isLoading(id)).toBe(true);
+	});
+
+	it("asks again for no more than one chunk every RETRY_GAP_MS, in the order they came due, however many wait", async () => {
+		const { calls, load } = controlled();
+		const start = Date.now();
+		const store = new ChunkStore(load, 1e9, 8);
+		const ids = ["a", "b", "c", "d", "e", "f"];
+		for (const id of ids) store.request(id).catch(() => {});
+		for (const call of [...calls]) call.fail(new Busy(1000));
+		await settle();
+		expect(calls).toHaveLength(6);
+		await vi.advanceTimersByTimeAsync(999);
+		expect(calls).toHaveLength(6);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(asked(calls.slice(6), start)).toEqual(["a@1000"]);
+		await vi.advanceTimersByTimeAsync(RETRY_GAP_MS - 1);
+		expect(calls).toHaveLength(7);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(asked(calls.slice(6), start)).toEqual(["a@1000", `b@${1000 + RETRY_GAP_MS}`]);
+		await vi.advanceTimersByTimeAsync(10 * RETRY_GAP_MS);
+		expect(asked(calls.slice(6), start)).toEqual(ids.map((id, i) => `${id}@${1000 + i * RETRY_GAP_MS}`));
+	});
+
+	it("takes turns among the chunks it asks again for, the longest waiting first", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1e9, 8);
+		const ids = ["a", "b", "c", "d", "e", "f", "g", "h"];
+		store.want("xy", ids);
+		for (const id of ids) store.request(id).catch(() => {});
+		// Every chunk is asked for again and answered busy again, over and over.
+		let answered = 0;
+		const busy = async () => {
+			while (answered < calls.length) calls[answered++]?.fail(new Busy(1000));
+			await settle();
+		};
+		await busy();
+		for (let round = 0; round < 40; round++) {
+			await vi.advanceTimersByTimeAsync(RETRY_GAP_MS);
+			await busy();
+		}
+		// The best ranked mustn't keep the others waiting: each is asked for about as often.
+		const times = ids.map((id) => calls.filter((c) => c.id === id).length);
+		expect(Math.min(...times)).toBeGreaterThanOrEqual(4);
+		expect(Math.max(...times) - Math.min(...times)).toBeLessThanOrEqual(1);
+	});
+
+	it("wakes for whichever chunk is due first, even if a later one parked earlier", async () => {
+		const { calls, load } = controlled();
+		const start = Date.now();
+		const store = new ChunkStore(load, 1e9, 4);
+		store.request("a").catch(() => {});
+		store.request("b").catch(() => {});
+		calls[0]?.fail(new Busy(5000));
+		await settle();
+		calls[1]?.fail(new Busy(1000));
+		await settle();
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(asked(calls, start)).toEqual(["a@0", "b@0", "b@1000", "a@5000"]);
+	});
+
+	it("asks again as often as the server says it is busy, each time after the delay it gives", async () => {
+		const { calls, load } = controlled();
+		const start = Date.now();
+		const store = new ChunkStore(load, 1000, 1);
+		const a = store.request("a");
+		for (const delay of [1000, 3000]) {
+			calls.at(-1)?.fail(new Busy(delay));
+			await vi.advanceTimersByTimeAsync(delay);
+		}
+		calls.at(-1)?.finish();
+		await a;
+		expect(asked(calls, start)).toEqual(["a@0", "a@1000", "a@4000"]);
+	});
+
+	it("stops waiting for a chunk no view wants any more", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		store.want("xy", ["a", "b"]);
+		const a = store.request("a");
+		const b = store.request("b");
+		const lost = a.catch((e: unknown) => e);
+		b.catch(() => {});
+		calls[0]?.fail(new Busy(1000));
+		await settle();
+		store.want("xy", ["b"]);
+		const error = await lost;
+		expect(error).toBeInstanceOf(DOMException);
+		expect((error as DOMException).name).toBe("AbortError");
+		expect(store.isLoading("a")).toBe(false);
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(calls.map((c) => c.id)).toEqual(["a", "b"]);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("stops waiting for every chunk when all are cancelled", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		const waiting = ["a", "b", "c"].map((id) => store.request(id).catch((e: unknown) => e));
+		for (const call of [...calls]) call.fail(new Busy(1000));
+		await settle();
+		store.keepOnly(new Set());
+		for (const error of await Promise.all(waiting)) expect((error as DOMException).name).toBe("AbortError");
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(calls).toHaveLength(3);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("lets a refresh, or an invalidation, take the place of a load that waits", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		const waiting = store.request("a");
+		const lost = waiting.catch((e: unknown) => e);
+		calls[0]?.fail(new Busy(1000));
+		await settle();
+		const fresh = store.refresh("a", 3);
+		expect(((await lost) as DOMException).message).toBe("Changed while loading");
+		// The refresh starts at once: it hasn't been asked for before.
+		expect(calls.map((c) => c.id)).toEqual(["a", "a"]);
+		expect(store.refreshing("a")).toBe(3);
+		calls[1]?.fail(new Busy(1000));
+		await settle();
+		fresh.catch(() => {});
+		store.invalidate("a");
+		await expect(fresh).rejects.toThrow("Changed while loading");
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(calls).toHaveLength(2);
+	});
+
+	it("gives up once another wait would end past its patience, with the last answer", async () => {
+		const { calls, load } = controlled();
+		const start = Date.now();
+		const store = new ChunkStore(load, 1000, 1);
+		const a = store.request("a");
+		const lost = a.catch((e: unknown) => e);
+		const answers = [new Busy(50_000, "first"), new Busy(50_000, "second"), new Busy(50_000, "third")];
+		for (const answer of answers.slice(0, 2)) {
+			calls.at(-1)?.fail(answer);
+			await vi.advanceTimersByTimeAsync(50_000);
+		}
+		expect(asked(calls, start)).toEqual(["a@0", "a@50000", "a@100000"]);
+		calls[2]?.fail(answers[2]);
+		const error = await lost;
+		// A wait to 150 s would end past the 120 s the chunk is waited for.
+		expect(error).toBe(answers[2]);
+		expect((error as Busy).cause).toBe("third");
+		expect(store.isLoading("a")).toBe(false);
+		await vi.advanceTimersByTimeAsync(PATIENCE_MS);
+		expect(calls).toHaveLength(3);
+		expect(vi.getTimerCount()).toBe(0);
+		// Asked for afterwards, the chunk gets its patience afresh.
+		store.request("a").catch(() => {});
+		expect(calls).toHaveLength(4);
+		calls[3]?.fail(new Busy(50_000));
+		await vi.advanceTimersByTimeAsync(50_000);
+		expect(calls).toHaveLength(5);
+	});
+
+	it("is patient for two minutes by default", async () => {
+		const load = vi.fn(async () => {
+			throw new Busy(2000);
+		});
+		const store = new ChunkStore(load, 1000);
+		const lost = store.request("a").catch((e: unknown) => e);
+		await vi.advanceTimersByTimeAsync(PATIENCE_MS + 10_000);
+		expect(await lost).toBeInstanceOf(Busy);
+		// Asked for every two seconds, from 0 to 120 s.
+		expect(load).toHaveBeenCalledTimes(61);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("counts the time the answers took against its patience, but not the time spent in line", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000, 1);
+		const slow = store.request("slow").catch((e: unknown) => e);
+		const queued = store.request("queued");
+		// The first load takes 100 s to answer that the server is busy for another 30: a wait to 130.
+		await vi.advanceTimersByTimeAsync(100_000);
+		calls[0]?.fail(new Busy(30_000));
+		expect(await slow).toBeInstanceOf(Busy);
+		// The second spent that time in line, which isn't the server's doing.
+		await settle();
+		expect(calls.map((c) => c.id)).toEqual(["slow", "queued"]);
+		calls[1]?.fail(new Busy(30_000));
+		await vi.advanceTimersByTimeAsync(30_000);
+		expect(calls.map((c) => c.id)).toEqual(["slow", "queued", "queued"]);
+		calls[2]?.finish();
+		await queued;
+	});
+
+	it("passes any other failure on at once, as it did", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		const lost = store.request("a").catch((e: unknown) => e);
+		const error = new Error("broken");
+		calls[0]?.fail(error);
+		expect(await lost).toBe(error);
+		expect(store.isLoading("a")).toBe(false);
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(calls).toHaveLength(1);
 	});
 });

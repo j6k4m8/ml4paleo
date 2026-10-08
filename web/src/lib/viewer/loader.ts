@@ -3,15 +3,20 @@
  * ChunkStores of an image and of its labels.
  */
 
-import type { Chunk, Loader } from "./chunks";
-import type { ArrayRegion, DecodeResponse, Region } from "./decode.worker";
+import { Busy, type Chunk, type Loader } from "./chunks";
+import type { ArrayRegion, DecodeResponse, Region } from "./decoding";
+import { retryDelay } from "./patient";
 import { CHUNK, type Level, type Vec3 } from "./tiles";
 
-/** A load that failed: what went wrong, and the HTTP status the server answered with, if it did. */
+/**
+ * A load that failed: what went wrong, and the HTTP status the server
+ * answered with, if it did (for a 503, its `Retry-After`, as written).
+ */
 export class LoadError extends Error {
 	constructor(
 		message: string,
 		readonly status?: number,
+		readonly retryAfter?: string,
 	) {
 		super(message);
 		this.name = "LoadError";
@@ -38,7 +43,7 @@ export class WorkerPool {
 		const waiting = this.#waiting.get(response.id);
 		if (!waiting) return;
 		this.#waiting.delete(response.id);
-		if ("error" in response) waiting.reject(new LoadError(response.error, response.status));
+		if ("error" in response) waiting.reject(new LoadError(response.error, response.status, response.retryAfter));
 		else {
 			waiting.resolve({
 				data: response.data as Chunk["data"],
@@ -107,9 +112,11 @@ export function labelLoader(pool: WorkerPool, url: string, shape: Vec3): Loader 
 /**
  * Loads chunks of a project's label zarr at any of its levels (the image's
  * pyramid): ids `cz/cy/cx` for full resolution, `level/cz/cy/cx` for the
- * coarser levels, which the server makes when asked for (so a 503 is asked
- * again). A level the server turns out not to have (it answers 404 for the
- * array) is handed to `missing`, and loads for it end quietly.
+ * coarser levels, which the server makes when asked for. A coarser chunk the
+ * server is still making (a 503) is `Busy`, for the store to ask again, after
+ * the server's `Retry-After` and up to half as long again at random. A level
+ * the server turns out not to have (it answers 404 for the array) is handed
+ * to `missing`, and loads for it end quietly.
  */
 export function labelLevelLoader(pool: WorkerPool, url: string, levels: () => Level[], missing: (level: number) => void): Loader {
 	return async (id, signal) => {
@@ -122,9 +129,12 @@ export function labelLevelLoader(pool: WorkerPool, url: string, levels: () => Le
 			const region = chunkRegion([cz, cy, cx], found.shape);
 			return await pool.load({ url, path: found.path, region, derived: level > 0 }, signal);
 		} catch (error) {
-			if (level > 0 && error instanceof LoadError && error.status === 404) {
-				missing(level);
-				throw new DOMException("No such label level", "AbortError");
+			if (level > 0 && error instanceof LoadError) {
+				if (error.status === 404) {
+					missing(level);
+					throw new DOMException("No such label level", "AbortError");
+				}
+				if (error.status === 503) throw new Busy(retryDelay(error.retryAfter ?? null, Math.random()), error);
 			}
 			throw error;
 		}

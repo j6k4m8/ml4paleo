@@ -1160,13 +1160,39 @@ describe("label levels", () => {
 		layer.onLevels(heard);
 		const load = failing.pool.load;
 		failing.pool.load = async (request, signal) => {
-			if (request.path === "class_1") throw new LoadError("Error: Unexpected response status 503", 503);
+			if (request.path === "class_1") throw new LoadError("Error: Unexpected response status 500", 500);
 			return load.call(failing.pool, request, signal);
 		};
 		layer.store.want("view", ["1/0/0/0"]);
 		await expect(layer.store.request("1/0/0/0")).rejects.toBeInstanceOf(LoadError);
 		expect(layer.levels).toHaveLength(3);
 		expect(heard).not.toHaveBeenCalled();
+	});
+
+	it("aren't given up for a chunk the server is still making, which is asked for again", async () => {
+		vi.useFakeTimers();
+		try {
+			const making = levelPool(new Map([["1/0/0/0", { value: 6, pyramid: 3 }]]));
+			const { layer } = await started(group(pyramid), making);
+			making.failures.left = 2;
+			making.failures.status = 503;
+			const heard = vi.fn();
+			layer.onLevels(heard);
+			layer.store.want("view", ["1/0/0/0"]);
+			const loading = layer.store.request("1/0/0/0");
+			// Each time it is asked again after two seconds and up to a second more.
+			await vi.advanceTimersByTimeAsync(1999);
+			expect(making.loads).toHaveLength(1);
+			await vi.advanceTimersByTimeAsync(1001);
+			expect(making.loads).toHaveLength(2);
+			await vi.advanceTimersByTimeAsync(3000);
+			expect((await loading).pyramid).toBe(3);
+			expect(making.loads).toHaveLength(3);
+			expect(layer.levels).toHaveLength(3);
+			expect(heard).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("stop telling views once the layer stops", async () => {
@@ -1414,6 +1440,52 @@ describe("coarser label chunks that changed", () => {
 		await wait(1);
 		expect(loads.sort()).toEqual([under.one, under.one, under.two]);
 		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("keep the copy shown while the server is still making the new one, which is asked for again without taking a place", async () => {
+		vi.useFakeTimers();
+		const { layer, source, loads, failures, chunks } = await shown();
+		chunks.set(under.two, { value: 2, pyramid: 5 });
+		failures.left = 1;
+		failures.status = 503;
+		const heard = told(layer);
+		source.change([{ key: [3, 3, 3], version: 5 }]);
+		await settled();
+		expect(loads).toEqual([under.two]);
+		// It waits to be asked again, the old copy on show, and nobody told of it (of the chunks dropped, they were).
+		expect(layer.store.isLoading(under.two)).toBe(true);
+		expect(first(layer, under.two)).toBe(1);
+		expect(heard.flat()).not.toContain(under.two);
+		heard.length = 0;
+		await vi.advanceTimersByTimeAsync(2499);
+		expect(loads).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		await settled();
+		expect(loads).toEqual([under.two, under.two]);
+		expect(first(layer, under.two)).toBe(2);
+		expect(heard).toEqual([[under.two]]);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("are asked for again by the layer, the old copy still shown, when the server was still making them after the store's two minutes", async () => {
+		vi.useFakeTimers();
+		const { layer, source, loads, failures } = await shown();
+		failures.left = 1_000_000;
+		failures.status = 503;
+		source.change([{ key: [3, 3, 3], version: 5 }]);
+		await settled();
+		// The store asks every 2.5 s, from 0 to 120 s, and then fails with the server still busy.
+		await wait(119_999);
+		expect(loads).toHaveLength(48);
+		await wait(1);
+		expect(loads).toHaveLength(49);
+		expect(first(layer, under.two)).toBe(1);
+		// The layer asks again as it does after any failure.
+		await wait(999);
+		expect(loads).toHaveLength(49);
+		await wait(1);
+		expect(loads).toHaveLength(50);
+		expect(first(layer, under.two)).toBe(1);
 	});
 
 	it("are dropped, not left out of date, once loading them again has failed eight times", async () => {

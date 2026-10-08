@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Chunk } from "./chunks";
+import { Busy, type Chunk } from "./chunks";
 import { LoadError, labelLevelLoader, WorkerPool } from "./loader";
 import type { Level } from "./tiles";
 
@@ -44,6 +44,14 @@ describe("WorkerPool", () => {
 		expect(error).toBeInstanceOf(LoadError);
 		expect((error as LoadError).status).toBe(401);
 		expect((error as LoadError).message).toContain("401");
+	});
+
+	it("fails a load with the 503's Retry-After, as the server wrote it", async () => {
+		const { load, answer } = loading();
+		answer({ error: "Error: Unexpected response status 503", status: 503, retryAfter: "7" });
+		const error = await load.catch((e: unknown) => e);
+		expect((error as LoadError).status).toBe(503);
+		expect((error as LoadError).retryAfter).toBe("7");
 	});
 
 	it("fails a load that got no answer from the server without a status", async () => {
@@ -135,8 +143,44 @@ describe("labelLevelLoader", () => {
 		expect(load).toHaveBeenCalledTimes(1);
 	});
 
+	describe("a coarser chunk the server is still making (a 503)", () => {
+		afterEach(() => vi.restoreAllMocks());
+
+		const busy = async (retryAfter: string | undefined, id = "2/0/0/0") => {
+			vi.spyOn(Math, "random").mockReturnValue(0.5);
+			const failure = new LoadError("Error: Unexpected response status 503", 503, retryAfter);
+			const { loader, load, missing, signal } = loading(async () => {
+				throw failure;
+			});
+			const error = await loader(id, signal).catch((e: unknown) => e);
+			return { error, failure, load, missing };
+		};
+
+		it("is busy, for the store to ask again, after the Retry-After and a little more", async () => {
+			const { error, failure, load, missing } = await busy("3");
+			expect(error).toBeInstanceOf(Busy);
+			expect((error as Busy).delay).toBe(3750);
+			expect((error as Busy).cause).toBe(failure);
+			expect(load).toHaveBeenCalledTimes(1);
+			expect(missing).not.toHaveBeenCalled();
+		});
+
+		it("is asked for again after two seconds and a little more when the server doesn't say", async () => {
+			expect(((await busy(undefined)).error as Busy).delay).toBe(2500);
+		});
+
+		it("is busy at every level above full resolution", async () => {
+			for (const id of ["1/0/0/0", "2/0/0/0"]) expect((await busy("1", id)).error).toBeInstanceOf(Busy);
+		});
+
+		it("isn't called busy for a full resolution chunk, which the server doesn't make", async () => {
+			const { error, failure } = await busy("1", "0/0/0");
+			expect(error).toBe(failure);
+		});
+	});
+
 	it("passes on every other failure, as it was", async () => {
-		for (const status of [401, 500, 503, undefined]) {
+		for (const status of [401, 500, 502, undefined]) {
 			const failure = new LoadError("Error", status);
 			const { loader, missing, signal } = loading(async () => {
 				throw failure;
