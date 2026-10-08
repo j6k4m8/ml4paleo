@@ -891,6 +891,38 @@ def pyramid_that_makes(make, seconds=0.1):
     return pyramid, ask
 
 
+def test_what_a_build_held_is_let_go_of_even_if_storing_what_it_made_is_cancelled(
+    monkeypatch,
+):
+    async def scenario():
+        pyramid = label_pyramid.LabelPyramid()
+        child = b"a chunk under the one being made, held for it"
+        pyramid._cache.put(child, b"x" * 100, pin=True)
+        assert pyramid._cache.pinned_size > 0
+
+        async def assemble(*args):
+            return b"made", [child]
+
+        async def nothing_stored(*args):
+            return None
+
+        async def cancelled(*args):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(pyramid, "_assemble", assemble)
+        monkeypatch.setattr(label_pyramid, "_load", nothing_stored)
+        monkeypatch.setattr(label_pyramid, "_save", cancelled)
+        plan = label_pyramid.Plan(uuid.uuid4(), plan_levels(SHAPE))
+        state = label_pyramid.Fingerprint(count=label_pyramid.STORED_COUNT, versions=1)
+        with pytest.raises(asyncio.CancelledError):
+            await pyramid.chunk(
+                Session(), None, uuid.uuid4(), plan, 2, (0, 0, 0), state
+            )
+        assert pyramid._cache.pinned_size == 0
+
+    asyncio.run(scenario())
+
+
 def test_those_waiting_for_a_build_that_is_cancelled_are_told_to_ask_again():
     async def scenario():
         started = asyncio.Event()

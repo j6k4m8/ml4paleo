@@ -741,10 +741,13 @@ class LabelPyramid:
         )
         # Even one that shows nothing: finding that out was the work.
         self._cache.put(cached, data, pin=pin)
-        if stored:
-            await _save(store, plan, level, key, state, data)
-        for child_key in kept:
-            self._cache.unpin(child_key)
+        try:
+            if stored:
+                await _save(store, plan, level, key, state, data)
+        finally:
+            # However storing it ends, what it was made of is let go of.
+            for child_key in kept:
+                self._cache.unpin(child_key)
         return data
 
     async def _assemble(
