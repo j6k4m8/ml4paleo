@@ -93,6 +93,13 @@ export function pixelsPerVoxel(view: View): Vec3 {
 	return view.aspect.map((a) => a * view.zoom) as Vec3;
 }
 
+/** Device pixels a level's voxels cover on screen, along the plane's finer axis. */
+function voxelPixels(level: Level, view: View): number {
+	const { u, v } = view.plane;
+	const px = pixelsPerVoxel(view);
+	return Math.min(level.scale[u] * px[u], level.scale[v] * px[v]);
+}
+
 /**
  * The coarsest level whose voxels still cover at most about one and a half
  * CSS pixels in the view's plane.
@@ -100,14 +107,22 @@ export function pixelsPerVoxel(view: View): Vec3 {
 export function chooseLevel(levels: Level[], view: View): Level {
 	let best = levels[0];
 	if (!best) throw new Error("An image has at least one level");
-	const { u, v } = view.plane;
-	const px = pixelsPerVoxel(view);
 	const limit = 1.5 * (view.pixelRatio ?? 1);
-	const size = (level: Level) => Math.min(level.scale[u] * px[u], level.scale[v] * px[v]);
 	for (const level of levels) {
-		if (size(level) <= limit && size(level) > size(best)) best = level;
+		const size = voxelPixels(level, view);
+		if (size <= limit && size > voxelPixels(best, view)) best = level;
 	}
 	return best;
+}
+
+/**
+ * The level a view shows: the one `chooseLevel` picks, or a coarser one if
+ * that would take more than `maxTiles` chunks to cover the view.
+ */
+export function viewLevel(levels: Level[], view: View, maxTiles: number): Level {
+	let level = chooseLevel(levels, view);
+	while (level.index < levels.length - 1 && countTiles(level, view) > maxTiles) level = levels[level.index + 1]!;
+	return level;
 }
 
 /** The plane's index along its normal axis, in `level`'s voxels. */
@@ -117,39 +132,107 @@ export function sliceIndex(level: Level, view: View): number {
 }
 
 /**
- * The chunks of `level` that the view shows (plus `padding` chunks around
- * it, to load before they scroll into view), nearest to the center first.
+ * The chunks of `level` a view shows, with `padding` more on every side, as
+ * the chunk index along the normal and inclusive ranges along u and v (empty
+ * when first > last); null if the plane misses the level.
  */
-export function visibleTiles(level: Level, view: View, padding = 1): TileKey[] {
+function tileRange(level: Level, view: View, padding: number) {
 	const { normal, u, v } = view.plane;
 	const slice = sliceIndex(level, view);
-	if (slice < 0 || slice >= level.shape[normal]) return [];
+	if (slice < 0 || slice >= level.shape[normal]) return null;
 	const px = pixelsPerVoxel(view);
-	const range = (axis: Axis, half: number) => {
+	const span = (axis: Axis, half: number): [number, number] => {
 		const center = view.position[axis] / level.scale[axis];
 		const extent = half / (px[axis] * level.scale[axis]);
 		const last = Math.ceil(level.shape[axis] / CHUNK) - 1;
-		return {
-			first: Math.max(0, Math.floor((center - extent) / CHUNK) - padding),
-			last: Math.min(last, Math.floor((center + extent) / CHUNK) + padding),
-			center: center / CHUNK - 0.5,
-		};
+		return [
+			Math.max(0, Math.floor((center - extent) / CHUNK) - padding),
+			Math.min(last, Math.floor((center + extent) / CHUNK) + padding),
+		];
 	};
-	const us = range(u, view.width / 2);
-	const vs = range(v, view.height / 2);
-	const tiles: (TileKey & { distance: number })[] = [];
-	for (let cv = vs.first; cv <= vs.last; cv++) {
-		for (let cu = us.first; cu <= us.last; cu++) {
+	const [u0, u1] = span(u, view.width / 2);
+	const [v0, v1] = span(v, view.height / 2);
+	return { normal: Math.floor(slice / CHUNK), u0, u1, v0, v1 };
+}
+
+/** How many chunks of `level` the view shows (with `padding` more on every side). */
+export function countTiles(level: Level, view: View, padding = 0): number {
+	const range = tileRange(level, view, padding);
+	if (!range) return 0;
+	return Math.max(0, range.u1 - range.u0 + 1) * Math.max(0, range.v1 - range.v0 + 1);
+}
+
+/**
+ * The chunks of `level` that the view shows, nearest its center on screen
+ * first, then `padding` chunks around them (to load before they scroll into
+ * view), also nearest first.
+ */
+export function visibleTiles(level: Level, view: View, padding = 1): TileKey[] {
+	const inner = tileRange(level, view, 0);
+	const outer = tileRange(level, view, padding);
+	if (!inner || !outer) return [];
+	const { normal, u, v } = view.plane;
+	const px = pixelsPerVoxel(view);
+	// Screen pixels from the view's center to a chunk's center along an axis.
+	const offset = (axis: Axis, c: number) => ((c + 0.5) * CHUNK * level.scale[axis] - view.position[axis]) * px[axis];
+	const tiles: (TileKey & { margin: boolean; distance: number })[] = [];
+	for (let cv = outer.v0; cv <= outer.v1; cv++) {
+		for (let cu = outer.u0; cu <= outer.u1; cu++) {
 			const c: Vec3 = [0, 0, 0];
-			c[normal] = Math.floor(slice / CHUNK);
+			c[normal] = outer.normal;
 			c[u] = cu;
 			c[v] = cv;
-			const distance = Math.hypot(cu - us.center, cv - vs.center);
-			tiles.push({ level: level.index, cz: c[0], cy: c[1], cx: c[2], distance });
+			const margin = cu < inner.u0 || cu > inner.u1 || cv < inner.v0 || cv > inner.v1;
+			const distance = Math.hypot(offset(u, cu), offset(v, cv));
+			tiles.push({ level: level.index, cz: c[0], cy: c[1], cx: c[2], margin, distance });
 		}
 	}
-	tiles.sort((a, b) => a.distance - b.distance);
+	tiles.sort((a, b) => Number(a.margin) - Number(b.margin) || a.distance - b.distance);
 	return tiles.map(({ level, cz, cy, cx }) => ({ level, cz, cy, cx }));
+}
+
+/** Which of `keys`, chunks of `level`, the view shows, nearest its center first. */
+export function tilesShown(keys: Iterable<TileKey>, level: Level, view: View): TileKey[] {
+	const range = tileRange(level, view, 0);
+	if (!range) return [];
+	const { normal, u, v } = view.plane;
+	const px = pixelsPerVoxel(view);
+	const offset = (axis: Axis, c: number) => ((c + 0.5) * CHUNK * level.scale[axis] - view.position[axis]) * px[axis];
+	const shown: (TileKey & { distance: number })[] = [];
+	for (const key of keys) {
+		const c = [key.cz, key.cy, key.cx];
+		const [n, cu, cv] = [c[normal]!, c[u]!, c[v]!];
+		if (n !== range.normal || cu < range.u0 || cu > range.u1 || cv < range.v0 || cv > range.v1) continue;
+		shown.push({ ...key, distance: Math.hypot(offset(u, cu), offset(v, cv)) });
+	}
+	shown.sort((a, b) => a.distance - b.distance);
+	return shown.map(({ level, cz, cy, cx }) => ({ level, cz, cy, cx }));
+}
+
+/**
+ * The chunks a view loads, most wanted first: every level coarser than
+ * `level`, coarsest first, where the view shows it (backdrops that arrive
+ * quickly and show while finer chunks load), then `level` itself, nearest
+ * the center first, then `padding` chunks around it.
+ */
+export function tilesToLoad(levels: Level[], level: Level, view: View, padding = 1): TileKey[] {
+	const tiles: TileKey[] = [];
+	for (let i = levels.length - 1; i > level.index; i--) tiles.push(...visibleTiles(levels[i]!, view, 0));
+	tiles.push(...visibleTiles(level, view, padding));
+	return tiles;
+}
+
+/**
+ * The chunk of the coarser level `to` that holds `key`'s part of the plane
+ * the view shows.
+ */
+export function coveringTile(key: TileKey, from: Level, to: Level, view: View): TileKey {
+	const { normal, u, v } = view.plane;
+	const c = [key.cz, key.cy, key.cx];
+	const out: Vec3 = [0, 0, 0];
+	out[normal] = Math.floor(sliceIndex(to, view) / CHUNK);
+	for (const axis of [u, v]) out[axis] = Math.floor((c[axis]! * from.scale[axis]) / to.scale[axis]);
+	return { level: to.index, cz: out[0], cy: out[1], cx: out[2] };
 }
 
 /** The level-0 voxel under a point on the view, from the view's center. */

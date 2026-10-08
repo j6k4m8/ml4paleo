@@ -9,7 +9,8 @@
 	import type { ViewerState } from "./state.svelte";
 	import {
 		boxOnPlane,
-		chooseLevel,
+		countTiles,
+		coveringTile,
 		type Level,
 		type Plane,
 		pixelsPerVoxel,
@@ -18,8 +19,10 @@
 		type TileKey,
 		tileCrosses,
 		tileId,
+		tilesToLoad,
 		type Vec3,
 		type View,
+		viewLevel,
 		visibleTiles,
 		voxelAt,
 	} from "./tiles";
@@ -79,6 +82,8 @@
 	let width = $state(0);
 	let height = $state(0);
 	let error = $state("");
+	// Why chunks didn't load, until one does.
+	let loadError = $state("");
 	let labelsHidden = $state(false);
 	let frame = 0;
 	let destroyed = false;
@@ -215,43 +220,43 @@
 
 	function failed(e: unknown) {
 		if (e instanceof DOMException && e.name === "AbortError") return;
-		error = e instanceof Error ? e.message : String(e);
+		loadError = e instanceof Error ? e.message : String(e);
 	}
 
 	function render() {
 		if (destroyed || !renderer || levels.length === 0 || width === 0) return;
 		const current = view();
-		const coarsest = levels[levels.length - 1]!;
-		let chosen = chooseLevel(levels, current);
-		while (chosen !== coarsest && visibleTiles(chosen, current, 0).length > MAX_IMAGE_TILES) {
-			chosen = levels[chosen.index + 1]!;
+		const chosen = viewLevel(levels, current, MAX_IMAGE_TILES);
+		const slices = levels.map((level) => sliceIndex(level, current));
+		// Every coarser level loads first, where the view shows it, and stays
+		// drawn under the finer ones: whatever moves (zoom, pan, slice), the
+		// view shows the best it has while the rest arrives, never a gap.
+		const wanted = tilesToLoad(levels, chosen, current);
+		images.want(plane.name, wanted.map(tileId));
+		for (const key of wanted) loadImage(key, slices[key.level]!);
+		const layers: { level: Level; slice: number; tiles: TileKey[] }[] = [];
+		for (let i = levels.length - 1; i > chosen.index; i--) {
+			layers.push({ level: levels[i]!, slice: slices[i]!, tiles: visibleTiles(levels[i]!, current, 0) });
 		}
-		const layers = (coarsest === chosen ? [chosen] : [coarsest, chosen]).map((level) => ({
-			level,
-			slice: sliceIndex(level, current),
-			tiles: visibleTiles(level, current),
-		}));
-		const imageIds = new Set(layers.flatMap(({ tiles }) => tiles.map(tileId)));
-		// Tiles just outside the view load ahead but may be evicted.
-		const shownIds = new Set(
-			layers.flatMap(({ level }) => visibleTiles(level, current, 0).map(tileId)),
-		);
-		images.want(plane.name, imageIds, shownIds);
-		renderer.reserve(imageIds.size, 4 * MAX_LABEL_TILES);
-		for (const { slice, tiles } of layers) {
-			for (const key of tiles) loadImage(key, slice);
-		}
+		const top = { level: chosen, slice: slices[chosen.index]!, tiles: visibleTiles(chosen, current, 0) };
+		// Zooming out, what the finer level already has fills in until the
+		// chosen level's chunks arrive.
+		const finer = levels[chosen.index - 1];
+		const filling = finer ? { level: finer, slice: slices[finer.index]!, tiles: stopgaps(finer, top, current) } : null;
+		if (filling && filling.tiles.length > 0) layers.push(filling);
+		layers.push(top);
+		renderer.reserve(wanted.length + (filling?.tiles.length ?? 0), 4 * MAX_LABEL_TILES);
 
 		const full = levels[0]!;
-		const fullTiles = visibleTiles(full, current, 0);
-		const at = sliceIndex(full, current);
+		const at = slices[0]!;
 		// Only layers that exist and are shown get hidden when zoomed out.
 		const overlaid = !!(
 			(viewer.showLabels && labels) ||
 			(viewer.showPrediction && (prediction || proposal)) ||
 			(viewer.showSegmentation && segmentation)
 		);
-		labelsHidden = overlaid && fullTiles.length > MAX_LABEL_TILES;
+		labelsHidden = overlaid && countTiles(full, current) > MAX_LABEL_TILES;
+		const fullTiles = labelsHidden ? [] : visibleTiles(full, current, 0);
 		const overlays: Overlay[] = [];
 		/** Draw a layer's chunks in view (or just `keys`), leaving out `hole`. */
 		const add = (
@@ -262,9 +267,9 @@
 			{ keys = fullTiles, hole }: { keys?: TileKey[]; hole?: Rect } = {},
 		) => {
 			if (!store) return;
-			if (!shown || labelsHidden) return store.want(plane.name, new Set());
+			if (!shown || keys.length === 0) return store.want(plane.name, []);
 			const tiles = keys.map((key) => ({ id: `${key.cz}/${key.cy}/${key.cx}`, key }));
-			store.want(plane.name, new Set(tiles.map((t) => t.id)));
+			store.want(plane.name, tiles.map((t) => t.id));
 			for (const tile of tiles) loadOverlay(store, prefix, tile, at);
 			overlays.push({ slice: at, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity, hole });
 		};
@@ -279,6 +284,24 @@
 		renderer.draw(current, viewer.window, layers, overlays);
 	}
 
+	/**
+	 * Chunks of `finer` already at hand (on the GPU, or loaded) where the
+	 * chosen level's chunks haven't arrived, to draw under them meanwhile.
+	 */
+	function stopgaps(finer: Level, top: { level: Level; slice: number; tiles: TileKey[] }, current: View): TileKey[] {
+		if (!renderer) return [];
+		const missing = new Set(top.tiles.filter((key) => !renderer!.hasImage(key, top.slice)).map(tileId));
+		if (missing.size === 0) return [];
+		const at = sliceIndex(finer, current);
+		return visibleTiles(finer, current, 0).filter((key) => {
+			if (!missing.has(tileId(coveringTile(key, finer, top.level, current)))) return false;
+			if (renderer!.hasImage(key, at)) return true;
+			const cached = images.peek(tileId(key));
+			if (cached) renderer!.uploadImage(key, at, cached);
+			return !!cached;
+		});
+	}
+
 	function loadImage(key: TileKey, at: number) {
 		if (!renderer || renderer.hasImage(key, at)) return;
 		const id = tileId(key);
@@ -289,6 +312,7 @@
 		images
 			.request(id)
 			.then((chunk) => {
+				loadError = "";
 				if (!renderer || renderer.hasImage(key, at)) return;
 				if (sliceIndex(levels[key.level]!, view()) !== at) return schedule();
 				renderer.uploadImage(key, at, chunk);
@@ -619,7 +643,7 @@
 		{slice}
 		{#if labelsHidden}<span class="muted">· zoom in to see labels</span>{/if}
 	</div>
-	{#if error}<p class="error" role="alert">{error}</p>{/if}
+	{#if error || loadError}<p class="error" role="alert">{error || loadError}</p>{/if}
 </div>
 
 <style>

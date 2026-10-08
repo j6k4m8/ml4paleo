@@ -4,11 +4,16 @@ import {
 	boxOnPlane,
 	CHUNK,
 	chooseLevel,
+	countTiles,
+	coveringTile,
 	type Level,
 	PLANES,
 	tileCrosses,
 	tileId,
+	tilesShown,
+	tilesToLoad,
 	type View,
+	viewLevel,
 	visibleTiles,
 	voxelAt,
 	windowed,
@@ -94,11 +99,93 @@ describe("visibleTiles", () => {
 		expect(far.every((t) => t.cy <= Math.ceil(1000 / CHUNK) - 1 && t.cx <= Math.ceil(700 / CHUNK) - 1)).toBe(true);
 	});
 
+	it("lists the view before its margin", () => {
+		const level = levels[0] as Level;
+		const shown = new Set(visibleTiles(level, view(), 0).map(tileId));
+		const tiles = visibleTiles(level, view(), 1).map(tileId);
+		expect(new Set(tiles.slice(0, shown.size))).toEqual(shown);
+	});
+
+	it("orders by distance on screen, where thick voxels are tall", () => {
+		const level = levels[0] as Level;
+		// XZ with z voxels 4 times as thick: a chunk is 256 pixels tall and 64
+		// wide, so the next chunk across comes before the next one down.
+		const tiles = visibleTiles(level, view({ plane: PLANES.xz, aspect: [4, 1, 1], position: [96, 500, 352], width: 400, height: 600 }), 0);
+		expect(tileId(tiles[0] as never)).toBe("0/1/7/5");
+		expect(tiles.slice(1, 3).map(tileId).sort()).toEqual(["0/1/7/4", "0/1/7/6"]);
+	});
+
 	it("stretches thick axes on screen", () => {
 		const level = levels[0] as Level;
 		// z voxels 4 times as thick: 128 pixels cover 32 z voxels.
 		const tiles = visibleTiles(level, view({ plane: PLANES.xz, aspect: [4, 1, 1] }), 0);
 		expect(new Set(tiles.map((t) => t.cz))).toEqual(new Set([1, 2]));
+	});
+});
+
+describe("viewLevel", () => {
+	it("goes coarser when the chosen level would take too many chunks", () => {
+		const wide = view({ zoom: 2, width: 2000, height: 1000 });
+		// x 0..700 (11 chunks) by y 250..750 (9 chunks), then 6 by 5 at level 1.
+		expect(countTiles(levels[0] as Level, wide)).toBe(11 * 9);
+		expect(countTiles(levels[1] as Level, wide)).toBe(6 * 5);
+		expect(viewLevel(levels, wide, 1000).index).toBe(0);
+		expect(viewLevel(levels, wide, 60).index).toBe(1);
+		expect(viewLevel(levels, wide, 20).index).toBe(2);
+	});
+});
+
+describe("countTiles", () => {
+	it("counts what visibleTiles lists", () => {
+		const level = levels[0] as Level;
+		for (const padding of [0, 1, 2]) {
+			expect(countTiles(level, view(), padding)).toBe(visibleTiles(level, view(), padding).length);
+		}
+		expect(countTiles(level, view({ position: [-1, 500, 350] }))).toBe(0);
+	});
+});
+
+describe("tilesToLoad", () => {
+	it("asks for coarser levels first, then the level's view, then its margin", () => {
+		const tiles = tilesToLoad(levels, levels[0] as Level, view({ width: 256, height: 256 }));
+		const order = tiles.map((t) => t.level);
+		expect(order[0]).toBe(2);
+		expect(order.indexOf(0)).toBeGreaterThan(order.lastIndexOf(1));
+		const shown = visibleTiles(levels[0] as Level, view({ width: 256, height: 256 }), 0).map(tileId);
+		const level0 = tiles.filter((t) => t.level === 0).map(tileId);
+		expect(level0.slice(0, shown.length)).toEqual(shown);
+		expect(level0.length).toBeGreaterThan(shown.length);
+		// Each coarser level covers the view.
+		expect(new Set(tiles.filter((t) => t.level === 1).map(tileId))).toEqual(
+			new Set(visibleTiles(levels[1] as Level, view({ width: 256, height: 256 }), 0).map(tileId)),
+		);
+	});
+
+	it("asks for only the coarsest level when that is the one shown", () => {
+		const coarsest = levels[2] as Level;
+		expect(tilesToLoad(levels, coarsest, view({ zoom: 0.25 })).every((t) => t.level === 2)).toBe(true);
+	});
+});
+
+describe("coveringTile", () => {
+	it("finds the coarser chunk holding a chunk's part of the plane", () => {
+		const fine = levels[0] as Level;
+		const coarse = levels[2] as Level;
+		// z 130 is level-2 slice 32, in chunk 0; x chunk 5 (320..383) is in level-2 chunk 1.
+		expect(coveringTile({ level: 0, cz: 2, cy: 7, cx: 5 }, fine, coarse, view())).toEqual({ level: 2, cz: 0, cy: 1, cx: 1 });
+	});
+});
+
+describe("tilesShown", () => {
+	it("keeps the chunks on the view's slice and screen, nearest first", () => {
+		const level = levels[0] as Level;
+		const keys = [
+			{ level: 0, cz: 2, cy: 8, cx: 6 },
+			{ level: 0, cz: 2, cy: 7, cx: 5 },
+			{ level: 0, cz: 3, cy: 7, cx: 5 },
+			{ level: 0, cz: 2, cy: 0, cx: 0 },
+		];
+		expect(tilesShown(keys, level, view()).map(tileId)).toEqual(["0/2/7/5", "0/2/8/6"]);
 	});
 });
 
