@@ -145,6 +145,15 @@ export class OpQueue {
 		private send: Send = defaultSend,
 	) {}
 
+	/**
+	 * Whether an undo or redo is waiting to be sent or answered. The page's
+	 * copies of the labels don't show one until its answer has made them
+	 * load again, so they can't be trusted to say what is labeled meanwhile.
+	 */
+	get toggling(): boolean {
+		return this.#queue.some((op) => op.kind !== "edit");
+	}
+
 	/** Resume ops a previous page left unsent, ahead of anything new. */
 	async start(): Promise<Queued[]> {
 		const saved = (await this.storage?.load().catch(() => [])) ?? [];

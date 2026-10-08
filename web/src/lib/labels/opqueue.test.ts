@@ -130,6 +130,28 @@ describe("OpQueue", () => {
 		expect(calls.filter((c) => c.path.endsWith("/ops"))).toHaveLength(3);
 	});
 
+	it("says while an undo or redo waits to be sent or answered, not for one that drops an unsent edit", async () => {
+		const { send } = server();
+		const queue = new OpQueue("p", null, send);
+		expect(queue.toggling).toBe(false);
+		queue.edit([delta(0)]);
+		// Undone before it was sent: the edit is dropped, and nothing waits.
+		queue.undo();
+		expect(queue.toggling).toBe(false);
+		queue.redo();
+		await settle(queue);
+		expect(queue.toggling).toBe(false);
+		// Undone and redone once sent: the undo waits to be sent, and then the redo.
+		queue.undo();
+		expect(queue.toggling).toBe(true);
+		await settle(queue);
+		expect(queue.toggling).toBe(false);
+		queue.redo();
+		expect(queue.toggling).toBe(true);
+		await settle(queue);
+		expect(queue.toggling).toBe(false);
+	});
+
 	it("saves undos of sent edits, with their seq", async () => {
 		const { send } = server();
 		const saved: { kind: string; seq?: number }[] = [];

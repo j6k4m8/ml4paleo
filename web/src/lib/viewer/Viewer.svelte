@@ -701,17 +701,20 @@
 		accepting = true;
 		notice = "";
 		const { store, artifact_id: artifact, kind } = layer;
-		/** Read a box of a store's chunks, which no view's own requests cancel. */
+		/** Read a box of a store's chunks, which no view's own requests cancel; one loading again (after an edit) is waited for. */
 		const read = (from: ChunkStore) =>
 			readBox((id) => {
 				from.want(`accept:${id}`, new Set([id]));
-				return from.request(id).finally(() => from.want(`accept:${id}`, new Set()));
+				return (from.loading(id) ?? from.request(id)).finally(() => from.want(`accept:${id}`, new Set()));
 			}, box);
 		try {
 			let values = await read(store);
 			const predicted = values.some((value) => value > 0);
-			// If the labels can't be read, the server still fills only what's unlabeled.
-			if (skipLabeled && predicted) values = unlabeledOnly(values, await read(labels.store).catch(() => new Uint8Array(values.length)));
+			// Not while an undo or redo is on its way: the copies don't show it yet. And if the
+			// labels can't be read, the server still fills only what's unlabeled.
+			if (skipLabeled && predicted && !queue.toggling) {
+				values = unlabeledOnly(values, await read(labels.store).catch(() => new Uint8Array(values.length)));
+			}
 			const parts = acceptParts(values, box);
 			const ops = queue.editMany(parts, { accept: { prediction: artifact, ...where } });
 			for (const op of ops) labels.applyLocal(op.local, op.deltas);
