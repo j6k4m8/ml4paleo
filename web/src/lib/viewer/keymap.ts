@@ -70,7 +70,8 @@ export const MOUSE: [string, string][] = [
 	["Wheel", "Next or previous slice"],
 	["Ctrl + wheel, or pinch", "Zoom"],
 	["Drag (navigating), middle drag, or Space + drag", "Pan"],
-	["Click (navigating)", "Move the crosshair there"],
+	["Right-click (Mac: or Ctrl + click), with any tool", "Move the crosshair there"],
+	["Tap (touch or pen, navigating)", "Move the crosshair there"],
 	["Drag (brush, eraser)", "Paint"],
 	["Click (polygon)", "Add a point; on the first point, close the polygon"],
 	["Drag (polygon)", "Draw freehand; letting go closes the polygon"],
@@ -78,6 +79,19 @@ export const MOUSE: [string, string][] = [
 	["Alt or Shift while closing (polygon)", "Cut out of the active class, or fill, whatever the mode"],
 	["Drag (ROI)", "Draw an ROI on this slice"],
 ];
+
+const MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+
+/**
+ * Whether a press is a right-click: the right button, or on a Mac Ctrl with
+ * the left (where the system makes it one). In a view it moves the crosshair
+ * to where it points, whatever the tool; a plain left click never does, so a
+ * stray click can't move you. Elsewhere Ctrl is the zoom key, held down while
+ * painting, so it doesn't count.
+ */
+export function isRightClick(event: Pick<PointerEvent, "button" | "ctrlKey">, mac = MAC): boolean {
+	return event.button === 2 || (mac && event.button === 0 && event.ctrlKey);
+}
 
 const BY_KEY = new Map(KEYMAP.flatMap((binding) => binding.keys.map((key) => [key, binding.action] as const)));
 
