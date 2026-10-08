@@ -4,6 +4,7 @@
  * region's values, transferred without copying (see decoding.ts).
  */
 
+import { failure } from "./image";
 import { type CancelRequest, createDecoder, type DecodeRequest } from "./decoding";
 import { useZstd } from "./zstd";
 
@@ -22,7 +23,13 @@ self.onmessage = async (event: MessageEvent<DecodeRequest | CancelRequest>) => {
 	running.set(message.id, controller);
 	try {
 		const { reply, transfer } = await decode(message, controller.signal);
-		(self as unknown as Worker).postMessage(reply, transfer);
+		try {
+			(self as unknown as Worker).postMessage(reply, transfer);
+		} catch (error) {
+			// A reply that can't be sent (a DataCloneError, say) is answered as a failed
+			// load, or the page's load would wait for it for good.
+			(self as unknown as Worker).postMessage({ id: message.id, ...failure(error) });
+		}
 	} finally {
 		running.delete(message.id);
 	}

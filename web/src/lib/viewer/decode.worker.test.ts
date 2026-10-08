@@ -30,6 +30,8 @@ const load = (id: number, path = "class_1"): DecodeRequest => ({
 describe("the decode worker", () => {
 	const posted: { reply: Record<string, unknown>; transfer: unknown }[] = [];
 	let send: (message: DecodeRequest | CancelRequest) => Promise<void>;
+	// What the worker's postMessage throws for the next reply, if anything (a reply that can't be cloned, say).
+	let refusal: Error | undefined;
 
 	/** Answers the array's metadata, and each chunk as `chunk` says (by the request, to be able to hold one). */
 	const serve = (chunk: (request: Request) => Promise<Response> | Response) => {
@@ -41,7 +43,18 @@ describe("the decode worker", () => {
 
 	beforeEach(async () => {
 		posted.length = 0;
-		const fake = { onmessage: null as unknown, postMessage: (reply: Record<string, unknown>, transfer: unknown) => posted.push({ reply, transfer }) };
+		refusal = undefined;
+		const fake = {
+			onmessage: null as unknown,
+			postMessage: (reply: Record<string, unknown>, transfer: unknown) => {
+				if (refusal) {
+					const error = refusal;
+					refusal = undefined;
+					throw error;
+				}
+				posted.push({ reply, transfer });
+			},
+		};
 		vi.stubGlobal("self", fake);
 		vi.resetModules();
 		await import("./decode.worker");
@@ -82,6 +95,18 @@ describe("the decode worker", () => {
 		await loading;
 		expect(posted).toHaveLength(1);
 		expect(posted[0]!.reply).toMatchObject({ id: 3, error: expect.stringContaining("AbortError") });
+	});
+
+	it("answers a reply that can't be sent as a failed load, so the page's load ends", async () => {
+		serve(() => new Response(new Uint8Array(64 ** 3).fill(5)));
+		refusal = new DOMException("The reply could not be cloned", "DataCloneError");
+		await send(load(4));
+		expect(posted).toHaveLength(1);
+		expect(posted[0]!.reply).toMatchObject({ id: 4, error: expect.stringContaining("DataCloneError") });
+		expect(posted[0]!.reply).not.toHaveProperty("data");
+		// The next load is answered as usual.
+		await send(load(5));
+		expect(posted[1]!.reply).toMatchObject({ id: 5, shape: [64, 64, 64] });
 	});
 
 	it("ignores a cancel for a load that isn't running", async () => {
