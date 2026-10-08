@@ -1004,6 +1004,164 @@ def test_the_rule_and_the_codec_are_pinned_to_the_rule_version():
     assert label_pyramid.RULE_VERSION == 2
 
 
+# Many chunks, each with a single label, which is little to send but makes
+# chunks of level 2 and above stand for many labeled chunks.
+MANY = (270, 270, 270)
+
+
+def one_label_in_each_chunk(shape=MANY) -> np.ndarray:
+    volume = np.zeros(shape, dtype=np.uint8)
+    for key in np.ndindex(*(-(-n // 64) for n in shape)):
+        volume[tuple(64 * k + 1 for k in key)] = 2
+    return volume
+
+
+def stored_chunks(settings, project) -> list[str]:
+    root = pathlib.Path(settings.storage.url.removeprefix("file://"))
+    found = (root / "projects" / project / "labels" / "pyramid").rglob("*")
+    return sorted(str(f.relative_to(root.parent)) for f in found if f.is_file())
+
+
+def another_process(app) -> label_pyramid.LabelPyramid:
+    """
+    A pyramid with nothing cached, as another process, or this one after a
+    restart, would have.
+    """
+    app.state.label_pyramid = label_pyramid.LabelPyramid()
+    return app.state.label_pyramid
+
+
+def test_chunks_that_stand_for_many_labeled_chunks_outlast_a_process(
+    ada, migrated_database_url, settings, monkeypatch
+):
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    volume = one_label_in_each_chunk()
+    paint(ada, project, volume)
+    levels = plan_levels(MANY)
+    top = len(levels) - 1
+    assert top == 3
+    spy = Spy(monkeypatch, ada.client.app, delay=0)
+    first = get(ada, project, top, (0, 0, 0))
+    assert first.status_code == 200 and spy.reads == 125
+    # The top chunk (of 125) and the first chunk of level 2 (of 64) are kept;
+    # the others stand for too few.
+    names = [name.split("/labels/")[1] for name in stored_chunks(settings, project)]
+    assert names == ["pyramid/2/0/0/0", "pyramid/3/0/0/0"]
+
+    another_process(ada.client.app)
+    spy.reads = 0
+    again = get(ada, project, top, (0, 0, 0))
+    assert again.status_code == 200 and again.content == first.content
+    assert again.headers["etag"] == first.headers["etag"]
+    assert spy.reads == 0
+    np.testing.assert_array_equal(
+        decode_chunk(again.content),
+        expected_chunk(shrink(volume, levels)[top], (0, 0, 0)),
+    )
+
+
+def test_a_stored_chunk_is_used_only_for_the_state_it_was_made_for(
+    ada, migrated_database_url, settings, monkeypatch
+):
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    volume = one_label_in_each_chunk()
+    paint(ada, project, volume)
+    levels = plan_levels(MANY)
+    top = len(levels) - 1
+    spy = Spy(monkeypatch, ada.client.app, delay=0)
+    assert get(ada, project, top, (0, 0, 0)).status_code == 200
+
+    # Change a chunk outside the first of level 2, which stays as it was.
+    volume[270 - 3, 270 - 3, 270 - 3] = 3
+    paint(ada, project, volume[267:268, 267:268, 267:268], (267, 267, 267))
+    another_process(ada.client.app)
+    spy.reads = 0
+    changed = get(ada, project, top, (0, 0, 0))
+    assert changed.status_code == 200
+    # Everything but what that chunk of level 2 is made of is made again.
+    assert spy.reads == 125 - 64
+    expected = expected_chunk(shrink(volume, levels)[top], (0, 0, 0))
+    np.testing.assert_array_equal(decode_chunk(changed.content), expected)
+
+    # What it replaced is what is kept, now.
+    another_process(ada.client.app)
+    spy.reads = 0
+    final = get(ada, project, top, (0, 0, 0))
+    assert spy.reads == 0 and final.content == changed.content
+
+
+def test_storage_trouble_doesnt_stop_coarse_chunks_being_made(
+    ada, migrated_database_url, settings, monkeypatch
+):
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    volume = one_label_in_each_chunk()
+    paint(ada, project, volume)
+    levels = plan_levels(MANY)
+    top = len(levels) - 1
+    real_get = label_pyramid.obstore.get_async
+
+    async def broken_get(store, path, *args, **kwargs):
+        if path.startswith("pyramid/"):
+            raise OSError("storage is unwell")
+        return await real_get(store, path, *args, **kwargs)
+
+    async def broken_put(store, path, *args, **kwargs):
+        raise OSError("storage is unwell")
+
+    expected = expected_chunk(shrink(volume, levels)[top], (0, 0, 0))
+    with monkeypatch.context() as patch:
+        patch.setattr(label_pyramid.obstore, "get_async", broken_get)
+        patch.setattr(label_pyramid.obstore, "put_async", broken_put)
+        response = get(ada, project, top, (0, 0, 0))
+    assert response.status_code == 200
+    np.testing.assert_array_equal(decode_chunk(response.content), expected)
+    assert stored_chunks(settings, project) == []
+
+    # A stored chunk that can't be read is made again, and stored over.
+    another_process(ada.client.app)
+    assert get(ada, project, top, (0, 0, 0)).status_code == 200
+    assert len(stored_chunks(settings, project)) == 2
+    another_process(ada.client.app)
+    with monkeypatch.context() as patch:
+        patch.setattr(label_pyramid.obstore, "get_async", broken_get)
+        response = get(ada, project, top, (0, 0, 0))
+    assert response.status_code == 200
+    np.testing.assert_array_equal(decode_chunk(response.content), expected)
+
+
+def requests_to_make_the_top(ada, project, processes, top) -> int:
+    """
+    How many requests it takes to get the top chunk, when each is answered by
+    the next of some processes (each with its own cache) and does little.
+    """
+    pyramids = [label_pyramid.LabelPyramid(blobs=72) for _ in range(processes)]
+    for count in range(1, 200):
+        ada.client.app.state.label_pyramid = pyramids[count % processes]
+        if get(ada, project, top, (0, 0, 0)).status_code == 200:
+            return count
+    raise AssertionError("the top chunk was never made")
+
+
+def test_processes_that_ask_in_turn_share_what_they_make(
+    ada, migrated_database_url, settings, monkeypatch
+):
+    top = len(plan_levels(MANY)) - 1
+
+    def climb(processes, stored=True):
+        project = make_project(ada, migrated_database_url, shape=MANY)
+        paint(ada, project, one_label_in_each_chunk())
+        with monkeypatch.context() as patch:
+            if not stored:
+                patch.setattr(label_pyramid, "STORED_COUNT", 10**9)
+            return requests_to_make_the_top(ada, project, processes, top)
+
+    alone, shared, separate = climb(1), climb(4), climb(4, stored=False)
+    # Four processes in turn make about what one does, if what they make is
+    # stored, and far more if it isn't, since each makes its own.
+    assert shared <= alone + 1
+    assert separate >= shared + 2
+
+
 def test_a_label_blob_gone_from_storage_is_an_error(ada, project, settings):
     paint(ada, project, messy_volume())
     root = pathlib.Path(settings.storage.url.removeprefix("file://"))

@@ -7,10 +7,10 @@ full-resolution label chunk, so the label zarr also offers `class_1`,
 level 0). They have the image's level shapes, and a voxel at level k covers the
 same block of the volume as the image's voxel there. Chunks stay 64-cubed.
 
-These levels exist only to be looked at. Nothing stores them, edits never
-touch them, and training, exports, accepts, and segmentation read the full
-resolution labels. How a level shrinks the one below it (`downsample_labels`)
-is in `ml4paleo.labels.pyramid`. A class that has been retired still has its
+These levels exist only to be looked at. Edits never touch them, and
+training, exports, accepts, and segmentation read the full resolution labels.
+How a level shrinks the one below it (`downsample_labels`) is in
+`ml4paleo.labels.pyramid`. A class that has been retired still has its
 voxels in the chunks, but viewers draw them as nothing, so here they count as
 unlabeled and can't outvote a class that shows.
 
@@ -44,10 +44,11 @@ from the full resolution chunks), when someone asks for it:
   below it are cached.
 - What a build finished is kept until the chunk above it is made. A request
   that gives up has only its finished chunks (the ones under a chunk not yet
-  made) to show for it, and the next request, perhaps in another process's
-  turn, needs them. So they are pinned: they go last when the cache is full,
-  and are released when the chunk above them is made, or after two minutes if
-  nobody asks again, so a build nobody comes back to can't hold memory.
+  made) to show for it, and the next request needs them. So they are pinned:
+  they are exempt from the cache's limit (up to a limit of their own, `PIN_BYTES`
+  or the cache's, whichever is more) and are released when the chunk above them
+  is made, or after two minutes if nobody asks again, so a build nobody comes
+  back to can't hold memory.
 - Requests share the work, and the memory it takes is bounded. A chunk is
   built by one request at a time: another that wants it waits for that build
   (and gets `Busy` if it gives up). A chunk of level 1 is read and shrunk, or a
@@ -56,7 +57,14 @@ from the full resolution chunks), when someone asks for it:
   slots are never held while waiting for another chunk, so they can't deadlock;
   a request holds no database connection while it waits for one.
 
-Each process has its own cache.
+- Each process has its own cache, so a build one process made is not another's:
+  asked in turn, several processes would each make the same chunks, and they
+  would start over after a restart. So a chunk that stands for many labeled
+  chunks (`STORED_COUNT`), and so took long to make, is also kept in the
+  project's label storage, under `pyramid/`, as one object per chunk (replaced
+  when the chunk changes, headed by the state it shows, which has to be the one
+  asked for to be used). It is a cache of what can be made again: if it can't
+  be read or written, the chunk is made without it.
 """
 
 import asyncio
@@ -115,6 +123,10 @@ WAIT_SECONDS = 5
 # has at most seven chunks per level pinned, so this is room for several.
 PIN_SECONDS = 120
 PIN_BYTES = 16 * 1024 * 1024
+# A chunk that stands for at least this many labeled chunks (a few hundred
+# milliseconds' work, however it is spread over requests) is also kept in
+# storage.
+STORED_COUNT = 64
 # What a cached chunk costs besides its bytes: its key, the cache's own entry
 # for it, and a pinned one's pin. Measured for tiny chunks, which are the ones
 # it matters for: 253 bytes, or 333 pinned (a test checks).
@@ -345,6 +357,53 @@ async def _read(store, sha: str) -> bytes:
     except FileNotFoundError:
         raise MissingBlob(sha) from None
     return bytes(await result.bytes_async())
+
+
+# What heads a stored chunk: what it must show for it to be used.
+_HEADER = struct.Struct(">4sB6sIq")
+
+
+def _stored_key(level: int, key: ChunkKey) -> str:
+    z, y, x = key
+    return f"pyramid/{level}/{z}/{y}/{x}"
+
+
+def _stored_header(plan: Plan, state: Fingerprint) -> bytes:
+    return _HEADER.pack(b"m4py", RULE_VERSION, plan.digest, state.count, state.versions)
+
+
+async def _load(
+    store, plan: Plan, level: int, key: ChunkKey, state: Fingerprint
+) -> bytes | None:
+    """
+    A chunk kept in storage, if it is there and shows the state asked for.
+    """
+    try:
+        result = await obstore.get_async(store, _stored_key(level, key))
+        data = bytes(await result.bytes_async())
+    except FileNotFoundError:
+        return None
+    except Exception:
+        _warn("Reading chunks of the label pyramid from storage failed")
+        log.debug("Reading a stored chunk failed", exc_info=True)
+        return None
+    header = _stored_header(plan, state)
+    return data[len(header) :] if data.startswith(header) else None
+
+
+async def _save(
+    store, plan: Plan, level: int, key: ChunkKey, state: Fingerprint, data: bytes
+) -> None:
+    try:
+        await obstore.put_async(
+            store,
+            _stored_key(level, key),
+            _stored_header(plan, state) + data,
+            use_multipart=False,
+        )
+    except Exception:
+        _warn("Storing chunks of the label pyramid failed")
+        log.debug("Storing a chunk failed", exc_info=True)
 
 
 def _combine(
@@ -580,7 +639,7 @@ class LabelPyramid:
         self._building[cached] = made
         try:
             data = await self._make(
-                db, store, project_id, plan, level, key, cached, budget, pin
+                db, store, project_id, plan, level, key, state, cached, budget, pin
             )
         except BaseException as exc:
             # Anyone waiting can only ask again, whatever stopped this.
@@ -609,10 +668,40 @@ class LabelPyramid:
         plan: Plan,
         level: int,
         key: ChunkKey,
+        state: Fingerprint,
         cached: Hashable,
         budget: _Budget,
         pin: bool,
     ) -> bytes | None:
+        stored = state.count >= STORED_COUNT
+        if stored and (data := await _load(store, plan, level, key, state)):
+            self._cache.put(cached, data, pin=pin)
+            return data
+        data, kept = await self._assemble(
+            db, store, project_id, plan, level, key, budget
+        )
+        if data is not None:
+            self._cache.put(cached, data, pin=pin)
+            if stored:
+                await _save(store, plan, level, key, state, data)
+        for child_key in kept:
+            self._cache.unpin(child_key)
+        return data
+
+    async def _assemble(
+        self,
+        db: AsyncSession,
+        store,
+        project_id: uuid.UUID,
+        plan: Plan,
+        level: int,
+        key: ChunkKey,
+        budget: _Budget,
+    ) -> tuple[bytes | None, list[Hashable]]:
+        """
+        A chunk made of the ones under it, and the cache keys of the chunks of
+        the level below that were made into it.
+        """
         levels = plan.levels
         step = _step(levels, level)
         origin = (key[0] * step[0], key[1] * step[1], key[2] * step[2])
@@ -628,38 +717,32 @@ class LabelPyramid:
                     for (at, _), blob in zip(leaves, blobs, strict=True)
                 ]
                 data = await run_in_threadpool(_combine, parts, step, plan.retired)
-        else:
-            parts = []
-            below = await _children(db, project_id, levels, level, key)
-            for child, child_state in sorted(below.items()):
-                # What is made of a chunk under this one is kept (pinned)
-                # until this one is made, so a request that gives up before
-                # then leaves its work for the next.
-                made = await self._build(
-                    db,
-                    store,
-                    project_id,
-                    plan,
-                    level - 1,
-                    child,
-                    child_state,
-                    budget,
-                    pin=True,
-                )
-                if made is not None:
-                    parts.append((_position(child, origin), made))
-                    kept.append(
-                        _cache_key(project_id, plan, level - 1, child, child_state)
-                    )
-            budget.spend()
-            await db.rollback()
-            async with self._gate():
-                data = await run_in_threadpool(_combine, parts, step)
-        if data is not None:
-            self._cache.put(cached, data, pin=pin)
-        for child_key in kept:
-            self._cache.unpin(child_key)
-        return data
+            return data, kept
+        parts = []
+        below = await _children(db, project_id, levels, level, key)
+        for child, child_state in sorted(below.items()):
+            # What is made of a chunk under this one is kept (pinned) until
+            # this one is made, so a request that gives up before then leaves
+            # its work for the next.
+            made = await self._build(
+                db,
+                store,
+                project_id,
+                plan,
+                level - 1,
+                child,
+                child_state,
+                budget,
+                pin=True,
+            )
+            if made is not None:
+                parts.append((_position(child, origin), made))
+                kept.append(_cache_key(project_id, plan, level - 1, child, child_state))
+        budget.spend()
+        await db.rollback()
+        async with self._gate():
+            data = await run_in_threadpool(_combine, parts, step)
+        return data, kept
 
 
 def _cache_key(
