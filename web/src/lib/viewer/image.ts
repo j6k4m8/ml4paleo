@@ -16,18 +16,25 @@ export function absolute(url: string): string {
 }
 
 /**
- * A fetch for zarrita's FetchStore that reads shard indexes (the suffix
- * ranges it asks for) whatever happens to the read that asked first.
- * zarrita reads each shard's index once and shares it with every chunk of
- * the shard, passing on the first read's abort signal: cancelling that one
- * chunk would fail all the others waiting for the index.
+ * A fetch for zarrita's FetchStore reading sharded arrays, where each chunk
+ * is a byte range of its shard's one URL.
+ *
+ * Ranges skip the browser's HTTP cache, which lets one request per URL
+ * through at a time, so a shard's chunks would load one by one (decoded
+ * chunks are cached in memory instead, by `ChunkStore`). And shard indexes
+ * (suffix ranges) are read whatever happens to the read that asked first:
+ * zarrita reads each index once for every chunk of its shard, passing on the
+ * first read's abort signal, so cancelling that one chunk would fail all the
+ * others waiting for the index.
  */
-export function shardIndexesKept(
+export function shardedFetch(
 	fetcher: (request: Request) => Promise<Response> = (request) => fetch(request),
 ): (request: Request) => Promise<Response> {
 	return (request) => {
-		const suffix = request.headers.get("range")?.startsWith("bytes=-");
-		return fetcher(suffix ? new Request(request, { signal: null }) : request);
+		const range = request.headers.get("range");
+		if (!range) return fetcher(request);
+		const index = range.startsWith("bytes=-");
+		return fetcher(new Request(request, { cache: "no-store", ...(index ? { signal: null } : {}) }));
 	};
 }
 

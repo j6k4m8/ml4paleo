@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as zarr from "zarrita";
-import { shardIndexesKept } from "./image";
+import { shardedFetch } from "./image";
 
 /**
  * A 4 × 4 uint8 array in one shard of four 2 × 2 chunks (chunk k holds the
@@ -59,10 +59,10 @@ function shardedArray() {
 	return { fetcher, reads };
 }
 
-describe("shardIndexesKept", () => {
+describe("shardedFetch", () => {
 	it("reads a shard's index for every chunk waiting on it, even if the read that asked first is cancelled", async () => {
 		const { fetcher, reads } = shardedArray();
-		const store = new zarr.FetchStore("http://test/image/", { useSuffixRequest: true, fetch: shardIndexesKept(fetcher) });
+		const store = new zarr.FetchStore("http://test/image/", { useSuffixRequest: true, fetch: shardedFetch(fetcher) });
 		const array = await zarr.open.v3(zarr.root(store), { kind: "array" });
 		const first = new AbortController();
 		const cancelled = zarr.get(array, [zarr.slice(0, 2), zarr.slice(0, 2)], { opts: { signal: first.signal } });
@@ -74,9 +74,21 @@ describe("shardIndexesKept", () => {
 		expect(reads.filter((r) => r.includes("bytes=-"))).toHaveLength(1);
 	});
 
+	it("reads ranges past the browser's HTTP cache, which would take them one at a time", async () => {
+		const seen: Request[] = [];
+		const fetcher = shardedFetch(async (request) => {
+			seen.push(request);
+			return new Response("");
+		});
+		await fetcher(new Request("http://test/image/zarr.json"));
+		await fetcher(new Request("http://test/image/c/0/0", { headers: { Range: "bytes=0-3" } }));
+		expect(seen.map((r) => r.cache)).toEqual(["default", "no-store"]);
+		expect(seen[1]?.headers.get("range")).toBe("bytes=0-3");
+	});
+
 	it("still cancels chunk reads", async () => {
 		const { fetcher, reads } = shardedArray();
-		const store = new zarr.FetchStore("http://test/image/", { useSuffixRequest: true, fetch: shardIndexesKept(fetcher) });
+		const store = new zarr.FetchStore("http://test/image/", { useSuffixRequest: true, fetch: shardedFetch(fetcher) });
 		const array = await zarr.open.v3(zarr.root(store), { kind: "array" });
 		await zarr.get(array, [zarr.slice(0, 2), zarr.slice(0, 2)]);
 		const controller = new AbortController();
