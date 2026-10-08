@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { base64, packBits, zstdFrame } from "../labels/deltas";
 import type { Chunk } from "./chunks";
 import { LabelLayer, strictOn } from "./labels";
@@ -7,27 +7,36 @@ import type { WorkerPool } from "./loader";
 /**
  * A worker pool whose label chunks come from a map the test controls. With
  * `held`, loads answer from the map as it is when they start but arrive
- * only when the test calls `release`.
+ * only when the test calls `release`. The next `failures.left` loads fail.
  */
 function fakePool(server: Map<string, { value: number; version?: number }>, held = false) {
 	const loads: string[] = [];
 	const waiting: (() => void)[] = [];
+	const failures = { left: 0 };
 	const pool = {
 		load: async (request: { region: [number, number][] }): Promise<Chunk> => {
 			const id = request.region.map(([start]) => start / 64).join("/");
 			loads.push(id);
 			const { value, version } = server.get(id) ?? { value: 0, version: 0 };
 			if (held) await new Promise<void>((resolve) => waiting.push(resolve));
+			if (failures.left > 0) {
+				failures.left -= 1;
+				throw new Error("offline");
+			}
 			return { data: new Uint8Array(8).fill(value), shape: [2, 2, 2], version };
 		},
 	};
 	const release = () => {
 		for (const resolve of waiting.splice(0)) resolve();
 	};
-	return { pool: pool as unknown as WorkerPool, loads, release };
+	return { pool: pool as unknown as WorkerPool, loads, release, failures };
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+// For tests with fake timers: lets the promises already resolved run their callbacks.
+const settled = async () => {
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+};
 
 const delta = (value: number, key: [number, number, number] = [0, 0, 0]) => ({
 	key,
@@ -451,5 +460,115 @@ describe("LabelLayer", () => {
 		// The load that was under way landed clean, without the refused edit.
 		expect(first(layer, "0/0/0")).toBe(3);
 		expect(loads).toHaveLength(2);
+	});
+
+	describe("a reload that fails", () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		/** A chunk loaded at version 1 whose reload, for someone's edit (2), fails `failures` times. */
+		const loadedWithFailures = async (failures: number, held = false) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const server = new Map([["0/0/0", { value: 1, version: 1 }]]);
+			const pool = fakePool(server, held);
+			const layer = new LabelLayer("p", pool.pool, [2, 2, 2]);
+			const loading = loaded(layer, "0/0/0");
+			pool.release();
+			await loading;
+			server.set("0/0/0", { value: 2, version: 2 });
+			pool.failures.left = failures;
+			layer.changed([{ key: [0, 0, 0], version: 2 }]);
+			pool.release();
+			await settled();
+			return { layer, ...pool };
+		};
+
+		it("leaves the copy shown, and is tried again", async () => {
+			const { layer, loads } = await loadedWithFailures(1);
+			expect(loads).toHaveLength(2);
+			expect(first(layer, "0/0/0")).toBe(1);
+			expect(layer.store.peek("0/0/0")).toBeDefined();
+			const heard = told(layer);
+			await vi.advanceTimersByTimeAsync(1000);
+			await settled();
+			expect(loads).toHaveLength(3);
+			expect(first(layer, "0/0/0")).toBe(2);
+			expect(layer.versionOf("0/0/0")).toBe(2);
+			expect(heard).toEqual([["0/0/0"]]);
+		});
+
+		it("waits twice as long each time, up to half a minute", async () => {
+			const { layer, loads, failures } = await loadedWithFailures(6);
+			const waits = [1000, 2000, 4000, 8000, 16_000, 30_000];
+			for (const [attempt, wait] of waits.entries()) {
+				expect(loads).toHaveLength(2 + attempt);
+				await vi.advanceTimersByTimeAsync(wait - 1);
+				await settled();
+				expect(loads).toHaveLength(2 + attempt);
+				await vi.advanceTimersByTimeAsync(1);
+				await settled();
+			}
+			// The sixth try worked.
+			expect(failures.left).toBe(0);
+			expect(loads).toHaveLength(8);
+			expect(first(layer, "0/0/0")).toBe(2);
+		});
+
+		it("isn't tried again once a reload of it has worked", async () => {
+			const { layer, loads } = await loadedWithFailures(1);
+			// Another change event reloads the chunk before the retry is due.
+			layer.reload(["0/0/0"]);
+			await settled();
+			expect(loads).toHaveLength(3);
+			expect(first(layer, "0/0/0")).toBe(2);
+			// The retry's timer is gone with it.
+			expect(vi.getTimerCount()).toBe(0);
+			await vi.advanceTimersByTimeAsync(60_000);
+			await settled();
+			expect(loads).toHaveLength(3);
+		});
+
+		it("isn't tried again once a newer copy came another way", async () => {
+			const { layer, loads } = await loadedWithFailures(1);
+			await layer.store.refresh("0/0/0");
+			expect(loads).toHaveLength(3);
+			await vi.advanceTimersByTimeAsync(60_000);
+			await settled();
+			expect(loads).toHaveLength(3);
+		});
+
+		it("isn't tried again while the chunk is loading another way", async () => {
+			const { layer, loads, release } = await loadedWithFailures(1, true);
+			const loading = layer.store.refresh("0/0/0");
+			expect(loads).toHaveLength(3);
+			await vi.advanceTimersByTimeAsync(1000);
+			await settled();
+			expect(loads).toHaveLength(3);
+			release();
+			await loading;
+		});
+
+		it("isn't tried again once the chunk's copy is gone", async () => {
+			const { layer, loads } = await loadedWithFailures(1);
+			layer.store.invalidate("0/0/0");
+			await vi.advanceTimersByTimeAsync(60_000);
+			await settled();
+			expect(loads).toHaveLength(2);
+		});
+
+		it("isn't tried again after the layer stops", async () => {
+			const { layer, loads } = await loadedWithFailures(1);
+			layer.stop();
+			await vi.advanceTimersByTimeAsync(60_000);
+			await settled();
+			expect(loads).toHaveLength(2);
+		});
+
+		it("keeps what's shown through a failure that isn't followed by a retry", async () => {
+			const { layer } = await loadedWithFailures(1);
+			expect(first(layer, "0/0/0")).toBe(1);
+			expect(layer.versionOf("0/0/0")).toBe(1);
+		});
 	});
 });

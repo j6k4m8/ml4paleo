@@ -39,6 +39,9 @@ interface LocalDelta {
 const CACHE_BYTES = 128 * 1024 * 1024;
 // How many of the chunks this page edited last it remembers (`recent`).
 const RECENT = 256;
+// A reload that failed is tried again after this long, doubling each time up to the longest.
+const RETRY_MS = 1000;
+const RETRY_LONGEST_MS = 30_000;
 
 /**
  * An edit as it goes out. A strict one is refused if its chunks changed since
@@ -64,6 +67,11 @@ export class LabelLayer {
 	#local = new Map<string, Map<string, LocalDelta>>();
 	// Chunks this page edited, the latest last.
 	#recent = new Set<string>();
+	// Reloads that failed and will be tried again: how many times each has
+	// failed in a row, and the timer of the next try.
+	#failures = new Map<string, number>();
+	#retries = new Map<string, ReturnType<typeof setTimeout>>();
+	#stopped = false;
 	/** Called if live updates stop for good (signed out, or removed from the project). */
 	onStopped: (() => void) | null = null;
 
@@ -203,15 +211,22 @@ export class LabelLayer {
 		for (const id of ids) {
 			if (this.store.get(id) && this.store.isWanted(id)) {
 				this.store.refresh(id, versions?.get(id)).then(
-					() => this.#emit([id]),
 					() => {
-						// Stopped for good (no view wants it now) or failed: the
-						// out-of-date copy goes, and views drop what they drew from it,
-						// so the next look loads it afresh. A refresh that took over
-						// says so itself.
-						if (this.store.isLoading(id)) return;
-						this.store.invalidate(id);
+						this.#giveUp(id);
 						this.#emit([id]);
+					},
+					(error: unknown) => {
+						// A reload that failed leaves the copy shown, and is tried again.
+						if (!(error instanceof DOMException && error.name === "AbortError")) {
+							this.#retry(id, versions?.get(id));
+							return;
+						}
+						// One stopped (no view wants the chunk now) took the out-of-date
+						// copy with it, so views forget what they drew from it and load
+						// the chunk afresh, unless another reload took over, which says
+						// so itself.
+						this.#giveUp(id);
+						if (!this.store.isLoading(id)) this.#emit([id]);
 					},
 				);
 			} else {
@@ -220,6 +235,28 @@ export class LabelLayer {
 			}
 		}
 		this.#emit(dropped);
+	}
+
+	/** Load a chunk again after a failed reload, if the copy shown is still the out-of-date one. */
+	#retry(id: string, version: number | undefined): void {
+		clearTimeout(this.#retries.get(id));
+		const stale = this.store.peek(id);
+		if (this.#stopped || !stale) return this.#giveUp(id);
+		const failures = (this.#failures.get(id) ?? 0) + 1;
+		this.#failures.set(id, failures);
+		const timer = setTimeout(() => {
+			// A newer copy came since, or the chunk is loading again, or it's gone.
+			if (this.store.peek(id) !== stale || this.store.isLoading(id)) return this.#giveUp(id);
+			this.#retries.delete(id);
+			this.reload([id], version === undefined ? undefined : new Map([[id, version]]));
+		}, Math.min(RETRY_LONGEST_MS, RETRY_MS * 2 ** (failures - 1)));
+		this.#retries.set(id, timer);
+	}
+
+	#giveUp(id: string): void {
+		clearTimeout(this.#retries.get(id));
+		this.#retries.delete(id);
+		this.#failures.delete(id);
 	}
 
 	/**
@@ -314,6 +351,10 @@ export class LabelLayer {
 	}
 
 	stop(): void {
+		this.#stopped = true;
+		for (const timer of this.#retries.values()) clearTimeout(timer);
+		this.#retries.clear();
+		this.#failures.clear();
 		this.#events?.close();
 		this.store.keepOnly(new Set());
 		this.#listeners.clear();
