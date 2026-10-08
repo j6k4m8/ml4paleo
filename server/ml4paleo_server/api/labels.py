@@ -21,11 +21,12 @@ Accepting a prediction is how a model's labels become the project's:
 one of `roi_id` (an ROI) or `box` (`[z0, y0, x0, z1, y1, x1]`, whole voxels,
 half-open, not empty, inside the image, as an ROI's box is; the annotator
 sends the part of a slice a view shows). Either way the deltas must stay
-inside it and it must hold at most 256^3 voxels, each delta writes one
-predicted value (never 0) into only unlabeled voxels, and the server reads
-the stored prediction and refuses the op unless it holds that value at every
-voxel a delta selects, and is of the project's current image if it says which
-image it was made from (409). The op is `Source.MODEL_VERIFIED`, and its tool
+inside it and the labels they write span at most 256^3 voxels (a box may
+hold no more either; an ROI may be bigger), each delta writes one predicted
+value (never 0) into only unlabeled voxels, and the server reads the stored
+prediction and refuses the op unless it holds that value at every voxel a
+delta selects, and is of the project's current image if it says which image
+it was made from (409). The op is `Source.MODEL_VERIFIED`, and its tool
 record names the prediction, its model, and the ROI or the box; garbage
 collection keeps a prediction such an op names, undone or not.
 
@@ -498,9 +499,9 @@ async def accept_prediction(
     The server checks the claim: each delta writes one predicted value (not
     0) into only unlabeled voxels inside the ROI or box, and the stored
     prediction has exactly that value at every voxel it selects. A box is
-    checked as an ROI's is (whole voxels, not empty, inside the image), and
-    either may hold at most `MAX_ACCEPT_VOXELS`. Undo and redo work as for
-    any edit.
+    checked as an ROI's is (whole voxels, not empty, inside the image). The
+    labels sent may span at most `MAX_ACCEPT_VOXELS` (and so may a box).
+    Undo and redo work as for any edit.
     """
     if done := await labels.existing(db, project.id, body.client_op_id):
         return _op_out(done)
