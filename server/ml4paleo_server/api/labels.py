@@ -974,7 +974,10 @@ async def _coarse_chunk(
         raise HTTPException(
             status_code=503,
             detail="These labels take a moment to work out; ask again.",
-            headers={"Retry-After": str(label_pyramid.retry_after(level, key))},
+            headers={
+                **headers,
+                "Retry-After": str(label_pyramid.retry_after(level, key)),
+            },
         ) from None
     except label_pyramid.MissingBlob:
         raise HTTPException(

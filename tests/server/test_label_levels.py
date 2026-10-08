@@ -587,6 +587,10 @@ def test_a_chunk_too_big_for_one_request_comes_in_several(
         assert response.headers["retry-after"] == str(
             label_pyramid.retry_after(top, (0, 0, 0))
         )
+        # As on every answer for a coarse chunk: the state it was asked for,
+        # and not to be kept.
+        assert response.headers["cache-control"] == "private, no-cache"
+        assert int(response.headers["x-pyramid-version"]) > 0
     assert asked[-1][0] == 200
     assert [code for code, _ in asked[:-1]] == [503] * (len(asked) - 1)
     assert len(asked) > 2
