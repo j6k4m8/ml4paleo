@@ -23,6 +23,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 
@@ -163,8 +164,13 @@ async def train_model(
     try:
         params = plugin.Params(**body.params)
     except ValidationError as exc:
-        raise HTTPException(
-            status_code=422, detail=exc.errors(include_url=False)
+        # Answered as the rest of the body's errors are, which are safe to send
+        # whatever the request held (see `app.invalid_request`).
+        raise RequestValidationError(
+            [
+                {**error, "loc": ("body", "params", *error["loc"])}
+                for error in exc.errors(include_url=False)
+            ]
         ) from None
     # Look for a free model slot before pinning a training set, so a refused
     # training stores nothing; `train.start` reserves the slot. Commit the

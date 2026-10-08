@@ -4,10 +4,13 @@ The API skeleton: health, security headers, SPA serving, and migrations.
 
 import base64
 import hashlib
+import http.client
 import uuid
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
+from helpers import NOT_JSON, strict_json
 from ml4paleo_server import migrations
 from ml4paleo_server.app import create_app
 from ml4paleo_server.db import uuid7
@@ -136,3 +139,64 @@ def test_empty_secret_files_are_ignored(monkeypatch, tmp_path):
     (tmp_path / "empty").write_text("\n")
     monkeypatch.setenv("M4P_STORAGE__SECRET_ACCESS_KEY_FILE", str(tmp_path / "empty"))
     assert Settings().storage.secret_access_key is None
+
+
+def login_with(literal: str) -> str:
+    """A login whose password is `literal`, written into the JSON as it is (NaN, say, unquoted)."""
+    return '{"username": "ada", "password": ' + literal + "}"
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_a_number_json_cannot_hold_is_a_422_a_browser_can_read(client, literal):
+    response = client.post(
+        "/api/auth/login",
+        content=login_with(literal),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    [error] = strict_json(response.text)["detail"]
+    # The usual error, as the web app reads it (where, and what), with the input written as text.
+    assert error["loc"] == ["body", "password"]
+    assert error["type"] == "string_type" and "string" in error["msg"]
+    assert error["input"] == NOT_JSON[literal]
+
+
+def test_other_validation_errors_keep_their_usual_shape(client):
+    response = client.post("/api/auth/login", json={"username": "ada"})
+    assert response.status_code == 422
+    [error] = response.json()["detail"]
+    assert error["loc"] == ["body", "password"]
+    assert (error["type"], error["msg"]) == ("missing", "Field required")
+    assert error["input"] == {"username": "ada"}
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_a_number_json_cannot_hold_gets_its_422_over_a_real_connection(
+    live_server, literal
+):
+    where = urlsplit(live_server)
+    connection = http.client.HTTPConnection(where.hostname, where.port, timeout=10)
+    try:
+        connection.request(
+            "POST",
+            "/api/auth/login",
+            body=login_with(literal),
+            headers={"Content-Type": "application/json"},
+        )
+        # A dropped connection raises here instead of answering.
+        response = connection.getresponse()
+        assert response.status == 422
+        [error] = strict_json(response.read().decode())["detail"]
+        assert (
+            error["loc"] == ["body", "password"] and error["input"] == NOT_JSON[literal]
+        )
+    finally:
+        connection.close()
+    # And the server goes on.
+    connection = http.client.HTTPConnection(where.hostname, where.port, timeout=10)
+    try:
+        connection.request("GET", "/api/health")
+        assert connection.getresponse().status == 200
+    finally:
+        connection.close()

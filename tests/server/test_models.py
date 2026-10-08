@@ -13,7 +13,7 @@ import uuid
 import numpy as np
 import obstore
 import pytest
-from helpers import SECRET_KEY, add_worker, run_db, signup
+from helpers import SECRET_KEY, add_worker, run_db, signup, strict_json
 from ml4paleo_server import artifacts, jobs, labels, pipelines
 from ml4paleo_server.db import (
     Artifact,
@@ -98,6 +98,23 @@ def add_class(browser, project):
         f"/api/projects/{project}/labels/classes",
         json={"name": "bone", "color": "#ffffff"},
     ).json()["value"]
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_a_parameter_json_cannot_hold_is_a_422(ada, literal):
+    project = make_project(ada)
+    base = f"/api/projects/{project}/models"
+    for name in ("n_estimators", "sigma_max"):
+        response = ada.post(
+            base,
+            content=f'{{"params": {{"{name}": {literal}}}}}',
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 422, (name, response.text)
+        # Which parameter, as the web app reads it, in a body a browser can parse.
+        [error] = strict_json(response.text)["detail"]
+        assert error["loc"] == ["body", "params", name]
+        assert error["msg"]
 
 
 def test_training_sets_pin_labels_and_rois(ada, settings, migrated_database_url):

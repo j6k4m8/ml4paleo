@@ -14,7 +14,7 @@ import uuid
 
 import numpy as np
 import pytest
-from helpers import run_db, signup
+from helpers import NOT_JSON, run_db, signup, strict_json
 from ml4paleo_server import artifacts, jobs, labels
 from ml4paleo_server.db import (
     Artifact,
@@ -1037,6 +1037,94 @@ def test_the_history_lists_a_box_accept_without_an_roi(
         "v1_job_id": None,
         "roi_id": None,
     }
+
+
+def with_number(body: dict, literal: str) -> str:
+    """
+    `body` as JSON text, with each "@number@" in it written as `literal`: NaN, an
+    infinity, or a number too big for a float, which Python's JSON parser takes.
+    """
+    return json.dumps(body).replace('"@number@"', literal)
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_numbers_json_cannot_hold_are_a_422_in_the_labels_api(
+    ada, project, settings, migrated_database_url, literal
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    base = f"/api/projects/{project}/labels"
+    delta = deltas_for(np.ones((1, 1, 1), dtype=bool), (0, 0, 0), value=2)[0]
+    accept = {
+        "client_op_id": str(uuid.uuid4()),
+        "prediction_artifact_id": prediction,
+        "box": [0, 0, 0, 10, 10, 10],
+        "deltas": [delta],
+    }
+    ops = {"client_op_id": str(uuid.uuid4()), "deltas": [delta]}
+    shown = NOT_JSON[literal]
+    # Each: where it is, the request, the error's place, and the input it shows.
+    cases = {
+        "the accept's box": (
+            f"{base}/accept",
+            {**accept, "box": [0, 0, 0, "@number@", 10, 10]},
+            ["body", "box", 3],
+            shown,
+        ),
+        "an edit's base version": (
+            f"{base}/ops",
+            {**ops, "deltas": [{**delta, "base_version": "@number@"}]},
+            ["body", "deltas", 0, "base_version"],
+            shown,
+        ),
+        "a delta's box": (
+            f"{base}/ops",
+            {**ops, "deltas": [{**delta, "box": [0, 0, 0, 1, 1, "@number@"]}]},
+            ["body", "deltas", 0, "box", 5],
+            shown,
+        ),
+        "a delta's value": (
+            f"{base}/accept",
+            {**accept, "deltas": [{**delta, "value": "@number@"}]},
+            ["body", "deltas", 0, "value"],
+            shown,
+        ),
+        "a class's color": (
+            f"{base}/classes",
+            {"name": "tooth", "color": "@number@"},
+            ["body", "color"],
+            shown,
+        ),
+        "an edit's strict flag": (
+            f"{base}/ops",
+            {**ops, "strict": "@number@"},
+            ["body", "strict"],
+            shown,
+        ),
+        # Free-form, so it passes as a model field and reaches the database unless
+        # it is checked: here the input is the whole tool, with the number as text.
+        "an edit's tool": (
+            f"{base}/ops",
+            {**ops, "tool": {"x": "@number@"}},
+            ["body", "tool"],
+            {"x": shown},
+        ),
+    }
+    before = ada.get(f"{base}/counts").json()
+    for name, (url, body, place, seen) in cases.items():
+        response = ada.post(
+            url,
+            content=with_number(body, literal),
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 422, (name, response.status_code, response.text)
+        errors = strict_json(response.text)["detail"]
+        [error] = [e for e in errors if e["loc"] == place]
+        assert error["input"] == seen, name
+        assert error["msg"], name
+    # Nothing was written or made.
+    assert ada.get(f"{base}/counts").json() == before
+    assert len(ada.get(f"{base}/classes").json()) == 2
+    assert ada.get(f"{base}/ops").json() == []
 
 
 def test_the_history_names_people_and_models(

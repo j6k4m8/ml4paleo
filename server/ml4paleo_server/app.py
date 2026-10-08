@@ -9,14 +9,18 @@ single-page app): existing files are served as-is and any other path gets
 import base64
 import contextlib
 import hashlib
+import math
 import pathlib
 import re
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 from urllib.parse import urlsplit
 
 import obstore
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
@@ -141,6 +145,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.label_pyramid = LabelPyramid(settings.label_cache_mb * 1024 * 1024)
 
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(
+        request: Request, exc: RequestValidationError
+    ) -> Response:
+        """
+        A 422 that says what is wrong, as FastAPI's own does. Each error
+        echoes the input it refused, and a number JSON can't hold (NaN or an
+        infinity, which Python's parser takes, as it does a number too big for
+        a float, like 1e999) can't be written back: the default answer fails
+        to render, and the request gets a 500.
+        """
+        return JSONResponse(
+            status_code=422,
+            content={"detail": _writable(jsonable_encoder(exc.errors()))},
+        )
+
     @app.middleware("http")
     async def csrf_protection(request: Request, call_next) -> Response:
         """
@@ -219,6 +239,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _serve_web_app(settings.web_dir, path)
 
     return app
+
+
+def _writable(value: Any) -> Any:
+    """
+    `value` (as `jsonable_encoder` leaves it) with each number JSON can't hold
+    written as text instead: "nan", "inf", or "-inf".
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _writable(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_writable(item) for item in value]
+    return value
 
 
 def _upload_origin(settings: Settings) -> str | None:

@@ -322,7 +322,13 @@ class OpIn(BaseModel):
     @field_validator("tool")
     @classmethod
     def _small(cls, tool: dict[str, Any]) -> dict[str, Any]:
-        if len(json.dumps(tool)) > MAX_TOOL_BYTES:
+        # It is stored as JSON, which can't hold NaN or the infinities (Python's
+        # parser takes them, and the database refuses them).
+        try:
+            text = json.dumps(tool, allow_nan=False)
+        except ValueError:
+            raise ValueError("tool can't hold NaN or infinity") from None
+        if len(text) > MAX_TOOL_BYTES:
             raise ValueError("tool is too large")
         return tool
 
