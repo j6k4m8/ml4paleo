@@ -52,6 +52,7 @@
 		voxels,
 		within,
 	} from "../rois.svelte";
+	import { BACKGROUND_VALUE, withBackground } from "./background";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
 	import { type Action, actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
@@ -98,6 +99,11 @@
 	let cancelling = $state(false);
 	let segmentation: ChunkStore | null = $state(null);
 	let classes: LabelClass[] = $state([]);
+	// The classes plus Background, which the person picks from and paints with.
+	const pickable = $derived(withBackground(classes));
+	// Whether any background has been painted (by anyone, or here); assumed until the server says not, so the hint doesn't flash.
+	let hasBackground = $state(true);
+	let paintedBackground = false;
 	let error = $state("");
 	// Why the prediction layer couldn't load when the page opened; cleared
 	// when a later load works.
@@ -179,6 +185,10 @@
 			// Classes added here or elsewhere reach the list, and the palette.
 			layer.onClasses(() => (classes = layer.classes));
 			viewer.activeClass ??= classes[0]?.value ?? null;
+			layer.counts().then(
+				(counts) => (hasBackground = paintedBackground || (counts.get(BACKGROUND_VALUE) ?? 0) > 0),
+				() => {},
+			);
 			queue.onOutcome((outcome) => {
 				if ("cancelled" in outcome) {
 					layer.settle(outcome.op.local, null);
@@ -270,6 +280,7 @@
 		const deltas = splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value, onlyIf });
 		notice = "";
 		for (const op of queue.edit(deltas, { strict, tool })) labels.applyLocal(op.local, op.deltas);
+		if (value === BACKGROUND_VALUE && deltas.length > 0) hasBackground = paintedBackground = true;
 		viewer.revealLabels();
 	}
 
@@ -746,7 +757,7 @@
 				viewer.brushRadius = Math.min(64, Math.max(viewer.brushRadius + 0.5, Math.round(viewer.brushRadius * 1.25 * 2) / 2));
 				return;
 			case "class": {
-				const chosen = classes[Number(event.key) - 1];
+				const chosen = pickable[Number(event.key) - 1];
 				if (chosen) viewer.activeClass = chosen.value;
 				return;
 			}
@@ -860,7 +871,7 @@
 		},
 	];
 
-	const activeClass = $derived(classes.find((c) => c.value === viewer.activeClass));
+	const activeClass = $derived(pickable.find((c) => c.value === viewer.activeClass));
 
 	/** Open the new-class form, its name ready to type (what's typed already stays). */
 	async function startClass() {
@@ -912,10 +923,12 @@
 		}
 		savingClass = true;
 		classError = "";
+		const first = classes.length === 0;
 		try {
 			const made = await labels.addClass(name, classColor);
 			// Ready to paint with it, which is why anyone adds one.
 			viewer.activeClass = made.value;
+			if (first) setTool("brush");
 			classAdded = `Added ${made.name}.`;
 			savingClass = false;
 			await closeClassForm();
@@ -1203,24 +1216,49 @@
 						</button>
 					{/if}
 				{/snippet}
-				{#if classes.length > 0}
-					<ul class="-mx-2.5 -my-1 flex flex-col">
-						{#each classes as label, index (label.value)}
-							<li>
-								<button
-									class="flex w-full items-center gap-2 px-2.5 py-1 text-left {viewer.activeClass === label.value ? 'bg-accent-soft text-ink' : 'hover:bg-raised'}"
-									onclick={() => (viewer.activeClass = label.value)}
-									aria-pressed={viewer.activeClass === label.value}
-								>
-									<span class="size-3 rounded-[2px] shadow-[0_0_0_1px_black]" style:background={label.color}></span>
-									<span class="flex-1">{label.name}</span>
-									{#if index < 9}<span class="kbd">{index + 1}</span>{/if}
-								</button>
-							</li>
-						{/each}
-					</ul>
-				{:else if labels}
-					<p class="text-ink-dim">No classes yet. Add one to start labeling.</p>
+				{#if labels && classes.length === 0}
+					<div class="flex flex-col gap-1 rounded-sm border border-edge bg-field p-2.5">
+						<p class="font-medium text-ink">Start labeling</p>
+						<p class="text-ink-dim">
+							The model learns from two kinds of labels: what you're looking for, and background, which is everything else.
+						</p>
+						<ol class="ml-4 list-decimal text-ink-dim">
+							<li>Name what you're looking for, below.</li>
+							<li>Paint a little of it, then paint some Background, which is already in the list.</li>
+						</ol>
+					</div>
+				{/if}
+				<ul class="-mx-2.5 -my-1 flex flex-col">
+					{#each pickable as label, index (label.value)}
+						<li>
+							<button
+								class="flex w-full items-center gap-2 px-2.5 py-1 text-left {viewer.activeClass === label.value ? 'bg-accent-soft text-ink' : 'hover:bg-raised'}"
+								onclick={() => (viewer.activeClass = label.value)}
+								aria-pressed={viewer.activeClass === label.value}
+								title={label.value === BACKGROUND_VALUE ? "Paint everything that isn't what you're looking for" : undefined}
+							>
+								<span class="size-3 rounded-[2px] shadow-[0_0_0_1px_black]" style:background={label.color}></span>
+								<span class="flex-1">{label.name}</span>
+								{#if index < 9}<span class="kbd">{index + 1}</span>{/if}
+							</button>
+						</li>
+					{/each}
+				</ul>
+				{#if labels && classes.length > 0 && !hasBackground}
+					<div class="flex flex-col gap-1.5 text-ink-dim">
+						<p>
+							<span class="text-ink">Paint some Background too:</span> everything that isn't what you're looking for. The model needs both to tell them apart.
+						</p>
+						<button
+							class="btn self-start"
+							onclick={() => {
+								viewer.activeClass = BACKGROUND_VALUE;
+								if (viewer.tool === "navigate") setTool("brush");
+							}}
+						>
+							Paint Background
+						</button>
+					</div>
 				{/if}
 				<p class="sr-only" role="status">{classAdded}</p>
 				{#if classFormOpen}
@@ -1231,7 +1269,7 @@
 								bind:this={classInput}
 								bind:value={className}
 								maxlength="100"
-								placeholder="Class name, like bone"
+								placeholder={classes.length === 0 ? "What are you looking for? Like bone" : "Class name, like bone"}
 								aria-label="Class name"
 								autocomplete="off"
 								required
@@ -1247,7 +1285,7 @@
 						</div>
 						{#if classError}<p class="error" role="alert">{classError}</p>{/if}
 						<div class="flex items-center gap-2">
-							<button class="btn btn-primary" disabled={!className.trim()} aria-disabled={savingClass}>Add</button>
+							<button class="btn btn-primary" disabled={!className.trim()} aria-disabled={savingClass}>{classes.length === 0 ? "Start labeling" : "Add"}</button>
 							{#if classes.length > 0}
 								<button type="button" class="btn btn-ghost" disabled={savingClass} onclick={closeClassForm}>Cancel</button>
 							{/if}

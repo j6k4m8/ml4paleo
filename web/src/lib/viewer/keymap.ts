@@ -56,7 +56,7 @@ export const KEYMAP: Binding[] = [
 	{ action: "accept", keys: ["a"], label: "Accept the prediction in the selected ROI as labels" },
 	{ action: "smaller", keys: ["["], label: "Smaller brush" },
 	{ action: "bigger", keys: ["]"], label: "Bigger brush" },
-	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class" },
+	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class (1 is Background)" },
 	{ action: "close-polygon", keys: ["Enter"], label: "Close the polygon (with Alt: cut it out of the class; with Shift: fill it)" },
 	{ action: "remove-point", keys: ["Backspace"], label: "Remove the polygon's last point" },
 	{ action: "cancel", keys: ["Escape"], label: "Drop the polygon, then go back to navigating" },

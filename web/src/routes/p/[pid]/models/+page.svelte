@@ -3,6 +3,7 @@
 	import { api, message } from "#lib/api.ts";
 	import { latestPredictions, unfinished } from "#lib/pipelines.ts";
 	import type { Pipeline } from "#lib/types.ts";
+	import { BACKGROUND_VALUE, withBackground } from "#lib/viewer/background.ts";
 	import type { LabelClass } from "#lib/viewer/labels.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
@@ -46,6 +47,9 @@
 	let models: Model[] = $state([]);
 	let plugins: Plugin[] = $state([]);
 	let classes: LabelClass[] = $state([]);
+	let classesLoaded = $state(false);
+	// Voxels labeled with each value (background is 1), once known.
+	let counts: Record<string, number> | null = $state(null);
 	let quota: Quota | null = $state(null);
 	let progress: Record<string, number> = $state({});
 	let prediction: { model_id: string | null; model_name: string | null } | null = $state(null);
@@ -67,6 +71,15 @@
 	});
 
 	const chosen = $derived(plugins.find((p) => p.name === plugin));
+	// What has been labeled, background and classes, and so whether there are two things to tell apart.
+	const labeledNow = $derived(withBackground(classes).filter((c) => (counts?.[c.value] ?? 0) > 0));
+	const tooLittle = $derived(counts !== null && classesLoaded && labeledNow.length < 2);
+	const whyTooLittle = $derived.by(() => {
+		const only = labeledNow[0];
+		if (!only) return "Nothing is labeled yet. In the annotator, label what you're looking for, and some background.";
+		if (only.value === BACKGROUND_VALUE) return "Only background is labeled. Label what you're looking for too.";
+		return `Only ${only.name} is labeled. Paint some Background too, so the model can tell them apart.`;
+	});
 	// The prediction pipelines still running, by model.
 	const predicting: Record<string, string> = $derived(
 		Object.fromEntries(Object.entries(predictions).flatMap(([model, p]) => (unfinished(p) ? [[model, p.id]] : []))),
@@ -83,6 +96,7 @@
 				`/api/projects/${pid}/prediction`,
 			).catch(() => null);
 			predictions = latestPredictions(await api<Pipeline[]>(`/api/projects/${pid}/pipelines`));
+			counts = await api<Record<string, number>>(`/api/projects/${pid}/labels/counts`).catch(() => null);
 		} catch (e) {
 			error = message(e);
 		}
@@ -96,7 +110,13 @@
 			const first = list[0];
 			if (first) params = Object.fromEntries(Object.entries(first.params_schema.properties).map(([k, v]) => [k, v.default]));
 		}, () => {});
-		api<LabelClass[]>(`/api/projects/${pid}/labels/classes`).then((list) => (classes = list), () => {});
+		api<LabelClass[]>(`/api/projects/${pid}/labels/classes`).then(
+			(list) => {
+				classes = list;
+				classesLoaded = true;
+			},
+			() => {},
+		);
 	});
 
 	// Follow running trainings and predictions; refresh when one ends. For a
@@ -219,8 +239,26 @@
 					</div>
 				</div>
 			{/if}
+			{#if counts && classesLoaded}
+				<div class="flex flex-col gap-1.5 rounded-sm border border-edge bg-field p-2.5">
+					<p class="text-2xs font-semibold tracking-wide text-ink-dim uppercase">Labeled so far</p>
+					<ul class="flex flex-col gap-0.5">
+						{#each withBackground(classes) as c (c.value)}
+							<li class="flex items-center gap-2">
+								<span class="size-2.5 shrink-0 rounded-[2px] shadow-[0_0_0_1px_black]" style:background={c.color}></span>
+								<span class="flex-1 truncate">{c.name}</span>
+								<span class="font-mono text-2xs text-ink-dim">{(counts[c.value] ?? 0).toLocaleString()} voxels</span>
+							</li>
+						{/each}
+					</ul>
+					{#if tooLittle}
+						<p class="text-warn" role="status">{whyTooLittle}</p>
+						<a href="/p/{pid}/annotate">Open the annotator</a>
+					{/if}
+				</div>
+			{/if}
 			{#if error}<p class="error" role="alert">{error}</p>{/if}
-			<button class="btn btn-primary h-7" disabled={busy}><Brain size={14} /> Train</button>
+			<button class="btn btn-primary h-7" disabled={busy || tooLittle} title={tooLittle ? whyTooLittle : undefined}><Brain size={14} /> Train</button>
 		</form>
 	</section>
 
