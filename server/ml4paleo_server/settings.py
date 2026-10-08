@@ -172,7 +172,8 @@ class Settings(BaseSettings):
     # Number of API worker processes.
     api_workers: int = Field(default=4, ge=1)
     # Memory, in MB, each API process keeps for the zoomed-out levels of the
-    # labels it makes for viewers (they are worked out when asked for).
+    # labels it makes for viewers (they are worked out when asked for), and at
+    # most as much again for chunks held while a build is under way.
     label_cache_mb: int = Field(default=64, ge=1)
     # Addresses of reverse proxies whose X-Forwarded-For header is trusted
     # (comma-separated IPs or networks, or "*"). Client IPs feed rate limits,

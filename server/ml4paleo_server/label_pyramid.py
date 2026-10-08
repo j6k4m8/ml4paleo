@@ -56,7 +56,6 @@ from the full resolution chunks), when someone asks for it:
   request that would queue behind too many others gets `Busy` at once. The
   slots are never held while waiting for another chunk, so they can't deadlock;
   a request holds no database connection while it waits for one.
-
 - Each process has its own cache, so a build one process made is not another's:
   asked in turn, several processes would each make the same chunks, and they
   would start over after a restart. So a chunk that stands for many labeled
@@ -202,8 +201,10 @@ def levels_of(manifest: Mapping) -> list[LevelSpec]:
     """
     The levels of a project's labels, which are its image's. Images don't
     record them, but a pyramid follows from the shape and voxel size, so
-    this plans it as ingest did. If the image has a different number of levels
-    than that plan, it was made some other way, and only level 0 is offered.
+    this plans it as ingest did, for the 64-cubed chunks every image has (an
+    image made with others would need its levels recorded in its manifest). If
+    the image has a different number of levels than that plan, it was made
+    some other way, and only level 0 is offered.
     """
     z, y, x = manifest["shape_czyx"][1:]
     try:
