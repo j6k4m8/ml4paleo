@@ -76,6 +76,11 @@ export class ChunkStore {
 		return this.#cache.get(id);
 	}
 
+	/** The ids of the cached chunks, the least recently used first. */
+	ids(): IterableIterator<string> {
+		return this.#cache.keys();
+	}
+
 	/** Whether a load of the chunk is queued or running. */
 	isLoading(id: string): boolean {
 		return this.#pending.has(id);

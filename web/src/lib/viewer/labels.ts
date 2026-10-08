@@ -8,8 +8,8 @@ import { api } from "#lib/api.ts";
 import { applyLocally, type DeltaIn, decodeDelta } from "../labels/deltas";
 import { ChunkStore } from "./chunks";
 import { absolute } from "./image";
-import { LoadError, labelLoader, type WorkerPool } from "./loader";
-import type { Vec3 } from "./tiles";
+import { LoadError, labelLevelLoader, type WorkerPool } from "./loader";
+import type { Level, TileKey, Vec3 } from "./tiles";
 
 export interface LabelClass {
 	value: number;
@@ -65,6 +65,52 @@ function worthRetrying(error: unknown, failures: number): boolean {
 	return false;
 }
 
+/** The labels at full resolution, which every server has. */
+function fullResolution(shape: Vec3): Level {
+	return { index: 0, path: "class", shape, scale: [1, 1, 1] };
+}
+
+const isTriple = (value: unknown): value is Vec3 =>
+	Array.isArray(value) && value.length === 3 && value.every((n) => Number.isInteger(n) && n >= 1);
+
+/**
+ * The levels of the labels that a project's label zarr lists in its group
+ * metadata (`ml4paleo.label_levels`, one per level of the image's pyramid,
+ * named `class`, `class_1`, ...), finest first, up to the first it lists
+ * that doesn't make sense after the ones before. Without a list, or one
+ * whose full resolution isn't `shape`, only full resolution (the server
+ * doesn't make the coarser levels, or the page can't tell what they are).
+ */
+export function labelLevels(group: unknown, shape: Vec3): Level[] {
+	const listed = (group as { attributes?: { ml4paleo?: { label_levels?: unknown } } } | null | undefined)?.attributes?.ml4paleo?.label_levels;
+	const levels: Level[] = [];
+	if (Array.isArray(listed)) {
+		for (const [index, entry] of listed.entries()) {
+			const { array, shape: size, factor_zyx: scale } = (entry ?? {}) as Record<string, unknown>;
+			if (array !== (index === 0 ? "class" : `class_${index}`) || !isTriple(size) || !isTriple(scale)) break;
+			const finer = levels[index - 1]?.scale;
+			// Each level is coarser than the one before.
+			if (finer && !(scale.every((s, axis) => s >= finer[axis]!) && scale.some((s, axis) => s > finer[axis]!))) break;
+			levels.push({ index, path: array, shape: size, scale });
+		}
+	}
+	const [full] = levels;
+	if (!full || full.shape.some((n, axis) => n !== shape[axis]) || full.scale.some((s) => s !== 1)) return [fullResolution(shape)];
+	return levels;
+}
+
+/** The id of a label chunk in the labels' store: `cz/cy/cx` at full resolution, else `level/cz/cy/cx`. */
+export function labelId(key: TileKey): string {
+	return key.level === 0 ? `${key.cz}/${key.cy}/${key.cx}` : `${key.level}/${key.cz}/${key.cy}/${key.cx}`;
+}
+
+/** The level and chunk key a label chunk id (see `labelId`) names. */
+export function labelKey(id: string): TileKey {
+	const parts = id.split("/").map(Number);
+	const [cz = 0, cy = 0, cx = 0] = parts.slice(-3);
+	return { level: parts.length > 3 ? (parts[0] ?? 0) : 0, cz, cy, cx };
+}
+
 /**
  * An edit as it goes out. A strict one is refused if its chunks changed since
  * the page read them, so it carries the versions the page's copies stand
@@ -80,8 +126,16 @@ export function strictOn<T extends { strict: boolean; deltas: DeltaIn[] }>(layer
 export class LabelLayer {
 	store: ChunkStore;
 	classes: LabelClass[] = [];
+	/**
+	 * The levels of the labels, finest first: full resolution, then the
+	 * coarser ones (the image's pyramid) the server makes when asked, once
+	 * `start` has read which it has. Their chunks are in `store` too, with
+	 * ids `level/cz/cy/cx`.
+	 */
+	levels: Level[];
 	#listeners = new Set<(ids: string[]) => void>();
 	#classListeners = new Set<() => void>();
+	#levelListeners = new Set<() => void>();
 	#events: EventSource | null = null;
 	// This page's edits that a copy of their chunk may not show yet, by op,
 	// in order: chunk id → delta. Until the server answers, an op's deltas
@@ -104,7 +158,12 @@ export class LabelLayer {
 		shape: Vec3,
 	) {
 		const url = absolute(`/api/projects/${projectId}/labels/zarr/`);
-		this.store = new ChunkStore(labelLoader(pool, url, shape), CACHE_BYTES, 4);
+		this.levels = [fullResolution(shape)];
+		this.store = new ChunkStore(
+			labelLevelLoader(pool, url, () => this.levels, (level) => this.#without(level)),
+			CACHE_BYTES,
+			4,
+		);
 		// Whatever the server sends, this page's edits stay on screen.
 		this.store.onLoad = (id, chunk) => {
 			let stale = false;
@@ -190,7 +249,7 @@ export class LabelLayer {
 	async start(): Promise<void> {
 		const base = `/api/projects/${this.projectId}/labels`;
 		this.classes = await api<LabelClass[]>(`${base}/classes`);
-		const [latest] = await api<{ seq: number }[]>(`${base}/ops?limit=1`);
+		const [[latest]] = await Promise.all([api<{ seq: number }[]>(`${base}/ops?limit=1`), this.#readLevels()]);
 		this.#events = new EventSource(`${base}/events?after=${latest?.seq ?? 0}`);
 		this.#events.onerror = () => {
 			// The browser retries dropped streams itself; a closed one is final,
@@ -205,6 +264,34 @@ export class LabelLayer {
 			const change = JSON.parse((event as MessageEvent<string>).data) as { chunks: { key: Vec3; version: number }[] };
 			this.changed(change.chunks);
 		});
+	}
+
+	/** Read which coarser levels the server has. Without them (or if it can't say) the labels stay at full resolution. */
+	async #readLevels(): Promise<void> {
+		try {
+			const group = await api<unknown>(`/api/projects/${this.projectId}/labels/zarr/zarr.json`);
+			this.levels = labelLevels(group, this.levels[0]!.shape);
+		} catch {
+			// The labels work without the coarser levels, just as they did before them.
+		}
+	}
+
+	/**
+	 * The server turned out not to have level `level`, so it, and any coarser,
+	 * are given up: views go on with the finer ones, as with a server that has no
+	 * coarser levels at all.
+	 */
+	#without(level: number): void {
+		if (level < 1 || level >= this.levels.length) return;
+		this.levels = this.levels.slice(0, level);
+		for (const id of [...this.store.ids()]) if (labelKey(id).level >= level) this.store.invalidate(id);
+		for (const listener of this.#levelListeners) listener();
+	}
+
+	/** Call `listener` when the levels the labels have are fewer than they were. */
+	onLevels(listener: () => void): () => void {
+		this.#levelListeners.add(listener);
+		return () => this.#levelListeners.delete(listener);
 	}
 
 	/**
@@ -441,5 +528,6 @@ export class LabelLayer {
 		this.store.keepOnly(new Set());
 		this.#listeners.clear();
 		this.#classListeners.clear();
+		this.#levelListeners.clear();
 	}
 }

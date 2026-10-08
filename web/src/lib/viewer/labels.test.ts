@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "#lib/api.ts";
 import { base64, packBits, zstdFrame } from "../labels/deltas";
 import type { Chunk } from "./chunks";
-import { LabelLayer, strictOn } from "./labels";
+import { LabelLayer, labelId, labelKey, labelLevels, strictOn } from "./labels";
 import { LoadError, type WorkerPool } from "./loader";
+import type { Vec3 } from "./tiles";
 
 /**
  * A worker pool whose label chunks come from a map the test controls. With
@@ -899,5 +900,252 @@ describe("adding a class", () => {
 		vi.mocked(api).mockResolvedValueOnce(matrix).mockResolvedValueOnce([bone, matrix]);
 		await layer.addClass("matrix", "#00ff00");
 		expect(stopped).toBe(1);
+	});
+});
+
+/** What the label zarr's group says of its levels: one `[shape, factor]` each, finest first. */
+const group = (levels: [Vec3, Vec3][]) => ({
+	zarr_format: 3,
+	node_type: "group",
+	attributes: {
+		ml4paleo: {
+			label_levels: levels.map(([shape, factor_zyx], i) => ({ array: i === 0 ? "class" : `class_${i}`, shape, factor_zyx })),
+		},
+	},
+});
+
+// A 256 × 256 × 256 image: 4 × 4 × 4 chunks, then 2 × 2 × 2, then one.
+const pyramid: [Vec3, Vec3][] = [
+	[[256, 256, 256], [1, 1, 1]],
+	[[128, 128, 128], [2, 2, 2]],
+	[[64, 64, 64], [4, 4, 4]],
+];
+
+describe("labelLevels", () => {
+	const shape: Vec3 = [256, 256, 256];
+
+	it("lists the levels the label zarr says it has, finest first", () => {
+		expect(labelLevels(group(pyramid), shape)).toEqual([
+			{ index: 0, path: "class", shape: [256, 256, 256], scale: [1, 1, 1] },
+			{ index: 1, path: "class_1", shape: [128, 128, 128], scale: [2, 2, 2] },
+			{ index: 2, path: "class_2", shape: [64, 64, 64], scale: [4, 4, 4] },
+		]);
+	});
+
+	it("keeps each level's own factors, which may differ by axis", () => {
+		const levels = labelLevels(
+			group([
+				[[256, 256, 256], [1, 1, 1]],
+				[[256, 128, 128], [1, 2, 2]],
+				[[128, 64, 64], [2, 4, 4]],
+			]),
+			shape,
+		);
+		expect(levels.map((l) => l.scale)).toEqual([[1, 1, 1], [1, 2, 2], [2, 4, 4]]);
+	});
+
+	it("stays at full resolution when the server lists no levels, or something else", () => {
+		const full = [{ index: 0, path: "class", shape, scale: [1, 1, 1] }];
+		for (const found of [undefined, null, [], "no", { zarr_format: 3 }, { attributes: {} }, { attributes: { ml4paleo: {} } }, { attributes: { ml4paleo: { label_levels: [] } } }]) {
+			expect(labelLevels(found, shape)).toEqual(full);
+		}
+	});
+
+	it("stays at full resolution when the levels are for another image", () => {
+		const full = [{ index: 0, path: "class", shape, scale: [1, 1, 1] }];
+		expect(labelLevels(group([[[128, 256, 256], [1, 1, 1]]]), shape)).toEqual(full);
+		expect(labelLevels(group([[[256, 256, 256], [2, 2, 2]]]), shape)).toEqual(full);
+	});
+
+	it("stops at the first level it can't make sense of", () => {
+		const bad: unknown[] = [
+			{ array: "class_2", shape: [64, 64, 64], factor_zyx: [4, 4, 4] },
+			{ array: "class_1", shape: [128, 128], factor_zyx: [2, 2, 2] },
+			{ array: "class_1", shape: [128, 128, 128], factor_zyx: [0, 2, 2] },
+			{ array: "class_1", shape: [128, 128, 128], factor_zyx: [1.5, 2, 2] },
+			// No coarser than full resolution.
+			{ array: "class_1", shape: [256, 256, 256], factor_zyx: [1, 1, 1] },
+			null,
+		];
+		for (const entry of bad) {
+			const found = {
+				attributes: {
+					ml4paleo: { label_levels: [{ array: "class", shape: [256, 256, 256], factor_zyx: [1, 1, 1] }, entry, { array: "class_2", shape: [64, 64, 64], factor_zyx: [4, 4, 4] }] },
+				},
+			};
+			expect(labelLevels(found, shape).map((l) => l.path)).toEqual(["class"]);
+		}
+		// A coarser level that's finer along an axis than the one before isn't one.
+		const crossed = group([
+			[[256, 256, 256], [1, 1, 1]],
+			[[128, 128, 128], [2, 2, 2]],
+			[[128, 64, 64], [1, 4, 4]],
+		]);
+		expect(labelLevels(crossed, shape).map((l) => l.path)).toEqual(["class", "class_1"]);
+	});
+});
+
+describe("label chunk ids", () => {
+	it("number full resolution chunks cz/cy/cx and coarser ones level/cz/cy/cx", () => {
+		expect(labelId({ level: 0, cz: 3, cy: 1, cx: 2 })).toBe("3/1/2");
+		expect(labelId({ level: 2, cz: 0, cy: 1, cx: 0 })).toBe("2/0/1/0");
+		expect(labelKey("3/1/2")).toEqual({ level: 0, cz: 3, cy: 1, cx: 2 });
+		expect(labelKey("2/0/1/0")).toEqual({ level: 2, cz: 0, cy: 1, cx: 0 });
+	});
+});
+
+/**
+ * A worker pool for labels with several levels, whose chunks come from a map
+ * the test controls, by the ids `labelId` makes. Levels in `absent` have no
+ * array: the server answers 404 for it.
+ */
+function levelPool(chunks: Map<string, { value: number; version?: number; pyramid?: number }> = new Map(), absent = new Set<number>()) {
+	const loads: string[] = [];
+	const asked: { path: string; derived?: boolean }[] = [];
+	const pool = {
+		load: async (request: { path: string; region: [number, number][]; derived?: boolean }): Promise<Chunk> => {
+			const level = request.path === "class" ? 0 : Number(request.path.slice("class_".length));
+			const [z, y, x] = request.region.map(([start]) => start / 64);
+			const id = labelId({ level, cz: z!, cy: y!, cx: x! });
+			loads.push(id);
+			asked.push({ path: request.path, derived: request.derived });
+			if (absent.has(level)) throw new LoadError("NotFoundError: Not found: v3 array or group", 404);
+			const { value, version, pyramid } = chunks.get(id) ?? { value: 0 };
+			return { data: new Uint8Array(8).fill(value), shape: [2, 2, 2], version, pyramid };
+		},
+	};
+	return { pool: pool as unknown as WorkerPool, loads, asked, chunks };
+}
+
+/** A stand-in for the browser's EventSource that the test can send changes through. */
+class FakeSource {
+	static last: FakeSource | undefined;
+	static CLOSED = 2;
+	readyState = 1;
+	onerror: (() => void) | null = null;
+	#handlers = new Map<string, (event: { data: string }) => void>();
+	constructor(readonly url: string) {
+		FakeSource.last = this;
+	}
+	addEventListener(type: string, handler: (event: { data: string }) => void) {
+		this.#handlers.set(type, handler);
+	}
+	close() {}
+	/** The server says these chunks changed. */
+	change(chunks: { key: Vec3; version: number }[]) {
+		this.#handlers.get("change")?.({ data: JSON.stringify({ chunks }) });
+	}
+}
+
+/** A layer for a 256-cubed image that has started against a server answering `zarr` for its group. */
+async function started(zarr: unknown, pooled = levelPool()) {
+	vi.stubGlobal("EventSource", FakeSource);
+	vi.mocked(api).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+	if (zarr instanceof Error) vi.mocked(api).mockRejectedValueOnce(zarr);
+	else vi.mocked(api).mockResolvedValueOnce(zarr);
+	const layer = new LabelLayer("p", pooled.pool, [256, 256, 256]);
+	await layer.start();
+	return { layer, source: FakeSource.last!, ...pooled };
+}
+
+describe("label levels", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		vi.mocked(api).mockReset();
+		FakeSource.last = undefined;
+	});
+
+	it("start with full resolution only, until the server says what it has", () => {
+		const layer = new LabelLayer("p", levelPool().pool, [256, 256, 256]);
+		expect(layer.levels.map((l) => l.path)).toEqual(["class"]);
+	});
+
+	it("are read from the group's metadata when the layer starts", async () => {
+		const { layer } = await started(group(pyramid));
+		expect(layer.levels.map((l) => [l.path, l.scale])).toEqual([
+			["class", [1, 1, 1]],
+			["class_1", [2, 2, 2]],
+			["class_2", [4, 4, 4]],
+		]);
+		expect(vi.mocked(api).mock.calls.map(([path]) => path)).toEqual([
+			"/api/projects/p/labels/classes",
+			"/api/projects/p/labels/ops?limit=1",
+			"/api/projects/p/labels/zarr/zarr.json",
+		]);
+	});
+
+	it("are only full resolution for a server that doesn't have them", async () => {
+		for (const found of [{ zarr_format: 3, node_type: "group", attributes: {} }, new Error("HTTP 404")]) {
+			const { layer } = await started(found);
+			expect(layer.levels.map((l) => l.path)).toEqual(["class"]);
+		}
+	});
+
+	it("load a coarser level's chunks from its array, as made ones, and a full resolution chunk from the class array", async () => {
+		const { layer, asked } = await started(group(pyramid), levelPool(new Map([["1/0/1/0", { value: 4, pyramid: 9 }]])));
+		layer.store.want("view", ["1/0/1/0", "0/0/1/0"]);
+		const coarse = await layer.store.request("1/0/1/0");
+		await layer.store.request("0/0/1/0");
+		expect(asked).toEqual([
+			{ path: "class_1", derived: true },
+			{ path: "class", derived: false },
+		]);
+		// What it was made from is no edit's base version.
+		expect(coarse.pyramid).toBe(9);
+		expect(layer.versionOf("1/0/1/0")).toBeUndefined();
+	});
+
+	it("fall back to full resolution when the server has no array for a level it listed, and tell the views", async () => {
+		const { layer } = await started(group(pyramid), levelPool(new Map(), new Set([2])));
+		const heard = vi.fn();
+		layer.onLevels(heard);
+		layer.store.want("view", ["2/0/0/0", "1/0/0/0"]);
+		// Its load ends without an error, as one nobody needs now does.
+		const lacking = await layer.store.request("2/0/0/0").catch((e: unknown) => e);
+		expect((lacking as DOMException).name).toBe("AbortError");
+		expect(layer.levels.map((l) => l.path)).toEqual(["class", "class_1"]);
+		expect(heard).toHaveBeenCalledTimes(1);
+		// A load of it again doesn't say so again.
+		await layer.store.request("2/0/0/0").catch(() => {});
+		expect(heard).toHaveBeenCalledTimes(1);
+		await layer.store.request("1/0/0/0");
+	});
+
+	it("fall back past every coarser level a server lacks, forgetting what was loaded of them", async () => {
+		const { layer } = await started(group(pyramid), levelPool(new Map(), new Set([1])));
+		layer.store.want("view", ["0/0/0", "2/0/0/0", "1/0/0/0"]);
+		await layer.store.request("0/0/0");
+		await layer.store.request("2/0/0/0");
+		expect(layer.store.peek("2/0/0/0")).toBeDefined();
+		await layer.store.request("1/0/0/0").catch(() => {});
+		expect(layer.levels.map((l) => l.path)).toEqual(["class"]);
+		expect(layer.store.peek("2/0/0/0")).toBeUndefined();
+		expect(layer.store.peek("0/0/0")).toBeDefined();
+	});
+
+	it("aren't given up for a failure that isn't a missing array", async () => {
+		const failing = levelPool();
+		const { layer } = await started(group(pyramid), failing);
+		const heard = vi.fn();
+		layer.onLevels(heard);
+		const load = failing.pool.load;
+		failing.pool.load = async (request, signal) => {
+			if (request.path === "class_1") throw new LoadError("Error: Unexpected response status 503", 503);
+			return load.call(failing.pool, request, signal);
+		};
+		layer.store.want("view", ["1/0/0/0"]);
+		await expect(layer.store.request("1/0/0/0")).rejects.toBeInstanceOf(LoadError);
+		expect(layer.levels).toHaveLength(3);
+		expect(heard).not.toHaveBeenCalled();
+	});
+
+	it("stop telling views once the layer stops", async () => {
+		const { layer } = await started(group(pyramid), levelPool(new Map(), new Set([1])));
+		const heard = vi.fn();
+		layer.onLevels(heard);
+		layer.stop();
+		layer.store.want("view", ["1/0/0/0"]);
+		await layer.store.request("1/0/0/0").catch(() => {});
+		expect(heard).not.toHaveBeenCalled();
 	});
 });
