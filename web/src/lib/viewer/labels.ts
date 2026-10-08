@@ -22,6 +22,13 @@ interface LocalDelta {
 	mask: Uint8Array;
 	written: Uint8Array | number;
 	onlyIf: string;
+	/**
+	 * Once the server has applied the op, the chunk version it made: copies
+	 * from then on have the edit, and only older ones need it put back.
+	 */
+	made?: number;
+	/** A copy older than `made` arrived and was sent for again. */
+	again?: boolean;
 }
 
 const CACHE_BYTES = 128 * 1024 * 1024;
@@ -31,11 +38,11 @@ export class LabelLayer {
 	classes: LabelClass[] = [];
 	#listeners = new Set<(ids: string[]) => void>();
 	#events: EventSource | null = null;
-	// Edits sent but not yet confirmed, in order, by op: chunk id → delta.
+	// This page's edits that a copy of their chunk may not show yet, by op,
+	// in order: chunk id → delta. Until the server answers, an op's deltas
+	// go over every copy that loads; after, only over copies older than the
+	// version the op made.
 	#local = new Map<string, Map<string, LocalDelta>>();
-	// Chunks that reloaded while an op was unconfirmed, by op: its delta was
-	// put back over whatever the server had, which may be newer.
-	#reapplied = new Map<string, Set<string>>();
 	/** Called if live updates stop for good (signed out, or removed from the project). */
 	onStopped: (() => void) | null = null;
 
@@ -46,15 +53,32 @@ export class LabelLayer {
 	) {
 		const url = absolute(`/api/projects/${projectId}/labels/zarr/`);
 		this.store = new ChunkStore(labelLoader(pool, url, shape), CACHE_BYTES, 4);
-		// Whatever the server sends, unconfirmed edits stay on screen.
+		// Whatever the server sends, this page's edits stay on screen.
 		this.store.onLoad = (id, chunk) => {
+			let stale = false;
 			for (const [op, deltas] of this.#local) {
 				const delta = deltas.get(id);
 				if (!delta) continue;
+				if (delta.made !== undefined) {
+					if (chunk.version === undefined || chunk.version >= delta.made) {
+						this.#forget(op, id);
+						continue;
+					}
+					// A copy from before the edit (its load started first): show the
+					// edit on it, and load it once more.
+					stale ||= !delta.again;
+					delta.again = true;
+				}
 				applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, delta.mask, delta.written, delta.onlyIf);
-				this.#reapplied.get(op)?.add(id);
 			}
+			if (stale) queueMicrotask(() => this.reload([id]));
 		};
+	}
+
+	#forget(op: string, id: string): void {
+		const deltas = this.#local.get(op);
+		deltas?.delete(id);
+		if (deltas?.size === 0) this.#local.delete(op);
 	}
 
 	/** Colors by label value (background, 1, has none). */
@@ -72,9 +96,22 @@ export class LabelLayer {
 			if (this.#events?.readyState === EventSource.CLOSED) this.onStopped?.();
 		};
 		this.#events.addEventListener("change", (event) => {
-			const change = JSON.parse((event as MessageEvent<string>).data) as { chunks: { key: Vec3 }[] };
-			this.reload(change.chunks.map(({ key }) => key.join("/")));
+			const change = JSON.parse((event as MessageEvent<string>).data) as { chunks: { key: Vec3; version: number }[] };
+			this.changed(change.chunks);
 		});
+	}
+
+	/**
+	 * Chunks that changed on the server, at these versions: anyone's edits,
+	 * or this page's undos and redos (whose results it can't work out). The
+	 * ones this page holds an older copy of, or is still loading, load again.
+	 */
+	changed(chunks: { key: Vec3; version: number }[]): void {
+		const stale = chunks.filter(({ key, version }) => {
+			const chunk = this.store.peek(key.join("/"));
+			return chunk?.version === undefined || chunk.version < version;
+		});
+		this.reload(stale.map(({ key }) => key.join("/")));
 	}
 
 	/**
@@ -103,7 +140,7 @@ export class LabelLayer {
 		return this.store.get(id)?.version;
 	}
 
-	/** Show an op's deltas at once, until `settle` is called for it. */
+	/** Show an op's deltas at once, and keep showing them until its copies arrive. */
 	applyLocal(op: string, deltas: DeltaIn[]): void {
 		const local = new Map<string, LocalDelta>();
 		const changed: string[] = [];
@@ -118,43 +155,51 @@ export class LabelLayer {
 			}
 		}
 		this.#local.set(op, local);
-		this.#reapplied.set(op, new Set());
 		this.#emit(changed);
 	}
 
 	/**
-	 * The server answered for an op: keep its result (taking the versions it
-	 * made) or, if it was refused, fetch its chunks again to undo the preview.
+	 * The server answered for an op, with the chunk versions it made, or
+	 * null if it refused the op (its chunks load again to take it back).
+	 * A copy this page had at the version just before is the server's copy
+	 * now. A copy someone else changed meanwhile, or one still loading that
+	 * may predate the op, keeps showing the edit until a copy with it comes.
 	 */
 	settle(op: string, versions: { key: Vec3; version: number }[] | null): void {
 		const local = this.#local.get(op);
-		const reapplied = this.#reapplied.get(op) ?? new Set<string>();
-		this.#local.delete(op);
-		this.#reapplied.delete(op);
-		for (const id of local?.keys() ?? []) this.store.unpin(id);
-		if (versions) {
-			this.noteVersions(versions);
-			if (reapplied.size > 0) this.reload([...reapplied]);
-		} else if (local) {
+		if (!local) return;
+		for (const id of local.keys()) this.store.unpin(id);
+		if (!versions) {
+			this.#local.delete(op);
 			this.reload([...local.keys()]);
+			return;
 		}
-	}
-
-	/**
-	 * Take the versions an op of this page made. A chunk this page had at the
-	 * version just before is now current; otherwise someone else changed it
-	 * too, and it reloads.
-	 */
-	noteVersions(versions: { key: Vec3; version: number }[]): void {
-		const stale: string[] = [];
-		for (const { key, version } of versions) {
-			const id = key.join("/");
-			const chunk = this.store.get(id);
-			if (!chunk || chunk.version === undefined) continue;
-			if (chunk.version === version - 1) chunk.version = version;
-			else if (chunk.version < version) stale.push(id);
+		const made = new Map(versions.map(({ key, version }) => [key.join("/"), version]));
+		const again: string[] = [];
+		for (const [id, delta] of local) {
+			const version = made.get(id);
+			if (version === undefined) {
+				local.delete(id);
+				continue;
+			}
+			const chunk = this.store.peek(id);
+			let keep = this.store.isLoading(id);
+			if (chunk?.version !== undefined) {
+				if (chunk.version === version - 1) {
+					chunk.version = version;
+				} else if (chunk.version < version - 1) {
+					keep = true;
+					again.push(id);
+				} else if (chunk.version > version) {
+					// A copy newer than the op, which went over it again.
+					again.push(id);
+				}
+			}
+			if (keep) delta.made = version;
+			else local.delete(id);
 		}
-		if (stale.length > 0) this.reload(stale);
+		if (local.size === 0) this.#local.delete(op);
+		this.reload(again);
 	}
 
 	#emit(ids: string[]): void {

@@ -168,7 +168,7 @@
 				if ("cancelled" in outcome) {
 					layer.settle(outcome.op.local, null);
 				} else if (outcome.op.kind !== "edit") {
-					if ("result" in outcome) layer.noteVersions(outcome.result.chunks);
+					if ("result" in outcome) layer.changed(outcome.result.chunks);
 					else if (!outcome.alreadyDone) notice = `That ${outcome.op.kind} didn't go through: ${outcome.error}`;
 				} else if ("result" in outcome) {
 					layer.settle(outcome.op.local, outcome.result.chunks);
