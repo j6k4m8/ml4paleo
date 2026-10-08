@@ -31,10 +31,12 @@ export interface Polygon {
 }
 
 const PREFERENCES = "m4p.viewer";
+const LABEL_OPACITY = 0.5;
+// Labels fainter than this are as good as hidden.
+const FAINTEST_LABELS = 0.1;
 
 interface Preferences {
 	opacity: number;
-	showLabels: boolean;
 	layout: Layout;
 	brushRadius: number;
 	protectLabels: boolean;
@@ -60,7 +62,8 @@ export class ViewerState {
 	/** Screen pixels per level-0 voxel along the finest axis. */
 	zoom = $state(1);
 	window = $state<[number, number]>([0, 1]);
-	opacity = $state(0.5);
+	opacity = $state(LABEL_OPACITY);
+	/** Labels show on every visit, even if they were hidden on the last. */
 	showLabels = $state(true);
 	showPrediction = $state(true);
 	predictionOpacity = $state(0.35);
@@ -89,8 +92,7 @@ export class ViewerState {
 		public aspect: Vec3,
 	) {
 		const saved = loadPreferences();
-		if (typeof saved.opacity === "number") this.opacity = Math.min(1, Math.max(0, saved.opacity));
-		if (typeof saved.showLabels === "boolean") this.showLabels = saved.showLabels;
+		if (typeof saved.opacity === "number" && saved.opacity >= FAINTEST_LABELS) this.opacity = Math.min(1, saved.opacity);
 		if (saved.layout && LAYOUTS.includes(saved.layout)) this.layout = saved.layout;
 		if (typeof saved.brushRadius === "number") this.brushRadius = Math.min(64, Math.max(0.5, saved.brushRadius));
 		if (typeof saved.protectLabels === "boolean") this.protectLabels = saved.protectLabels;
@@ -105,7 +107,6 @@ export class ViewerState {
 		try {
 			const preferences: Preferences = {
 				opacity: this.opacity,
-				showLabels: this.showLabels,
 				layout: this.layout,
 				brushRadius: this.brushRadius,
 				protectLabels: this.protectLabels,
@@ -130,6 +131,15 @@ export class ViewerState {
 		const point = [...this.position] as Vec3;
 		point[axis] = Math.floor(point[axis]!) + by + 0.5;
 		this.moveTo(point);
+	}
+
+	/**
+	 * Show the labels layer if it's hidden or too faint to see, as after an
+	 * edit, which would otherwise seem to vanish once drawn.
+	 */
+	revealLabels(): void {
+		this.showLabels = true;
+		if (this.opacity < FAINTEST_LABELS) this.opacity = LABEL_OPACITY;
 	}
 
 	zoomBy(factor: number): void {

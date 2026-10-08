@@ -659,6 +659,7 @@
 	<div class="caption">
 		{plane.name.toUpperCase()} · {AXIS_NAMES[plane.normal]}
 		{slice}
+		{#if labels && !viewer.showLabels}<span class="warn">· labels hidden (V)</span>{/if}
 		{#if labelsHidden}<span class="muted">· zoom in to see labels</span>{/if}
 	</div>
 	{#if error || loadError}<p class="error" role="alert">{error || loadError}</p>{/if}
@@ -768,6 +769,9 @@
 	}
 	.caption .muted {
 		color: #a8a8a8;
+	}
+	.caption .warn {
+		color: var(--color-warn);
 	}
 	.error {
 		position: absolute;

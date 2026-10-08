@@ -207,7 +207,6 @@
 	$effect(() => {
 		void [
 			viewer.opacity,
-			viewer.showLabels,
 			viewer.layout,
 			viewer.brushRadius,
 			viewer.protectLabels,
@@ -253,6 +252,7 @@
 		const deltas = splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value, onlyIf });
 		notice = "";
 		for (const op of queue.edit(deltas, { strict, tool })) labels.applyLocal(op.local, op.deltas);
+		viewer.revealLabels();
 	}
 
 	function stroke(drawn: Stroke) {
@@ -613,6 +613,7 @@
 			const ops = queue.editMany(parts, { accept: { prediction: artifact, roi: roi.id } });
 			for (const op of ops) labels.applyLocal(op.local, op.deltas);
 			if (ops.length === 0) notice = `The ${kind} has nothing in that ROI.`;
+			else viewer.revealLabels();
 		} catch (e) {
 			notice = `Couldn't read the ${kind}: ${e instanceof Error ? e.message : String(e)}`;
 		} finally {
