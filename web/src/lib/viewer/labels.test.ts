@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "#lib/api.ts";
 import { base64, packBits, zstdFrame } from "../labels/deltas";
 import type { Chunk } from "./chunks";
-import { LabelLayer, labelId, labelKey, labelLevels, strictOn } from "./labels";
+import { coarseIds, LabelLayer, labelId, labelKey, labelLevels, strictOn } from "./labels";
 import { LoadError, type WorkerPool } from "./loader";
 import type { Vec3 } from "./tiles";
 
@@ -997,11 +997,16 @@ describe("label chunk ids", () => {
 /**
  * A worker pool for labels with several levels, whose chunks come from a map
  * the test controls, by the ids `labelId` makes. Levels in `absent` have no
- * array: the server answers 404 for it.
+ * array: the server answers 404 for it. With `held`, loads answer from the
+ * map as it is when they start but arrive only when the test calls `release`.
+ * The next `failures.left` loads fail, as if the server answered with
+ * `failures.status`.
  */
-function levelPool(chunks: Map<string, { value: number; version?: number; pyramid?: number }> = new Map(), absent = new Set<number>()) {
+function levelPool(chunks: Map<string, { value: number; version?: number; pyramid?: number }> = new Map(), absent = new Set<number>(), held = false) {
 	const loads: string[] = [];
 	const asked: { path: string; derived?: boolean }[] = [];
+	const waiting: (() => void)[] = [];
+	const failures: { left: number; status: number } = { left: 0, status: 500 };
 	const pool = {
 		load: async (request: { path: string; region: [number, number][]; derived?: boolean }): Promise<Chunk> => {
 			const level = request.path === "class" ? 0 : Number(request.path.slice("class_".length));
@@ -1011,10 +1016,18 @@ function levelPool(chunks: Map<string, { value: number; version?: number; pyrami
 			asked.push({ path: request.path, derived: request.derived });
 			if (absent.has(level)) throw new LoadError("NotFoundError: Not found: v3 array or group", 404);
 			const { value, version, pyramid } = chunks.get(id) ?? { value: 0 };
+			if (held) await new Promise<void>((resolve) => waiting.push(resolve));
+			if (failures.left > 0) {
+				failures.left -= 1;
+				throw new LoadError(`Error: Unexpected response status ${failures.status}`, failures.status);
+			}
 			return { data: new Uint8Array(8).fill(value), shape: [2, 2, 2], version, pyramid };
 		},
 	};
-	return { pool: pool as unknown as WorkerPool, loads, asked, chunks };
+	const release = () => {
+		for (const resolve of waiting.splice(0)) resolve();
+	};
+	return { pool: pool as unknown as WorkerPool, loads, asked, chunks, failures, release };
 }
 
 /** A stand-in for the browser's EventSource that the test can send changes through. */
@@ -1147,5 +1160,340 @@ describe("label levels", () => {
 		layer.store.want("view", ["1/0/0/0"]);
 		await layer.store.request("1/0/0/0").catch(() => {});
 		expect(heard).not.toHaveBeenCalled();
+	});
+});
+
+describe("coarseIds", () => {
+	const levels = labelLevels(group(pyramid), [256, 256, 256]);
+
+	it("numbers the chunk of each coarser level that holds a chunk by its factor", () => {
+		expect(coarseIds(levels, [[5, 9, 17]])).toEqual(["1/2/4/8", "2/1/2/4"]);
+		expect(coarseIds(levels, [[0, 0, 0]])).toEqual(["1/0/0/0", "2/0/0/0"]);
+		expect(coarseIds(levels, [[3, 3, 3]])).toEqual(["1/1/1/1", "2/0/0/0"]);
+	});
+
+	it("uses each axis's own factor", () => {
+		const stretched = labelLevels(
+			group([
+				[[256, 256, 256], [1, 1, 1]],
+				[[256, 128, 128], [1, 2, 2]],
+				[[128, 64, 64], [2, 4, 4]],
+			]),
+			[256, 256, 256],
+		);
+		expect(coarseIds(stretched, [[5, 9, 17]])).toEqual(["1/5/4/8", "2/2/2/4"]);
+	});
+
+	it("names a chunk held by several only once", () => {
+		expect(coarseIds(levels, [[4, 4, 4], [5, 5, 5], [4, 5, 5], [6, 4, 7]])).toEqual(["1/2/2/2", "1/3/2/3", "2/1/1/1"]);
+	});
+
+	it("has none without coarser levels", () => {
+		expect(coarseIds(levels.slice(0, 1), [[1, 2, 3]])).toEqual([]);
+		expect(coarseIds(levels, [])).toEqual([]);
+	});
+});
+
+describe("coarser label chunks that changed", () => {
+	const random = vi.spyOn(Math, "random");
+	beforeEach(() => {
+		random.mockReturnValue(0.5);
+	});
+	afterEach(() => {
+		random.mockReset();
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+		vi.mocked(api).mockReset();
+		FakeSource.last = undefined;
+	});
+
+	// A change at chunk (1, 2, 3) is under these.
+	const fine = [1, 2, 3] as Vec3;
+	const under = { one: "1/0/1/1", two: "2/0/0/0" };
+
+	/** Two views' worth of coarser chunks under chunk (1, 2, 3), loaded, and shown by a view. */
+	const shown = async (held = false) => {
+		const chunks = new Map([
+			[under.one, { value: 1, pyramid: 4 }],
+			[under.two, { value: 1, pyramid: 4 }],
+		]);
+		const started_ = await started(group(pyramid), levelPool(chunks, new Set(), held));
+		const wanted = [under.one, under.two];
+		started_.layer.store.want("view", wanted);
+		const loading = Promise.all(wanted.map((id) => started_.layer.store.request(id)));
+		started_.release();
+		await loading;
+		started_.loads.length = 0;
+		return started_;
+	};
+	const wait = async (ms: number) => {
+		for (let left = ms; left > 0; left -= 500) {
+			await vi.advanceTimersByTimeAsync(Math.min(500, left));
+			await settled();
+		}
+	};
+	/** The coarser chunks among those views were told of, once each, in order. */
+	const coarse = (heard: string[][]) => [...new Set(heard.flat().filter((id) => labelKey(id).level > 0))].sort();
+	/** The coarser chunks among those loaded. */
+	const coarsely = (loads: string[]) => loads.filter((id) => labelKey(id).level > 0).sort();
+
+	it("are loaded again at every level when a change event names a chunk under them", async () => {
+		const { layer, source, loads, chunks } = await shown();
+		const heard = told(layer);
+		chunks.set(under.one, { value: 2, pyramid: 5 });
+		chunks.set(under.two, { value: 3, pyramid: 5 });
+		source.change([{ key: fine, version: 5 }]);
+		await tick();
+		expect(coarsely(loads)).toEqual([under.one, under.two]);
+		expect(first(layer, under.one)).toBe(2);
+		expect(first(layer, under.two)).toBe(3);
+		expect(layer.store.peek(under.one)?.pyramid).toBe(5);
+		// Views drop what they drew from the old copies.
+		expect(coarse(heard)).toEqual([under.one, under.two]);
+	});
+
+	it("keep the old copy showing until the new one arrives", async () => {
+		const { layer, source, release, chunks } = await shown(true);
+		chunks.set(under.one, { value: 2, pyramid: 5 });
+		source.change([{ key: fine, version: 5 }]);
+		await tick();
+		expect(first(layer, under.one)).toBe(1);
+		release();
+		await tick();
+		expect(first(layer, under.one)).toBe(2);
+	});
+
+	it("are loaded again when this page's own edit is answered, even with nothing left of the edit to show", async () => {
+		const { layer, loads, chunks } = await shown();
+		chunks.set(under.one, { value: 2, pyramid: 5 });
+		layer.settle("an edit whose copies were all current", [{ key: fine, version: 5 }]);
+		await tick();
+		expect(loads.sort()).toEqual([under.one, under.two]);
+		expect(first(layer, under.one)).toBe(2);
+	});
+
+	it("are loaded again for an edit that is still on screen at full resolution too", async () => {
+		const { layer, loads } = await shown();
+		layer.applyLocal("op", [delta(5, fine)]);
+		expect(loads).toEqual([]);
+		layer.settle("op", [{ key: fine, version: 5 }]);
+		await tick();
+		expect(loads.sort()).toEqual([under.one, under.two]);
+	});
+
+	it("aren't loaded again for an edit the server refused, which changed nothing", async () => {
+		const { layer, loads } = await shown();
+		layer.applyLocal("op", [delta(5, fine)]);
+		layer.settle("op", null);
+		await tick();
+		expect(loads.filter((id) => id.split("/").length > 3)).toEqual([]);
+	});
+
+	it("are loaded again once for an edit that both its answer and its change event name", async () => {
+		const { layer, source, loads } = await shown();
+		layer.settle("op", [{ key: fine, version: 5 }]);
+		await tick();
+		source.change([{ key: fine, version: 5 }]);
+		await tick();
+		expect(loads.sort()).toEqual([under.one, under.two]);
+		// The other way round too.
+		loads.length = 0;
+		source.change([{ key: fine, version: 6 }]);
+		await tick();
+		layer.settle("op two", [{ key: fine, version: 6 }]);
+		await tick();
+		expect(loads.sort()).toEqual([under.one, under.two]);
+	});
+
+	it("are loaded again for a later change of the same chunk", async () => {
+		const { source, loads } = await shown();
+		source.change([{ key: fine, version: 5 }]);
+		await tick();
+		source.change([{ key: fine, version: 6 }]);
+		await tick();
+		expect(loads).toHaveLength(4);
+	});
+
+	it("start over when a later change comes while they load, which the load may not have", async () => {
+		const { layer, source, loads, release, chunks } = await shown(true);
+		source.change([{ key: fine, version: 5 }]);
+		await tick();
+		// Still loading, a second change of the same chunk comes.
+		chunks.set(under.one, { value: 2, pyramid: 6 });
+		source.change([{ key: fine, version: 6 }]);
+		await tick();
+		expect(loads.filter((id) => id === under.one)).toHaveLength(2);
+		release();
+		await tick();
+		expect(first(layer, under.one)).toBe(2);
+		expect(layer.store.isLoading(under.one)).toBe(false);
+	});
+
+	it("don't start over for a change of the same version that they already load for", async () => {
+		const { layer, source, loads } = await shown(true);
+		source.change([{ key: fine, version: 5 }]);
+		await tick();
+		layer.settle("op", [{ key: fine, version: 5 }]);
+		source.change([{ key: fine, version: 5 }]);
+		await tick();
+		expect(loads.filter((id) => id === under.one)).toHaveLength(1);
+	});
+
+	it("are loaded again once per change to chunks they share, however many the change names", async () => {
+		const { source, loads } = await shown();
+		// Chunks (0, 2, 2) .. (1, 3, 3) are all under level 1's (0, 1, 1) and level 2's (0, 0, 0).
+		source.change([
+			{ key: [0, 2, 2], version: 2 },
+			{ key: [0, 3, 3], version: 3 },
+			{ key: [1, 2, 3], version: 4 },
+			{ key: [1, 3, 2], version: 5 },
+		]);
+		await tick();
+		expect(loads.sort()).toEqual([under.one, under.two]);
+	});
+
+	it("are forgotten, not loaded again, when no view shows them", async () => {
+		const { layer, source, loads } = await shown();
+		layer.store.want("view", []);
+		const heard = told(layer);
+		source.change([{ key: fine, version: 5 }]);
+		await tick();
+		expect(loads).toEqual([]);
+		expect(layer.store.peek(under.one)).toBeUndefined();
+		expect(layer.store.peek(under.two)).toBeUndefined();
+		expect(coarse(heard)).toEqual([under.one, under.two]);
+	});
+
+	it("aren't loaded for chunks the page never loaded", async () => {
+		const { source, loads } = await shown();
+		source.change([{ key: [3, 3, 3], version: 2 }]);
+		await tick();
+		// (3, 3, 3) is under level 1's (1, 1, 1), which was never shown, and level 2's, which was.
+		expect(loads).toEqual([under.two]);
+	});
+
+	it("are all that is loaded again when the full resolution chunk is current already", async () => {
+		const { layer, source, loads } = await shown();
+		layer.store.want("view", [under.one, under.two, "1/2/3"]);
+		await layer.store.request("1/2/3");
+		loads.length = 0;
+		layer.store.get("1/2/3")!.version = 5;
+		source.change([{ key: fine, version: 5 }]);
+		await tick();
+		expect(loads.sort()).toEqual([under.one, under.two]);
+	});
+
+	it("are loaded again after a failure, as full resolution chunks are", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const { layer, source, loads, failures } = await shown();
+		failures.left = 1;
+		source.change([{ key: fine, version: 5 }]);
+		await settled();
+		// Level 1's reload failed, level 2's worked.
+		expect(loads.sort()).toEqual([under.one, under.two]);
+		expect(layer.store.peek(under.one)).toBeDefined();
+		await wait(999);
+		expect(loads).toHaveLength(2);
+		await wait(1);
+		expect(loads.sort()).toEqual([under.one, under.one, under.two]);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("are dropped, not left out of date, once loading them again has failed eight times", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const { layer, source, loads, failures } = await shown();
+		failures.left = 1000;
+		const heard = told(layer);
+		source.change([{ key: [3, 3, 3], version: 5 }]);
+		await settled();
+		// Level 1's chunk for it was never loaded; level 2's is under.two.
+		expect(loads).toEqual([under.two]);
+		heard.length = 0;
+		await wait((1 + 2 + 4 + 8 + 16 + 30 + 30) * 1000 - 1);
+		expect(loads).toHaveLength(7);
+		expect(layer.store.peek(under.two)).toBeDefined();
+		expect(heard).toEqual([]);
+		await wait(1);
+		expect(loads).toHaveLength(8);
+		// The out-of-date copy is gone, and views are told, so they load it afresh.
+		expect(layer.store.peek(under.two)).toBeUndefined();
+		expect(heard).toEqual([[under.two]]);
+		expect(vi.getTimerCount()).toBe(0);
+		failures.left = 0;
+		layer.store.want("view", [under.two]);
+		expect(((await layer.store.request(under.two)).data as Uint8Array)[0]).toBe(1);
+	});
+
+	it("are dropped at once when loading them again is refused", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const { layer, source, loads, failures } = await shown();
+		failures.left = 1;
+		failures.status = 403;
+		const heard = told(layer);
+		source.change([{ key: [3, 3, 3], version: 5 }]);
+		await settled();
+		expect(loads).toEqual([under.two]);
+		expect(layer.store.peek(under.two)).toBeUndefined();
+		expect(heard.at(-1)).toEqual([under.two]);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("go with a load again that no view wants any more, so the next look loads them afresh", async () => {
+		const { layer, source, release, chunks } = await shown(true);
+		const heard = told(layer);
+		chunks.set(under.two, { value: 4, pyramid: 7 });
+		source.change([{ key: [3, 3, 3], version: 5 }]);
+		await tick();
+		heard.length = 0;
+		layer.store.want("view", [under.one]);
+		await tick();
+		expect(layer.store.peek(under.two)).toBeUndefined();
+		expect(heard).toEqual([[under.two]]);
+		layer.store.want("view", [under.one, under.two]);
+		const again = layer.store.request(under.two);
+		release();
+		expect(((await again).data as Uint8Array)[0]).toBe(4);
+	});
+
+	it("aren't loaded again by anything without coarser levels", async () => {
+		const { layer, source, loads } = await started(group(pyramid.slice(0, 1)));
+		layer.store.want("view", ["1/2/3"]);
+		await layer.store.request("1/2/3");
+		loads.length = 0;
+		source.change([{ key: fine, version: 5 }]);
+		await tick();
+		expect(loads).toEqual(["1/2/3"]);
+	});
+
+	describe("stay out of what edits are sent on", () => {
+		it("whatever version they were made from", async () => {
+			const { layer } = await shown();
+			expect(layer.store.peek(under.one)?.pyramid).toBe(4);
+			expect(layer.versionOf(under.one)).toBeUndefined();
+			expect(layer.versionOf(under.two)).toBeUndefined();
+		});
+
+		it("so an edit goes out on the full resolution chunk's version, or a plain edit if that isn't known", async () => {
+			const { layer } = await shown();
+			layer.store.want("view", [under.one, under.two, "1/2/3"]);
+			await layer.store.request("1/2/3");
+			layer.store.get("1/2/3")!.version = 3;
+			const op = { strict: true, deltas: [delta(5, fine)] };
+			expect(strictOn(layer, op).deltas[0]!.base_version).toBe(3);
+			// Nothing of the coarser chunks above it can stand in for a version it lacks.
+			const lacking = { strict: true, deltas: [delta(5, [1, 2, 2])] };
+			expect(strictOn(layer, lacking).strict).toBe(false);
+		});
+
+		it("and don't make a full resolution chunk's change event seem seen", async () => {
+			const { layer, source, loads } = await shown();
+			layer.store.want("view", [under.one, under.two, "1/2/3"]);
+			await layer.store.request("1/2/3");
+			loads.length = 0;
+			// The coarser chunk's version (4) is past the change's (3), which tells nothing about the chunk under it.
+			source.change([{ key: fine, version: 3 }]);
+			await tick();
+			expect(loads).toContain("1/2/3");
+		});
 	});
 });

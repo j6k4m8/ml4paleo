@@ -47,6 +47,9 @@ const RETRY_LONGEST_MS = 30_000;
 const RETRY_SPREAD = 0.25;
 // Failing this many times in a row, other than for the network, a chunk isn't tried again.
 const FAILURES = 8;
+// How many chunks it remembers having asked for the coarser chunks above
+// of, before it forgets the earliest half.
+const COVERED = 4096;
 
 /**
  * Whether a reload that failed is worth trying again, `failures` failures in
@@ -112,6 +115,20 @@ export function labelKey(id: string): TileKey {
 }
 
 /**
+ * The chunks of the coarser `levels` that hold the full resolution chunks
+ * `keys`, as ids (`level/cz/cy/cx`), each once: a chunk of a level whose voxels
+ * are `scale` full resolution ones along an axis holds the chunks numbered
+ * `scale` times its own, so a chunk `c` is in the one numbered `floor(c / scale)`.
+ */
+export function coarseIds(levels: Level[], keys: Vec3[]): string[] {
+	const ids = new Set<string>();
+	for (const level of levels.slice(1)) {
+		for (const key of keys) ids.add(`${level.index}/${key.map((c, axis) => Math.floor(c / level.scale[axis]!)).join("/")}`);
+	}
+	return [...ids];
+}
+
+/**
  * An edit as it goes out. A strict one is refused if its chunks changed since
  * the page read them, so it carries the versions the page's copies stand
  * for; where any isn't known, it goes out as a plain edit instead.
@@ -148,6 +165,9 @@ export class LabelLayer {
 	// failed in a row, and the timer of the next try.
 	#failures = new Map<string, number>();
 	#retries = new Map<string, ReturnType<typeof setTimeout>>();
+	// Full resolution chunks whose coarser chunks were loaded again for a
+	// change: the latest version each was done for.
+	#covered = new Map<string, number>();
 	#stopped = false;
 	/** Called if live updates stop for good (signed out, or removed from the project). */
 	onStopped: (() => void) | null = null;
@@ -312,6 +332,28 @@ export class LabelLayer {
 			stale.map(({ key }) => key.join("/")),
 			new Map(stale.map(({ key, version }) => [key.join("/"), version])),
 		);
+		this.#refreshCoarser(chunks);
+	}
+
+	/**
+	 * Chunks changed at these versions (by anyone's edit, this page's too),
+	 * so the coarser chunks holding them are out of date: load those again
+	 * (the server answers `304` for one the change left as it was), unless
+	 * that was already done for these versions, as when an edit's answer and
+	 * its change event both name it. A coarser chunk is made from the ones
+	 * under it, so what it says of its version says nothing of theirs.
+	 */
+	#refreshCoarser(chunks: { key: Vec3; version: number }[]): void {
+		if (this.levels.length < 2) return;
+		const news = chunks.filter(({ key, version }) => version > (this.#covered.get(key.join("/")) ?? 0));
+		for (const { key, version } of news) this.#covered.set(key.join("/"), version);
+		if (this.#covered.size > COVERED) {
+			for (const id of this.#covered.keys()) {
+				this.#covered.delete(id);
+				if (this.#covered.size <= COVERED / 2) break;
+			}
+		}
+		this.reload(coarseIds(this.levels, news.map(({ key }) => key)));
 	}
 
 	/**
@@ -361,7 +403,7 @@ export class LabelLayer {
 		clearTimeout(this.#retries.get(id));
 		const stale = this.store.peek(id);
 		const failures = (this.#failures.get(id) ?? 0) + 1;
-		if (this.#stopped || !stale || !worthRetrying(error, failures)) return this.#giveUp(id);
+		if (this.#stopped || !stale || !worthRetrying(error, failures)) return this.#abandon(id);
 		this.#failures.set(id, failures);
 		const timer = setTimeout(() => {
 			// A newer copy came since, or the chunk is loading again, or it's gone.
@@ -376,6 +418,19 @@ export class LabelLayer {
 		clearTimeout(this.#retries.get(id));
 		this.#retries.delete(id);
 		this.#failures.delete(id);
+	}
+
+	/**
+	 * Stop trying to load a chunk again, for good. The out-of-date copy of a
+	 * coarser chunk, which nothing else would ever change, is dropped, so
+	 * views load it afresh when they next need it rather than show it.
+	 */
+	#abandon(id: string): void {
+		this.#giveUp(id);
+		if (labelKey(id).level > 0 && this.store.peek(id)) {
+			this.store.invalidate(id);
+			this.#emit([id]);
+		}
 	}
 
 	/**
@@ -422,6 +477,8 @@ export class LabelLayer {
 	 * may predate the op, keeps showing the edit until a copy with it comes.
 	 */
 	settle(op: string, versions: { key: Vec3; version: number }[] | null): void {
+		// However the edit stays on screen, the coarser chunks over it are out of date now.
+		if (versions) this.#refreshCoarser(versions);
 		const local = this.#local.get(op);
 		if (!local) return;
 		for (const id of local.keys()) this.store.unpin(id);
