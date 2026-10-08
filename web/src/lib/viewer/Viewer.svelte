@@ -35,7 +35,17 @@
 	import { nextColor } from "#lib/labelimport.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
-	import { acceptParts, MAX_ACCEPT_VOXELS, planeToAccept, readBox, unlabeledOnly, viewExtent, whyNotInView } from "../labels/accept";
+	import {
+		acceptKeyTarget,
+		acceptParts,
+		leavesLabeledOut,
+		MAX_ACCEPT_VOXELS,
+		planeToAccept,
+		readBox,
+		unlabeledOnly,
+		viewExtent,
+		whyNotInView,
+	} from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit, saveState } from "../labels/opqueue.svelte";
 	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
@@ -718,7 +728,7 @@
 			const predicted = values.some((value) => value > 0);
 			// Not while an undo or redo is on its way: the copies don't show it yet. And if the
 			// labels can't be read, the server still fills only what's unlabeled.
-			if (skipLabeled && predicted && !queue.toggling) {
+			if (leavesLabeledOut(skipLabeled, predicted, queue.toggling)) {
 				values = unlabeledOnly(values, await read(labels.store).catch(() => new Uint8Array(values.length)));
 			}
 			const parts = acceptParts(values, box);
@@ -841,12 +851,13 @@
 				return setTool(action);
 			case "next-roi":
 				return nextOpen();
-			case "accept":
+			case "accept": {
 				// Holding the key down would go on to accept what's already accepted.
-				if (event.repeat) return;
-				if (selectedRoi) void acceptPrediction(selectedRoi);
-				else void acceptView();
+				const target = acceptKeyTarget(event.repeat, selectedRoi !== null);
+				if (target === "roi" && selectedRoi) void acceptPrediction(selectedRoi);
+				else if (target === "view") void acceptView();
 				return;
+			}
 			case "complete-roi":
 				if (viewer.selectedRoi) rois.update(viewer.selectedRoi, { status: event.shiftKey ? "open" : "complete" });
 				return;

@@ -75,6 +75,16 @@ export function planeToAccept(layout: Layout, pointed: Plane | null, used: Plane
 	return layout === "four" ? (pointed ?? used) : PLANES[layout];
 }
 
+/**
+ * What a press of the accept key accepts in: nothing for the repeats of a key
+ * held down (it accepts once, when pressed, not again for what is accepted
+ * already), else the selected ROI if there is one, else the view.
+ */
+export function acceptKeyTarget(repeat: boolean, roiSelected: boolean): "nothing" | "roi" | "view" {
+	if (repeat) return "nothing";
+	return roiSelected ? "roi" : "view";
+}
+
 /** How many chunks (64³ voxels) a box touches. */
 export function chunksIn(box: Box): number {
 	let count = 1;
@@ -144,6 +154,19 @@ export function unlabeledOnly(predicted: Uint8Array, labeled: Uint8Array): Uint8
 	const out = new Uint8Array(predicted.length);
 	for (let i = 0; i < out.length; i++) if (!labeled[i]) out[i] = predicted[i]!;
 	return out;
+}
+
+/**
+ * Whether to leave out of an accept the voxels the page knows are labeled
+ * already (`unlabeledOnly`): when asked to (in a view, where accepting again
+ * should say there's nothing left to fill), when something is predicted
+ * there, and not while an undo or redo is on its way (`toggling`: see
+ * `OpQueue`), as the page's copies of the labels don't show it yet, so they
+ * can't say what is labeled. Leaving them in is safe, since the server fills
+ * only unlabeled voxels whatever it is sent.
+ */
+export function leavesLabeledOut(skipLabeled: boolean, predicted: boolean, toggling: boolean): boolean {
+	return skipLabeled && predicted && !toggling;
 }
 
 /** Edits that write each predicted value into the box's unlabeled voxels. */
