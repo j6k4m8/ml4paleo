@@ -133,13 +133,25 @@ export function chooseLevel(levels: Level[], view: View, current?: number): Leve
 }
 
 /**
+ * Kept to a coarser level by the chunk limit, a view goes finer again only
+ * once that takes this many times fewer chunks than the limit, so panning
+ * near it doesn't flip levels.
+ */
+export const TILE_HYSTERESIS = 1.25;
+
+/**
  * The level a view shows: the one `chooseLevel` picks, or a coarser one if
  * drawing it (with the coarser levels under it) would take more than
- * `maxTiles` chunks.
+ * `maxTiles` chunks, or, finer than `current`, more than `maxTiles` over
+ * TILE_HYSTERESIS.
  */
 export function viewLevel(levels: Level[], view: View, current: number | undefined, maxTiles: number): Level {
 	let level = chooseLevel(levels, view, current);
-	while (level.index < levels.length - 1 && countDrawn(levels, level, view) > maxTiles) level = levels[level.index + 1]!;
+	while (level.index < levels.length - 1) {
+		const limit = current !== undefined && level.index < current ? maxTiles / TILE_HYSTERESIS : maxTiles;
+		if (countDrawn(levels, level, view) <= limit) break;
+		level = levels[level.index + 1]!;
+	}
 	return level;
 }
 

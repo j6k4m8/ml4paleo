@@ -10,6 +10,7 @@ import {
 	LEVEL_HYSTERESIS,
 	type Level,
 	PLANES,
+	TILE_HYSTERESIS,
 	tileCrosses,
 	tileId,
 	tilesShown,
@@ -169,6 +170,33 @@ describe("viewLevel", () => {
 		expect(viewLevel(levels, wide, undefined, 1000).index).toBe(0);
 		expect(viewLevel(levels, wide, undefined, 60).index).toBe(1);
 		expect(viewLevel(levels, wide, undefined, 20).index).toBe(2);
+	});
+
+	it("doesn't flip levels as panning near the limit adds and drops a row of chunks", () => {
+		const limit = 120;
+		let shown: number | undefined;
+		const seen = new Set<number>();
+		// Level 0 at zoom 2: 1800 × 1000 pixels show 900 × 500 voxels, 11 or 12 chunks
+		// across (the image is 700 wide, so x stays at 11) and 8 or 9 down as y moves.
+		for (const y of [480, 500, 510, 530, 490, 470, 505, 515]) {
+			const at = view({ zoom: 2, width: 1800, height: 1000, position: [130, y, 350] });
+			shown = viewLevel(levels, at, shown, limit).index;
+			seen.add(shown);
+		}
+		expect(seen.size).toBe(1);
+	});
+
+	it("goes finer again once well under the limit", () => {
+		const limit = 120;
+		const near = view({ zoom: 2, width: 1800, height: 1000, position: [130, 500, 350] });
+		const level0 = countDrawn(levels, levels[0] as Level, near);
+		expect(level0).toBeGreaterThan(limit / TILE_HYSTERESIS);
+		// Kept at level 1 by the limit, it stays there while level 0 would only just fit...
+		expect(viewLevel(levels, near, 1, Math.ceil(level0 * 1.1)).index).toBe(1);
+		// ...and goes back to level 0 once that fits well under it.
+		expect(viewLevel(levels, near, 1, Math.ceil(level0 * TILE_HYSTERESIS)).index).toBe(0);
+		// Without a level shown before, it takes level 0 when that fits.
+		expect(viewLevel(levels, near, undefined, level0).index).toBe(0);
 	});
 
 	it("counts the coarser levels drawn under a level against the limit", () => {
