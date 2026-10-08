@@ -686,6 +686,37 @@ describe("ChunkStore, for chunks the server is still making", () => {
 		await vi.advanceTimersByTimeAsync(1);
 		expect(asked(calls, start)).toEqual(["a@0", "b@0", "b@60000"]);
 	});
+
+	it("doesn't ask again for a load that was cancelled in the moment the server's busy answer came", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		store.want("xy", ["a"]);
+		const lost = store.request("a").catch((e: unknown) => e);
+		// The view moves on, and the answer, which comes as it does, is that the server is busy.
+		store.want("xy", []);
+		calls[0]?.fail(new Busy(1000));
+		await settle();
+		expect(((await lost) as DOMException).name).toBe("AbortError");
+		expect(store.isLoading("a")).toBe(false);
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(calls).toHaveLength(1);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("doesn't ask again for a load a refresh took the place of, whose busy answer comes after", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		store.request("a").catch(() => {});
+		const fresh = store.refresh("a");
+		expect(calls).toHaveLength(2);
+		calls[0]?.fail(new Busy(1000));
+		await settle();
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(calls).toHaveLength(2);
+		calls[1]?.finish(20);
+		expect((await fresh).data.byteLength).toBe(20);
+		expect(vi.getTimerCount()).toBe(0);
+	});
 });
 
 describe("ChunkStore, for chunks the server takes long to make", () => {
