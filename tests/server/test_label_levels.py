@@ -1489,6 +1489,97 @@ def test_retiring_a_class_changes_only_the_chunks_it_is_in(ada, project):
     check_every_level(ada, project, volume, levels, shown)
 
 
+def test_a_chunk_is_tested_for_retired_voxels_with_one_column_up_to_a_limit():
+    # The test is made on every request, over every label row in the chunk's
+    # box, so what it costs mustn't grow with each class retired.
+    assert label_pyramid._seen(frozenset()) == []
+    for count in (1, 2, label_pyramid.TESTED_RETIRED):
+        assert len(label_pyramid._seen(frozenset(range(2, 2 + count)))) == 1, count
+    too_many = frozenset(range(2, 2 + label_pyramid.TESTED_RETIRED + 1))
+    assert label_pyramid._seen(too_many) == []
+    some = frozenset({2, 5})
+    assert label_pyramid._present(some, [True]) == some
+    assert label_pyramid._present(some, [False]) == frozenset()
+    assert label_pyramid._present(frozenset(), []) == frozenset()
+    # Past the limit there is no test, and every chunk follows them.
+    assert label_pyramid._present(too_many, []) == too_many
+
+
+def test_a_chunk_with_voxels_of_one_retired_class_follows_every_retired_class(
+    ada, project, migrated_database_url
+):
+    levels = plan_levels(SHAPE)
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    # Bone and matrix in far corners; teeth, a third class, nowhere.
+    volume[0:60, 0:60, 0:60] = 2
+    volume[130:140, 140:150, 260:270] = 3
+    paint(ada, project, volume)
+    teeth = ada.post(
+        f"/api/projects/{project}/labels/classes",
+        json={"name": "teeth", "color": "#112233"},
+    )
+    assert teeth.status_code == 201, teeth.text
+    retired = frozenset({3, teeth.json()["value"]})
+    for value in retired:
+        retire(ada, project, value)
+
+    async def fingerprints(db):
+        return [
+            await label_pyramid.fingerprint(
+                db, uuid.UUID(project), levels, level, key, retired
+            )
+            for level, key in [(1, (0, 0, 0)), (1, (1, 1, 2)), (3, (0, 0, 0))]
+        ]
+
+    bone, matrix, top = run_db(migrated_database_url, fingerprints)
+    # Bone has none of them in it; the chunk with matrix follows both, and so
+    # does the top chunk, which has matrix in it.
+    assert bone.retired == frozenset()
+    assert matrix.retired == top.retired == retired
+    assert bone.count and matrix.count and top.count == bone.count + matrix.count
+
+
+def test_past_the_classes_it_tests_for_every_chunk_follows_the_retired_ones(
+    ada, project, monkeypatch
+):
+    monkeypatch.setattr(label_pyramid, "TESTED_RETIRED", 1)
+    levels = plan_levels(SHAPE)
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    volume[0:60, 0:60, 0:60] = 2
+    volume[130:140, 140:150, 260:270] = 3
+    volume[100:110, 100:110, 100:110] = 4
+    # Teeth need a class to be painted with.
+    teeth = ada.post(
+        f"/api/projects/{project}/labels/classes",
+        json={"name": "teeth", "color": "#112233"},
+    )
+    assert teeth.json()["value"] == 4
+    paint(ada, project, volume)
+    matrix = (1, 1, 2)
+    etag = get(ada, project, 1, matrix).headers["etag"]
+
+    def revalidate():
+        return get(ada, project, 1, matrix, headers={"If-None-Match": etag})
+
+    retire(ada, project, 2)
+    # One class is within what it tests for: the chunk with matrix only keeps its ETag.
+    assert revalidate().status_code == 304
+    shown = np.where(volume == 2, 0, volume)
+    check_every_level(ada, project, volume, levels, shown)
+    retire(ada, project, 4)
+    # Two are past it, so the chunk follows them though it has none of their
+    # voxels, and what it shows is as it was.
+    again = revalidate()
+    assert again.status_code == 200
+    assert again.headers["etag"] != etag
+    shown = np.where(np.isin(volume, (2, 4)), 0, volume)
+    check_every_level(ada, project, volume, levels, shown)
+    np.testing.assert_array_equal(
+        decode_chunk(again.content),
+        expected_chunk(shrink(shown, levels)[1], matrix),
+    )
+
+
 def test_a_build_that_took_an_older_state_leaves_a_stored_chunk_of_a_newer_one(
     ada, migrated_database_url, settings
 ):

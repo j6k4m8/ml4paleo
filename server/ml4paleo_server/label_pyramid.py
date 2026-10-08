@@ -28,10 +28,12 @@ from the full resolution chunks), when someone asks for it:
   it is simply missing (unlabeled), as at level 0. The `ETag` also names what
   else the pixels follow: the image whose levels these are, and the shape and
   factors of each (replacing the image can change them, labels unchanged), the
-  retired classes that have voxels under the chunk (the same query says which,
-  from the chunks' voxel counts per class, so retiring a class changes only
-  the chunks it is in), and `RULE_VERSION`. It is only unique to its URL: two
-  chunks can have the same one.
+  retired classes, but only for a chunk that has voxels of any of them (the
+  same query says so, testing each chunk's voxel counts per class once, for
+  up to `TESTED_RETIRED` classes: it runs on every request, and its cost grows
+  with the classes it looks for), so retiring a class changes the chunks that
+  have retired voxels (of it, or of an earlier one) and none of the others, and
+  `RULE_VERSION`. It is only unique to its URL: two chunks can have the same one.
 - A computed chunk is kept, as the bytes a viewer gets, in a cache that holds
   the most recently used ones under a memory limit. Its key includes that sum,
   so an edit leaves the stale copy behind rather than finding it. An edit
@@ -90,7 +92,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import obstore
-from sqlalchemy import Integer, and_, func, select
+from sqlalchemy import Integer, Text, and_, func, literal, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -122,6 +125,14 @@ CACHE_BYTES = 64 * 1024 * 1024
 # mixed everywhere), so a request makes some hundreds.
 SECONDS = 1.5
 BLOBS = 512
+# How many retired classes a chunk's voxel counts are tested for (see `_seen`).
+# Every request pays for the test, and it costs more the more there are (the
+# state of the top chunk of 500,000 label rows takes 15 ms to tell with none
+# retired, 22 with one, and 38 with sixteen; testing for the 253 classes a
+# project can come to have retired takes 150 to 430 ms). A project that has
+# retired more than this is rare, so past it every chunk follows the retired
+# classes, as if it had voxels of them.
+TESTED_RETIRED = 16
 # Pieces of work (the chunks under a chunk of level 1 read and shrunk, or a
 # chunk of a higher level combined) running at once in each process, and how
 # many more may wait for a slot before a request is turned away.
@@ -166,8 +177,10 @@ class Fingerprint:
     """
     Which state of the labels a chunk shows: how many full-resolution chunks
     under it have labels, the sum of the versions of all the chunks under it,
-    erased ones too (which only goes up), and which of the project's retired
-    classes have voxels in them, as those are left out of what it shows.
+    erased ones too (which only goes up), and the project's retired classes if
+    any of them has voxels in them, as those are left out of what it shows
+    (none otherwise: with no voxels of them, which are retired doesn't matter;
+    all of them, if there are too many to tell).
     """
 
     count: int
@@ -197,10 +210,11 @@ class Plan:
     def digest(self, retired: frozenset[int]) -> bytes:
         """
         Says in a few bytes what a chunk's pixels follow besides the versions
-        of the labels under it: the image and its levels, and which retired
-        classes (of those `retired`, the ones with voxels under the chunk)
-        they leave out. Retiring a class that isn't under a chunk, or was never
-        used, leaves its digest as it was.
+        of the labels under it: the image and its levels, and the `retired`
+        classes they leave out, which is all the project's if the chunk has
+        voxels of any of them and none if it hasn't. So a chunk without retired
+        voxels has the digest it had before any class was retired, whatever is
+        retired since (if no more than `TESTED_RETIRED` are).
         """
         digest = hashlib.blake2s(self._levels_digest, digest_size=6)
         digest.update(bytes(sorted(retired)))
@@ -304,19 +318,28 @@ _COUNT = func.count(LabelChunk.class_sha)
 _VERSIONS = func.coalesce(func.sum(LabelChunk.version), 0)
 
 
-def _seen(retired: Iterable[int]) -> list:
+def _seen(retired: frozenset[int]) -> list:
     """
-    For each retired class, in order, whether any of the chunks in a box has
-    voxels of it (a chunk's counts of its voxels per class say).
+    The column that says whether any of the chunks in a box has voxels of a
+    retired class (a chunk's counts of its voxels per class say): one test of
+    each chunk however many classes are retired, which matters, since a viewer
+    asks for the state of a chunk on every request and the top chunk's box is
+    every chunk of the project. No column if none are retired, or too many to
+    test (`TESTED_RETIRED`).
     """
-    return [
-        func.coalesce(func.bool_or(LabelChunk.class_counts.has_key(str(value))), False)
-        for value in sorted(retired)
-    ]
+    if not retired or len(retired) > TESTED_RETIRED:
+        return []
+    names = literal([str(value) for value in sorted(retired)], type_=ARRAY(Text))
+    return [func.coalesce(func.bool_or(LabelChunk.class_counts.has_any(names)), False)]
 
 
-def _present(retired: Iterable[int], seen: Iterable) -> frozenset[int]:
-    return frozenset(v for v, here in zip(sorted(retired), seen, strict=True) if here)
+def _present(retired: frozenset[int], seen: Iterable) -> frozenset[int]:
+    """
+    What a chunk's fingerprint says of the retired classes: all of them if any
+    has voxels in it (see `Plan.digest`), or if there were too many to test,
+    else none.
+    """
+    return retired if any(seen) or len(retired) > TESTED_RETIRED else frozenset()
 
 
 async def fingerprint(
@@ -328,8 +351,8 @@ async def fingerprint(
     retired: frozenset[int] = frozenset(),
 ) -> Fingerprint:
     """
-    Which state of the labels a chunk of `level` shows (one query), counting
-    which of the `retired` classes are in it.
+    Which state of the labels a chunk of `level` shows (one query), and
+    whether any of the `retired` classes has voxels in it.
     """
     box = footprint(levels[level], key)
     row = (
