@@ -4,6 +4,7 @@
  * this browser.
  */
 
+import type { Polygon, PolygonMode } from "../labels/polygon";
 import type { PlaneMask } from "../labels/raster";
 import type { Plane, Vec3 } from "./tiles";
 
@@ -21,13 +22,6 @@ export interface Stroke {
 	value: number;
 	onlyIf: string;
 	radius: number;
-}
-
-/** A polygon being drawn: its plane, slice, and vertices in plane voxels. */
-export interface Polygon {
-	plane: Plane["name"];
-	slice: number;
-	points: [number, number][];
 }
 
 const PREFERENCES = "m4p.viewer";
@@ -77,7 +71,14 @@ export class ViewerState {
 	brushRadius = $state(4);
 	/** Paint only voxels without a label. */
 	protectLabels = $state(false);
-	polygon = $state<Polygon | null>(null);
+	/** The polygon being drawn; replaced, never changed in place. */
+	polygon = $state.raw<Polygon | null>(null);
+	/** Closing a polygon fills it with the active class, or cuts it out of that class. */
+	polygonMode = $state<PolygonMode>("add");
+	/** Alt and Shift as held now, which change what closing a polygon does. */
+	held = $state.raw({ altKey: false, shiftKey: false });
+	/** A polygon is being dragged out freehand, on its slice: the views hold still until it's let go. */
+	lassoing = $state(false);
 	/** Space is held: drag pans whatever the tool. */
 	panning = $state(false);
 	/** New ROIs: one-voxel slices, or cubes this many voxels deep. */
@@ -118,6 +119,13 @@ export class ViewerState {
 			localStorage.setItem(PREFERENCES, JSON.stringify(preferences));
 		} catch {
 			// Private windows and blocked storage just don't remember.
+		}
+	}
+
+	/** Note which of Alt and Shift a key or pointer event says are held. */
+	noteKeys(keys: { altKey: boolean; shiftKey: boolean }): void {
+		if (keys.altKey !== this.held.altKey || keys.shiftKey !== this.held.shiftKey) {
+			this.held = { altKey: keys.altKey, shiftKey: keys.shiftKey };
 		}
 	}
 
