@@ -4,7 +4,8 @@
 	import { PlaneMask } from "../labels/raster";
 	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
-	import type { ChunkStore } from "./chunks";
+	import { withBackground } from "./background";
+import type { ChunkStore } from "./chunks";
 	import { isRightClick } from "./keymap";
 	import type { LabelLayer } from "./labels";
 	import { MAX_LABEL_TILES, labelsView, overlayHidden } from "./overlays";
@@ -293,14 +294,14 @@
 			prefix: string,
 			shown: boolean,
 			opacity: number,
-			{ keys = fullTiles, hole }: { keys?: TileKey[]; hole?: Rect } = {},
+			{ keys = fullTiles, hole, background }: { keys?: TileKey[]; hole?: Rect; background?: boolean } = {},
 		) => {
 			if (!store) return;
 			if (!shown || keys.length === 0) return store.want(plane.name, []);
 			const tiles = keys.map((key) => ({ id: `${key.cz}/${key.cy}/${key.cx}`, key }));
 			store.want(plane.name, tiles.map((t) => t.id));
 			for (const tile of tiles) loadOverlay(store, prefix, tile, levels, at);
-			overlays.push({ slice: at, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity, hole });
+			overlays.push({ slice: at, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity, hole, background });
 		};
 		// A proposal shows in its box, in place of the prediction there.
 		const inlay = proposal ? boxOnPlane(proposal.box, plane, at) : null;
@@ -323,7 +324,7 @@
 			labelsHidden = picked.hidden;
 			labels.store.want(plane.name, picked.wanted, picked.shown);
 			for (const tile of picked.draw) loadOverlay(labels.store, "", tile, labels.levels, at);
-			overlays.push({ slice: at, tiles: picked.draw, opacity: viewer.opacity });
+			overlays.push({ slice: at, tiles: picked.draw, opacity: viewer.opacity, background: true });
 		} else {
 			labels?.store.want(plane.name, []);
 			labelsHidden = false;
@@ -634,7 +635,7 @@
 	const activeColor = $derived(
 		viewer.tool === "eraser"
 			? "#ffffff"
-			: (labels?.classes.find((c) => c.value === viewer.activeClass)?.color ?? "#ffffff"),
+			: (withBackground(labels?.classes ?? []).find((c) => c.value === viewer.activeClass)?.color ?? "#ffffff"),
 	);
 
 	function clearStroke() {

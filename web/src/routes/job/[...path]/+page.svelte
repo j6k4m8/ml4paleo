@@ -39,7 +39,7 @@
 				<p class="error" role="alert">That isn't a v1 job's link.</p>
 			{:else}
 				<p class="text-ink-dim">
-					Importing copies this job's scan, its annotation samples (as labels in complete slice ROIs), and its last
+					Importing copies this job's scan, its annotation samples (as labels), and its last
 					finished segmentation (as the prediction) into a new project of yours. The first person to import a job gets
 					it.
 				</p>

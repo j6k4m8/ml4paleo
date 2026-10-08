@@ -3,8 +3,11 @@
 	import { api, message } from "#lib/api.ts";
 	import { latestPredictions, unfinished } from "#lib/pipelines.ts";
 	import type { Pipeline } from "#lib/types.ts";
+	import { BACKGROUND_VALUE, withBackground } from "#lib/viewer/background.ts";
 	import type { LabelClass } from "#lib/viewer/labels.ts";
+	import { SHOW_ROIS } from "#lib/features.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
+	import Labeled from "#lib/ui/Labeled.svelte";
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 	import Brain from "@lucide/svelte/icons/brain";
 	import Play from "@lucide/svelte/icons/play";
@@ -46,6 +49,12 @@
 	let models: Model[] = $state([]);
 	let plugins: Plugin[] = $state([]);
 	let classes: LabelClass[] = $state([]);
+	let classesLoaded = $state(false);
+	// Voxels labeled with each value (background is 1), once known.
+	let counts: Record<string, number> | null = $state(null);
+	// Whether the project has any ROIs, once known. They're hidden now, but a complete one
+	// made earlier makes the voxels in it background, which the counts don't show.
+	let hasRois: boolean | null = $state(null);
 	let quota: Quota | null = $state(null);
 	let progress: Record<string, number> = $state({});
 	let prediction: { model_id: string | null; model_name: string | null } | null = $state(null);
@@ -67,6 +76,18 @@
 	});
 
 	const chosen = $derived(plugins.find((p) => p.name === plugin));
+	// What has been labeled, background and classes, and so whether there are two things to tell apart.
+	const labeledNow = $derived(withBackground(classes).filter((c) => (counts?.[c.value] ?? 0) > 0));
+	const tooLittle = $derived(counts !== null && classesLoaded && labeledNow.length < 2);
+	// Training can't work: nothing painted would make up for it, so Train waits. With ROIs around
+	// it only warns, and the trainer says if it really can't.
+	const blocked = $derived(tooLittle && hasRois === false);
+	const whyTooLittle = $derived.by(() => {
+		const only = labeledNow[0];
+		if (!only) return "Nothing is labeled yet. In the annotator, label what you're looking for, and some background.";
+		if (only.value === BACKGROUND_VALUE) return "Only background is labeled. Label what you're looking for too.";
+		return `Only ${only.name} is labeled. Paint some Background too, so the model can tell them apart.`;
+	});
 	// The prediction pipelines still running, by model.
 	const predicting: Record<string, string> = $derived(
 		Object.fromEntries(Object.entries(predictions).flatMap(([model, p]) => (unfinished(p) ? [[model, p.id]] : []))),
@@ -83,6 +104,8 @@
 				`/api/projects/${pid}/prediction`,
 			).catch(() => null);
 			predictions = latestPredictions(await api<Pipeline[]>(`/api/projects/${pid}/pipelines`));
+			counts = await api<Record<string, number>>(`/api/projects/${pid}/labels/counts`).catch(() => null);
+			hasRois = await api<unknown[]>(`/api/projects/${pid}/rois`).then((list) => list.length > 0, () => null);
 		} catch (e) {
 			error = message(e);
 		}
@@ -96,7 +119,13 @@
 			const first = list[0];
 			if (first) params = Object.fromEntries(Object.entries(first.params_schema.properties).map(([k, v]) => [k, v.default]));
 		}, () => {});
-		api<LabelClass[]>(`/api/projects/${pid}/labels/classes`).then((list) => (classes = list), () => {});
+		api<LabelClass[]>(`/api/projects/${pid}/labels/classes`).then(
+			(list) => {
+				classes = list;
+				classesLoaded = true;
+			},
+			() => {},
+		);
 	});
 
 	// Follow running trainings and predictions; refresh when one ends. For a
@@ -177,8 +206,12 @@
 		<h2 class="panel-title">Train a model</h2>
 		<form class="flex flex-col gap-3 p-3" onsubmit={train}>
 			<p class="text-ink-dim">
-				Trains on everything labeled so far: complete ROIs (unlabeled voxels there count as background), open ROIs, and
-				labels outside ROIs. Validation ROIs are held out to score the model.
+				{#if SHOW_ROIS}
+					Trains on everything labeled so far: complete ROIs (unlabeled voxels there count as background), open ROIs, and
+					labels outside ROIs. Validation ROIs are held out to score the model.
+				{:else}
+					Trains on everything you've labeled: your classes, and Background, which tells the model what to leave alone.
+				{/if}
 			</p>
 			{#if plugins.length > 1}
 				<label class="label">
@@ -219,8 +252,18 @@
 					</div>
 				</div>
 			{/if}
+			{#if counts && classesLoaded}
+				<div class="flex flex-col gap-1.5 rounded-sm border border-edge bg-field p-2.5">
+					<p class="text-2xs font-semibold tracking-wide text-ink-dim uppercase">Labeled so far</p>
+					<Labeled {classes} {counts} />
+					{#if tooLittle}
+						<p class="text-warn" role="status">{whyTooLittle}</p>
+						<a href="/p/{pid}/annotate">Open the annotator</a>
+					{/if}
+				</div>
+			{/if}
 			{#if error}<p class="error" role="alert">{error}</p>{/if}
-			<button class="btn btn-primary h-7" disabled={busy}><Brain size={14} /> Train</button>
+			<button class="btn btn-primary h-7" disabled={busy || blocked} title={blocked ? whyTooLittle : undefined}><Brain size={14} /> Train</button>
 		</form>
 	</section>
 
@@ -270,7 +313,7 @@
 						{/if}
 						<p class="text-2xs text-ink-faint">
 							{model.plugin} · {new Date(model.created_at).toLocaleString()} · {model.training_set.labeled_chunks ?? 0} labeled
-							chunks, {model.training_set.rois?.complete ?? 0} complete and {model.training_set.rois?.open ?? 0} open ROIs
+							chunks{#if SHOW_ROIS}, {model.training_set.rois?.complete ?? 0} complete and {model.training_set.rois?.open ?? 0} open ROIs{/if}
 						</p>
 						{#if model.metrics}
 							{#if model.metrics.validation_crops}
@@ -291,7 +334,7 @@
 										</tr>
 									</tbody>
 								</table>
-							{:else}
+							{:else if SHOW_ROIS}
 								<p class="text-2xs text-ink-dim">No validation ROIs, so no scores. Mark some ROIs as validation to score models.</p>
 							{/if}
 						{/if}

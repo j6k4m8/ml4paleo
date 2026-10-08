@@ -6,6 +6,7 @@ feed collaborators follow, and the labels as a zarr group for viewers.
     POST   /api/projects/{id}/labels/classes             {name, color}
     PATCH  /api/projects/{id}/labels/classes/{value}     {name?, color?}
     DELETE /api/projects/{id}/labels/classes/{value}
+    GET    /api/projects/{id}/labels/counts              voxels labeled with each value
     POST   /api/projects/{id}/labels/ops                 apply an edit
     POST   /api/projects/{id}/labels/ops/{seq}/undo      {client_op_id}
     POST   /api/projects/{id}/labels/ops/{seq}/redo      {client_op_id}
@@ -49,7 +50,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from starlette.concurrency import run_in_threadpool
 
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
@@ -119,6 +120,36 @@ async def list_classes(project: MemberProject, db: DbSession) -> list[ClassOut]:
         )
     ).all()
     return [ClassOut(value=r.value, name=r.name, color=r.color) for r in rows]
+
+
+@router.get("/counts")
+async def count_labels(project: MemberProject, db: DbSession) -> dict[str, int]:
+    """
+    Voxels labeled with each value, for background (1) and every class the
+    project has: what there is to train on. A value nobody painted says 0.
+    """
+    live = {
+        BACKGROUND,
+        *(
+            await db.scalars(
+                select(LabelClass.value).where(
+                    LabelClass.project_id == project.id,
+                    LabelClass.deleted_at.is_(None),
+                )
+            )
+        ),
+    }
+    rows = await db.execute(
+        text(
+            "SELECT counts.key, sum(counts.value::bigint) "
+            "FROM label_chunks CROSS JOIN LATERAL "
+            "jsonb_each_text(label_chunks.class_counts) AS counts "
+            "WHERE label_chunks.project_id = :project GROUP BY counts.key"
+        ),
+        {"project": project.id},
+    )
+    painted = {int(key): int(total) for key, total in rows}
+    return {str(value): painted.get(value, 0) for value in sorted(live)}
 
 
 async def new_class_values(db, project_id: uuid.UUID, count: int) -> list[int]:

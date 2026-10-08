@@ -8,6 +8,7 @@
 	import { loadLevels } from "#lib/viewer/image.ts";
 	import type { LabelClass } from "#lib/viewer/labels.ts";
 	import type { Level } from "#lib/viewer/tiles.ts";
+	import { SHOW_ROIS } from "#lib/features.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
 	import LabelImport from "#lib/ui/LabelImport.svelte";
 	import Loop from "#lib/ui/Loop.svelte";
@@ -41,6 +42,7 @@
 	);
 
 	$effect(() => {
+		if (!SHOW_ROIS) return;
 		const list = new RoiList(pid);
 		rois = list;
 		const stopRefreshing = list.keepFresh();
@@ -112,6 +114,7 @@
 
 <ProjectTabs {pid} />
 
+{#if SHOW_ROIS}
 <div class="mx-auto grid max-w-6xl gap-4 p-6 lg:grid-cols-[1fr_20rem]">
 	<div class="flex min-w-0 flex-col gap-4">
 		<div class="flex flex-wrap items-center gap-3">
@@ -206,3 +209,4 @@
 		<LabelImport {pid} {hasImage} onimported={labelsImported} />
 	</div>
 </div>
+{/if}

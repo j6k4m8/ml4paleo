@@ -60,7 +60,7 @@
 	<h1 class="flex items-center gap-2"><History size={16} /> Import from ml4paleo v1</h1>
 	<p class="text-ink-dim">
 		The old ml4paleo had no accounts: anyone with a job's link could open it. Importing a job copies its scan, your
-		annotation samples (as labels in complete slice ROIs), and its last segmentation (as the prediction) into a new
+		annotation samples (as labels), and its last segmentation (as the prediction) into a new
 		project of yours. The first person to import a job gets it.
 	</p>
 

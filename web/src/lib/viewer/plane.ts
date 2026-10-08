@@ -8,6 +8,7 @@
  * under a finer one would show where the finer one has none.
  */
 
+import { BACKGROUND_ALPHA, BACKGROUND_CLASS, BACKGROUND_VALUE } from "./background";
 import type { Chunk } from "./chunks";
 import { CHUNK, type Level, type Plane, type Rect, type TileKey, type Vec3, type View, pixelsPerVoxel, tileId } from "./tiles";
 
@@ -46,7 +47,8 @@ in vec2 voxel;
 uniform vec4 rect;          // tile u, v, width, height in level-0 voxels
 uniform vec2 perTexel;      // level-0 voxels per texel along u and v
 uniform usampler2D tile;
-uniform sampler2D palette;  // 256 × 1, RGBA by label value
+uniform sampler2D palette;  // 256 × 2, RGBA by label value: classes, then classes and background
+uniform int paletteRow;
 uniform float opacity;
 uniform vec4 hole;          // u0, v0, u1, v1 in level-0 voxels, left undrawn
 out vec4 color;
@@ -57,7 +59,7 @@ void main() {
 	ivec2 size = textureSize(tile, 0);
 	ivec2 texel = clamp(ivec2(floor((voxel - rect.xy) / perTexel)), ivec2(0), size - 1);
 	uint value = texelFetch(tile, texel, 0).r;
-	vec4 swatch = texelFetch(palette, ivec2(int(value), 0), 0);
+	vec4 swatch = texelFetch(palette, ivec2(int(value), paletteRow), 0);
 	color = vec4(swatch.rgb, swatch.a * opacity);
 }`;
 
@@ -104,6 +106,23 @@ export function paletteBytes(colors: Map<number, string>): Uint8Array {
 		const rgb = Number.parseInt(match[1] ?? "0", 16);
 		bytes.set([rgb >> 16, (rgb >> 8) & 255, rgb & 255, 255], value * 4);
 	}
+	return bytes;
+}
+
+/**
+ * Two palettes, one under the other: the classes (which model layers and
+ * the like draw with, where background stays clear), and the same with
+ * painted background shown as a haze (which the labels draw with).
+ */
+export function paletteRows(colors: Map<number, string>): Uint8Array {
+	const classes = paletteBytes(colors);
+	const withBackground = classes.slice();
+	const match = /^#([0-9a-f]{6})$/i.exec(BACKGROUND_CLASS.color);
+	const rgb = Number.parseInt(match?.[1] ?? "0", 16);
+	withBackground.set([rgb >> 16, (rgb >> 8) & 255, rgb & 255, BACKGROUND_ALPHA], BACKGROUND_VALUE * 4);
+	const bytes = new Uint8Array(classes.length * 2);
+	bytes.set(classes, 0);
+	bytes.set(withBackground, classes.length);
 	return bytes;
 }
 
@@ -174,6 +193,8 @@ export interface Overlay {
 	opacity: number;
 	/** A part of the plane left undrawn, for another layer to show. */
 	hole?: Rect;
+	/** Whether painted background shows (for the labels; a model's background stays clear). */
+	background?: boolean;
 }
 
 export interface LabelTile {
@@ -215,7 +236,7 @@ export class PlaneRenderer {
 		for (const name of ["rect", "uvMax", "center", "toClip", "tile", "window"]) {
 			this.#imageUniforms[name] = gl.getUniformLocation(this.#image, name);
 		}
-		for (const name of ["rect", "perTexel", "uvMax", "center", "toClip", "tile", "palette", "opacity", "hole"]) {
+		for (const name of ["rect", "perTexel", "uvMax", "center", "toClip", "tile", "palette", "paletteRow", "opacity", "hole"]) {
 			this.#labelUniforms[name] = gl.getUniformLocation(this.#labels, name);
 		}
 		const buffer = gl.createBuffer();
@@ -280,7 +301,7 @@ export class PlaneRenderer {
 	setPalette(colors: Map<number, string>): void {
 		const gl = this.#gl;
 		gl.bindTexture(gl.TEXTURE_2D, this.#palette);
-		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteBytes(colors));
+		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteRows(colors));
 	}
 
 	/** Whether the image slice of `key` that the view cuts is on the GPU (and, if so, just used). */
@@ -391,6 +412,7 @@ export class PlaneRenderer {
 		for (const overlay of overlays) {
 			if (overlay.opacity <= 0) continue;
 			gl.uniform1f(this.#labelUniforms.opacity ?? null, overlay.opacity);
+			gl.uniform1i(this.#labelUniforms.paletteRow ?? null, overlay.background ? 1 : 0);
 			// An empty rectangle by default, so every voxel draws.
 			const [u0, v0, u1, v1] = overlay.hole ?? [0, 0, 0, 0];
 			gl.uniform4f(this.#labelUniforms.hole ?? null, u0, v0, u1, v1);
