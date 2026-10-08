@@ -7,20 +7,27 @@
 
 import type { Chunk } from "../viewer/chunks";
 import type { Layout } from "../viewer/state.svelte";
-import { type Plane, PLANES, type Vec3 } from "../viewer/tiles";
+import { type Plane, PLANES, TILE_HYSTERESIS, type Vec3 } from "../viewer/tiles";
 import { CHUNK, type DeltaIn, splitIntoDeltas } from "./deltas";
 
 /** Boxes bigger than this would make the page hold too much at once. */
 export const MAX_ACCEPT_VOXELS = 256 ** 3;
 
 /**
- * The most chunks (64³ voxels) one accept in a view reads, which is as many
- * as a view draws the prediction from: zoomed out past that it isn't shown,
- * and what's accepted is what's shown. A slice of a view holds few voxels
- * for the chunks it touches (a chunk for each 64 × 64 of them), so the
- * voxel limit alone wouldn't keep an accept from reading thousands.
+ * The most chunks (64³ voxels) a view draws the prediction from: with more
+ * in view it's left out (see `PlaneView`), until the view needs this many
+ * times fewer (`TILE_HYSTERESIS`).
  */
-export const MAX_VIEW_CHUNKS = 128;
+const MOST_DRAWN_CHUNKS = 128;
+
+/**
+ * The most chunks one accept in a view reads: as many as a view surely draws
+ * the prediction from, so what's accepted is what's shown, and already
+ * loaded. A view's slice has a chunk for each 64 × 64 of its voxels, so this
+ * also holds it to far fewer voxels than the server takes at once (256³),
+ * which is why only chunks are counted.
+ */
+export const MAX_VIEW_CHUNKS = Math.floor(MOST_DRAWN_CHUNKS / TILE_HYSTERESIS);
 
 export type Box = [number, number, number, number, number, number];
 
@@ -76,14 +83,39 @@ export function chunksIn(box: Box): number {
 	return count;
 }
 
-/**
- * Whether the part of a slice a view shows is too big to accept at once: it
- * holds more voxels than the server takes in one accept, or takes more
- * chunks than a view draws the prediction from.
- */
+/** Whether the part of a slice a view shows takes more chunks than can be accepted at once. */
 export function tooBigForView(box: Box): boolean {
-	const voxels = (box[3] - box[0]) * (box[4] - box[1]) * (box[5] - box[2]);
-	return voxels > MAX_ACCEPT_VOXELS || chunksIn(box) > MAX_VIEW_CHUNKS;
+	return chunksIn(box) > MAX_VIEW_CHUNKS;
+}
+
+/** What accepting in the view depends on. */
+export interface ViewAccept {
+	/** The project's image was replaced since this page opened. */
+	imageReplaced: boolean;
+	/** There's a prediction or a proposal (shown or not). */
+	predicted: boolean;
+	/** The prediction layer is on, and how opaque it is. */
+	shown: boolean;
+	opacity: number;
+	/** The part of the slice the view shows, if it shows any. */
+	box: Box | null;
+	/** The box reaches over the edge of a proposal, so part of it shows the proposal and part doesn't. */
+	mixed: boolean;
+	/** Some layer shows over all of the box. */
+	covered: boolean;
+}
+
+/** Why accepting in the view can't go ahead, in a sentence, or "" if it can. */
+export function whyNotInView(now: ViewAccept): string {
+	if (now.imageReplaced) return "This project's image was replaced; reload the page first.";
+	if (!now.predicted) return "There's no prediction to accept yet.";
+	if (!now.shown) return "The prediction is hidden; show it (M) to accept what's in view.";
+	if (!(now.opacity > 0)) return "The prediction's opacity is 0; raise it to accept what's in view.";
+	if (!now.box) return "Nothing of the image is in view.";
+	if (tooBigForView(now.box)) return "Zoom in a bit: the visible area is too big to accept at once.";
+	if (now.mixed) return "Part of this view shows your proposal and part doesn't; zoom in on one of them to accept it.";
+	if (!now.covered) return "Nothing is predicted in this view yet.";
+	return "";
 }
 
 /**

@@ -35,11 +35,7 @@ export interface QueuedEdit {
 }
 
 /** Where a prediction is accepted: in an ROI (`roi`), or in a box (z0, y0, x0, z1, y1, x1) of the image (`box`). */
-export interface Accept {
-	prediction: string;
-	roi?: string;
-	box?: Box;
-}
+export type Accept = { prediction: string } & ({ roi: string; box?: never } | { box: Box; roi?: never });
 
 export interface QueuedToggle {
 	kind: "undo" | "redo";
@@ -329,7 +325,7 @@ export class OpQueue {
 					? await this.send(`${base}/accept`, {
 							client_op_id: ready.clientOpId,
 							prediction_artifact_id: ready.accept.prediction,
-							...(ready.accept.roi ? { roi_id: ready.accept.roi } : { box: ready.accept.box }),
+							...("roi" in ready.accept && ready.accept.roi ? { roi_id: ready.accept.roi } : { box: ready.accept.box }),
 							deltas: ready.deltas,
 						})
 					: await this.send(`${base}/ops`, {

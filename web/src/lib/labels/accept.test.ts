@@ -2,7 +2,19 @@ import { decompress } from "fzstd";
 import { describe, expect, it } from "vitest";
 import type { Chunk } from "../viewer/chunks";
 import { PLANES } from "../viewer/tiles";
-import { type Box, MAX_VIEW_CHUNKS, acceptParts, chunksIn, planeToAccept, readBox, tooBigForView, unlabeledOnly } from "./accept";
+import {
+	type Box,
+	MAX_ACCEPT_VOXELS,
+	MAX_VIEW_CHUNKS,
+	type ViewAccept,
+	acceptParts,
+	chunksIn,
+	planeToAccept,
+	readBox,
+	tooBigForView,
+	unlabeledOnly,
+	whyNotInView,
+} from "./accept";
 import { CHUNK, type DeltaIn, decodeDelta, fromBase64, unpackBits } from "./deltas";
 
 /** A 100 × 70 × 130 volume whose value at (z, y, x) is (z + y + x) % 4. */
@@ -168,21 +180,55 @@ describe("accepting what a view shows", () => {
 		expect(chunksIn([9, 0, 0, 10, 4096, 4096])).toBe(64 * 64);
 	});
 
-	it("is too big when it holds more voxels than the server takes at once", () => {
-		expect(tooBigForView([0, 0, 0, 256, 256, 256])).toBe(false);
-		expect(tooBigForView([0, 0, 0, 256, 256, 257])).toBe(true);
-		expect(tooBigForView([0, 0, 0, 257, 257, 257])).toBe(true);
+	it("is too big when it takes more chunks than a view surely draws the prediction from", () => {
+		// A view draws it for up to 128 chunks, and again after being over only once it needs a fifth fewer.
+		expect(MAX_VIEW_CHUNKS).toBe(102);
+		// 6 × 17 chunks of one slice.
+		expect(tooBigForView([9, 0, 0, 10, 384, 1088])).toBe(false);
+		expect(tooBigForView([9, 0, 0, 10, 384, 1089])).toBe(true);
+		// A view just across a chunk's edge touches more than its area says.
+		expect(tooBigForView([9, 1, 0, 10, 385, 1088])).toBe(true);
+		expect(tooBigForView([9, 0, 0, 10, 4096, 4096])).toBe(true);
 	});
 
-	it("is too big when it takes more chunks than a view draws the prediction from", () => {
-		expect(MAX_VIEW_CHUNKS).toBe(128);
-		// 8 × 16 chunks of one slice.
-		expect(tooBigForView([9, 0, 0, 10, 512, 1024])).toBe(false);
-		expect(tooBigForView([9, 0, 0, 10, 513, 1024])).toBe(true);
-		// A view just across a chunk's edge touches more than its area says.
-		expect(tooBigForView([9, 1, 0, 10, 513, 1024])).toBe(true);
-		expect(tooBigForView([9, 0, 0, 10, 4096, 4096])).toBe(true);
-		// The server's own limit allows a slice this big.
-		expect(4096 * 4096).toBeLessThanOrEqual(256 ** 3);
+	it("never reaches the server's limit with a view's one-voxel-thick slice, so only chunks are counted", () => {
+		// The most voxels a slice of that many chunks holds is a chunk's 64 × 64 for each.
+		expect(MAX_VIEW_CHUNKS * 64 * 64).toBeLessThan(MAX_ACCEPT_VOXELS);
+	});
+
+	describe("says why accepting in the view can't go ahead", () => {
+		const slice: Box = [3, 0, 0, 4, 512, 512];
+		const ready: ViewAccept = { imageReplaced: false, predicted: true, shown: true, opacity: 0.35, box: slice, mixed: false, covered: true };
+		const why = (over: Partial<ViewAccept>) => whyNotInView({ ...ready, ...over });
+
+		it("says nothing when it can", () => {
+			expect(why({})).toBe("");
+		});
+
+		it("says what's wrong, most basic first", () => {
+			expect(why({ imageReplaced: true })).toContain("image was replaced");
+			expect(why({ predicted: false })).toContain("no prediction");
+			expect(why({ shown: false })).toContain("hidden");
+			expect(why({ opacity: 0 })).toContain("opacity is 0");
+			expect(why({ opacity: Number.NaN })).toContain("opacity is 0");
+			expect(why({ box: null })).toContain("Nothing of the image is in view");
+			expect(why({ box: [3, 0, 0, 4, 4096, 4096] })).toBe("Zoom in a bit: the visible area is too big to accept at once.");
+			expect(why({ mixed: true })).toContain("proposal");
+			expect(why({ covered: false })).toContain("Nothing is predicted");
+		});
+
+		it("gives the first reason when there are several", () => {
+			const everything = { imageReplaced: true, predicted: false, shown: false, opacity: 0, box: null, mixed: true, covered: false };
+			expect(why(everything)).toContain("image was replaced");
+			expect(why({ ...everything, imageReplaced: false })).toContain("no prediction");
+			expect(why({ ...everything, imageReplaced: false, predicted: true })).toContain("hidden");
+			expect(why({ ...everything, imageReplaced: false, predicted: true, shown: true })).toContain("opacity");
+			expect(why({ ...everything, imageReplaced: false, predicted: true, shown: true, opacity: 1 })).toContain("Nothing of the image");
+			// Too big comes before the proposal's edge, which comes before nothing being predicted.
+			const big: Partial<ViewAccept> = { box: [3, 0, 0, 4, 4096, 4096], mixed: true, covered: false };
+			expect(why(big)).toContain("too big");
+			expect(why({ ...big, box: slice })).toContain("proposal");
+			expect(why({ ...big, box: slice, mixed: false })).toContain("Nothing is predicted");
+		});
 	});
 });

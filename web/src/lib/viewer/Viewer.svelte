@@ -35,7 +35,7 @@
 	import { nextColor } from "#lib/labelimport.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
-	import { acceptParts, MAX_ACCEPT_VOXELS, planeToAccept, readBox, tooBigForView, unlabeledOnly } from "../labels/accept";
+	import { acceptParts, MAX_ACCEPT_VOXELS, planeToAccept, readBox, unlabeledOnly, whyNotInView } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit, saveState } from "../labels/opqueue.svelte";
 	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
@@ -509,14 +509,15 @@
 			? visibleBox({ plane, position: viewer.position, zoom: viewer.zoom, aspect: viewer.aspect, width: size[0], height: size[1] }, viewer.shape)
 			: null;
 		const layer = box ? showing(box) : null;
-		let blocked = "";
-		if (imageReplaced) blocked = "This project's image was replaced; reload the page first.";
-		else if (!prediction && !proposal) blocked = "There's no prediction to accept yet.";
-		else if (!viewer.showPrediction) blocked = "The prediction is hidden; show it (M) to accept what's in view.";
-		else if (!box) blocked = "Nothing of the image is in view.";
-		else if (tooBigForView(box)) blocked = "Zoom in a bit: the visible area is too big to accept at once.";
-		else if (mixesProposal(box)) blocked = "Part of this view shows your proposal and part doesn't; zoom in on one of them to accept it.";
-		else if (!layer) blocked = "Nothing is predicted in this view yet.";
+		const blocked = whyNotInView({
+			imageReplaced,
+			predicted: !!(prediction || proposal),
+			shown: viewer.showPrediction,
+			opacity: viewer.predictionOpacity,
+			box,
+			mixed: !!box && mixesProposal(box),
+			covered: !!layer,
+		});
 		return { plane, box, layer, blocked };
 	});
 
@@ -1292,13 +1293,13 @@
 								{@const { plane, box, layer, blocked } = inView}
 								{@const kind = (layer ?? prediction ?? proposal)?.kind ?? "prediction"}
 								<!-- A goes to the selected ROI, if one is, so it's this button's key only without one. -->
-								{@const hint = selectedRoi ? "" : " (A)"}
+								{@const keyHint = selectedRoi ? "" : " (A)"}
 								<button
 									class="btn w-full"
 									disabled={accepting || !!blocked}
 									title={blocked ||
-										`Fills the unlabeled voxels in the visible part of this slice (${plane.name.toUpperCase()} view, ${"zyx"[plane.normal]} ${box?.[plane.normal]}) with the ${kind}; you can undo it${hint}`}
-									aria-describedby={blocked ? "accept-view-why" : undefined}
+										`Fills the unlabeled voxels in the visible part of this slice (${plane.name.toUpperCase()} view, ${"zyx"[plane.normal]} ${box?.[plane.normal]}) with the ${kind}; you can undo it${keyHint}`}
+									aria-describedby={blocked && !accepting ? "accept-view-why" : undefined}
 									onclick={acceptView}
 								>
 									<CheckCheck size={13} />
