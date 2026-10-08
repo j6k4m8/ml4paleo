@@ -286,6 +286,19 @@ def test_permanent_errors_are_not_retried(new_browser, token, migrated_database_
     assert "not an image" in job.error
 
 
+def test_a_failure_without_a_message_still_says_what_it_was(
+    new_browser, token, migrated_database_url
+):
+    def broken(ctx):
+        raise PermanentError()
+
+    job_id = enqueue(migrated_database_url)
+    start(make_worker(new_browser, token, {"noop": broken})).join(timeout=20)
+    job = job_row(migrated_database_url, job_id)
+    assert job.status == "failed"
+    assert job.error.splitlines()[0] == "PermanentError"
+
+
 def test_stopping_a_worker_gives_its_job_back(
     new_browser, token, migrated_database_url
 ):
