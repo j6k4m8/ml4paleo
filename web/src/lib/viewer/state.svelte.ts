@@ -77,7 +77,8 @@ export class ViewerState {
 	brushRadius = $state(4);
 	/** Paint only voxels without a label. */
 	protectLabels = $state(false);
-	polygon = $state<Polygon | null>(null);
+	/** The polygon being drawn; replaced, never changed in place. */
+	polygon = $state.raw<Polygon | null>(null);
 	/** Space is held: drag pans whatever the tool. */
 	panning = $state(false);
 	/** New ROIs: one-voxel slices, or cubes this many voxels deep. */

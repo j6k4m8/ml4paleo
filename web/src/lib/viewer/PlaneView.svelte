@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from "svelte";
-	import { CLOSE_PIXELS, closesAt, type Point, type Scale } from "../labels/polygon";
+	import { CLOSE_PIXELS, closesAt, DRAG_PIXELS, lassoPoints, type Point, type Scale } from "../labels/polygon";
 	import { PlaneMask } from "../labels/raster";
 	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
@@ -321,8 +321,11 @@
 
 	// --- pointer and wheel ---------------------------------------------------
 
-	let press: { x: number; y: number; moved: boolean; pan: boolean; pointer: number } | null = null;
+	// `draws`: the press added a polygon point, so dragging on draws freehand.
+	let press: { x: number; y: number; moved: boolean; pan: boolean; pointer: number; draws: boolean } | null = null;
 	let stroke: (Stroke & { last: [number, number] }) | null = null;
+	// A freehand drag with the polygon tool is under way; letting go closes it.
+	let lassoing = $state(false);
 	let rectangle: { from: [number, number]; to: [number, number] } | null = $state(null);
 	let cursor: [number, number] | null = $state(null);
 	let overlay: HTMLCanvasElement;
@@ -381,7 +384,7 @@
 		canvas.setPointerCapture(event.pointerId);
 		canvas.focus();
 		const pan = viewer.tool === "navigate" || viewer.panning || event.button === 1;
-		press = { x: event.clientX, y: event.clientY, moved: false, pan, pointer: event.pointerId };
+		press = { x: event.clientX, y: event.clientY, moved: false, pan, pointer: event.pointerId, draws: false };
 		if (pan || event.button !== 0 || !canEdit()) return;
 		if (painting) {
 			const point = planePoint(event);
@@ -408,6 +411,7 @@
 			// Clicking the first point again closes the polygon.
 			if (current && closesAt(current.points, point, scale(), CLOSE_PIXELS * reach(event))) return onpolygon();
 			viewer.polygon = current ? { ...current, points: [...current.points, point] } : { plane: plane.name, slice, points: [point] };
+			press.draws = true;
 		}
 	}
 
@@ -427,6 +431,7 @@
 			drawStroke();
 			return;
 		}
+		if (press?.draws) return lasso(press, event);
 		if (!press?.pan) return;
 		const dx = event.clientX - press.x;
 		const dy = event.clientY - press.y;
@@ -442,6 +447,24 @@
 		press.y = event.clientY;
 	}
 
+	/** Follow a drag with the polygon tool, dropping points along the way. */
+	function lasso(drawing: NonNullable<typeof press>, event: PointerEvent) {
+		const current = polygonHere;
+		if (!current) {
+			// Closed or dropped meanwhile (Enter, Esc, another tool).
+			drawing.draws = false;
+			lassoing = false;
+			return;
+		}
+		if (!lassoing && Math.hypot(event.clientX - drawing.x, event.clientY - drawing.y) < DRAG_PIXELS * reach(event)) return;
+		lassoing = true;
+		// Moves the browser merged into this one keep fast drags smooth.
+		const merged = event.getCoalescedEvents?.() ?? [];
+		const samples = (merged.length > 0 ? merged : [event]).map(planePoint);
+		const added = lassoPoints(current.points.at(-1), samples, scale());
+		if (added.length > 0) viewer.polygon = { ...current, points: [...current.points, ...added] };
+	}
+
 	function pointerUp(event: PointerEvent) {
 		if (press && event.pointerId !== press.pointer) return;
 		if (rectangle) {
@@ -454,6 +477,16 @@
 			stroke = null;
 			clearStroke();
 			if (finished.mask.count > 0) onstroke(finished);
+		} else if (lassoing) {
+			// Letting go of a freehand drag closes it, where the pointer let go.
+			lassoing = false;
+			const current = polygonHere;
+			if (current) {
+				const end = planePoint(event);
+				const last = current.points.at(-1);
+				if (!last || last[0] !== end[0] || last[1] !== end[1]) viewer.polygon = { ...current, points: [...current.points, end] };
+				onpolygon();
+			}
 		} else if (press?.pan && !press.moved && viewer.tool === "navigate") {
 			viewer.autoFit = false;
 			viewer.moveTo(voxelAt(view(), ...offset(event)));
@@ -465,6 +498,7 @@
 		press = null;
 		stroke = null;
 		rectangle = null;
+		lassoing = false;
 		clearStroke();
 	}
 
@@ -484,7 +518,7 @@
 			viewer.moveTo(point);
 			return;
 		}
-		if (stroke || rectangle) return;
+		if (stroke || rectangle || lassoing) return;
 		// About one slice per mouse wheel notch; trackpads add up.
 		wheelSteps += delta / 100;
 		const steps = Math.trunc(wheelSteps);
@@ -549,13 +583,13 @@
 		if (points.length === 0) return null;
 		const outline = points.map(([u, v]) => screen(u, v));
 		const first = outline[0]!;
-		const closing = cursor !== null && closesAt(points, planeAt(cursor), scale());
-		// The outline ends at the pointer, or closes when a click would close it.
-		if (closing) outline.push(first);
-		else if (cursor) outline.push(cursor);
+		const closing = !lassoing && cursor !== null && closesAt(points, planeAt(cursor), scale());
+		// The outline ends at the pointer, or closes when a click or letting go would close it.
+		if (cursor && !closing) outline.push(cursor);
+		if (closing || lassoing) outline.push(first);
 		return {
 			outline: outline.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
-			first: points.length >= 3 ? first : null,
+			first: points.length >= 3 && !lassoing ? first : null,
 			closing,
 		};
 	});

@@ -823,7 +823,7 @@
 			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · click moves the crosshair",
 			brush: "Drag to paint the active class · [ ] change the size",
 			eraser: "Drag to erase labels · [ ] change the size",
-			polygon: "Click to add points · click the first point, double-click, or Enter fills · Alt+Enter erases the class inside · Esc cancels",
+			polygon: "Click points or drag freehand · click the first point, double-click, or Enter fills · Alt+Enter erases the class inside · Esc cancels",
 			roi: "Drag a box on a slice · G goes to the next open ROI · C marks it complete",
 		}[viewer.tool],
 	);

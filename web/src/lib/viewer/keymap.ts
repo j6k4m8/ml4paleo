@@ -49,7 +49,7 @@ export const KEYMAP: Binding[] = [
 	{ action: "navigate", keys: ["n"], label: "Navigate" },
 	{ action: "brush", keys: ["b"], label: "Brush" },
 	{ action: "eraser", keys: ["e"], label: "Eraser" },
-	{ action: "polygon", keys: ["p"], label: "Polygon (with Alt when closing: erase that class)" },
+	{ action: "polygon", keys: ["p"], label: "Polygon: click points or drag freehand (with Alt when closing: erase that class)" },
 	{ action: "roi", keys: ["r"], label: "Draw an ROI" },
 	{ action: "next-roi", keys: ["g"], label: "Go to the next open ROI" },
 	{ action: "complete-roi", keys: ["c"], label: "Mark the selected ROI complete (with Shift: reopen)" },
@@ -73,6 +73,7 @@ export const MOUSE: [string, string][] = [
 	["Click (navigating)", "Move the crosshair there"],
 	["Drag (brush, eraser)", "Paint"],
 	["Click (polygon)", "Add a point; on the first point, close the polygon"],
+	["Drag (polygon)", "Draw freehand; letting go closes the polygon"],
 	["Drag (ROI)", "Draw an ROI on this slice"],
 ];
 
