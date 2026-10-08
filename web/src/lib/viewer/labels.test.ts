@@ -752,6 +752,26 @@ describe("LabelLayer", () => {
 			}
 		});
 
+		it("starts its waits over for a chunk it stopped trying again because nothing shows it", async () => {
+			const { layer, server, loads, failures } = await loadedWithFailures(1);
+			// Nothing shows the chunk when the try comes, which drops its copy.
+			layer.store.want("view", []);
+			await wait(1000);
+			expect(layer.store.peek("0/0/0")).toBeUndefined();
+			expect(vi.getTimerCount()).toBe(0);
+			// Shown again later, it loads, then a reload of it fails: the wait is the first again.
+			await loaded(layer, "0/0/0");
+			server.set("0/0/0", { value: 3, version: 3 });
+			failures.left = 1;
+			layer.changed([{ key: [0, 0, 0], version: 3 }]);
+			await settled();
+			const failed = loads.length;
+			await wait(999);
+			expect(loads).toHaveLength(failed);
+			await wait(1);
+			expect(loads).toHaveLength(failed + 1);
+		});
+
 		it("keeps what's shown through a failure that isn't followed by a retry", async () => {
 			const { layer } = await loadedWithFailures(1);
 			expect(first(layer, "0/0/0")).toBe(1);

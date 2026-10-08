@@ -255,6 +255,7 @@ export class LabelLayer {
 				);
 			} else {
 				this.store.invalidate(id);
+				this.#giveUp(id);
 				dropped.push(id);
 			}
 		}
