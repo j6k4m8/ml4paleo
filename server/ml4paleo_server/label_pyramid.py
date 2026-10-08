@@ -458,8 +458,9 @@ async def _load(
     """
     A chunk kept in storage, if it is there and shows the state asked for;
     and the sum of versions of the labels under whatever is there, if it was
-    made for this plan, whatever state it shows (so a build for an older one
-    can leave it be).
+    made for this plan (rule, image, levels, and retired classes), whatever
+    state it shows, so a build for an older one can leave it be. A chunk made
+    for another plan says nothing of which is newer.
     """
     try:
         result = await obstore.get_async(store, _stored_key(level, key))
@@ -792,8 +793,13 @@ class LabelPyramid:
         # Even one that shows nothing: finding that out was the work.
         self._cache.put(cached, data, pin=pin)
         try:
-            # Not over a chunk kept for a newer state, which a build that took
-            # its state earlier would only replace with an older one.
+            # Not over a chunk this found kept for a newer state, which a build
+            # that took its state earlier would only replace with an older one.
+            # One stored after this looked, or made for other retired classes,
+            # can still be replaced by an older one (a conditional write would
+            # stop the first, but not every store has one); the next build for
+            # a newer state replaces that, and no pixels are wrong, as a stored
+            # chunk is only used for the state it says.
             if stored and (
                 stored_versions is None or stored_versions <= state.versions
             ):
