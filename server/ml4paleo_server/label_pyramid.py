@@ -64,6 +64,7 @@ import contextlib
 import functools
 import hashlib
 import logging
+import struct
 import time
 import uuid
 from collections import OrderedDict
@@ -87,6 +88,8 @@ log = logging.getLogger(__name__)
 
 ChunkKey = tuple[int, int, int]
 Box = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
+# A chunk's place in the cache: level, chunk, labeled chunks, versions.
+_KEY = struct.Struct(">BIIIIq")
 
 # Bump when `downsample_labels` or the chunk codec changes the bytes a chunk
 # is made of, so viewers drop the chunks they kept. A test pins both.
@@ -111,8 +114,10 @@ WAIT_SECONDS = 5
 # has at most seven chunks per level pinned, so this is room for several.
 PIN_SECONDS = 120
 PIN_BYTES = 16 * 1024 * 1024
-# What a cached chunk costs besides its bytes (its key, and the cache's).
-ENTRY_OVERHEAD = 256
+# What a cached chunk costs besides its bytes: its key, the cache's own entry
+# for it, and a pinned one's pin. Measured for tiny chunks, which are the ones
+# it matters for: 253 bytes, or 333 pinned (a test checks).
+ENTRY_OVERHEAD = 320
 
 
 class Busy(Exception):
@@ -152,14 +157,17 @@ class Plan:
     retired: frozenset[int] = frozenset()
 
     @functools.cached_property
-    def tag(self) -> str:
+    def digest(self) -> bytes:
+        """
+        Says which image and retired classes this is, in a few bytes.
+        """
         digest = hashlib.blake2s(self.image.bytes, digest_size=6)
         digest.update(bytes(sorted(self.retired)))
-        return digest.hexdigest()
+        return digest.digest()
 
     def etag(self, level: int, state: Fingerprint) -> str:
         z, y, x = self.levels[level].factor_zyx
-        return f'"p{RULE_VERSION}.{self.tag}.{z}.{y}.{x}.{state.versions}"'
+        return f'"p{RULE_VERSION}.{self.digest.hex()}.{z}.{y}.{x}.{state.versions}"'
 
 
 def array_name(level: int) -> str:
@@ -647,8 +655,15 @@ class LabelPyramid:
 
 def _cache_key(
     project_id: uuid.UUID, plan: Plan, level: int, key: ChunkKey, state: Fingerprint
-) -> Hashable:
-    return (project_id, plan.tag, level, key, state)
+) -> bytes:
+    # One small string of bytes, which costs the cache far less than a tuple of
+    # objects would.
+    z, y, x = key
+    return (
+        project_id.bytes
+        + plan.digest
+        + _KEY.pack(level, z, y, x, state.count, state.versions)
+    )
 
 
 def _position(key: ChunkKey, origin: ChunkKey) -> ChunkKey:

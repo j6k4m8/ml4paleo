@@ -5,10 +5,12 @@ from the full-resolution labels when a viewer asks, for display only.
 
 import asyncio
 import base64
+import gc
 import hashlib
 import pathlib
 import shutil
 import threading
+import tracemalloc
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
@@ -19,7 +21,7 @@ from ml4paleo_server import artifacts, label_pyramid
 from ml4paleo_server.app import create_app
 
 from ml4paleo.labels import LABEL_CHUNK_ZYX
-from ml4paleo.labels.codec import ZARR_CODECS, decode_chunk
+from ml4paleo.labels.codec import ZARR_CODECS, decode_chunk, encode_chunk
 from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.labels.pyramid import downsample_labels
 from ml4paleo.ome import OmeImage, plan_levels
@@ -862,8 +864,9 @@ def test_a_cold_chunk_finishes_however_little_room_the_cache_has(
         assert get(ada, project, 2, key).status_code == 200
     level1 = [
         len(data) + label_pyramid.ENTRY_OVERHEAD
-        for (_, _, level, *_), data in pyramid._cache._items.items()
-        if level == 1
+        for key, data in pyramid._cache._items.items()
+        # The level follows the project and the plan in a key.
+        if label_pyramid._KEY.unpack(key[16 + 6 :])[0] == 1
     ]
     # Eight under the first chunk, four more under the second.
     assert len(level1) == (8, 12)[len(keys) - 1]
@@ -881,6 +884,37 @@ def test_a_cold_chunk_finishes_however_little_room_the_cache_has(
     assert max(attempts.values()) <= 9 + len(keys) - 1
     # Nothing is left pinned once what they were pinned for is made.
     assert pyramid._cache.pinned_size == 0
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_the_cache_counts_what_a_chunk_really_takes(pinned):
+    # What the cache costs for each chunk is what counts when chunks are tiny,
+    # as those of a sparse project are.
+    levels = plan_levels((64, 64, 64))
+    chunk = np.zeros((64, 64, 64), dtype=np.uint8)
+    chunk[3, 4, 5] = 2
+    data = encode_chunk(chunk)
+    count = 5000
+    cache = label_pyramid._Cache(10**12, 10**12)
+    gc.collect()
+    tracemalloc.start()
+    before = tracemalloc.take_snapshot()
+    for i in range(count):
+        project = uuid.UUID(int=i * 7919 + 2**100)
+        plan = label_pyramid.Plan(uuid.UUID(int=i + 2**90), levels)
+        state = label_pyramid.Fingerprint(count=3, versions=1000 + i)
+        key = label_pyramid._cache_key(
+            project, plan, 1, (i % 90, i % 300, i % 70), state
+        )
+        cache.put(key, data + i.to_bytes(4, "little"), pin=pinned)
+    gc.collect()
+    used = sum(
+        entry.size_diff
+        for entry in tracemalloc.take_snapshot().compare_to(before, "filename")
+    )
+    tracemalloc.stop()
+    assert len(data) < 40
+    assert used <= cache.total
 
 
 def test_the_cache_follows_the_setting(settings):
