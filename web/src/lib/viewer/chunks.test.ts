@@ -40,6 +40,47 @@ describe("ChunkStore", () => {
 		expect(calls.map((c) => c.id)).toEqual(["a", "b", "c"]);
 	});
 
+	it("starts the most wanted queued load next", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000, 1);
+		store.want("xy", ["a", "b", "c", "d"]);
+		for (const id of ["d", "c", "b", "a"]) store.request(id).catch(() => {});
+		calls[0]?.finish();
+		await tick();
+		calls[1]?.finish();
+		await tick();
+		calls[2]?.finish();
+		await tick();
+		expect(calls.map((c) => c.id)).toEqual(["d", "a", "b", "c"]);
+	});
+
+	it("lets views sharing the store take turns", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000, 1);
+		store.want("xy", ["x1", "x2", "x3"]);
+		store.want("xz", ["z1", "z2", "z3"]);
+		for (const id of ["x1", "x2", "x3", "z1", "z2", "z3"]) store.request(id).catch(() => {});
+		for (let i = 0; i < 5; i++) {
+			calls[i]?.finish();
+			await tick();
+		}
+		expect(calls.map((c) => c.id)).toEqual(["x1", "z1", "x2", "z2", "x3", "z3"]);
+	});
+
+	it("follows the view's latest order, cancelling what it left", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000, 1);
+		store.want("xy", ["a", "b", "c"]);
+		for (const id of ["a", "b", "c"]) store.request(id).catch(() => {});
+		store.want("xy", ["c", "b"]);
+		expect(calls[0]?.signal.aborted).toBe(true);
+		calls[0]?.fail(new DOMException("Aborted", "AbortError"));
+		await tick();
+		calls[1]?.finish();
+		await tick();
+		expect(calls.map((c) => c.id)).toEqual(["a", "c", "b"]);
+	});
+
 	it("cancels loads the view no longer needs", async () => {
 		const { calls, load } = controlled();
 		const store = new ChunkStore(load, 1000, 1);
@@ -141,6 +182,50 @@ describe("ChunkStore", () => {
 		calls.at(-1)?.finish();
 		await c;
 		expect(store.get("a")).toBeUndefined();
+	});
+
+	it("evicts the chunks a view wants least first", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 25);
+		for (const id of ["a", "b"]) {
+			const pending = store.request(id);
+			calls.at(-1)?.finish();
+			await pending;
+		}
+		// Wanted but not kept, most wanted first.
+		store.want("xy", ["b", "a"], []);
+		const c = store.request("c");
+		calls.at(-1)?.finish();
+		await c;
+		expect(store.peek("a")).toBeUndefined();
+		expect(store.peek("b")).toBeDefined();
+	});
+
+	it("peeks without counting as a use", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 25);
+		for (const id of ["a", "b"]) {
+			const pending = store.request(id);
+			calls.at(-1)?.finish();
+			await pending;
+		}
+		expect(store.peek("a")).toBeDefined();
+		expect(store.isLoading("c")).toBe(false);
+		const c = store.request("c");
+		expect(store.isLoading("c")).toBe(true);
+		calls.at(-1)?.finish();
+		await c;
+		expect(store.isLoading("c")).toBe(false);
+		expect(store.peek("a")).toBeUndefined();
+	});
+
+	it("forgets owners that want nothing", () => {
+		const { load } = controlled();
+		const store = new ChunkStore(load, 1000);
+		store.want("accept:a", ["a"]);
+		expect(store.isWanted("a")).toBe(true);
+		store.want("accept:a", []);
+		expect(store.isWanted("a")).toBe(false);
 	});
 
 	it("refreshes a chunk while the old copy stays in use", async () => {

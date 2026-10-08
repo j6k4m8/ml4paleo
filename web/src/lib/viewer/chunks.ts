@@ -1,8 +1,8 @@
 /**
  * A cache of decoded chunks, kept under a byte budget (least recently used
  * chunks go first), that loads each chunk once however often it is asked
- * for, runs a limited number of loads at a time, and drops loads that the
- * view no longer needs.
+ * for, runs a limited number of loads at a time, most wanted first, and
+ * drops loads that no view needs any more.
  */
 
 export interface Chunk {
@@ -17,23 +17,29 @@ export type Loader = (id: string, signal: AbortSignal) => Promise<Chunk>;
 
 interface Pending {
 	id: string;
+	promise: Promise<Chunk>;
 	resolve: (chunk: Chunk) => void;
 	reject: (error: unknown) => void;
 	controller: AbortController;
-	started: boolean;
 	/** Replaces a cached copy that is now out of date. */
 	refresh: boolean;
 }
 
+// Where a chunk nobody wants waits: after every wanted one.
+const UNRANKED = Number.MAX_SAFE_INTEGER;
+
 export class ChunkStore {
 	#cache = new Map<string, Chunk>();
 	#bytes = 0;
-	#pending = new Map<string, { promise: Promise<Chunk>; entry: Pending }>();
+	#pending = new Map<string, Pending>();
 	#queue: Pending[] = [];
+	#sorted = true;
 	#running = 0;
 	#pinned = new Set<string>();
-	#wanted = new Map<string, Set<string>>();
+	#wanted = new Map<string, string[]>();
 	#protected = new Map<string, Set<string>>();
+	// Each wanted chunk's best place in any owner's list: the queue's order.
+	#rank = new Map<string, number>();
 	/** Called with each loaded chunk before it is cached and returned. */
 	onLoad: ((id: string, chunk: Chunk) => void) | null = null;
 
@@ -57,7 +63,17 @@ export class ChunkStore {
 		return chunk;
 	}
 
-	/** Load a chunk (once), queueing behind loads asked for earlier. */
+	/** A cached chunk, leaving its place in line for eviction alone. */
+	peek(id: string): Chunk | undefined {
+		return this.#cache.get(id);
+	}
+
+	/** Whether a load of the chunk is queued or running. */
+	isLoading(id: string): boolean {
+		return this.#pending.has(id);
+	}
+
+	/** Load a chunk (once), queueing it behind chunks wanted more. */
 	request(id: string): Promise<Chunk> {
 		const cached = this.get(id);
 		if (cached) return Promise.resolve(cached);
@@ -71,44 +87,55 @@ export class ChunkStore {
 	 * cached copy in use until the new one replaces it.
 	 */
 	refresh(id: string): Promise<Chunk> {
-		const pending = this.#pending.get(id);
-		if (pending) {
-			pending.entry.controller.abort();
-			this.#pending.delete(id);
-			this.#queue = this.#queue.filter((entry) => entry !== pending.entry);
-			pending.entry.reject(new DOMException("Changed while loading", "AbortError"));
-		}
+		this.#cancel(id, "Changed while loading");
 		return this.#enqueue(id, true);
 	}
 
 	/** Whether any view needs this chunk now. */
 	isWanted(id: string): boolean {
-		for (const set of this.#wanted.values()) if (set.has(id)) return true;
-		return false;
+		return this.#rank.has(id);
 	}
 
 	#enqueue(id: string, refresh: boolean): Promise<Chunk> {
-		let entry!: Pending;
-		const promise = new Promise<Chunk>((resolve, reject) => {
-			entry = { id, resolve, reject, controller: new AbortController(), started: false, refresh };
+		let resolve!: (chunk: Chunk) => void;
+		let reject!: (error: unknown) => void;
+		const promise = new Promise<Chunk>((ok, fail) => {
+			resolve = ok;
+			reject = fail;
 		});
-		this.#pending.set(id, { promise, entry });
+		const entry: Pending = { id, promise, resolve, reject, controller: new AbortController(), refresh };
+		this.#pending.set(id, entry);
 		this.#queue.push(entry);
+		this.#sorted = false;
 		this.#pump();
 		return promise;
 	}
 
 	/**
 	 * Say which chunks `owner` (for example one of several views sharing
-	 * this store) needs now; loads no owner needs are cancelled. Of those,
-	 * the `shown` ones (by default all) are never evicted, even over budget.
+	 * this store) needs now, most wanted first; loads no owner needs are
+	 * cancelled. Loads run in order of each chunk's best place in any
+	 * owner's list, so views sharing the store take turns. Of the chunks
+	 * wanted, the `shown` ones (by default all) are never evicted, even over
+	 * budget, and all count as just used.
 	 */
-	want(owner: string, ids: Set<string>, shown: Set<string> = ids): void {
-		this.#wanted.set(owner, ids);
-		this.#protected.set(owner, shown);
-		const union = new Set<string>();
-		for (const set of this.#wanted.values()) for (const id of set) union.add(id);
-		this.keepOnly(union);
+	want(owner: string, ids: Iterable<string>, shown?: Iterable<string>): void {
+		const list = [...ids];
+		if (list.length > 0) this.#wanted.set(owner, list);
+		else this.#wanted.delete(owner);
+		const kept = new Set(shown ?? list);
+		if (kept.size > 0) this.#protected.set(owner, kept);
+		else this.#protected.delete(owner);
+		this.#rank = new Map();
+		for (const wanted of this.#wanted.values()) {
+			wanted.forEach((id, place) => {
+				if (place < (this.#rank.get(id) ?? UNRANKED)) this.#rank.set(id, place);
+			});
+		}
+		// The most wanted last, so it is the last to go.
+		for (let i = list.length - 1; i >= 0; i--) this.get(list[i]!);
+		this.#sorted = false;
+		this.keepOnly(new Set(this.#rank.keys()));
 	}
 
 	#isShown(id: string): boolean {
@@ -118,16 +145,21 @@ export class ChunkStore {
 
 	/** Cancel queued and running loads of chunks not in `wanted`. */
 	keepOnly(wanted: Set<string>): void {
-		for (const [id, { entry }] of this.#pending) {
-			if (wanted.has(id)) continue;
-			entry.controller.abort();
-			this.#pending.delete(id);
-			// A cancelled refresh leaves an out-of-date copy: drop it, so the
-			// next request loads afresh.
-			if (entry.refresh) this.#drop(id);
-			entry.reject(new DOMException("No longer needed", "AbortError"));
+		for (const id of [...this.#pending.keys()]) {
+			if (!wanted.has(id)) this.#cancel(id, "No longer needed");
 		}
-		this.#queue = this.#queue.filter((entry) => wanted.has(entry.id));
+	}
+
+	#cancel(id: string, reason: string): void {
+		const entry = this.#pending.get(id);
+		if (!entry) return;
+		entry.controller.abort();
+		this.#pending.delete(id);
+		this.#queue = this.#queue.filter((queued) => queued !== entry);
+		// A cancelled refresh leaves an out-of-date copy: drop it, so the
+		// next request loads afresh.
+		if (entry.refresh) this.#drop(id);
+		entry.reject(new DOMException(reason, "AbortError"));
 	}
 
 	/** Keep a chunk however full the cache gets (for example while edited). */
@@ -146,13 +178,7 @@ export class ChunkStore {
 	 */
 	invalidate(id: string): void {
 		this.#drop(id);
-		const pending = this.#pending.get(id);
-		if (pending) {
-			pending.entry.controller.abort();
-			this.#pending.delete(id);
-			this.#queue = this.#queue.filter((entry) => entry !== pending.entry);
-			pending.entry.reject(new DOMException("Changed while loading", "AbortError"));
-		}
+		this.#cancel(id, "Changed while loading");
 	}
 
 	#drop(id: string): void {
@@ -163,12 +189,21 @@ export class ChunkStore {
 		}
 	}
 
+	/** The queued load to start next: the most wanted. */
+	#next(): Pending | undefined {
+		if (!this.#sorted) {
+			const rank = (entry: Pending) => this.#rank.get(entry.id) ?? UNRANKED;
+			// Stable, so equally wanted chunks load in the order asked for.
+			this.#queue.sort((a, b) => rank(a) - rank(b));
+			this.#sorted = true;
+		}
+		return this.#queue.shift();
+	}
+
 	#pump(): void {
 		while (this.#running < this.concurrency) {
-			const entry = this.#queue.shift();
+			const entry = this.#next();
 			if (!entry) return;
-			if (entry.controller.signal.aborted) continue;
-			entry.started = true;
 			this.#running += 1;
 			let loading: Promise<Chunk>;
 			try {
@@ -179,21 +214,17 @@ export class ChunkStore {
 			}
 			loading
 				.then((chunk) => {
-					if (this.#pending.get(entry.id)?.entry !== entry) return;
+					if (this.#pending.get(entry.id) !== entry) return;
 					this.#pending.delete(entry.id);
 					this.onLoad?.(entry.id, chunk);
-					const old = this.#cache.get(entry.id);
-					if (old) {
-						this.#cache.delete(entry.id);
-						this.#bytes -= old.data.byteLength;
-					}
+					this.#drop(entry.id);
 					this.#cache.set(entry.id, chunk);
 					this.#bytes += chunk.data.byteLength;
 					this.#evict();
 					entry.resolve(chunk);
 				})
 				.catch((error: unknown) => {
-					if (this.#pending.get(entry.id)?.entry === entry) this.#pending.delete(entry.id);
+					if (this.#pending.get(entry.id) === entry) this.#pending.delete(entry.id);
 					entry.reject(error);
 				})
 				.finally(() => {
