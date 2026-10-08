@@ -1360,6 +1360,45 @@ def test_retiring_a_class_changes_only_the_chunks_it_is_in(ada, project):
     check_every_level(ada, project, volume, levels, shown)
 
 
+@pytest.mark.parametrize("change", ["retire", "image", "rule"])
+def test_a_stored_chunk_is_not_used_once_the_plan_changes(
+    ada, migrated_database_url, settings, reads, monkeypatch, change
+):
+    # With no label edited, a retired class, a new image, or a new rule each
+    # change what a chunk shows, or can, so a process that finds one stored
+    # for what was must make it again.
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    volume = one_label_in_each_chunk()
+    volume[100:110, 100:110, 100:110] = 3
+    paint(ada, project, volume)
+    levels = plan_levels(MANY)
+    top = len(levels) - 1
+    first = get(ada, project, top, (0, 0, 0))
+    assert first.status_code == 200
+    assert len(stored_chunks(settings, project)) == 2
+    shown = volume
+    if change == "retire":
+        retire(ada, project, 3)
+        shown = np.where(volume == 3, 0, volume)
+    elif change == "image":
+        # The same shape, so the same plan, but another image.
+        add_image(migrated_database_url, project, MANY)
+    else:
+        monkeypatch.setattr(
+            label_pyramid, "RULE_VERSION", label_pyramid.RULE_VERSION + 1
+        )
+    another_process(ada.client.app)
+    reads.clear()
+    again = get(ada, project, top, (0, 0, 0))
+    assert again.status_code == 200
+    assert again.headers["etag"] != first.headers["etag"]
+    assert reads
+    np.testing.assert_array_equal(
+        decode_chunk(again.content),
+        expected_chunk(shrink(shown, levels)[top], (0, 0, 0)),
+    )
+
+
 def requests_to_make_the_top(ada, project, processes, top) -> int:
     """
     How many requests it takes to get the top chunk, when each is answered by
