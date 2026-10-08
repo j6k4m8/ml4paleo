@@ -853,14 +853,14 @@
 
 	const hint = $derived(
 		{
-			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · click moves the crosshair",
-			brush: "Drag to paint the active class · [ ] change the size",
-			eraser: "Drag to erase labels · [ ] change the size",
+			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · right-click moves the crosshair",
+			brush: "Drag to paint the active class · [ ] change the size · right-click moves the crosshair",
+			eraser: "Drag to erase labels · [ ] change the size · right-click moves the crosshair",
 			polygon:
 				viewer.polygonMode === "add"
-					? "Click points or drag freehand · click the first point, double-click, or Enter fills · hold Alt to cut out · Esc cancels"
-					: "Click points or drag freehand · click the first point, double-click, or Enter cuts out · hold Shift to fill · Esc cancels",
-			roi: "Drag a box on a slice · G goes to the next open ROI · C marks it complete",
+					? "Click points or drag freehand · click the first point, double-click, or Enter fills · hold Alt to cut out · Esc cancels · right-click moves the crosshair"
+					: "Click points or drag freehand · click the first point, double-click, or Enter cuts out · hold Shift to fill · Esc cancels · right-click moves the crosshair",
+			roi: "Drag a box on a slice · G goes to the next open ROI · C marks it complete · right-click moves the crosshair",
 		}[viewer.tool],
 	);
 </script>
