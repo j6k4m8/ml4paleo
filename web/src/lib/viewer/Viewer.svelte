@@ -35,7 +35,7 @@
 	import { nextColor } from "#lib/labelimport.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
-	import { acceptParts, MAX_ACCEPT_VOXELS, planeToAccept, readBox, unlabeledOnly, whyNotInView } from "../labels/accept";
+	import { acceptParts, MAX_ACCEPT_VOXELS, planeToAccept, readBox, unlabeledOnly, viewExtent, whyNotInView } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit, saveState } from "../labels/opqueue.svelte";
 	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
@@ -62,7 +62,7 @@
 	import { imageLoader, labelLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
 	import { LAYOUTS, type Stroke, ViewerState } from "./state.svelte";
-	import { aspectOf, type Level, type Plane, PLANES, type Vec3, visibleBox } from "./tiles";
+	import { aspectOf, type Level, type Plane, PLANES, type Vec3 } from "./tiles";
 
 	let {
 		image,
@@ -498,16 +498,21 @@
 
 	/**
 	 * What accepting in the view would do: the part of its slice the active
-	 * view shows (`visibleBox`, once the view has a size), the layer that
-	 * shows there, which accepting reads, and why it can't go ahead, if it
-	 * can't. These words are the button's tooltip and the notice for the key.
+	 * view shows (once the view has a size), and how many chunks that view
+	 * counts to draw the prediction there (see `viewExtent`, which counts them
+	 * as the view does, so accepting is on only where the prediction is
+	 * drawn), the layer that shows there, which accepting reads, and why it
+	 * can't go ahead, if it can't. These words are the button's tooltip and the
+	 * notice for the key.
 	 */
 	const inView = $derived.by(() => {
 		const plane = planeToAccept(viewer.layout, pointed, used);
 		const size = sizes.get(plane.name);
-		const box = size
-			? visibleBox({ plane, position: viewer.position, zoom: viewer.zoom, aspect: viewer.aspect, width: size[0], height: size[1] }, viewer.shape)
-			: null;
+		const full = levels[0];
+		const { box, tiles } =
+			size && full
+				? viewExtent({ plane, position: viewer.position, zoom: viewer.zoom, aspect: viewer.aspect, width: size[0], height: size[1] }, full)
+				: { box: null, tiles: 0 };
 		const layer = box ? showing(box) : null;
 		const blocked = whyNotInView({
 			imageReplaced,
@@ -515,6 +520,7 @@
 			shown: viewer.showPrediction,
 			opacity: viewer.predictionOpacity,
 			box,
+			tiles,
 			mixed: !!box && mixesProposal(box),
 			covered: !!layer,
 		});

@@ -2,8 +2,8 @@ import { decompress } from "fzstd";
 import { describe, expect, it } from "vitest";
 import type { Chunk } from "../viewer/chunks";
 import { labelId, labelKey } from "../viewer/labels";
-import { MAX_OVERLAY_TILES } from "../viewer/overlays";
-import { PLANES, TILE_HYSTERESIS } from "../viewer/tiles";
+import { MAX_OVERLAY_TILES, overlayHidden } from "../viewer/overlays";
+import { type Level, PLANES, TILE_HYSTERESIS, type Vec3, type View } from "../viewer/tiles";
 import {
 	type Box,
 	MAX_ACCEPT_VOXELS,
@@ -15,6 +15,7 @@ import {
 	readBox,
 	tooBigForView,
 	unlabeledOnly,
+	viewExtent,
 	whyNotInView,
 } from "./accept";
 import { CHUNK, type DeltaIn, decodeDelta, fromBase64, unpackBits } from "./deltas";
@@ -204,12 +205,16 @@ describe("accepting what a view shows", () => {
 		expect(MAX_OVERLAY_TILES).toBe(128);
 		expect(MAX_VIEW_CHUNKS).toBe(Math.floor(MAX_OVERLAY_TILES / TILE_HYSTERESIS));
 		expect(MAX_VIEW_CHUNKS).toBe(102);
-		// 6 × 17 chunks of one slice.
-		expect(tooBigForView([9, 0, 0, 10, 384, 1088])).toBe(false);
-		expect(tooBigForView([9, 0, 0, 10, 384, 1089])).toBe(true);
-		// A view just across a chunk's edge touches more than its area says.
-		expect(tooBigForView([9, 1, 0, 10, 385, 1088])).toBe(true);
-		expect(tooBigForView([9, 0, 0, 10, 4096, 4096])).toBe(true);
+		// 6 × 17 chunks of one slice, and the view counts no more of them.
+		const six: Box = [9, 0, 0, 10, 384, 1088];
+		expect(tooBigForView(six, 102)).toBe(false);
+		expect(tooBigForView([9, 0, 0, 10, 384, 1089], 108)).toBe(true);
+		// The view's own count counts where it's the larger, and so does the box's.
+		expect(tooBigForView(six, 103)).toBe(true);
+		expect(tooBigForView([9, 1, 0, 10, 385, 1088], 7 * 17)).toBe(true);
+		expect(tooBigForView([9, 0, 0, 10, 4096, 4096], 0)).toBe(true);
+		// A count that isn't a number is never taken for a small one.
+		expect(tooBigForView(six, Number.NaN)).toBe(true);
 	});
 
 	it("never reaches the server's limit with a view's one-voxel-thick slice, so only chunks are counted", () => {
@@ -219,7 +224,7 @@ describe("accepting what a view shows", () => {
 
 	describe("says why accepting in the view can't go ahead", () => {
 		const slice: Box = [3, 0, 0, 4, 512, 512];
-		const ready: ViewAccept = { imageReplaced: false, predicted: true, shown: true, opacity: 0.35, box: slice, mixed: false, covered: true };
+		const ready: ViewAccept = { imageReplaced: false, predicted: true, shown: true, opacity: 0.35, box: slice, tiles: 64, mixed: false, covered: true };
 		const why = (over: Partial<ViewAccept>) => whyNotInView({ ...ready, ...over });
 
 		it("says nothing when it can", () => {
@@ -234,22 +239,126 @@ describe("accepting what a view shows", () => {
 			expect(why({ opacity: Number.NaN })).toContain("opacity is 0");
 			expect(why({ box: null })).toContain("Nothing of the image is in view");
 			expect(why({ box: [3, 0, 0, 4, 4096, 4096] })).toBe("Zoom in a bit: the visible area is too big to accept at once.");
+			// Or when the view counts more chunks than the box touches, as when it leaves the prediction out.
+			expect(why({ tiles: 120 })).toBe("Zoom in a bit: the visible area is too big to accept at once.");
+			expect(why({ tiles: 102 })).toBe("");
 			expect(why({ mixed: true })).toContain("proposal");
 			expect(why({ covered: false })).toContain("Nothing is predicted");
 		});
 
 		it("gives the first reason when there are several", () => {
-			const everything = { imageReplaced: true, predicted: false, shown: false, opacity: 0, box: null, mixed: true, covered: false };
+			const everything = { imageReplaced: true, predicted: false, shown: false, opacity: 0, box: null, tiles: 0, mixed: true, covered: false };
 			expect(why(everything)).toContain("image was replaced");
 			expect(why({ ...everything, imageReplaced: false })).toContain("no prediction");
 			expect(why({ ...everything, imageReplaced: false, predicted: true })).toContain("hidden");
 			expect(why({ ...everything, imageReplaced: false, predicted: true, shown: true })).toContain("opacity");
 			expect(why({ ...everything, imageReplaced: false, predicted: true, shown: true, opacity: 1 })).toContain("Nothing of the image");
 			// Too big comes before the proposal's edge, which comes before nothing being predicted.
-			const big: Partial<ViewAccept> = { box: [3, 0, 0, 4, 4096, 4096], mixed: true, covered: false };
+			const big: Partial<ViewAccept> = { box: [3, 0, 0, 4, 4096, 4096], tiles: 4096, mixed: true, covered: false };
 			expect(why(big)).toContain("too big");
-			expect(why({ ...big, box: slice })).toContain("proposal");
-			expect(why({ ...big, box: slice, mixed: false })).toContain("Nothing is predicted");
+			expect(why({ ...big, box: slice, tiles: 64 })).toContain("proposal");
+			expect(why({ ...big, box: slice, tiles: 64, mixed: false })).toContain("Nothing is predicted");
+		});
+	});
+
+	describe("is on only where the view draws the prediction", () => {
+		const shape: Vec3 = [20, 1024, 1024];
+		const full: Level = { index: 0, path: "0", shape, scale: [1, 1, 1] };
+		const ready: ViewAccept = { imageReplaced: false, predicted: true, shown: true, opacity: 0.35, box: null, tiles: 0, mixed: false, covered: true };
+		const TOO_BIG = "Zoom in a bit: the visible area is too big to accept at once.";
+		/** An XY view of a 704 × 576 canvas centered on (z 9.5, y 288, x 352), where the canvas has its edges on chunk edges at zoom 1. */
+		const view = (zoom: number, over: Partial<View> = {}): View => ({
+			plane: PLANES.xy,
+			position: [9.5, 288, 352],
+			zoom,
+			aspect: [1, 1, 1],
+			width: 704,
+			height: 576,
+			...over,
+		});
+		/** Why accepting in `v` can't go ahead, or "" if it can. */
+		const why = (v: View) => whyNotInView({ ...ready, ...viewExtent(v, full) });
+
+		it("counts a chunk a canvas edge only touches, as the view does", () => {
+			// Zoom 1: the canvas covers x 0 to 704 and y 0 to 576, which are chunk edges.
+			const { box, tiles } = viewExtent(view(1), full);
+			expect(box).toEqual([9, 0, 0, 10, 576, 704]);
+			expect(chunksIn(box!)).toBe(11 * 9);
+			expect(tiles).toBe(12 * 10);
+		});
+
+		it("stays off while the view still leaves the prediction out", () => {
+			// Zoom 0.8: 13 × 11 chunks, so the view leaves the prediction out.
+			expect(viewExtent(view(0.8), full).tiles).toBe(143);
+			expect(overlayHidden(full, view(0.8), false)).toBe(true);
+			expect(why(view(0.8))).toBe(TOO_BIG);
+			// Zoomed in to 1 it counts 120, over the 102.4 it has to come down to draw the prediction again, so
+			// it's still left out, though the box touches only 99 chunks (which alone would let it accept).
+			const { box } = viewExtent(view(1), full);
+			expect(overlayHidden(full, view(1), true)).toBe(true);
+			expect(tooBigForView(box!, chunksIn(box!))).toBe(false);
+			expect(why(view(1))).toBe(TOO_BIG);
+		});
+
+		it("is on once the view counts 102 chunks or fewer, whether or not it had left the prediction out", () => {
+			const closer = view(1.25);
+			expect(viewExtent(closer, full).tiles).toBe(81);
+			expect(why(closer)).toBe("");
+			expect(overlayHidden(full, closer, true)).toBe(false);
+			expect(overlayHidden(full, closer, false)).toBe(false);
+		});
+
+		it("counts alike where no canvas edge is on a chunk's", () => {
+			const odd = { position: [9.5, 300.25, 333.5] as Vec3, width: 700, height: 570 };
+			// 99 chunks in view, and the box touches the same.
+			const near = view(1.05, odd);
+			const { box, tiles } = viewExtent(near, full);
+			expect(tiles).toBe(99);
+			expect(chunksIn(box!)).toBe(99);
+			expect(why(near)).toBe("");
+			expect(overlayHidden(full, near, true)).toBe(false);
+			// A little further out, 110.
+			const far = view(0.95, odd);
+			expect(viewExtent(far, full).tiles).toBe(110);
+			expect(chunksIn(viewExtent(far, full).box!)).toBe(110);
+			expect(why(far)).toBe(TOO_BIG);
+			expect(overlayHidden(full, far, true)).toBe(true);
+		});
+
+		it("is never on where the view leaves the prediction out, whichever state it was in", () => {
+			let seed = 20251008;
+			const random = () => {
+				seed = (seed * 1664525 + 1013904223) % 2 ** 32;
+				return seed / 2 ** 32;
+			};
+			const pick = <T,>(items: readonly T[]): T => items[Math.floor(random() * items.length)]!;
+			const planes = [PLANES.xy, PLANES.xz, PLANES.yz];
+			let on = 0;
+			let off = 0;
+			let boxAloneWouldHaveBeenWrong = 0;
+			for (let i = 0; i < 6000; i++) {
+				// Half have their canvas edges on multiples of 32 voxels, where counts differ most.
+				const aligned = i % 2 === 0;
+				const zoom = aligned ? pick([0.25, 0.5, 1, 2, 4]) : 0.15 * 60 ** random();
+				const width = aligned ? 64 * (2 + Math.floor(random() * 22)) : 100 + random() * 1500;
+				const height = aligned ? 64 * (2 + Math.floor(random() * 16)) : 100 + random() * 1000;
+				const position = shape.map((n) => (aligned ? 32 * Math.floor((random() * n) / 32) : random() * n)) as Vec3;
+				const aspect = pick<Vec3>([[1, 1, 1], [4, 1, 1], [2, 1, 1], [1, 1.5, 1], [1, 1, 2.5]]);
+				const v: View = { plane: pick(planes), position, zoom, aspect, width, height };
+				const { box, tiles } = viewExtent(v, full);
+				if (whyNotInView({ ...ready, box, tiles }) === "") {
+					on++;
+					expect(overlayHidden(full, v, false), JSON.stringify(v)).toBe(false);
+					expect(overlayHidden(full, v, true), JSON.stringify(v)).toBe(false);
+				} else {
+					off++;
+				}
+				if (box && chunksIn(box) <= MAX_VIEW_CHUNKS && overlayHidden(full, v, true)) boxAloneWouldHaveBeenWrong++;
+			}
+			// Many of each, and some the box's own count alone would have let through.
+			expect(on).toBeGreaterThan(500);
+			expect(off).toBeGreaterThan(500);
+			expect(boxAloneWouldHaveBeenWrong).toBeGreaterThan(0);
 		});
 	});
 });

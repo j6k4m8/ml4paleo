@@ -8,7 +8,7 @@
 import type { Chunk } from "../viewer/chunks";
 import { MAX_OVERLAY_TILES } from "../viewer/overlays";
 import type { Layout } from "../viewer/state.svelte";
-import { type Plane, PLANES, TILE_HYSTERESIS, type Vec3 } from "../viewer/tiles";
+import { countTiles, type Level, type Plane, PLANES, TILE_HYSTERESIS, type Vec3, type View, visibleBox } from "../viewer/tiles";
 import { CHUNK, type DeltaIn, splitIntoDeltas } from "./deltas";
 
 /** Boxes bigger than this would make the page hold too much at once. */
@@ -20,9 +20,10 @@ export const MAX_ACCEPT_VOXELS = 256 ** 3;
  * loaded. A view leaves the prediction out with more than `MAX_OVERLAY_TILES`
  * chunks in view, and draws it again only once it needs `TILE_HYSTERESIS`
  * times fewer (see `overlayHidden`), so it's drawn for certain with this
- * many. A view's slice has a chunk for each 64 × 64 of its voxels, so this
- * also holds it to far fewer voxels than the server takes at once (256³),
- * which is why only chunks are counted.
+ * many, counted as the view counts them (`countTiles`: see `viewExtent`). A
+ * view's slice has a chunk for each 64 × 64 of its voxels, so this also holds
+ * it to far fewer voxels than the server takes at once (256³), which is why
+ * only chunks are counted.
  */
 export const MAX_VIEW_CHUNKS = Math.floor(MAX_OVERLAY_TILES / TILE_HYSTERESIS);
 
@@ -81,9 +82,25 @@ export function chunksIn(box: Box): number {
 	return count;
 }
 
-/** Whether the part of a slice a view shows takes more chunks than can be accepted at once. */
-export function tooBigForView(box: Box): boolean {
-	return chunksIn(box) > MAX_VIEW_CHUNKS;
+/**
+ * What a view gives to accept in: the part of its slice it shows (`visibleBox`),
+ * and how many chunks it needs to draw the prediction there, counted as the
+ * view counts them to decide whether to (`countTiles` of the full resolution
+ * level `full`). That counts a chunk a canvas edge only touches, which the
+ * box (of whole voxels shown, half-open) leaves out, so it can be the larger.
+ */
+export function viewExtent(view: View, full: Level): { box: Box | null; tiles: number } {
+	return { box: visibleBox(view, full.shape), tiles: countTiles(full, view) };
+}
+
+/**
+ * Whether the part of a slice a view shows takes more chunks than can be
+ * accepted at once: more than `MAX_VIEW_CHUNKS` of them as the view counts
+ * them for drawing the prediction (`tiles`), so it isn't drawn only where it
+ * would be, or as the box touches them (which is what's read).
+ */
+export function tooBigForView(box: Box, tiles: number): boolean {
+	return !(Math.max(tiles, chunksIn(box)) <= MAX_VIEW_CHUNKS);
 }
 
 /** What accepting in the view depends on. */
@@ -95,8 +112,9 @@ export interface ViewAccept {
 	/** The prediction layer is on, and how opaque it is. */
 	shown: boolean;
 	opacity: number;
-	/** The part of the slice the view shows, if it shows any. */
+	/** The part of the slice the view shows, if it shows any, and the chunks the view counts to draw the prediction there (see `viewExtent`). */
 	box: Box | null;
+	tiles: number;
 	/** The box reaches over the edge of a proposal, so part of it shows the proposal and part doesn't. */
 	mixed: boolean;
 	/** Some layer shows over all of the box. */
@@ -110,7 +128,7 @@ export function whyNotInView(now: ViewAccept): string {
 	if (!now.shown) return "The prediction is hidden; show it (M) to accept what's in view.";
 	if (!(now.opacity > 0)) return "The prediction's opacity is 0; raise it to accept what's in view.";
 	if (!now.box) return "Nothing of the image is in view.";
-	if (tooBigForView(now.box)) return "Zoom in a bit: the visible area is too big to accept at once.";
+	if (tooBigForView(now.box, now.tiles)) return "Zoom in a bit: the visible area is too big to accept at once.";
 	if (now.mixed) return "Part of this view shows your proposal and part doesn't; zoom in on one of them to accept it.";
 	if (!now.covered) return "Nothing is predicted in this view yet.";
 	return "";
