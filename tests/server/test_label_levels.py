@@ -1580,6 +1580,117 @@ def test_past_the_classes_it_tests_for_every_chunk_follows_the_retired_ones(
     )
 
 
+def full_resolution(browser, project, shape) -> np.ndarray:
+    """
+    The labels at full resolution, read chunk by chunk as a viewer does.
+    """
+    out = np.zeros(shape, dtype=np.uint8)
+    for key in np.ndindex(*(-(-n // 64) for n in shape)):
+        got = chunk(browser, project, 0, key)
+        if got is not None:
+            part = tuple(
+                slice(k * 64, min((k + 1) * 64, n))
+                for k, n in zip(key, shape, strict=True)
+            )
+            out[part] = got[tuple(slice(0, p.stop - p.start) for p in part)]
+    return out
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_retired_voxels_coming_and_going_by_edits_undo_and_redo(
+    ada, migrated_database_url, fresh
+):
+    # A retired class's voxels covered by an edit, brought back by undoing it,
+    # covered again by redoing it, and a new image, step by step, in this
+    # process or, with `fresh`, in a new one at each step (so chunks come from
+    # storage, and "nothing" from what was kept). After each step every coarse
+    # chunk must be the full resolution labels shrunk, retired classes left
+    # out, and no ETag a viewer kept from an earlier step may be taken for the
+    # same pixels when they differ.
+    shape = MANY
+    project = make_project(ada, migrated_database_url, shape=shape)
+    levels = plan_levels(shape)
+    keys = [
+        (level, key)
+        for level in range(1, len(levels))
+        for key in np.ndindex(*(-(-n // 64) for n in levels[level].shape_zyx))
+    ]
+    retired = set()
+    kept = {}
+
+    def check(step):
+        if fresh:
+            pyramid = another_process(ada.client.app)
+            pyramid.seconds, pyramid.blobs = 3600, 10**9
+        shown = full_resolution(ada, project, shape)
+        for value in retired:
+            shown[shown == value] = 0
+        arrays = shrink(shown, levels)
+        for level, key in keys:
+            expected = expected_chunk(arrays[level], key)
+            response = get(ada, project, level, key)
+            if expected.any():
+                assert response.status_code == 200, (step, level, key)
+                np.testing.assert_array_equal(
+                    decode_chunk(response.content),
+                    expected,
+                    err_msg=f"{step} {level} {key}",
+                )
+                kept.setdefault((level, key), {})[response.headers["etag"]] = (
+                    response.content
+                )
+            else:
+                assert response.status_code == 404, (step, level, key)
+            for etag, content in kept.get((level, key), {}).items():
+                again = get(ada, project, level, key, headers={"If-None-Match": etag})
+                if again.status_code == 304:
+                    np.testing.assert_array_equal(
+                        decode_chunk(content),
+                        expected,
+                        err_msg=f"{step} {level} {key} {etag}",
+                    )
+
+    # Class 2 in every chunk, and class 3 in a block under the first chunks.
+    volume = one_label_in_each_chunk(shape)
+    volume[60:70, 60:70, 60:70] = 3
+    paint(ada, project, volume)
+    check("painted")
+    retire(ada, project, 3)
+    retired.add(3)
+    check("retired 3")
+    # Cover all of class 3 with background: no retired voxels are left.
+    over = send(
+        ada,
+        project,
+        split_into_deltas(np.ones((10, 10, 10), bool), (60, 60, 60), value=1),
+        "brush",
+    )
+    check("covered 3")
+    undo = ada.post(
+        f"/api/projects/{project}/labels/ops/{over['seq']}/undo",
+        json={"client_op_id": str(uuid.uuid4())},
+    )
+    assert undo.status_code == 201
+    check("undo brings 3 back")
+    redo = ada.post(
+        f"/api/projects/{project}/labels/ops/{over['seq']}/redo",
+        json={"client_op_id": str(uuid.uuid4())},
+    )
+    assert redo.status_code == 201
+    check("redo covers it again")
+    add_image(migrated_database_url, project, shape)
+    check("a new image")
+    retire(ada, project, 2)
+    retired.add(2)
+    check("retired 2: only background is left to show")
+    undo = ada.post(
+        f"/api/projects/{project}/labels/ops/{over['seq']}/undo",
+        json={"client_op_id": str(uuid.uuid4())},
+    )
+    assert undo.status_code == 201
+    check("undo again: retired classes only, nothing shows")
+
+
 def test_a_build_that_took_an_older_state_leaves_a_stored_chunk_of_a_newer_one(
     ada, migrated_database_url, settings
 ):
