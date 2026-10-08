@@ -5,6 +5,7 @@ from the full-resolution labels when a viewer asks, for display only.
 
 import asyncio
 import base64
+import dataclasses
 import gc
 import hashlib
 import pathlib
@@ -1269,6 +1270,90 @@ def test_no_connection_is_held_while_chunks_kept_in_storage_are_looked_for(
     # The state of the labels is taken in a transaction, which is given back
     # before the wait.
     assert spy.stored == [0, 0, 0]
+
+
+def test_the_shape_and_factors_of_every_level_are_part_of_the_plan():
+    # Chunks kept in storage outlast deploys, so a change in how levels are
+    # planned must not be taken for the same plan, for any level above it too.
+    image = uuid.uuid4()
+    levels = plan_levels(SHAPE)
+    state = label_pyramid.Fingerprint(count=1, versions=1)
+    plan = label_pyramid.Plan(image, levels)
+    assert plan.etag(2, state) == label_pyramid.Plan(image, list(levels)).etag(2, state)
+    for change in (
+        {"factor_zyx": (2, 4, 4)},
+        {"shape_zyx": (70, 75, 136)},
+    ):
+        other = [levels[0], dataclasses.replace(levels[1], **change), *levels[2:]]
+        assert label_pyramid.Plan(image, other).etag(2, state) != plan.etag(2, state), (
+            change
+        )
+        assert label_pyramid.Plan(image, other).digest(frozenset()) != plan.digest(
+            frozenset()
+        )
+
+
+def test_retiring_a_class_nothing_was_painted_with_changes_nothing(
+    ada, migrated_database_url, settings, reads
+):
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    paint(ada, project, one_label_in_each_chunk())
+    levels = plan_levels(MANY)
+    top = len(levels) - 1
+    chunks = [(level, (0, 0, 0)) for level in range(1, top + 1)]
+    before = {at: get(ada, project, *at) for at in chunks}
+    assert {r.status_code for r in before.values()} == {200}
+    unused = ada.post(
+        f"/api/projects/{project}/labels/classes",
+        json={"name": "teeth", "color": "#112233"},
+    )
+    assert unused.status_code == 201, unused.text
+    retire(ada, project, unused.json()["value"])
+    for at, was in before.items():
+        # What a viewer kept still holds.
+        now = get(ada, project, *at, headers={"If-None-Match": was.headers["etag"]})
+        assert now.status_code == 304, at
+        assert now.headers["etag"] == was.headers["etag"]
+    # So do the chunks this process kept, and those kept in storage, which
+    # another process takes as they are.
+    reads.clear()
+    for at, was in before.items():
+        assert get(ada, project, *at).content == was.content
+    another_process(ada.client.app)
+    assert get(ada, project, top, (0, 0, 0)).content == before[(top, (0, 0, 0))].content
+    assert reads == []
+
+
+def test_retiring_a_class_changes_only_the_chunks_it_is_in(ada, project):
+    levels = plan_levels(SHAPE)
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    # A chunk of level 1 with bone and a little matrix, and another, far from
+    # it, with matrix only.
+    volume[0:60, 0:60, 0:60] = 2
+    volume[60:64, 60:64, 60:64] = 3
+    volume[130:140, 140:150, 260:270] = 3
+    paint(ada, project, volume)
+    bone, matrix = (0, 0, 0), (1, 1, 2)
+    etags = {
+        (level, key): get(ada, project, level, key).headers["etag"]
+        for level, key in [(1, bone), (1, matrix), (2, (0, 0, 0)), (3, (0, 0, 0))]
+    }
+    retire(ada, project, 2)
+
+    def revalidate(level, key):
+        return get(
+            ada, project, level, key, headers={"If-None-Match": etags[(level, key)]}
+        )
+
+    # The chunk with only matrix shows what it did, and a viewer keeps its copy.
+    assert revalidate(1, matrix).status_code == 304
+    # The ones with bone in them don't.
+    for level, key in [(1, bone), (2, (0, 0, 0)), (3, (0, 0, 0))]:
+        changed = revalidate(level, key)
+        assert changed.status_code == 200, (level, key)
+        assert changed.headers["etag"] != etags[(level, key)]
+    shown = np.where(volume == 2, 0, volume)
+    check_every_level(ada, project, volume, levels, shown)
 
 
 def requests_to_make_the_top(ada, project, processes, top) -> int:

@@ -26,9 +26,12 @@ from the full resolution chunks), when someone asks for it:
   sum is the chunk's `X-Pyramid-Version`, and its `ETag` has it too, so a
   viewer's revalidation costs one query. A chunk with no labeled chunk under
   it is simply missing (unlabeled), as at level 0. The `ETag` also names what
-  else the pixels follow: the image whose levels these are (replacing it can
-  change them, labels unchanged), the retired classes, and `RULE_VERSION`.
-  It is only unique to its URL: two chunks can have the same one.
+  else the pixels follow: the image whose levels these are, and the shape and
+  factors of each (replacing the image can change them, labels unchanged), the
+  retired classes that have voxels under the chunk (the same query says which,
+  from the chunks' voxel counts per class, so retiring a class changes only
+  the chunks it is in), and `RULE_VERSION`. It is only unique to its URL: two
+  chunks can have the same one.
 - A computed chunk is kept, as the bytes a viewer gets, in a cache that holds
   the most recently used ones under a memory limit. Its key includes that sum,
   so an edit leaves the stale copy behind rather than finding it. An edit
@@ -80,7 +83,7 @@ import time
 import uuid
 import zlib
 from collections import OrderedDict
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -104,7 +107,10 @@ Box = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
 _KEY = struct.Struct(">BIIIIq")
 
 # Bump when `downsample_labels` or the chunk codec changes the bytes a chunk
-# is made of, so viewers drop the chunks they kept. A test pins both.
+# is made of, so viewers drop the chunks they kept (and chunks kept in storage,
+# which outlast deploys, aren't used). A test pins both. How the levels are
+# planned (`plan_levels`, `levels_of`) needs no bump: a plan's digest names
+# every level's shape and factors, so a change to them is a change of plan.
 RULE_VERSION = 2
 # Memory for cached chunks, in each API process.
 CACHE_BYTES = 64 * 1024 * 1024
@@ -156,19 +162,22 @@ class MissingBlob(Exception):
 class Fingerprint:
     """
     Which state of the labels a chunk shows: how many full-resolution chunks
-    under it have labels, and the sum of the versions of all the chunks under
-    it, erased ones too (which only goes up).
+    under it have labels, the sum of the versions of all the chunks under it,
+    erased ones too (which only goes up), and which of the project's retired
+    classes have voxels in them, as those are left out of what it shows.
     """
 
     count: int
     versions: int
+    retired: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
 class Plan:
     """
     What a project's coarse levels follow besides its labels: the image whose
-    levels they share, and the classes retired, which they leave out.
+    levels they share, the levels themselves, and the classes retired, which
+    they leave out.
     """
 
     image: uuid.UUID
@@ -176,17 +185,28 @@ class Plan:
     retired: frozenset[int] = frozenset()
 
     @functools.cached_property
-    def digest(self) -> bytes:
-        """
-        Says which image and retired classes this is, in a few bytes.
-        """
+    def _levels_digest(self) -> bytes:
         digest = hashlib.blake2s(self.image.bytes, digest_size=6)
-        digest.update(bytes(sorted(self.retired)))
+        for level in self.levels:
+            digest.update(struct.pack(">6Q", *level.shape_zyx, *level.factor_zyx))
+        return digest.digest()
+
+    def digest(self, retired: frozenset[int]) -> bytes:
+        """
+        Says in a few bytes what a chunk's pixels follow besides the versions
+        of the labels under it: the image and its levels, and which retired
+        classes (of those `retired`, the ones with voxels under the chunk)
+        they leave out. Retiring a class that isn't under a chunk, or was never
+        used, leaves its digest as it was.
+        """
+        digest = hashlib.blake2s(self._levels_digest, digest_size=6)
+        digest.update(bytes(sorted(retired)))
         return digest.digest()
 
     def etag(self, level: int, state: Fingerprint) -> str:
         z, y, x = self.levels[level].factor_zyx
-        return f'"p{RULE_VERSION}.{self.digest.hex()}.{z}.{y}.{x}.{state.versions}"'
+        digest = self.digest(state.retired).hex()
+        return f'"p{RULE_VERSION}.{digest}.{z}.{y}.{x}.{state.versions}"'
 
 
 def retry_after(level: int, key: ChunkKey) -> int:
@@ -281,21 +301,42 @@ _COUNT = func.count(LabelChunk.class_sha)
 _VERSIONS = func.coalesce(func.sum(LabelChunk.version), 0)
 
 
+def _seen(retired: Iterable[int]) -> list:
+    """
+    For each retired class, in order, whether any of the chunks in a box has
+    voxels of it (a chunk's counts of its voxels per class say).
+    """
+    return [
+        func.coalesce(func.bool_or(LabelChunk.class_counts.has_key(str(value))), False)
+        for value in sorted(retired)
+    ]
+
+
+def _present(retired: Iterable[int], seen: Iterable) -> frozenset[int]:
+    return frozenset(v for v, here in zip(sorted(retired), seen, strict=True) if here)
+
+
 async def fingerprint(
     db: AsyncSession,
     project_id: uuid.UUID,
     levels: Sequence[LevelSpec],
     level: int,
     key: ChunkKey,
+    retired: frozenset[int] = frozenset(),
 ) -> Fingerprint:
     """
-    Which state of the labels a chunk of `level` shows (one query).
+    Which state of the labels a chunk of `level` shows (one query), counting
+    which of the `retired` classes are in it.
     """
     box = footprint(levels[level], key)
     row = (
-        await db.execute(select(_COUNT, _VERSIONS).where(_within(project_id, box)))
+        await db.execute(
+            select(_COUNT, _VERSIONS, *_seen(retired)).where(_within(project_id, box))
+        )
     ).one()
-    return Fingerprint(count=int(row[0]), versions=int(row[1]))
+    return Fingerprint(
+        count=int(row[0]), versions=int(row[1]), retired=_present(retired, row[2:])
+    )
 
 
 async def _children(
@@ -304,6 +345,7 @@ async def _children(
     levels: Sequence[LevelSpec],
     level: int,
     key: ChunkKey,
+    retired: frozenset[int] = frozenset(),
 ) -> dict[ChunkKey, Fingerprint]:
     """
     The chunks of `level - 1` under a chunk of `level` that have labels, and
@@ -315,13 +357,15 @@ async def _children(
     gy = LabelChunk.cy.op("/", return_type=Integer)(fy).label("gy")
     gx = LabelChunk.cx.op("/", return_type=Integer)(fx).label("gx")
     rows = await db.execute(
-        select(gz, gy, gx, _COUNT, _VERSIONS)
+        select(gz, gy, gx, _COUNT, _VERSIONS, *_seen(retired))
         .where(_within(project_id, footprint(levels[level], key)))
         .group_by("gz", "gy", "gx")
     )
     return {
-        (z, y, x): Fingerprint(count=int(count), versions=int(versions))
-        for z, y, x, count, versions in rows
+        (z, y, x): Fingerprint(
+            count=int(count), versions=int(versions), retired=_present(retired, seen)
+        )
+        for z, y, x, count, versions, *seen in rows
         if count
     }
 
@@ -377,7 +421,9 @@ def _stored_key(level: int, key: ChunkKey) -> str:
 
 
 def _stored_header(plan: Plan, state: Fingerprint) -> bytes:
-    return _HEADER.pack(b"m4py", RULE_VERSION, plan.digest, state.count, state.versions)
+    return _HEADER.pack(
+        b"m4py", RULE_VERSION, plan.digest(state.retired), state.count, state.versions
+    )
 
 
 async def _load(
@@ -732,7 +778,7 @@ class LabelPyramid:
                 data = await run_in_threadpool(_combine, parts, step, plan.retired)
             return data or _NOTHING, kept
         parts = []
-        below = await _children(db, project_id, levels, level, key)
+        below = await _children(db, project_id, levels, level, key, plan.retired)
         for child, child_state in sorted(below.items()):
             # What is made of a chunk under this one is kept (pinned) until
             # this one is made, so a request that gives up before then leaves
@@ -768,7 +814,7 @@ def _cache_key(
     z, y, x = key
     return (
         project_id.bytes
-        + plan.digest
+        + plan.digest(state.retired)
         + _KEY.pack(level, z, y, x, state.count, state.versions)
     )
 

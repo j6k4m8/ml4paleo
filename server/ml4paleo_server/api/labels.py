@@ -948,15 +948,19 @@ async def _coarse_chunk(
     key: tuple[int, int, int],
 ) -> Response:
     headers = {"Cache-Control": "private, no-cache"}
+    retired: frozenset[int] = frozenset()
     if any(k >= n for k, n in zip(key, label_pyramid.grid(levels[level]), strict=True)):
         state = label_pyramid.Fingerprint(count=0, versions=0)
     else:
-        state = await label_pyramid.fingerprint(db, project_id, levels, level, key)
+        # Which retired classes the chunk has is part of the state.
+        retired = await label_pyramid.retired_classes(db, project_id)
+        state = await label_pyramid.fingerprint(
+            db, project_id, levels, level, key, retired
+        )
     headers["X-Pyramid-Version"] = str(state.versions)
     if state.count == 0:
         await db.rollback()
         return Response(status_code=404, headers=headers)
-    retired = await label_pyramid.retired_classes(db, project_id)
     plan = label_pyramid.Plan(image_id, list(levels), retired)
     etag = plan.etag(level, state)
     if request.headers.get("if-none-match") == etag:
