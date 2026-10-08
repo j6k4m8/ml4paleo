@@ -202,8 +202,13 @@ export class LabelLayer {
 		this.#emit(dropped);
 	}
 
-	/** The chunk version this page last read, if it has the chunk. */
+	/**
+	 * The chunk version this page last read, if it has the chunk and its
+	 * copy may be current: not while a copy older than one of this page's
+	 * own edits stands in (a strict edit on it would be refused for nothing).
+	 */
 	versionOf(id: string): number | undefined {
+		if (!this.#confirmed([id]).next().done) return undefined;
 		return this.store.get(id)?.version;
 	}
 

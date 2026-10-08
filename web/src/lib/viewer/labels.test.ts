@@ -201,6 +201,8 @@ describe("LabelLayer", () => {
 		await tick();
 		// The copy predated the edit, so the chunk was sent for once more.
 		expect(loads).toHaveLength(2);
+		// While a copy older than the edit stands in, a strict edit there can't be based on it.
+		expect(layer.versionOf("0/0/0")).toBeUndefined();
 		layer.changed([{ key: [0, 0, 0], version: 4 }]);
 		expect(loads).toHaveLength(2);
 		release();
@@ -246,6 +248,25 @@ describe("LabelLayer", () => {
 		await tick();
 		expect(first(layer, "0/0/0")).toBe(5);
 		expect(loads).toHaveLength(2);
+	});
+
+	it("gives no version to base a strict edit on while a copy older than your edit stands in", async () => {
+		const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
+		const { pool, release } = fakePool(server, true);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		const loading = loaded(layer, "0/0/0");
+		layer.applyLocal("op", [delta(5)]);
+		server.set("0/0/0", { value: 5, version: 4 });
+		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
+		release();
+		await loading;
+		// The copy shown is at 3 with the edit put back; the server is at 4.
+		expect(layer.store.peek("0/0/0")?.version).toBe(3);
+		expect(layer.versionOf("0/0/0")).toBeUndefined();
+		await tick();
+		release();
+		await tick();
+		expect(layer.versionOf("0/0/0")).toBe(4);
 	});
 
 	it("remembers the chunks it edited, the latest last", () => {
