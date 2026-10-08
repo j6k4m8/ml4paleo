@@ -29,8 +29,12 @@ export type PolygonMode = "add" | "subtract";
 
 /** A click this close to a polygon's first point (CSS pixels) closes it. */
 export const CLOSE_PIXELS = 8;
-/** A press that moves this far (CSS pixels) is a drag, which draws freehand. */
-export const DRAG_PIXELS = 5;
+/**
+ * A press that moves this far (CSS pixels) is a drag, which draws freehand
+ * and closes on release; well past a click's wobble, since an accidental
+ * drag would close the polygon being clicked out.
+ */
+export const DRAG_PIXELS = 8;
 /** A freehand drag drops a point each time the pointer has gone this far (CSS pixels). */
 export const LASSO_SPACING = 4;
 // The server takes 16 KiB of tool record, so longer outlines aren't recorded.

@@ -355,8 +355,8 @@
 		return [px[plane.u] / ratio(), px[plane.v] / ratio()];
 	}
 
-	/** Fingers are less exact than a mouse, so they get twice the room. */
-	const reach = (event: PointerEvent) => (event.pointerType === "touch" ? 2 : 1);
+	/** Fingers and pens are less exact than a mouse, so they get twice the room. */
+	const reach = (event: PointerEvent) => (event.pointerType === "mouse" ? 1 : 2);
 
 	/** Whether closing the polygon with this event's keys held cuts it out. */
 	const cuts = (event: MouseEvent) => closingMode(viewer.polygonMode, event) === "subtract";
