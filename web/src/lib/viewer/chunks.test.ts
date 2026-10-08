@@ -245,6 +245,19 @@ describe("ChunkStore", () => {
 		expect(seen).toEqual(["a"]);
 	});
 
+	it("cancels many loads at once, keeping the rest in order", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1e9, 1);
+		const ids = Array.from({ length: 2000 }, (_, i) => `c${i}`);
+		for (const id of ids) store.request(id).catch(() => {});
+		store.keepOnly(new Set(["c0", "c1500", "c1999"]));
+		calls[0]?.finish();
+		await tick();
+		calls[1]?.finish();
+		await tick();
+		expect(calls.map((c) => c.id)).toEqual(["c0", "c1500", "c1999"]);
+	});
+
 	it("keeps the cached copy when a refresh replaces another", async () => {
 		const { calls, load } = controlled();
 		const store = new ChunkStore(load, 1000);

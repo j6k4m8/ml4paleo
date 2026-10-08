@@ -145,23 +145,29 @@ export class ChunkStore {
 
 	/** Cancel queued and running loads of chunks not in `wanted`. */
 	keepOnly(wanted: Set<string>): void {
-		for (const id of [...this.#pending.keys()]) {
-			if (!wanted.has(id)) this.#cancel(id, "No longer needed");
-		}
+		const cancelled = [...this.#pending.values()].filter((entry) => !wanted.has(entry.id));
+		if (cancelled.length === 0) return;
+		const gone = new Set(cancelled);
+		this.#queue = this.#queue.filter((queued) => !gone.has(queued));
+		for (const entry of cancelled) this.#stop(entry, "No longer needed", true);
 	}
 
-	/**
-	 * Stop a queued or running load. A refresh stopped for good leaves an
-	 * out-of-date copy, which goes too (unless another refresh follows), so
-	 * the next request loads afresh.
-	 */
 	#cancel(id: string, reason: string, dropStale = true): void {
 		const entry = this.#pending.get(id);
 		if (!entry) return;
-		entry.controller.abort();
-		this.#pending.delete(id);
 		this.#queue = this.#queue.filter((queued) => queued !== entry);
-		if (entry.refresh && dropStale) this.#drop(id);
+		this.#stop(entry, reason, dropStale);
+	}
+
+	/**
+	 * Stop a queued or running load (already out of the queue). A refresh
+	 * stopped for good leaves an out-of-date copy, which goes too (unless
+	 * another refresh follows), so the next request loads afresh.
+	 */
+	#stop(entry: Pending, reason: string, dropStale: boolean): void {
+		entry.controller.abort();
+		this.#pending.delete(entry.id);
+		if (entry.refresh && dropStale) this.#drop(entry.id);
 		entry.reject(new DOMException(reason, "AbortError"));
 	}
 
