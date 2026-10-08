@@ -49,7 +49,8 @@ def probe(ctx: JobContext) -> dict[str, Any]:
     image_grant, upload_grant = ctx.grants
     try:
         index = probe_archive(
-            open_object(upload_grant, UPLOAD_KEY),
+            # Small reads: the probe looks at the first bytes of many members.
+            open_object(upload_grant, UPLOAD_KEY, buffer_size=64 * 1024),
             SliceLimits.for_memory(ctx.memory_budget_bytes),
         )
     except IngestError as exc:
@@ -120,13 +121,14 @@ def pyramid(ctx: JobContext) -> dict[str, Any]:
 
 def finalize(ctx: JobContext) -> dict[str, Any]:
     """
-    Summarize the image, remove ingest's scratch files, and write the
-    manifest (last), so the server can commit the artifact.
+    Summarize the image and write the manifest, so the server can commit the
+    artifact, then remove ingest's scratch files.
     """
     grant = ctx.grants[0]
     image = OmeImage.open(grant)
     coarsest = np.asarray(image.array(image.num_levels - 1)[0])
-    delete_object(grant, INDEX_KEY)
+    index_bytes = get_bytes(grant, INDEX_KEY)
+    index = SourceIndex.from_json(index_bytes) if index_bytes else None
     manifest = {
         "kind": "image",
         "shape_czyx": list(image.shape_czyx),
@@ -135,7 +137,13 @@ def finalize(ctx: JobContext) -> dict[str, Any]:
         "voxel_size_zyx": list(image.voxel_size_zyx) if image.voxel_size_zyx else None,
         "unit": image.unit,
         "source": ctx.payload.get("source", {}),
+        # Files in the upload that weren't slices, which ingest left out.
+        "skipped": index.skipped if index else [],
+        "skipped_count": index.skipped_count if index else 0,
+        "notes": index.notes if index else [],
         **intensity_summary(coarsest),
     }
     write_manifest(grant, manifest)
+    # Only now, so a retry after a failed manifest write still has the index.
+    delete_object(grant, INDEX_KEY)
     return {"levels": image.num_levels}
