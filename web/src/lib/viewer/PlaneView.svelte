@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from "svelte";
+	import { CLOSE_PIXELS, closesAt, type Point, type Scale } from "../labels/polygon";
 	import { PlaneMask } from "../labels/raster";
 	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
@@ -341,6 +342,21 @@
 		return [point[plane.u], point[plane.v]];
 	}
 
+	/** The plane point at a place on the view, in CSS pixels from its corner. */
+	function planeAt([x, y]: [number, number]): Point {
+		const point = voxelAt(view(), x * ratio() - width / 2, y * ratio() - height / 2);
+		return [point[plane.u], point[plane.v]];
+	}
+
+	/** CSS pixels per level-0 voxel along u and v. */
+	function scale(): Scale {
+		const px = pixelsPerVoxel(view());
+		return [px[plane.u] / ratio(), px[plane.v] / ratio()];
+	}
+
+	/** Fingers are less exact than a mouse, so they get twice the room. */
+	const reach = (event: PointerEvent) => (event.pointerType === "touch" ? 2 : 1);
+
 	/** Where a plane point is on screen, in CSS pixels. */
 	function screen(u: number, v: number): [number, number] {
 		const px = pixelsPerVoxel(view());
@@ -388,12 +404,10 @@
 			rectangle = { from: point, to: point };
 		} else if (viewer.tool === "polygon") {
 			const point = planePoint(event);
-			const current = viewer.polygon;
-			if (current && current.plane === plane.name && current.slice === slice) {
-				viewer.polygon = { ...current, points: [...current.points, point] };
-			} else {
-				viewer.polygon = { plane: plane.name, slice, points: [point] };
-			}
+			const current = polygonHere;
+			// Clicking the first point again closes the polygon.
+			if (current && closesAt(current.points, point, scale(), CLOSE_PIXELS * reach(event))) return onpolygon();
+			viewer.polygon = current ? { ...current, points: [...current.points, point] } : { plane: plane.name, slice, points: [point] };
 		}
 	}
 
@@ -524,11 +538,27 @@
 		viewer.polygon && viewer.polygon.plane === plane.name && viewer.polygon.slice === slice ? viewer.polygon : null,
 	);
 
-	function polygonPath(points: [number, number][], extra: [number, number] | null): string {
+	/**
+	 * The polygon being drawn here, on screen: its outline so far (to the
+	 * pointer), its first point once a click there can close it, and whether
+	 * the pointer is close enough to that point for a click to.
+	 */
+	const polygonShape = $derived.by(() => {
 		void [viewer.position, viewer.zoom, width, height];
-		const all = extra ? [...points.map(([u, v]) => screen(u, v)), extra] : points.map(([u, v]) => screen(u, v));
-		return all.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-	}
+		const points = polygonHere?.points ?? [];
+		if (points.length === 0) return null;
+		const outline = points.map(([u, v]) => screen(u, v));
+		const first = outline[0]!;
+		const closing = cursor !== null && closesAt(points, planeAt(cursor), scale());
+		// The outline ends at the pointer, or closes when a click would close it.
+		if (closing) outline.push(first);
+		else if (cursor) outline.push(cursor);
+		return {
+			outline: outline.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
+			first: points.length >= 3 ? first : null,
+			closing,
+		};
+	});
 
 	/** Screen rectangles of the ROIs this view's plane cuts through. */
 	const roiOutlines = $derived.by(() => {
@@ -591,14 +621,25 @@
 		{#if rectangleOutline}
 			<rect class="roi roi-new" x={rectangleOutline.x} y={rectangleOutline.y} width={rectangleOutline.w} height={rectangleOutline.h} />
 		{/if}
-		{#if polygonHere}
+		{#if polygonShape}
 			<polyline
-				points={polygonPath(polygonHere.points, cursor)}
+				points={polygonShape.outline}
 				fill={activeColor}
 				fill-opacity="0.25"
 				stroke={activeColor}
 				stroke-width="1.5"
 			/>
+			{#if polygonShape.first}
+				<!-- Click here to close; it grows and fills once the pointer is close enough. -->
+				<circle
+					class="start"
+					class:closing={polygonShape.closing}
+					cx={polygonShape.first[0]}
+					cy={polygonShape.first[1]}
+					r={polygonShape.closing ? 6 : 3.5}
+					stroke={activeColor}
+				/>
+			{/if}
 		{/if}
 		{#if brushOutline}
 			<ellipse
@@ -672,6 +713,14 @@
 	}
 	.roi.selected {
 		stroke-width: 3;
+	}
+	.start {
+		fill: rgb(0 0 0 / 0.6);
+		stroke-width: 1.5;
+	}
+	.start.closing {
+		fill: #fff;
+		stroke-width: 2;
 	}
 	.overlay {
 		position: absolute;

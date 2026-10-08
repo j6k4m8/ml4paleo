@@ -57,7 +57,7 @@ export const KEYMAP: Binding[] = [
 	{ action: "smaller", keys: ["["], label: "Smaller brush" },
 	{ action: "bigger", keys: ["]"], label: "Bigger brush" },
 	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class" },
-	{ action: "close-polygon", keys: ["Enter"], label: "Close the polygon (or double-click)" },
+	{ action: "close-polygon", keys: ["Enter"], label: "Close the polygon (or click its first point, or double-click)" },
 	{ action: "remove-point", keys: ["Backspace"], label: "Remove the polygon's last point" },
 	{ action: "cancel", keys: ["Escape"], label: "Drop the polygon, then go back to navigating" },
 	{ action: "undo", keys: ["mod+z"], label: "Undo your last edit" },
@@ -72,7 +72,7 @@ export const MOUSE: [string, string][] = [
 	["Drag (navigating), middle drag, or Space + drag", "Pan"],
 	["Click (navigating)", "Move the crosshair there"],
 	["Drag (brush, eraser)", "Paint"],
-	["Click (polygon)", "Add a point"],
+	["Click (polygon)", "Add a point; on the first point, close the polygon"],
 	["Drag (ROI)", "Draw an ROI on this slice"],
 ];
 
