@@ -38,7 +38,7 @@ interface LocalDelta {
 
 // Every chunk is 256 KiB, whatever its level, and a view draws up to
 // MAX_LABEL_TILES of them (see overlays.ts), which the three views share.
-const CACHE_BYTES = 256 * 1024 * 1024;
+export const CACHE_BYTES = 256 * 1024 * 1024;
 // How many of the chunks this page edited last it remembers (`recent`).
 const RECENT = 256;
 // A reload that failed is tried again after this long, doubling each time up

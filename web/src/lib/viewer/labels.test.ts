@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "#lib/api.ts";
 import { base64, packBits, zstdFrame } from "../labels/deltas";
 import type { Chunk } from "./chunks";
-import { coarseIds, LabelLayer, labelId, labelKey, labelLevels, strictOn } from "./labels";
+import { CACHE_BYTES, coarseIds, LabelLayer, labelId, labelKey, labelLevels, strictOn } from "./labels";
 import { LoadError, type WorkerPool } from "./loader";
 import type { Vec3 } from "./tiles";
 
@@ -937,6 +937,25 @@ const pyramid: [Vec3, Vec3][] = [
 	[[128, 128, 128], [2, 2, 2]],
 	[[64, 64, 64], [4, 4, 4]],
 ];
+
+describe("the label chunk cache", () => {
+	// Chunks of 256 KiB that take no memory to make.
+	const big = { byteLength: 256 * 1024, length: 256 * 1024 } as unknown as Uint8Array;
+
+	it("holds 256 MiB of chunks, the three views' share of them, and drops the least recently used past that", async () => {
+		expect(CACHE_BYTES).toBe(256 * 1024 * 1024);
+		const pool = { load: async (): Promise<Chunk> => ({ data: big, shape: [64, 64, 64] }) } as unknown as WorkerPool;
+		const layer = new LabelLayer("p", pool, [64 * 2000, 64, 64]);
+		const chunks = 1024;
+		await Promise.all(Array.from({ length: chunks }, (_, i) => layer.store.request(`${i}/0/0`)));
+		expect(layer.store.bytes).toBe(CACHE_BYTES);
+		expect(layer.store.peek("0/0/0")).toBeDefined();
+		await layer.store.request(`${chunks}/0/0`);
+		expect(layer.store.bytes).toBe(CACHE_BYTES);
+		expect(layer.store.peek("0/0/0")).toBeUndefined();
+		expect(layer.store.peek("1/0/0")).toBeDefined();
+	});
+});
 
 describe("labelLevels", () => {
 	const shape: Vec3 = [256, 256, 256];
