@@ -52,6 +52,7 @@
 		voxels,
 		within,
 	} from "../rois.svelte";
+	import { SHOW_ROIS } from "../features";
 	import { BACKGROUND_VALUE, withBackground } from "./background";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
@@ -148,11 +149,12 @@
 	onMount(async () => {
 		try {
 			levels = await loadLevels(zarrUrl, controller.signal);
-			rois.load().then(() => {
-				const found = rois.items.find((r) => r.id === firstRoi);
+			// Opening on a box works without ROIs; opening on an ROI needs them shown.
+			(SHOW_ROIS ? rois.load() : Promise.resolve()).then(() => {
+				const found = SHOW_ROIS ? rois.items.find((r) => r.id === firstRoi) : undefined;
 				if (found) goTo(found);
 				else if (firstBox) showBox(firstBox);
-				else if (firstRoi) rois.error = "That ROI isn't in this project any more.";
+				else if (firstRoi && SHOW_ROIS) rois.error = "That ROI isn't in this project any more.";
 			});
 			pool = new WorkerPool();
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
@@ -214,7 +216,7 @@
 		}
 	});
 
-	const stopRefreshing = rois.keepFresh();
+	const stopRefreshing = SHOW_ROIS ? rois.keepFresh() : () => {};
 	// Models trained or deleted, and predictions and proposals made, since.
 	// A reload that fails keeps what's shown, quietly, and the next one tries again.
 	const stopReloading = whileVisible(() => {
@@ -846,13 +848,13 @@
 		return `${index} (${(index * voxelSize[axis]!).toFixed(1)} ${unit})`;
 	}
 
-	const TOOLS = [
+	const TOOLS = ([
 		{ tool: "navigate", label: "Navigate", shortcut: "N", icon: Hand },
 		{ tool: "brush", label: "Brush", shortcut: "B", icon: Brush },
 		{ tool: "eraser", label: "Eraser", shortcut: "E", icon: Eraser },
 		{ tool: "polygon", label: "Polygon", shortcut: "P", icon: Pentagon },
 		{ tool: "roi", label: "ROI", shortcut: "R", icon: SquareDashed },
-	] as const;
+	] as const).filter((entry) => SHOW_ROIS || entry.tool !== "roi");
 
 	const LAYOUT_NAMES = { four: "Four views", xy: "XY", xz: "XZ", yz: "YZ" } as const;
 
@@ -1294,6 +1296,7 @@
 				{/if}
 			</Panel>
 
+			{#if SHOW_ROIS}
 			<Panel title="ROIs · {openRois.length} open">
 				<ul class="-mx-2.5 -my-1 flex max-h-52 flex-col overflow-y-auto">
 					{#each rois.items as roi (roi.id)}
@@ -1368,6 +1371,7 @@
 					<a href="/p/{project}/rois" class="ml-auto text-2xs">Open the ROI gallery</a>
 				</div>
 			</Panel>
+			{/if}
 		</aside>
 	</div>
 

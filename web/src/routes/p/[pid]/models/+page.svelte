@@ -5,7 +5,9 @@
 	import type { Pipeline } from "#lib/types.ts";
 	import { BACKGROUND_VALUE, withBackground } from "#lib/viewer/background.ts";
 	import type { LabelClass } from "#lib/viewer/labels.ts";
+	import { SHOW_ROIS } from "#lib/features.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
+	import Labeled from "#lib/ui/Labeled.svelte";
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 	import Brain from "@lucide/svelte/icons/brain";
 	import Play from "@lucide/svelte/icons/play";
@@ -197,8 +199,12 @@
 		<h2 class="panel-title">Train a model</h2>
 		<form class="flex flex-col gap-3 p-3" onsubmit={train}>
 			<p class="text-ink-dim">
-				Trains on everything labeled so far: complete ROIs (unlabeled voxels there count as background), open ROIs, and
-				labels outside ROIs. Validation ROIs are held out to score the model.
+				{#if SHOW_ROIS}
+					Trains on everything labeled so far: complete ROIs (unlabeled voxels there count as background), open ROIs, and
+					labels outside ROIs. Validation ROIs are held out to score the model.
+				{:else}
+					Trains on everything you've labeled: your classes, and Background, which tells the model what to leave alone.
+				{/if}
 			</p>
 			{#if plugins.length > 1}
 				<label class="label">
@@ -242,15 +248,7 @@
 			{#if counts && classesLoaded}
 				<div class="flex flex-col gap-1.5 rounded-sm border border-edge bg-field p-2.5">
 					<p class="text-2xs font-semibold tracking-wide text-ink-dim uppercase">Labeled so far</p>
-					<ul class="flex flex-col gap-0.5">
-						{#each withBackground(classes) as c (c.value)}
-							<li class="flex items-center gap-2">
-								<span class="size-2.5 shrink-0 rounded-[2px] shadow-[0_0_0_1px_black]" style:background={c.color}></span>
-								<span class="flex-1 truncate">{c.name}</span>
-								<span class="font-mono text-2xs text-ink-dim">{(counts[c.value] ?? 0).toLocaleString()} voxels</span>
-							</li>
-						{/each}
-					</ul>
+					<Labeled {classes} {counts} />
 					{#if tooLittle}
 						<p class="text-warn" role="status">{whyTooLittle}</p>
 						<a href="/p/{pid}/annotate">Open the annotator</a>
@@ -308,7 +306,7 @@
 						{/if}
 						<p class="text-2xs text-ink-faint">
 							{model.plugin} · {new Date(model.created_at).toLocaleString()} · {model.training_set.labeled_chunks ?? 0} labeled
-							chunks, {model.training_set.rois?.complete ?? 0} complete and {model.training_set.rois?.open ?? 0} open ROIs
+							chunks{#if SHOW_ROIS}, {model.training_set.rois?.complete ?? 0} complete and {model.training_set.rois?.open ?? 0} open ROIs{/if}
 						</p>
 						{#if model.metrics}
 							{#if model.metrics.validation_crops}
@@ -329,7 +327,7 @@
 										</tr>
 									</tbody>
 								</table>
-							{:else}
+							{:else if SHOW_ROIS}
 								<p class="text-2xs text-ink-dim">No validation ROIs, so no scores. Mark some ROIs as validation to score models.</p>
 							{/if}
 						{/if}

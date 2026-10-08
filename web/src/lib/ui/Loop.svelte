@@ -2,6 +2,7 @@
 	import Compass from "@lucide/svelte/icons/compass";
 	import { goto } from "$app/navigation";
 	import { message } from "#lib/api.ts";
+	import { SHOW_ROIS } from "#lib/features.ts";
 	import { explore } from "#lib/rois.svelte.ts";
 
 	let {
@@ -45,8 +46,13 @@
 		<li class="flex gap-2">
 			{@render step(1, "Label")}
 			<span class="text-ink-dim">
-				a few places: draw an ROI in the <a href="/p/{pid}/annotate">annotator</a>, paint it, and mark it complete. Or
-				<a href={importHref}>import labels</a> from a file.
+				{#if SHOW_ROIS}
+					a few places: draw an ROI in the <a href="/p/{pid}/annotate">annotator</a>, paint it, and mark it complete. Or
+					<a href={importHref}>import labels</a> from a file.
+				{:else}
+					what you're looking for, and some background, in the <a href="/p/{pid}/annotate">annotator</a>. Or
+					<a href={importHref}>import labels</a> from a file.
+				{/if}
 			</span>
 		</li>
 		<li class="flex gap-2">
@@ -54,14 +60,22 @@
 			<span class="text-ink-dim">a model on the <a href="/p/{pid}/models">Models</a> page.</span>
 		</li>
 		<li class="flex gap-2">
-			{@render step(3, "Explore")}
-			<span class="text-ink-dim">somewhere new to see how the model does, and fix what it gets wrong.</span>
+			{#if SHOW_ROIS}
+				{@render step(3, "Explore")}
+				<span class="text-ink-dim">somewhere new to see how the model does, and fix what it gets wrong.</span>
+			{:else}
+				{@render step(3, "Predict")}
+				<span class="text-ink-dim">on the Models page, and look at what the model finds in the annotator.</span>
+			{/if}
 		</li>
 		<li class="flex gap-2">
 			{@render step(4, "Retrain")}
-			<span class="text-ink-dim">with those fixes, then explore again.</span>
+			<span class="text-ink-dim">
+				{SHOW_ROIS ? "with those fixes, then explore again." : "with more labels where the model got it wrong."}
+			</span>
 		</li>
 	</ol>
+	{#if SHOW_ROIS}
 	<div class="flex flex-col gap-1.5 border-t border-edge p-3">
 		<button
 			class="btn btn-primary self-start"
@@ -77,4 +91,5 @@
 		</p>
 		{#if error}<p class="error" role="alert">{error}</p>{/if}
 	</div>
+	{/if}
 </section>
