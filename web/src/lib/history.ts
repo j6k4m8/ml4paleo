@@ -14,6 +14,7 @@ export interface Accepted {
 	model_name: string | null;
 	/** Set for a prediction brought over from v1, which no model made. */
 	v1_job_id: string | null;
+	/** The ROI they went into; none for labels accepted in a view, whose op's box says where. */
 	roi_id: string | null;
 }
 

@@ -1,8 +1,8 @@
 import { decompress } from "fzstd";
 import { describe, expect, it } from "vitest";
 import type { Chunk } from "../viewer/chunks";
-import { type Box, acceptParts, readBox } from "./accept";
-import { fromBase64, unpackBits } from "./deltas";
+import { type Box, MAX_VIEW_CHUNKS, acceptParts, chunksIn, readBox, tooBigForView, unlabeledOnly } from "./accept";
+import { CHUNK, type DeltaIn, decodeDelta, fromBase64, unpackBits } from "./deltas";
 
 /** A 100 × 70 × 130 volume whose value at (z, y, x) is (z + y + x) % 4. */
 const SHAPE = [100, 70, 130];
@@ -45,5 +45,131 @@ describe("accepting a prediction", () => {
 			return sum + unpackBits(decompress(fromBase64(d.mask)), n).reduce((a, b) => a + b, 0);
 		}, 0);
 		expect(voxels).toBe(values.filter((v) => v > 0).length);
+	});
+});
+
+/** What a set of edits writes, by global voxel "z/y/x"; each voxel may be written once. */
+function written(parts: DeltaIn[][]): Map<string, number> {
+	const out = new Map<string, number>();
+	for (const delta of parts.flat()) {
+		const { mask, written: value } = decodeDelta(delta);
+		const [z0, y0, x0, z1, y1, x1] = delta.box;
+		let i = 0;
+		for (let z = z0; z < z1; z++) {
+			for (let y = y0; y < y1; y++) {
+				for (let x = x0; x < x1; x++, i++) {
+					if (!mask[i]) continue;
+					const at = [delta.key[0] * CHUNK + z, delta.key[1] * CHUNK + y, delta.key[2] * CHUNK + x].join("/");
+					expect(out.has(at), `${at} written twice`).toBe(false);
+					out.set(at, value as number);
+				}
+			}
+		}
+	}
+	return out;
+}
+
+describe("accepting what a view shows", () => {
+	/** A slab's predicted values: 0 where nothing is predicted, and 1 (background), 2, and 3 in a pattern. */
+	function slab(box: Box): Uint8Array {
+		const size = [box[3] - box[0], box[4] - box[1], box[5] - box[2]];
+		const values = new Uint8Array(size[0]! * size[1]! * size[2]!);
+		for (let i = 0; i < values.length; i++) values[i] = (i * 7 + (i >> 3)) % 4;
+		return values;
+	}
+
+	// One voxel thick along each axis, each across a chunk's edge along the axes it spans.
+	const slabs: [string, Box][] = [
+		["an XY slice", [70, 60, 60, 71, 70, 70]],
+		["an XZ slice", [60, 9, 60, 70, 10, 70]],
+		["a YZ slice", [60, 60, 127, 70, 70, 128]],
+	];
+
+	it.each(slabs)("writes what's predicted over %s, background too, never 0", (_name, box) => {
+		const values = slab(box);
+		const parts = acceptParts(values, box);
+		const deltas = parts.flat();
+		expect(deltas.length).toBeGreaterThan(0);
+		expect(deltas.every((d) => d.only_if === "unlabeled" && d.value !== 0 && d.values === undefined)).toBe(true);
+		expect(new Set(deltas.map((d) => d.value))).toEqual(new Set([1, 2, 3]));
+		for (const part of parts) {
+			// An op touches a chunk once, and carries one value.
+			const keys = part.map((d) => d.key.join("/"));
+			expect(new Set(keys).size).toBe(keys.length);
+			expect(new Set(part.map((d) => d.value)).size).toBe(1);
+		}
+		// Exactly the predicted voxels, at their own places.
+		const expected = new Map<string, number>();
+		let i = 0;
+		for (let z = box[0]; z < box[3]; z++) {
+			for (let y = box[1]; y < box[4]; y++) {
+				for (let x = box[2]; x < box[5]; x++, i++) if (values[i]) expected.set(`${z}/${y}/${x}`, values[i]!);
+			}
+		}
+		expect(written(parts)).toEqual(expected);
+		// Each delta stays inside its chunk.
+		for (const d of deltas) {
+			for (let a = 0; a < 3; a++) expect(d.box[a + 3]).toBeLessThanOrEqual(CHUNK);
+		}
+	});
+
+	it("leaves out what's labeled already, whatever the label says", () => {
+		const box: Box = [5, 0, 62, 6, 2, 66];
+		const predicted = Uint8Array.from([1, 2, 3, 1, 2, 2, 2, 2]);
+		// Hand labels over the first voxel (the prediction's value), the third (another value), and the last.
+		const labeled = Uint8Array.from([1, 0, 4, 0, 0, 0, 0, 9]);
+		const left = unlabeledOnly(predicted, labeled);
+		expect([...left]).toEqual([0, 2, 0, 1, 2, 2, 2, 0]);
+		// The input stays as it was, and what is left makes edits only for those voxels.
+		expect([...predicted]).toEqual([1, 2, 3, 1, 2, 2, 2, 2]);
+		const filled = written(acceptParts(left, box));
+		expect(filled.size).toBe(5);
+		expect(filled.has("5/0/62")).toBe(false);
+		expect(filled.get("5/0/63")).toBe(2);
+		expect(filled.get("5/1/65")).toBeUndefined();
+		// Everything labeled: nothing to send.
+		expect(acceptParts(unlabeledOnly(predicted, new Uint8Array(8).fill(1)), box)).toEqual([]);
+		// Nothing labeled: all of it.
+		expect([...unlabeledOnly(predicted, new Uint8Array(8))]).toEqual([...predicted]);
+	});
+
+	it("makes nothing from a slice where nothing is predicted", () => {
+		const box: Box = [5, 0, 0, 6, 8, 8];
+		expect(acceptParts(new Uint8Array(64), box)).toEqual([]);
+	});
+
+	it("reads a slice from the chunks it crosses", async () => {
+		const box: Box = [62, 0, 60, 63, 70, 70];
+		const values = await readBox(fakeChunk, box);
+		let i = 0;
+		for (let y = 0; y < 70; y++) for (let x = 60; x < 70; x++) expect(values[i++]).toBe((62 + y + x) % 4);
+	});
+
+	it("counts the chunks a box touches", () => {
+		expect(chunksIn([0, 0, 0, 1, 64, 64])).toBe(1);
+		expect(chunksIn([0, 0, 0, 1, 65, 64])).toBe(2);
+		expect(chunksIn([63, 63, 63, 65, 65, 65])).toBe(8);
+		expect(chunksIn([64, 64, 64, 128, 128, 128])).toBe(1);
+		expect(chunksIn([0, 0, 0, 256, 256, 256])).toBe(64);
+		expect(chunksIn([1, 1, 1, 257, 257, 257])).toBe(125);
+		expect(chunksIn([9, 0, 0, 10, 4096, 4096])).toBe(64 * 64);
+	});
+
+	it("is too big when it holds more voxels than the server takes at once", () => {
+		expect(tooBigForView([0, 0, 0, 256, 256, 256])).toBe(false);
+		expect(tooBigForView([0, 0, 0, 256, 256, 257])).toBe(true);
+		expect(tooBigForView([0, 0, 0, 257, 257, 257])).toBe(true);
+	});
+
+	it("is too big when it takes more chunks than a view draws the prediction from", () => {
+		expect(MAX_VIEW_CHUNKS).toBe(128);
+		// 8 × 16 chunks of one slice.
+		expect(tooBigForView([9, 0, 0, 10, 512, 1024])).toBe(false);
+		expect(tooBigForView([9, 0, 0, 10, 513, 1024])).toBe(true);
+		// A view just across a chunk's edge touches more than its area says.
+		expect(tooBigForView([9, 1, 0, 10, 513, 1024])).toBe(true);
+		expect(tooBigForView([9, 0, 0, 10, 4096, 4096])).toBe(true);
+		// The server's own limit allows a slice this big.
+		expect(4096 * 4096).toBeLessThanOrEqual(256 ** 3);
 	});
 });

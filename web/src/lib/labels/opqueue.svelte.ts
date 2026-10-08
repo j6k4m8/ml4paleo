@@ -11,6 +11,7 @@
 
 import { ApiError, api } from "#lib/api.ts";
 import type { Vec3 } from "../viewer/tiles";
+import type { Box } from "./accept";
 import type { DeltaIn } from "./deltas";
 
 export const MAX_DELTAS = 512;
@@ -29,13 +30,15 @@ export interface QueuedEdit {
 	deltas: DeltaIn[];
 	strict: boolean;
 	tool: Record<string, unknown>;
-	/** Set when the edit accepts a model's prediction inside an ROI; the server checks it. */
+	/** Set when the edit accepts a model's prediction inside an ROI or a box; the server checks it. */
 	accept?: Accept;
 }
 
+/** Where a prediction is accepted: in an ROI (`roi`), or in a box (z0, y0, x0, z1, y1, x1) of the image (`box`). */
 export interface Accept {
 	prediction: string;
-	roi: string;
+	roi?: string;
+	box?: Box;
 }
 
 export interface QueuedToggle {
@@ -326,7 +329,7 @@ export class OpQueue {
 					? await this.send(`${base}/accept`, {
 							client_op_id: ready.clientOpId,
 							prediction_artifact_id: ready.accept.prediction,
-							roi_id: ready.accept.roi,
+							...(ready.accept.roi ? { roi_id: ready.accept.roi } : { box: ready.accept.box }),
 							deltas: ready.deltas,
 						})
 					: await this.send(`${base}/ops`, {

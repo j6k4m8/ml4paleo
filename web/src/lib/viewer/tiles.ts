@@ -292,6 +292,42 @@ export function voxelAt(view: View, dx: number, dy: number): Vec3 {
 	return point;
 }
 
+/**
+ * A voxel the view covers by less than this much is not counted, so rounding
+ * in the zoom and position can't pull in a voxel the view shows none of.
+ */
+const EDGE = 1e-6;
+
+/**
+ * The part of its slice a view shows, as a (z0, y0, x0, z1, y1, x1) box of
+ * level-0 voxels, half-open: every voxel the canvas covers, even in part, on
+ * the plane through `position`, cut to an image of `shape`, and one voxel
+ * thick along the plane's normal. Null if there is none: the view has no
+ * size, or its slice is outside the image.
+ */
+export function visibleBox(view: View, shape: Vec3): [number, number, number, number, number, number] | null {
+	const { normal, u, v } = view.plane;
+	const px = pixelsPerVoxel(view);
+	const slice = Math.floor(view.position[normal]);
+	if (!(slice >= 0 && slice < shape[normal])) return null;
+	if (!(view.width > 0 && view.height > 0 && px[u] > 0 && px[v] > 0)) return null;
+	const lo: Vec3 = [0, 0, 0];
+	const hi: Vec3 = [0, 0, 0];
+	lo[normal] = slice;
+	hi[normal] = slice + 1;
+	for (const [axis, pixels] of [
+		[u, view.width],
+		[v, view.height],
+	] as const) {
+		// The canvas is centered on the position; its edges are this far off, in voxels.
+		const half = pixels / 2 / px[axis];
+		lo[axis] = Math.max(0, Math.floor(view.position[axis] - half + EDGE));
+		hi[axis] = Math.min(shape[axis], Math.ceil(view.position[axis] + half - EDGE));
+		if (!(lo[axis] < hi[axis])) return null;
+	}
+	return [...lo, ...hi];
+}
+
 /** Map a stored value into [0, 1] for display, given a window [low, high]. */
 export function windowed(value: number, low: number, high: number): number {
 	if (high <= low) return value >= high ? 1 : 0;
