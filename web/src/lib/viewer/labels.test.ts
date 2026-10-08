@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "#lib/api.ts";
 import { base64, packBits, zstdFrame } from "../labels/deltas";
 import type { Chunk } from "./chunks";
 import { LabelLayer } from "./labels";
@@ -17,6 +18,8 @@ function fakePool(server: Map<string, { value: number; version: number }>) {
 	};
 	return { pool: pool as unknown as WorkerPool, loads };
 }
+
+vi.mock("#lib/api.ts", () => ({ api: vi.fn() }));
 
 const delta = (value: number) => ({
 	key: [0, 0, 0] as [number, number, number],
@@ -90,5 +93,47 @@ describe("LabelLayer", () => {
 		layer.settle("op", null);
 		await new Promise((r) => setTimeout(r, 0));
 		expect(first(layer, "0/0/0")).toBe(0);
+	});
+});
+
+describe("adding a class", () => {
+	afterEach(() => vi.mocked(api).mockReset());
+
+	it("adds it to the project, keeps it with the others, and tells the views", async () => {
+		const layer = new LabelLayer("p1", fakePool(new Map()).pool, [4, 4, 4]);
+		layer.classes = [{ value: 2, name: "bone", color: "#ff0000" }];
+		const made = { value: 3, name: "matrix", color: "#00ff00" };
+		vi.mocked(api).mockResolvedValue(made);
+		let told = 0;
+		layer.onClasses(() => told++);
+
+		expect(await layer.addClass("matrix", "#00ff00")).toEqual(made);
+
+		expect(api).toHaveBeenCalledWith("/api/projects/p1/labels/classes", { body: { name: "matrix", color: "#00ff00" } });
+		expect(layer.classes.map((c) => c.value)).toEqual([2, 3]);
+		expect(layer.colors.get(3)).toBe("#00ff00");
+		expect(told).toBe(1);
+	});
+
+	it("changes nothing when the server refuses", async () => {
+		const layer = new LabelLayer("p1", fakePool(new Map()).pool, [4, 4, 4]);
+		let told = 0;
+		layer.onClasses(() => told++);
+		vi.mocked(api).mockRejectedValue(new Error("No."));
+
+		await expect(layer.addClass("bone", "#ff0000")).rejects.toThrow("No.");
+
+		expect(layer.classes).toEqual([]);
+		expect(told).toBe(0);
+	});
+
+	it("stops telling views that were removed", async () => {
+		const layer = new LabelLayer("p1", fakePool(new Map()).pool, [4, 4, 4]);
+		vi.mocked(api).mockResolvedValue({ value: 2, name: "bone", color: "#ff0000" });
+		let told = 0;
+		const stop = layer.onClasses(() => told++);
+		stop();
+		await layer.addClass("bone", "#ff0000");
+		expect(told).toBe(0);
 	});
 });

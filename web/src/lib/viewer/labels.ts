@@ -30,6 +30,7 @@ export class LabelLayer {
 	store: ChunkStore;
 	classes: LabelClass[] = [];
 	#listeners = new Set<(ids: string[]) => void>();
+	#classListeners = new Set<() => void>();
 	#events: EventSource | null = null;
 	// Edits sent but not yet confirmed, in order, by op: chunk id → delta.
 	#local = new Map<string, Map<string, LocalDelta>>();
@@ -168,9 +169,28 @@ export class LabelLayer {
 		return () => this.#listeners.delete(listener);
 	}
 
+	/**
+	 * Add a class to the project. It gets the next value never used, and the
+	 * views learn its color.
+	 */
+	async addClass(name: string, color: string): Promise<LabelClass> {
+		const made = await api<LabelClass>(`/api/projects/${this.projectId}/labels/classes`, { body: { name, color } });
+		// A new class's value is the highest ever used, so it goes last.
+		this.classes = [...this.classes, made];
+		for (const listener of this.#classListeners) listener();
+		return made;
+	}
+
+	/** Call `listener` when a class is added here (its color needs drawing). */
+	onClasses(listener: () => void): () => void {
+		this.#classListeners.add(listener);
+		return () => this.#classListeners.delete(listener);
+	}
+
 	stop(): void {
 		this.#events?.close();
 		this.store.keepOnly(new Set());
 		this.#listeners.clear();
+		this.#classListeners.clear();
 	}
 }

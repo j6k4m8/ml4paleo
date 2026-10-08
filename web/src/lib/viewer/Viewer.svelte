@@ -16,6 +16,7 @@
 	import Maximize2 from "@lucide/svelte/icons/maximize-2";
 	import PanelRight from "@lucide/svelte/icons/panel-right";
 	import Pentagon from "@lucide/svelte/icons/pentagon";
+	import Plus from "@lucide/svelte/icons/plus";
 	import Redo2 from "@lucide/svelte/icons/redo-2";
 	import Sparkles from "@lucide/svelte/icons/sparkles";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
@@ -23,13 +24,14 @@
 	import SquaresUnite from "@lucide/svelte/icons/squares-unite";
 	import Undo2 from "@lucide/svelte/icons/undo-2";
 	import X from "@lucide/svelte/icons/x";
-	import { onDestroy, onMount, untrack } from "svelte";
+	import { onDestroy, onMount, tick, untrack } from "svelte";
 	import Histogram from "#lib/ui/Histogram.svelte";
 	import Panel from "#lib/ui/Panel.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
 	import { ApiError, api, message } from "#lib/api.ts";
 	import { unfinished } from "#lib/pipelines.ts";
 	import { whileVisible } from "#lib/refresh.ts";
+	import { nextColor } from "#lib/labelimport.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
 	import { acceptParts, MAX_ACCEPT_VOXELS, readBox } from "../labels/accept";
@@ -107,6 +109,18 @@
 	let hovered: Plane = PLANES.xy;
 	let notice = $state("");
 	let classesOpen = $state(true);
+	// The form for a new class: open on request, and from the start while the project has none.
+	let addingClass = $state(false);
+	let className = $state("");
+	let classColor = $state("");
+	let classError = $state("");
+	let savingClass = $state(false);
+	let classInput: HTMLInputElement | null = $state(null);
+	const classFormOpen = $derived(addingClass || (labels !== null && classes.length === 0));
+	// Whenever the form opens, it offers the next unused color.
+	$effect(() => {
+		if (classFormOpen && !classColor) classColor = nextColor(classes.map((c) => c.color));
+	});
 	// On narrow screens the dock floats over the views until closed.
 	let dockOpen = $state(false);
 	const me = session.current?.user.id ?? "";
@@ -845,6 +859,38 @@
 	];
 
 	const activeClass = $derived(classes.find((c) => c.value === viewer.activeClass));
+
+	/** Open the new-class form, its name ready to type. */
+	async function startClass() {
+		classesOpen = true;
+		dockOpen = true;
+		className = "";
+		classError = "";
+		addingClass = true;
+		await tick();
+		classInput?.focus();
+	}
+
+	async function saveClass(event: SubmitEvent) {
+		event.preventDefault();
+		const name = className.trim();
+		if (!labels || !name || savingClass) return;
+		savingClass = true;
+		classError = "";
+		try {
+			const made = await labels.addClass(name, classColor);
+			classes = labels.classes;
+			// Ready to paint with it, which is why anyone adds one.
+			viewer.activeClass = made.value;
+			addingClass = false;
+			className = "";
+			classColor = "";
+		} catch (e) {
+			classError = message(e);
+		} finally {
+			savingClass = false;
+		}
+	}
 	const zoomPercent = $derived(Math.round((viewer.zoom / (globalThis.devicePixelRatio || 1)) * 100));
 	const [, imageZ, imageY, imageX] = manifest.shape_czyx;
 	const histogram = manifest.histogram && !Array.isArray(manifest.histogram) ? manifest.histogram : null;
@@ -975,10 +1021,7 @@
 				style:background={activeClass?.color ?? "transparent"}
 				title={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "No class to paint"}
 				aria-label={activeClass ? `Active class: ${activeClass.name}` : "No active class"}
-				onclick={() => {
-					classesOpen = true;
-					dockOpen = true;
-				}}
+				onclick={() => (activeClass ? ((classesOpen = true), (dockOpen = true)) : startClass())}
 			></button>
 			<span class="my-1.5 h-px w-6 bg-line"></span>
 			<ToolButton icon={Undo2} label="Undo" shortcut="Ctrl+Z" disabled={queue.undoable === 0} onclick={() => queue.undo()} />
@@ -1119,6 +1162,13 @@
 			</Panel>
 
 			<Panel title="Classes" bind:open={classesOpen}>
+				{#snippet actions()}
+					{#if labels && !classFormOpen}
+						<button class="btn btn-ghost h-5 gap-1 px-1.5" title="Add a class to label with" onclick={startClass}>
+							<Plus size={12} /> Add class
+						</button>
+					{/if}
+				{/snippet}
 				{#if classes.length > 0}
 					<ul class="-mx-2.5 -my-1 flex flex-col">
 						{#each classes as label, index (label.value)}
@@ -1136,7 +1186,43 @@
 						{/each}
 					</ul>
 				{:else if labels}
-					<p class="text-ink-dim">Add label classes in the project settings to start labeling.</p>
+					<p class="text-ink-dim">No classes yet. Add one to start labeling.</p>
+				{/if}
+				{#if classFormOpen}
+					<form class="flex flex-col gap-2" onsubmit={saveClass}>
+						<div class="flex items-center gap-2">
+							<input
+								class="field"
+								bind:this={classInput}
+								bind:value={className}
+								maxlength="100"
+								placeholder="Class name, like bone"
+								aria-label="Class name"
+								autocomplete="off"
+								required
+								onkeydown={(event) => {
+									if (event.key === "Escape" && classes.length > 0) {
+										event.stopPropagation();
+										addingClass = false;
+									}
+								}}
+							/>
+							<input
+								type="color"
+								class="h-6 w-8 shrink-0 cursor-pointer rounded-sm border border-edge bg-field p-0.5"
+								bind:value={classColor}
+								aria-label="Class color"
+								title="Class color"
+							/>
+						</div>
+						{#if classError}<p class="error" role="alert">{classError}</p>{/if}
+						<div class="flex items-center gap-2">
+							<button class="btn btn-primary" disabled={savingClass || !className.trim()}>Add</button>
+							{#if classes.length > 0}
+								<button type="button" class="btn btn-ghost" onclick={() => (addingClass = false)}>Cancel</button>
+							{/if}
+						</div>
+					</form>
 				{/if}
 			</Panel>
 
