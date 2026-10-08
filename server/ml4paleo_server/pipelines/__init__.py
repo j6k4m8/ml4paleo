@@ -58,10 +58,20 @@ _RESULT_CHECKS = {
 }
 
 
+def reason(error: str | None) -> str | None:
+    """
+    Why a job failed, in a sentence: the first line of its error (the rest is
+    a traceback, for whoever runs the site). None when that says nothing.
+    """
+    lines = (error or "").strip().splitlines()
+    if not lines or lines[0].startswith("Traceback (most recent call last)"):
+        return None
+    return lines[0][:500]
+
+
 async def failure(db: AsyncSession, root_id: uuid.UUID) -> str | None:
     """
-    Why a pipeline failed, in a sentence: the first line of the error of its
-    first job to fail (the rest is a traceback, for whoever runs the site).
+    Why a pipeline failed: the reason its first job to fail gave.
     """
     error = await db.scalar(
         select(Job.error)
@@ -69,8 +79,7 @@ async def failure(db: AsyncSession, root_id: uuid.UUID) -> str | None:
         .order_by(Job.finished_at)
         .limit(1)
     )
-    lines = (error or "").strip().splitlines()
-    return lines[0][:500] if lines else None
+    return reason(error)
 
 
 def check_result(job: Job, result: dict) -> None:
@@ -101,6 +110,7 @@ __all__ = [
     "labelimport",
     "mesh",
     "predict",
+    "reason",
     "train",
     "v1import",
 ]

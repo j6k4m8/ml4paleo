@@ -242,20 +242,20 @@ class RandomForestPlugin:
         if not reservoir.rows:
             raise ValueError("There are no labeled voxels to train on")
         if len(reservoir.rows) < 2:
-            # Index 0 is background; the others follow the classes' values.
+            # Index 0 is background; the others are the project's classes.
             (only,) = reservoir.rows
-            labeled = (
-                "background" if only == 0 else f"class {data.class_values[only - 1]}"
-            )
-            fix = (
-                "Label a class"
-                if only == 0
-                else "Label another class, or mark an ROI complete so the "
-                "unlabeled voxels in it count as background"
-            )
+            if only == 0:
+                has, fix = "background", "Label a class"
+            else:
+                has = "one class"
+                fix = (
+                    "Label another class, or mark an ROI complete (one held out "
+                    "for validation doesn't count) so the unlabeled voxels in it "
+                    "count as background"
+                )
             raise ValueError(
                 "Training needs labels of at least two classes (background "
-                f"counts), and only {labeled} has any. {fix}"
+                f"counts), and only {has} has any. {fix}"
             )
         samples = {k: len(v) for k, v in reservoir.rows.items()}
         width = next(iter(reservoir.rows.values())).shape[1]

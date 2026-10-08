@@ -97,6 +97,8 @@ async def _model_out(db, model: TrainedModel) -> ModelOut:
     error = None
     if status == "failed" and model.job_id:
         error = await pipelines.failure(db, model.job_id)
+        if error is None and job_status == "cancelled":
+            error = "Stopped."
     return ModelOut(
         id=model.id,
         name=model.name,

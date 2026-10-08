@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ml4paleo.export import part_key
 from ml4paleo.storage import object_store
 
-from .. import artifacts, audit, jobs, objects, quotas
+from .. import artifacts, audit, jobs, objects, pipelines, quotas
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import Artifact, Job, User
 from ..pipelines import export as export_pipeline
@@ -94,8 +94,8 @@ async def _out(db: AsyncSession, export: Artifact) -> ExportOut:
     if status == "failed":
         if job is not None and job.cancel_requested:
             error = "Stopped."
-        elif job is not None and job.error:
-            error = job.error.strip().splitlines()[0][:500]
+        elif job is not None:
+            error = pipelines.reason(job.error)
         error = error or "The export didn't finish."
     assert export.expires_at is not None
     return ExportOut(

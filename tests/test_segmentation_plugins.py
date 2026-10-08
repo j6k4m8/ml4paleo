@@ -352,8 +352,8 @@ def test_training_needs_two_classes(tmp_path):
         def check(self):
             pass
 
-    # It says which class has labels, by value, and what to do about it.
-    for value, only in ((BONE, "class 2"), (1, "background")):
+    # It says what has labels, and what to do about it.
+    for value, only in ((BONE, "one class"), (1, "background")):
         labels = np.zeros(SHAPE, dtype=np.uint8)
         labels[20, 20, 20:30] = value
         source = DictLabels(labels)

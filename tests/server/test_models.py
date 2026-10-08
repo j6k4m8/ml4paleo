@@ -14,7 +14,7 @@ import numpy as np
 import obstore
 import pytest
 from helpers import SECRET_KEY, add_worker, run_db, signup
-from ml4paleo_server import artifacts, jobs, labels
+from ml4paleo_server import artifacts, jobs, labels, pipelines
 from ml4paleo_server.db import (
     Artifact,
     Job,
@@ -265,12 +265,12 @@ def test_a_failed_training_says_why(ada, settings, migrated_database_url):
     model = ada.post(base, json={}).json()
     assert ada.get(f"{base}/{model['id']}").json()["error"] is None
 
-    def fail(error):
+    def fail(error, status="failed"):
         async def run(db):
             await db.execute(
                 update(Job)
                 .where(Job.id == uuid.UUID(model["pipeline_id"]))
-                .values(status="failed", error=error)
+                .values(status=status, error=error)
             )
 
         run_db(migrated_database_url, run)
@@ -286,10 +286,27 @@ def test_a_failed_training_says_why(ada, settings, migrated_database_url):
     assert [m["error"] for m in ada.get(base).json()] == ["Needs two classes"]
     assert pipeline_error() == "Needs two classes"
     # A failure that says nothing still shows as failed.
-    fail("  \n")
+    for nothing in ("  \n", 'Traceback (most recent call last):\n  File "w.py"'):
+        fail(nothing)
+        shown = ada.get(f"{base}/{model['id']}").json()
+        assert (shown["status"], shown["error"]) == ("failed", None)
+        assert pipeline_error() is None
+    # A training that was stopped says so.
+    fail(None, "cancelled")
     shown = ada.get(f"{base}/{model['id']}").json()
-    assert (shown["status"], shown["error"]) == ("failed", None)
+    assert (shown["status"], shown["error"]) == ("failed", "Stopped.")
     assert pipeline_error() is None
+
+
+def test_a_reason_is_the_first_line_of_an_error():
+    assert pipelines.reason(None) is None
+    assert pipelines.reason("  \n") is None
+    assert pipelines.reason('Traceback (most recent call last):\n  File "w.py"') is None
+    assert (
+        pipelines.reason("Out of memory\n\nTraceback (most recent call last):")
+        == "Out of memory"
+    )
+    assert pipelines.reason("x" * 600) == "x" * 500
 
 
 def test_deleting_a_project_gives_back_its_model_slots(
