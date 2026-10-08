@@ -4,6 +4,7 @@ import {
 	boxOnPlane,
 	CHUNK,
 	chooseLevel,
+	countDrawn,
 	countTiles,
 	coveringTile,
 	LEVEL_HYSTERESIS,
@@ -169,6 +170,13 @@ describe("viewLevel", () => {
 		expect(viewLevel(levels, wide, undefined, 60).index).toBe(1);
 		expect(viewLevel(levels, wide, undefined, 20).index).toBe(2);
 	});
+
+	it("counts the coarser levels drawn under a level against the limit", () => {
+		const wide = view({ zoom: 2, width: 2000, height: 1000 });
+		// Level 1's own 30 chunks fit under 35, but not with level 2's 9 under them.
+		expect(countDrawn(levels, levels[1] as Level, wide)).toBe(30 + 9);
+		expect(viewLevel(levels, wide, undefined, 35).index).toBe(2);
+	});
 });
 
 describe("countTiles", () => {
@@ -183,7 +191,7 @@ describe("countTiles", () => {
 
 describe("tilesToLoad", () => {
 	it("asks for coarser levels first, then the level's view, then its margin", () => {
-		const tiles = tilesToLoad(levels, levels[0] as Level, view({ width: 256, height: 256 }));
+		const { tiles, shown: drawn } = tilesToLoad(levels, levels[0] as Level, view({ width: 256, height: 256 }));
 		const order = tiles.map((t) => t.level);
 		expect(order[0]).toBe(2);
 		expect(order.indexOf(0)).toBeGreaterThan(order.lastIndexOf(1));
@@ -191,6 +199,9 @@ describe("tilesToLoad", () => {
 		const level0 = tiles.filter((t) => t.level === 0).map(tileId);
 		expect(level0.slice(0, shown.length)).toEqual(shown);
 		expect(level0.length).toBeGreaterThan(shown.length);
+		// The ones drawn come first, margin last.
+		expect(drawn).toBe(countDrawn(levels, levels[0] as Level, view({ width: 256, height: 256 })));
+		expect(tiles.slice(drawn).every((t) => t.level === 0 && !shown.includes(tileId(t)))).toBe(true);
 		// Each coarser level covers the view.
 		expect(new Set(tiles.filter((t) => t.level === 1).map(tileId))).toEqual(
 			new Set(visibleTiles(levels[1] as Level, view({ width: 256, height: 256 }), 0).map(tileId)),
@@ -207,7 +218,7 @@ describe("tilesToLoad", () => {
 			] as [Vec3, number, Vec3][]) {
 				const at = view({ plane, position, zoom, aspect, width: 300, height: 200 });
 				const level = levels[0] as Level;
-				const asked = new Set(tilesToLoad(levels, level, at).map(tileId));
+				const asked = new Set(tilesToLoad(levels, level, at).tiles.map(tileId));
 				for (const key of visibleTiles(level, at, 0)) {
 					for (const coarser of levels.slice(1)) expect(asked).toContain(tileId(coveringTile(key, level, coarser, at)));
 				}
@@ -217,7 +228,7 @@ describe("tilesToLoad", () => {
 
 	it("asks for only the coarsest level when that is the one shown", () => {
 		const coarsest = levels[2] as Level;
-		expect(tilesToLoad(levels, coarsest, view({ zoom: 0.25 })).every((t) => t.level === 2)).toBe(true);
+		expect(tilesToLoad(levels, coarsest, view({ zoom: 0.25 })).tiles.every((t) => t.level === 2)).toBe(true);
 	});
 });
 

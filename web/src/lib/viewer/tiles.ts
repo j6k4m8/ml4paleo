@@ -134,12 +134,20 @@ export function chooseLevel(levels: Level[], view: View, current?: number): Leve
 
 /**
  * The level a view shows: the one `chooseLevel` picks, or a coarser one if
- * that would take more than `maxTiles` chunks to cover the view.
+ * drawing it (with the coarser levels under it) would take more than
+ * `maxTiles` chunks.
  */
 export function viewLevel(levels: Level[], view: View, current: number | undefined, maxTiles: number): Level {
 	let level = chooseLevel(levels, view, current);
-	while (level.index < levels.length - 1 && countTiles(level, view) > maxTiles) level = levels[level.index + 1]!;
+	while (level.index < levels.length - 1 && countDrawn(levels, level, view) > maxTiles) level = levels[level.index + 1]!;
 	return level;
+}
+
+/** How many chunks a view shows at `level`: its own and every coarser level's under them. */
+export function countDrawn(levels: Level[], level: Level, view: View): number {
+	let count = 0;
+	for (let i = level.index; i < levels.length; i++) count += countTiles(levels[i]!, view);
+	return count;
 }
 
 /** The plane's index along its normal axis, in `level`'s voxels. */
@@ -230,13 +238,15 @@ export function tilesShown(keys: Iterable<TileKey>, level: Level, view: View): T
  * The chunks a view loads, most wanted first: every level coarser than
  * `level`, coarsest first, where the view shows it (backdrops that arrive
  * quickly and show while finer chunks load), then `level` itself, nearest
- * the center first, then `padding` chunks around it.
+ * the center first, then `padding` chunks around it. The first `shown`
+ * are the ones the view draws (`countDrawn`); the rest load ahead.
  */
-export function tilesToLoad(levels: Level[], level: Level, view: View, padding = 1): TileKey[] {
+export function tilesToLoad(levels: Level[], level: Level, view: View, padding = 1): { tiles: TileKey[]; shown: number } {
 	const tiles: TileKey[] = [];
 	for (let i = levels.length - 1; i > level.index; i--) tiles.push(...visibleTiles(levels[i]!, view, 0));
+	const shown = tiles.length + countTiles(level, view);
 	tiles.push(...visibleTiles(level, view, padding));
-	return tiles;
+	return { tiles, shown };
 }
 
 /**

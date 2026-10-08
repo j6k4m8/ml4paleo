@@ -77,8 +77,9 @@
 	// Once hidden, overlays show again only when the view needs this many
 	// times fewer chunks, so zooming near the limit doesn't flicker them.
 	const OVERLAY_HYSTERESIS = 1.25;
-	// More image chunks than this in view, and the view uses a coarser level
-	// (each chunk is 64³ voxels, so this bounds memory on big screens).
+	// More image chunks than this drawn (the level's and the coarser ones
+	// under it), and the view uses a coarser level (each chunk is 64³ voxels,
+	// so this bounds the memory a view keeps on big screens).
 	const MAX_IMAGE_TILES = 400;
 	const AXIS_NAMES = ["z", "y", "x"];
 
@@ -240,8 +241,9 @@
 		// Every coarser level loads first, where the view shows it, and stays
 		// drawn under the finer ones: whatever moves (zoom, pan, slice), the
 		// view shows the best it has while the rest arrives, never a gap.
-		const wanted = tilesToLoad(levels, chosen, current);
-		images.want(plane.name, wanted.map(tileId));
+		// What it draws stays cached; the margin loads ahead but may go.
+		const { tiles: wanted, shown } = tilesToLoad(levels, chosen, current);
+		images.want(plane.name, wanted.map(tileId), wanted.slice(0, shown).map(tileId));
 		for (const key of wanted) loadImage(key, slices[key.level]!);
 		const layers: { level: Level; slice: number; tiles: TileKey[] }[] = [];
 		for (let i = levels.length - 1; i > chosen.index; i--) {
