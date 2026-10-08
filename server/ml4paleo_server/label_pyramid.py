@@ -431,21 +431,30 @@ def _stored_header(plan: Plan, state: Fingerprint) -> bytes:
 
 async def _load(
     store, plan: Plan, level: int, key: ChunkKey, state: Fingerprint
-) -> bytes | None:
+) -> tuple[bytes | None, int | None]:
     """
-    A chunk kept in storage, if it is there and shows the state asked for.
+    A chunk kept in storage, if it is there and shows the state asked for;
+    and the sum of versions of the labels under whatever is there, if it was
+    made for this plan, whatever state it shows (so a build for an older one
+    can leave it be).
     """
     try:
         result = await obstore.get_async(store, _stored_key(level, key))
         data = bytes(await result.bytes_async())
     except FileNotFoundError:
-        return None
+        return None, None
     except Exception:
         _warn("Reading chunks of the label pyramid from storage failed")
         log.debug("Reading a stored chunk failed", exc_info=True)
-        return None
+        return None, None
     header = _stored_header(plan, state)
-    return data[len(header) :] if data.startswith(header) else None
+    if data.startswith(header):
+        return data[len(header) :], state.versions
+    if len(data) >= _HEADER.size:
+        magic, rule, digest, _, versions = _HEADER.unpack_from(data)
+        if (magic, rule, digest) == (b"m4py", RULE_VERSION, plan.digest(state.retired)):
+            return None, versions
+    return None, None
 
 
 async def _save(
@@ -745,11 +754,13 @@ class LabelPyramid:
         pin: bool,
     ) -> bytes:
         stored = state.count >= STORED_COUNT
+        stored_versions = None
         if stored:
             # Storage can be slow, and a transaction is open from taking the
             # state (or the chunks under this one).
             await db.rollback()
-            if (data := await _load(store, plan, level, key, state)) is not None:
+            data, stored_versions = await _load(store, plan, level, key, state)
+            if data is not None:
                 self._cache.put(cached, data, pin=pin)
                 return data
         data, kept = await self._assemble(
@@ -758,7 +769,11 @@ class LabelPyramid:
         # Even one that shows nothing: finding that out was the work.
         self._cache.put(cached, data, pin=pin)
         try:
-            if stored:
+            # Not over a chunk kept for a newer state, which a build that took
+            # its state earlier would only replace with an older one.
+            if stored and (
+                stored_versions is None or stored_versions <= state.versions
+            ):
                 await _save(store, plan, level, key, state, data)
         finally:
             # However storing it ends, what it was made of is let go of.

@@ -28,7 +28,7 @@ from ml4paleo.labels.codec import ZARR_CODECS, decode_chunk, encode_chunk
 from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.labels.pyramid import downsample_labels
 from ml4paleo.ome import OmeImage, plan_levels
-from ml4paleo.storage import StorageGrant
+from ml4paleo.storage import StorageGrant, object_store
 
 # (z, y, x): levels of 4, with several chunks at the first two.
 SHAPE = (140, 150, 270)
@@ -905,7 +905,7 @@ def test_what_a_build_held_is_let_go_of_even_if_storing_what_it_made_is_cancelle
             return b"made", [child]
 
         async def nothing_stored(*args):
-            return None
+            return None, None
 
         async def cancelled(*args):
             raise asyncio.CancelledError
@@ -1184,6 +1184,18 @@ def stored_chunks(settings, project) -> list[str]:
     root = pathlib.Path(settings.storage.url.removeprefix("file://"))
     found = (root / "projects" / project / "labels" / "pyramid").rglob("*")
     return sorted(str(f.relative_to(root.parent)) for f in found if f.is_file())
+
+
+def stored_state(settings, project, level, key=(0, 0, 0)) -> tuple[int, int]:
+    """
+    The labeled chunks and the sum of versions that a chunk kept in storage says it
+    shows.
+    """
+    root = pathlib.Path(settings.storage.url.removeprefix("file://"))
+    name = "/".join(str(k) for k in (level, *key))
+    data = (root / "projects" / project / "labels" / "pyramid" / name).read_bytes()
+    _, _, _, count, versions = label_pyramid._HEADER.unpack_from(data)
+    return count, versions
 
 
 def another_process(app) -> label_pyramid.LabelPyramid:
@@ -1475,6 +1487,48 @@ def test_retiring_a_class_changes_only_the_chunks_it_is_in(ada, project):
         assert changed.headers["etag"] != etags[(level, key)]
     shown = np.where(volume == 2, 0, volume)
     check_every_level(ada, project, volume, levels, shown)
+
+
+def test_a_build_that_took_an_older_state_leaves_a_stored_chunk_of_a_newer_one(
+    ada, migrated_database_url, settings
+):
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    volume = one_label_in_each_chunk()
+    paint(ada, project, volume)
+    top = len(plan_levels(MANY)) - 1
+    older = get(ada, project, top, (0, 0, 0))
+    assert stored_state(settings, project, top) == (
+        125,
+        int(older.headers["x-pyramid-version"]),
+    )
+    # An edit, and a process that makes the chunk for what it made of the labels.
+    volume[130, 130, 130] = 3
+    paint(ada, project, volume[130:131, 130:131, 130:131], (130, 130, 130))
+    another_process(ada.client.app)
+    newer = get(ada, project, top, (0, 0, 0))
+    now = int(newer.headers["x-pyramid-version"])
+    assert now > int(older.headers["x-pyramid-version"])
+    assert stored_state(settings, project, top) == (125, now)
+
+    async def late(db):
+        # A build that took the state before the edit, and finishes after.
+        project_id = uuid.UUID(project)
+        image, levels = await labels.volume_levels(db, project_id)
+        plan = label_pyramid.Plan(image, levels)
+        state = label_pyramid.Fingerprint(
+            count=125, versions=int(older.headers["x-pyramid-version"])
+        )
+        store = object_store(labels.labels_root(settings, project_id))
+        pyramid = label_pyramid.LabelPyramid(seconds=3600, blobs=10**9)
+        return await pyramid.chunk(db, store, project_id, plan, top, (0, 0, 0), state)
+
+    assert run_db(migrated_database_url, late) is not None
+    # What is kept is still for the newer state, which a process that comes
+    # after takes as it is.
+    assert stored_state(settings, project, top) == (125, now)
+    another_process(ada.client.app)
+    final = get(ada, project, top, (0, 0, 0))
+    assert final.content == newer.content
 
 
 @pytest.mark.parametrize("change", ["retire", "image", "rule"])
