@@ -665,7 +665,13 @@
 
 	function keyUp(event: KeyboardEvent) {
 		viewer.noteKeys(event);
+		holdAlt(event);
 		if (event.key === " ") viewer.panning = false;
+	}
+
+	/** Alt held to cut out a polygon shouldn't open the browser's menu, as Alt alone does on Windows and Linux. */
+	function holdAlt(event: KeyboardEvent) {
+		if (event.key === "Alt" && viewer.tool === "polygon" && !forFocused(event)) event.preventDefault();
 	}
 
 	/** Leaving the window lets go of every key. */
@@ -684,6 +690,7 @@
 
 	function key(event: KeyboardEvent) {
 		viewer.noteKeys(event);
+		holdAlt(event);
 		if (viewer.help && event.key === "Escape") {
 			viewer.help = false;
 			event.preventDefault();

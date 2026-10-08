@@ -109,9 +109,13 @@ export function forFocused(event: KeyboardEvent): boolean {
 	return tag === "BUTTON" || (tag === "INPUT" && (target.type === "range" || target.type === "radio"));
 }
 
+// Alt changes how a polygon closes, so it may be held while drawing one;
+// with it, only these keys are the viewer's.
+const WITH_ALT = new Set(["Enter", "Backspace", "Escape"]);
+
 /** The action for a key press, or undefined if it isn't the viewer's. */
 export function actionFor(event: KeyboardEvent): Action | undefined {
-	if (event.altKey && event.key !== "Enter") return undefined;
+	if (event.altKey && !WITH_ALT.has(event.key)) return undefined;
 	if (forFocused(event)) return undefined;
 	return BY_KEY.get(comboOf(event));
 }

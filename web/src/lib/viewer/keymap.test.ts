@@ -22,8 +22,14 @@ describe("keymap", () => {
 		expect(actionFor(press("Enter"))).toBe("close-polygon");
 		expect(actionFor(press("Enter", { altKey: true }))).toBe("close-polygon");
 		expect(actionFor(press("Enter", { shiftKey: true }))).toBe("close-polygon");
+	});
+
+	it("keeps Backspace and Esc working while Alt is held over a polygon", () => {
+		expect(actionFor(press("Backspace", { altKey: true }))).toBe("remove-point");
+		expect(actionFor(press("Escape", { altKey: true }))).toBe("cancel");
 		// Alt with anything else is the browser's or the system's.
 		expect(actionFor(press("p", { altKey: true }))).toBeUndefined();
+		expect(actionFor(press("ArrowUp", { altKey: true }))).toBeUndefined();
 	});
 
 	it("leaves form fields and browser shortcuts alone", () => {
