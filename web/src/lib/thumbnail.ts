@@ -1,7 +1,8 @@
 /**
- * Small pictures of ROIs: the middle slice of the ROI from the image (at a
- * level near thumbnail size), with its labels when the ROI is small enough
- * to read them at full resolution.
+ * Small pictures: of ROIs (the middle slice of the ROI from the image, at a
+ * level near thumbnail size, with its labels when the ROI is small enough to
+ * read them at full resolution), and of a whole image (a slice through its
+ * middle).
  */
 
 import * as zarr from "zarrita";
@@ -39,17 +40,17 @@ export function thumbnailPlane(bbox: Box): Plane {
 }
 
 /**
- * The coarsest level that still shows the ROI at least TARGET voxels along
- * its longer side (the thumbnail is square, so the shorter side shrinks).
+ * The coarsest level that still shows the box at least `target` voxels along
+ * its longer side (a thumbnail is square, so the shorter side shrinks).
  */
-export function thumbnailLevel(levels: Level[], bbox: Box, plane: Plane): Level {
+export function thumbnailLevel(levels: Level[], bbox: Box, plane: Plane, target = TARGET): Level {
 	let best = levels[0]!;
 	for (const level of levels) {
 		const across = Math.max(
 			(bbox[plane.u + 3]! - bbox[plane.u]!) / level.scale[plane.u],
 			(bbox[plane.v + 3]! - bbox[plane.v]!) / level.scale[plane.v],
 		);
-		if (across >= TARGET) best = level;
+		if (across >= target) best = level;
 	}
 	return best;
 }
@@ -120,22 +121,53 @@ export async function drawThumbnail(
 		level.index === 0 && extent <= MAX_LABEL_EXTENT
 			? await readPlane(options.labelsUrl, "class", false, { scale: [1, 1, 1], shape: levels[0]!.shape }, bbox, plane, signal)
 			: null;
+	paint(canvas, image, options.window, labels, paletteBytes(options.colors), options.opacity);
+}
+
+/** Draw a slice through the middle of the whole image into `canvas`, at a level near `target` pixels across. */
+export async function drawImageSlice(
+	canvas: HTMLCanvasElement,
+	options: {
+		imageUrl: string;
+		levels: Level[];
+		plane: Plane;
+		window: [number, number];
+		target?: number;
+		signal?: AbortSignal;
+	},
+): Promise<void> {
+	const { levels, plane, signal } = options;
+	const [z = 1, y = 1, x = 1] = levels[0]!.shape;
+	const bbox: Box = [0, 0, 0, z, y, x];
+	const level = thumbnailLevel(levels, bbox, plane, options.target);
+	const image = await readPlane(options.imageUrl, level.path, true, level, bbox, plane, signal);
+	signal?.throwIfAborted();
+	paint(canvas, image, options.window, null, null, 0);
+}
+
+/** Put a windowed grayscale slice, with labels blended in when given, into `canvas`. */
+function paint(
+	canvas: HTMLCanvasElement,
+	image: { data: ArrayLike<number>; width: number; height: number },
+	window: [number, number],
+	labels: { data: ArrayLike<number> } | null,
+	palette: Uint8Array | null,
+	opacity: number,
+): void {
 	canvas.width = image.width;
 	canvas.height = image.height;
 	const context = canvas.getContext("2d");
 	if (!context) return;
 	const pixels = context.createImageData(image.width, image.height);
-	const [low, high] = options.window;
-	const palette = paletteBytes(options.colors);
+	const [low, high] = window;
 	for (let i = 0; i < image.width * image.height; i++) {
 		const shade = Math.round(255 * Math.min(1, Math.max(0, (image.data[i]! - low) / (high - low || 1))));
 		let [r, g, b] = [shade, shade, shade];
 		const value = labels ? labels.data[i]! : 0;
-		if (value > 0 && palette[value * 4 + 3]) {
-			const a = options.opacity;
-			r = Math.round(r * (1 - a) + palette[value * 4]! * a);
-			g = Math.round(g * (1 - a) + palette[value * 4 + 1]! * a);
-			b = Math.round(b * (1 - a) + palette[value * 4 + 2]! * a);
+		if (palette && value > 0 && palette[value * 4 + 3]) {
+			r = Math.round(r * (1 - opacity) + palette[value * 4]! * opacity);
+			g = Math.round(g * (1 - opacity) + palette[value * 4 + 1]! * opacity);
+			b = Math.round(b * (1 - opacity) + palette[value * 4 + 2]! * opacity);
 		}
 		pixels.data.set([r, g, b, 255], i * 4);
 	}

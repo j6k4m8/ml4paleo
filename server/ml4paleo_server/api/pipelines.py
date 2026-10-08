@@ -112,7 +112,10 @@ async def start_ingest(
     )
     if upload is None or upload.state != "complete":
         raise HTTPException(status_code=404, detail="No finished upload with that id.")
-    root, artifact = await pipelines.ingest.start(db, upload, auth.user.id)
+    try:
+        root, artifact = await pipelines.ingest.start(db, upload, auth.user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     audit.record(
         db,
         actor_id=auth.user.id,
