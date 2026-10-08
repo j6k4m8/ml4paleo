@@ -324,8 +324,6 @@
 	// `draws`: the press added a polygon point, so dragging on draws freehand.
 	let press: { x: number; y: number; moved: boolean; pan: boolean; pointer: number; draws: boolean } | null = null;
 	let stroke: (Stroke & { last: [number, number] }) | null = null;
-	// A freehand drag with the polygon tool is under way; letting go closes it.
-	let lassoing = $state(false);
 	let rectangle: { from: [number, number]; to: [number, number] } | null = $state(null);
 	let cursor: [number, number] | null = $state(null);
 	let overlay: HTMLCanvasElement;
@@ -458,11 +456,11 @@
 		if (!current) {
 			// Closed or dropped meanwhile (Enter, Esc, another tool).
 			drawing.draws = false;
-			lassoing = false;
+			viewer.lassoing = false;
 			return;
 		}
-		if (!lassoing && Math.hypot(event.clientX - drawing.x, event.clientY - drawing.y) < DRAG_PIXELS * reach(event)) return;
-		lassoing = true;
+		if (!viewer.lassoing && Math.hypot(event.clientX - drawing.x, event.clientY - drawing.y) < DRAG_PIXELS * reach(event)) return;
+		viewer.lassoing = true;
 		// Moves the browser merged into this one keep fast drags smooth.
 		const merged = event.getCoalescedEvents?.() ?? [];
 		const samples = (merged.length > 0 ? merged : [event]).map(planePoint);
@@ -482,9 +480,9 @@
 			stroke = null;
 			clearStroke();
 			if (finished.mask.count > 0) onstroke(finished);
-		} else if (lassoing) {
+		} else if (press?.draws && viewer.lassoing) {
 			// Letting go of a freehand drag closes it, where the pointer let go.
-			lassoing = false;
+			viewer.lassoing = false;
 			const current = polygonHere;
 			if (current) {
 				const end = planePoint(event);
@@ -500,10 +498,10 @@
 	}
 
 	function cancel() {
+		if (press?.draws) viewer.lassoing = false;
 		press = null;
 		stroke = null;
 		rectangle = null;
-		lassoing = false;
 		clearStroke();
 	}
 
@@ -523,7 +521,7 @@
 			viewer.moveTo(point);
 			return;
 		}
-		if (stroke || rectangle || lassoing) return;
+		if (stroke || rectangle || viewer.lassoing) return;
 		// About one slice per mouse wheel notch; trackpads add up.
 		wheelSteps += delta / 100;
 		const steps = Math.trunc(wheelSteps);
@@ -591,13 +589,13 @@
 		if (points.length === 0) return null;
 		const outline = points.map(([u, v]) => screen(u, v));
 		const first = outline[0]!;
-		const closing = !lassoing && cursor !== null && closesAt(points, planeAt(cursor), scale());
+		const closing = !viewer.lassoing && cursor !== null && closesAt(points, planeAt(cursor), scale());
 		// The outline ends at the pointer, or closes when a click or letting go would close it.
 		if (cursor && !closing) outline.push(cursor);
-		if (closing || lassoing) outline.push(first);
+		if (closing || viewer.lassoing) outline.push(first);
 		return {
 			outline: outline.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "),
-			first: points.length >= 3 && !lassoing ? first : null,
+			first: points.length >= 3 && !viewer.lassoing ? first : null,
 			closing,
 		};
 	});

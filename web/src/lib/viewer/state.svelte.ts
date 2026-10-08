@@ -77,6 +77,8 @@ export class ViewerState {
 	polygonMode = $state<PolygonMode>("add");
 	/** Alt and Shift as held now, which change what closing a polygon does. */
 	held = $state.raw({ altKey: false, shiftKey: false });
+	/** A polygon is being dragged out freehand, on its slice: the views hold still until it's let go. */
+	lassoing = $state(false);
 	/** Space is held: drag pans whatever the tool. */
 	panning = $state(false);
 	/** New ROIs: one-voxel slices, or cubes this many voxels deep. */

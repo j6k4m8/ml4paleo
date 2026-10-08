@@ -52,7 +52,7 @@
 	} from "../rois.svelte";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
-	import { actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
+	import { type Action, actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
 	import { type LabelClass, LabelLayer } from "./labels";
 	import { imageLoader, labelLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
@@ -674,6 +674,9 @@
 		viewer.noteKeys({ altKey: false, shiftKey: false });
 	}
 
+	// Keys that move the views, which wait while a polygon is dragged out on its slice.
+	const MOVES = new Set<Action>(["slice-next", "slice-previous", "fit", "next-roi", "layout"]);
+
 	/** The view that slice keys step: the only one, or the one last pointed at. */
 	function activePlane(): Plane {
 		return viewer.layout === "four" ? hovered : PLANES[viewer.layout];
@@ -696,6 +699,7 @@
 		// Enter and Backspace only mean something while drawing a polygon.
 		if ((action === "close-polygon" || action === "remove-point") && !viewer.polygon) return;
 		event.preventDefault();
+		if (viewer.lassoing && MOVES.has(action)) return;
 		const step = event.shiftKey ? 10 : 1;
 		switch (action) {
 			case "navigate":
