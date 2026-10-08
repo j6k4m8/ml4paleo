@@ -72,6 +72,9 @@
 	// zoomed far out they'd need too many chunks (each is 256 KiB; three
 	// views share a 128 MiB cache).
 	const MAX_LABEL_TILES = 128;
+	// Once hidden, overlays show again only when the view needs this many
+	// times fewer chunks, so zooming near the limit doesn't flicker them.
+	const OVERLAY_HYSTERESIS = 1.25;
 	// More image chunks than this in view, and the view uses a coarser level
 	// (each chunk is 64³ voxels, so this bounds memory on big screens).
 	const MAX_IMAGE_TILES = 400;
@@ -85,6 +88,9 @@
 	// Why chunks didn't load, until one does.
 	let loadError = $state("");
 	let labelsHidden = $state(false);
+	// The level this view showed last, which it keeps a little longer as it
+	// zooms in, so it doesn't flip between two levels.
+	let shownLevel: number | undefined;
 	let frame = 0;
 	let destroyed = false;
 
@@ -226,7 +232,8 @@
 	function render() {
 		if (destroyed || !renderer || levels.length === 0 || width === 0) return;
 		const current = view();
-		const chosen = viewLevel(levels, current, MAX_IMAGE_TILES);
+		const chosen = viewLevel(levels, current, shownLevel, MAX_IMAGE_TILES);
+		shownLevel = chosen.index;
 		const slices = levels.map((level) => sliceIndex(level, current));
 		// Every coarser level loads first, where the view shows it, and stays
 		// drawn under the finer ones: whatever moves (zoom, pan, slice), the
@@ -255,7 +262,8 @@
 			(viewer.showPrediction && (prediction || proposal)) ||
 			(viewer.showSegmentation && segmentation)
 		);
-		labelsHidden = overlaid && countTiles(full, current) > MAX_LABEL_TILES;
+		const needed = countTiles(full, current);
+		labelsHidden = overlaid && needed > (labelsHidden ? MAX_LABEL_TILES / OVERLAY_HYSTERESIS : MAX_LABEL_TILES);
 		const fullTiles = labelsHidden ? [] : visibleTiles(full, current, 0);
 		const overlays: Overlay[] = [];
 		/** Draw a layer's chunks in view (or just `keys`), leaving out `hole`. */

@@ -101,16 +101,33 @@ function voxelPixels(level: Level, view: View): number {
 }
 
 /**
- * The coarsest level whose voxels still cover at most about one and a half
- * CSS pixels in the view's plane.
+ * Zooming in, a view keeps the level it shows until that level's voxels
+ * cover this much more than the limit, so zooming back and forth near the
+ * switch doesn't flip between two levels (reloading each time).
  */
-export function chooseLevel(levels: Level[], view: View): Level {
+export const LEVEL_HYSTERESIS = 1.25;
+
+/**
+ * The coarsest level whose voxels still cover at most about one and a half
+ * CSS pixels in the view's plane. A view showing level `current` keeps it a
+ * little past that point as it zooms in (see LEVEL_HYSTERESIS).
+ */
+export function chooseLevel(levels: Level[], view: View, current?: number): Level {
 	let best = levels[0];
 	if (!best) throw new Error("An image has at least one level");
 	const limit = 1.5 * (view.pixelRatio ?? 1);
 	for (const level of levels) {
 		const size = voxelPixels(level, view);
 		if (size <= limit && size > voxelPixels(best, view)) best = level;
+	}
+	const kept = current === undefined ? undefined : levels[current];
+	if (
+		kept &&
+		kept.index > best.index &&
+		voxelPixels(kept, view) > voxelPixels(best, view) &&
+		voxelPixels(kept, view) <= limit * LEVEL_HYSTERESIS
+	) {
+		return kept;
 	}
 	return best;
 }
@@ -119,8 +136,8 @@ export function chooseLevel(levels: Level[], view: View): Level {
  * The level a view shows: the one `chooseLevel` picks, or a coarser one if
  * that would take more than `maxTiles` chunks to cover the view.
  */
-export function viewLevel(levels: Level[], view: View, maxTiles: number): Level {
-	let level = chooseLevel(levels, view);
+export function viewLevel(levels: Level[], view: View, current: number | undefined, maxTiles: number): Level {
+	let level = chooseLevel(levels, view, current);
 	while (level.index < levels.length - 1 && countTiles(level, view) > maxTiles) level = levels[level.index + 1]!;
 	return level;
 }

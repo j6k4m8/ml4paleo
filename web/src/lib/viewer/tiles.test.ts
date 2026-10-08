@@ -6,6 +6,7 @@ import {
 	chooseLevel,
 	countTiles,
 	coveringTile,
+	LEVEL_HYSTERESIS,
 	type Level,
 	PLANES,
 	tileCrosses,
@@ -47,6 +48,40 @@ describe("chooseLevel", () => {
 		expect(chooseLevel(levels, view({ zoom: 0.5 })).index).toBe(1);
 		expect(chooseLevel(levels, view({ zoom: 0.25 })).index).toBe(2);
 		expect(chooseLevel(levels, view({ zoom: 0.01 })).index).toBe(2);
+	});
+
+	it("keeps the level it shows a little past the switch, zooming in", () => {
+		// Level 1's voxels cover 2 × zoom pixels; past 1.5 the normal choice is level 0.
+		const past = view({ zoom: 0.8 });
+		expect(chooseLevel(levels, past).index).toBe(0);
+		expect(chooseLevel(levels, past, 1).index).toBe(1);
+		// Far enough past, it moves on.
+		const beyond = view({ zoom: (1.5 * LEVEL_HYSTERESIS) / 2 + 0.01 });
+		expect(chooseLevel(levels, beyond, 1).index).toBe(0);
+		// Zooming out switches to the coarser level at once, and back only past the band.
+		expect(chooseLevel(levels, view({ zoom: 0.74 }), 0).index).toBe(1);
+		expect(chooseLevel(levels, view({ zoom: 0.76 }), 1).index).toBe(1);
+		// A level two steps coarser isn't kept.
+		expect(chooseLevel(levels, view({ zoom: 0.8 }), 2).index).toBe(0);
+	});
+
+	it("doesn't flip between levels as the zoom wobbles around a switch", () => {
+		let shown: number | undefined;
+		const seen = new Set<number>();
+		for (const zoom of [0.74, 0.76, 0.75, 0.77, 0.79, 0.76, 0.78]) {
+			shown = chooseLevel(levels, view({ zoom }), shown).index;
+			seen.add(shown);
+		}
+		expect([...seen]).toEqual([1]);
+	});
+
+	it("keeps no coarser level that is no coarser on this plane", () => {
+		// Level 1 halves only z, which an XY view doesn't see.
+		const flat: Level[] = [
+			{ index: 0, path: "0", shape: [256, 100, 100], scale: [1, 1, 1] },
+			{ index: 1, path: "1", shape: [128, 100, 100], scale: [2, 1, 1] },
+		];
+		expect(chooseLevel(flat, view({ zoom: 1 }), 1).index).toBe(0);
 	});
 
 	it("counts stretched axes at their physical size", () => {
@@ -129,9 +164,9 @@ describe("viewLevel", () => {
 		// x 0..700 (11 chunks) by y 250..750 (9 chunks), then 6 by 5 at level 1.
 		expect(countTiles(levels[0] as Level, wide)).toBe(11 * 9);
 		expect(countTiles(levels[1] as Level, wide)).toBe(6 * 5);
-		expect(viewLevel(levels, wide, 1000).index).toBe(0);
-		expect(viewLevel(levels, wide, 60).index).toBe(1);
-		expect(viewLevel(levels, wide, 20).index).toBe(2);
+		expect(viewLevel(levels, wide, undefined, 1000).index).toBe(0);
+		expect(viewLevel(levels, wide, undefined, 60).index).toBe(1);
+		expect(viewLevel(levels, wide, undefined, 20).index).toBe(2);
 	});
 });
 
