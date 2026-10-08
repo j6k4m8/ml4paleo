@@ -331,6 +331,11 @@ export class LabelLayer {
 			} else if (chunk.version < version - 1 || chunk.version > version) {
 				// Someone else changed the chunk too, or a copy newer than the
 				// op was read and the edit went over it again: load it again.
+				// Put back over later changes, the edit hides them, so the copy
+				// no longer stands for their version: it says the op's, which
+				// the server is past, and strict edits on it are refused until
+				// the new copy lands.
+				if (chunk.version > version) chunk.version = version;
 				again.push(id);
 			}
 		}

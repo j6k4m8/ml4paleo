@@ -356,6 +356,34 @@ describe("LabelLayer", () => {
 		expect(layer.versionOf("0/0/0")).toBe(5);
 	});
 
+	it("doesn't let a copy that had an edit put back over later changes stand for their version", async () => {
+		const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
+		const { pool, release } = fakePool(server, true);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		const loading = loaded(layer, "0/0/0");
+		release();
+		await loading;
+		layer.applyLocal("op", [delta(5)]);
+		// Our edit (4), then someone's over it (5). A copy read after both
+		// lands before our answer, and our edit is put back over theirs.
+		server.set("0/0/0", { value: 7, version: 5 });
+		layer.changed([{ key: [0, 0, 0], version: 5 }]);
+		release();
+		await tick();
+		expect(first(layer, "0/0/0")).toBe(5);
+		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
+		// The next strict edit goes out now, before the chunk loads again. It
+		// can't be based on 5, which the server would accept though the page
+		// shows our 5s where the server has their 7s: on 4, it is refused.
+		const sent = strictOn(layer, { strict: true, deltas: [delta(9)] });
+		expect(sent.strict).toBe(true);
+		expect(sent.deltas[0]?.base_version).toBe(4);
+		release();
+		await tick();
+		expect(layer.versionOf("0/0/0")).toBe(5);
+		expect(first(layer, "0/0/0")).toBe(7);
+	});
+
 	describe("strict edits", () => {
 		it("go out on the version your own edit made, even after another edit of yours was refused", async () => {
 			const server = new Map([["0/0/0", { value: 0, version: 2 }]]);
