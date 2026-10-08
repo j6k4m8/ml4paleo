@@ -2,6 +2,10 @@
  * Draws one plane of an image with WebGL2. Each 64×64 tile of the plane is a
  * float texture, windowed on the GPU so 16-bit and float images keep their
  * full range; labels draw over it as integer textures colored by a palette.
+ * A layer of labels may hold tiles of several levels (a texel of a coarser
+ * one covers more of the plane). Each point of the plane shows only the
+ * finest tile there is for it: labels are see-through, so a coarser tile
+ * under a finer one would show where the finer one has none.
  */
 
 import { BACKGROUND_ALPHA, BACKGROUND_CLASS, BACKGROUND_VALUE } from "./background";
@@ -41,6 +45,7 @@ precision highp float;
 precision highp usampler2D;
 in vec2 voxel;
 uniform vec4 rect;          // tile u, v, width, height in level-0 voxels
+uniform vec2 perTexel;      // level-0 voxels per texel along u and v
 uniform usampler2D tile;
 uniform sampler2D palette;  // 256 × 2, RGBA by label value: classes, then classes and background
 uniform int paletteRow;
@@ -49,10 +54,10 @@ uniform vec4 hole;          // u0, v0, u1, v1 in level-0 voxels, left undrawn
 out vec4 color;
 void main() {
 	if (all(greaterThanEqual(voxel, hole.xy)) && all(lessThan(voxel, hole.zw))) discard;
-	// Label tiles are level 0, one texel a voxel; found from the same position
-	// as the hole, so the two agree at its edges.
+	// A texel is a voxel of the tile's level, found from the same position as
+	// the hole, so the two agree at its edges.
 	ivec2 size = textureSize(tile, 0);
-	ivec2 texel = clamp(ivec2(floor(voxel - rect.xy)), ivec2(0), size - 1);
+	ivec2 texel = clamp(ivec2(floor((voxel - rect.xy) / perTexel)), ivec2(0), size - 1);
 	uint value = texelFetch(tile, texel, 0).r;
 	vec4 swatch = texelFetch(palette, ivec2(int(value), paletteRow), 0);
 	color = vec4(swatch.rgb, swatch.a * opacity);
@@ -176,8 +181,15 @@ export class TextureCache {
 	}
 }
 
-/** Label-valued tiles drawn over the image with the palette. */
+/**
+ * Label-valued tiles drawn over the image with the palette. Where tiles of
+ * several levels cover a point, the first listed that is on the GPU draws
+ * there and the rest don't, so list them finest first. That takes a stencil
+ * buffer, which a browser may not give a canvas: without one, only the tiles
+ * of `level` are drawn.
+ */
 export interface Overlay {
+	/** The slice of full resolution that the tiles hold unless they say, in their own level's voxels. */
 	slice: number;
 	tiles: LabelTile[];
 	opacity: number;
@@ -185,12 +197,18 @@ export interface Overlay {
 	hole?: Rect;
 	/** Whether painted background shows (for the labels; a model's background stays clear). */
 	background?: boolean;
+	/** The level whose tiles are all that is drawn on a canvas without a stencil buffer (every level's, if not said). */
+	level?: number;
 }
 
 export interface LabelTile {
-	/** The label chunk id (`cz/cy/cx`) and its level-0 chunk key. */
+	/** The label chunk's id (what its textures are named by) and its chunk key, in its level. */
 	id: string;
 	key: TileKey;
+	/** The index of the slice (of the tile's level) the view cuts; the overlay's, if not said. */
+	slice?: number;
+	/** Level-0 voxels per voxel of the tile's level, (z, y, x); one, for full resolution, if not said. */
+	scale?: Vec3;
 }
 
 export class PlaneRenderer {
@@ -202,6 +220,8 @@ export class PlaneRenderer {
 	#imageTextures: TextureCache;
 	#labelTextures: TextureCache;
 	#palette: WebGLTexture;
+	// Whether the canvas has the stencil buffer it asked for (see `Overlay`).
+	#stencil: boolean;
 
 	/**
 	 * `extent` is the image's level-0 shape: coarse levels round their shape
@@ -212,16 +232,18 @@ export class PlaneRenderer {
 		private plane: Plane,
 		private extent: Vec3,
 	) {
-		// No alpha channel: labels blend over the image, never with the page.
-		const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, premultipliedAlpha: false });
+		// No alpha channel: labels blend over the image, never with the page. The
+		// stencil keeps tiles of coarser levels from drawing where finer ones did.
+		const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, premultipliedAlpha: false, stencil: true });
 		if (!gl) throw new Error("This browser doesn't support WebGL2");
 		this.#gl = gl;
+		this.#stencil = gl.getContextAttributes()?.stencil === true;
 		this.#image = this.#link(IMAGE);
 		this.#labels = this.#link(LABELS);
 		for (const name of ["rect", "uvMax", "center", "toClip", "tile", "window"]) {
 			this.#imageUniforms[name] = gl.getUniformLocation(this.#image, name);
 		}
-		for (const name of ["rect", "uvMax", "center", "toClip", "tile", "palette", "paletteRow", "opacity", "hole"]) {
+		for (const name of ["rect", "perTexel", "uvMax", "center", "toClip", "tile", "palette", "paletteRow", "opacity", "hole"]) {
 			this.#labelUniforms[name] = gl.getUniformLocation(this.#labels, name);
 		}
 		const buffer = gl.createBuffer();
@@ -331,7 +353,8 @@ export class PlaneRenderer {
 	/**
 	 * Draw the view: for each image layer (coarsest first), the tiles on the
 	 * GPU, so finer tiles cover coarser ones as they arrive; then each overlay
-	 * (a model's prediction, the labels) in order.
+	 * (a model's prediction, the labels) in order, each point showing the first
+	 * of the overlay's tiles that has one there.
 	 */
 	draw(
 		view: View,
@@ -345,7 +368,8 @@ export class PlaneRenderer {
 		gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
 		// The pasteboard around the image, as in the rest of the workspace.
 		gl.clearColor(0x28 / 255, 0x28 / 255, 0x28 / 255, 1);
-		gl.clear(gl.COLOR_BUFFER_BIT);
+		gl.disable(gl.STENCIL_TEST);
+		gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
 		const place = (uniforms: Record<string, WebGLUniformLocation | null>) => {
 			gl.uniform2f(uniforms.center ?? null, view.position[u], view.position[v]);
 			gl.uniform2f(uniforms.toClip ?? null, (2 * px[u]) / view.width, (2 * px[v]) / view.height);
@@ -359,6 +383,7 @@ export class PlaneRenderer {
 			const shownWidth = Math.max(0, Math.min(width, this.extent[u] - left));
 			const shownHeight = Math.max(0, Math.min(height, this.extent[v] - top));
 			gl.uniform4f(uniforms.rect ?? null, left, top, shownWidth, shownHeight);
+			gl.uniform2f(uniforms.perTexel ?? null, scale[u]!, scale[v]!);
 			gl.uniform2f(uniforms.uvMax ?? null, shownWidth / width, shownHeight / height);
 		};
 
@@ -380,6 +405,10 @@ export class PlaneRenderer {
 
 		gl.enable(gl.BLEND);
 		gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+		// A tile marks the points it draws, which no later tile of the overlay draws.
+		gl.enable(gl.STENCIL_TEST);
+		gl.stencilFunc(gl.EQUAL, 0, 0xff);
+		gl.stencilOp(gl.KEEP, gl.KEEP, gl.INCR);
 		gl.useProgram(this.#labels);
 		place(this.#labelUniforms);
 		gl.uniform1i(this.#labelUniforms.tile ?? null, 0);
@@ -394,14 +423,17 @@ export class PlaneRenderer {
 			// An empty rectangle by default, so every voxel draws.
 			const [u0, v0, u1, v1] = overlay.hole ?? [0, 0, 0, 0];
 			gl.uniform4f(this.#labelUniforms.hole ?? null, u0, v0, u1, v1);
+			gl.clear(gl.STENCIL_BUFFER_BIT);
 			for (const tile of overlay.tiles) {
-				const entry = this.#labelTextures.get(`${tile.id}@${overlay.slice}`);
+				if (!this.#stencil && overlay.level !== undefined && tile.key.level !== overlay.level) continue;
+				const entry = this.#labelTextures.get(`${tile.id}@${tile.slice ?? overlay.slice}`);
 				if (!entry) continue;
 				gl.bindTexture(gl.TEXTURE_2D, entry.texture);
-				rect(this.#labelUniforms, tile.key, [1, 1, 1], entry);
+				rect(this.#labelUniforms, tile.key, tile.scale ?? [1, 1, 1], entry);
 				gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 			}
 		}
+		gl.disable(gl.STENCIL_TEST);
 	}
 
 	destroy(): void {

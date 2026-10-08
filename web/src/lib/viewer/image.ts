@@ -49,10 +49,14 @@ export function httpStatus(error: unknown): number | undefined {
 
 /**
  * What a decode worker tells the page about a read that failed: the error,
- * and the HTTP status the server answered with, if it did.
+ * and the HTTP status the server answered with, if it did. An array that
+ * isn't there (zarrita's NotFoundError, for the metadata the server
+ * answered 404) says 404, as a missing chunk would if zarrita didn't read it
+ * as empty.
  */
 export function failure(error: unknown): { error: string; status?: number } {
-	return { error: String(error), status: httpStatus(error) };
+	const missing = error instanceof Error && error.name === "NotFoundError";
+	return { error: String(error), status: httpStatus(error) ?? (missing ? 404 : undefined) };
 }
 
 /** Level-0 voxels per voxel of each level, from the levels' scales. */

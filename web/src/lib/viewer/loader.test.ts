@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LoadError, WorkerPool } from "./loader";
+import { Busy, type Chunk } from "./chunks";
+import { LoadError, labelLevelLoader, WorkerPool } from "./loader";
+import type { Level } from "./tiles";
 
 /** A worker that does nothing but remember what it was asked and let the test answer for it. */
 class FakeWorker {
@@ -44,6 +46,14 @@ describe("WorkerPool", () => {
 		expect((error as LoadError).message).toContain("401");
 	});
 
+	it("fails a load with the 503's Retry-After, as the server wrote it", async () => {
+		const { load, answer } = loading();
+		answer({ error: "Error: Unexpected response status 503", status: 503, retryAfter: "7" });
+		const error = await load.catch((e: unknown) => e);
+		expect((error as LoadError).status).toBe(503);
+		expect((error as LoadError).retryAfter).toBe("7");
+	});
+
 	it("fails a load that got no answer from the server without a status", async () => {
 		const { load, answer } = loading();
 		answer({ error: "TypeError: Failed to fetch" });
@@ -57,5 +67,142 @@ describe("WorkerPool", () => {
 		const data = new Uint8Array(1);
 		answer({ data, shape: [1, 1, 1], version: 7 });
 		expect(await load).toEqual({ data, shape: [1, 1, 1], version: 7 });
+	});
+
+	it("hands back what a coarser level's chunk was made from apart from a version", async () => {
+		const { load, answer } = loading();
+		const data = new Uint8Array(1);
+		answer({ data, shape: [1, 1, 1], pyramid: 12 });
+		const chunk = await load;
+		expect(chunk.pyramid).toBe(12);
+		expect(chunk.version).toBeUndefined();
+	});
+});
+
+describe("labelLevelLoader", () => {
+	// The labels of a 200 × 130 × 70 image, and its two coarser levels.
+	const levels: Level[] = [
+		{ index: 0, path: "class", shape: [200, 130, 70], scale: [1, 1, 1] },
+		{ index: 1, path: "class_1", shape: [100, 65, 35], scale: [2, 2, 2] },
+		{ index: 2, path: "class_2", shape: [50, 33, 18], scale: [4, 4, 4] },
+	];
+	const chunk: Chunk = { data: new Uint8Array(1), shape: [1, 1, 1] };
+
+	const loading = (answer: (request: unknown) => Promise<Chunk> = async () => chunk) => {
+		const load = vi.fn(async (request: unknown, _signal: AbortSignal) => answer(request));
+		const missing = vi.fn();
+		const loader = labelLevelLoader({ load } as unknown as WorkerPool, "http://test/labels/", () => levels, missing);
+		return { load, missing, loader, signal: new AbortController().signal };
+	};
+
+	it("reads full resolution chunks, ids cz/cy/cx, from the class array, as the labels were read before levels", async () => {
+		const { loader, load, signal } = loading();
+		expect(await loader("1/2/0", signal)).toBe(chunk);
+		expect(load).toHaveBeenCalledWith(
+			{
+				url: "http://test/labels/",
+				path: "class",
+				region: [
+					[64, 128],
+					[128, 130],
+					[0, 64],
+				],
+				derived: false,
+			},
+			signal,
+		);
+	});
+
+	it("reads a coarser level's chunks, ids level/cz/cy/cx, from its array, cut to the level's shape, as made ones", async () => {
+		const { loader, load, signal } = loading();
+		await loader("1/1/1/0", signal);
+		expect(load).toHaveBeenCalledWith(
+			{
+				url: "http://test/labels/",
+				path: "class_1",
+				region: [
+					[64, 100],
+					[64, 65],
+					[0, 35],
+				],
+				derived: true,
+			},
+			signal,
+		);
+	});
+
+	it("says a level the server hasn't is missing, and ends the load without an error", async () => {
+		const { loader, load, missing, signal } = loading(async () => {
+			throw new LoadError("NotFoundError: Not found: v3 array or group", 404);
+		});
+		const error = await loader("1/0/0/0", signal).catch((e: unknown) => e);
+		expect(error).toBeInstanceOf(DOMException);
+		expect((error as DOMException).name).toBe("AbortError");
+		expect(missing).toHaveBeenCalledTimes(1);
+		expect(missing).toHaveBeenCalledWith(1);
+		expect(load).toHaveBeenCalledTimes(1);
+	});
+
+	describe("a coarser chunk the server is still making (a 503)", () => {
+		afterEach(() => vi.restoreAllMocks());
+
+		const busy = async (retryAfter: string | undefined, id = "2/0/0/0") => {
+			vi.spyOn(Math, "random").mockReturnValue(0.5);
+			const failure = new LoadError("Error: Unexpected response status 503", 503, retryAfter);
+			const { loader, load, missing, signal } = loading(async () => {
+				throw failure;
+			});
+			const error = await loader(id, signal).catch((e: unknown) => e);
+			return { error, failure, load, missing };
+		};
+
+		it("is busy, for the store to ask again, after the Retry-After and a little more", async () => {
+			const { error, failure, load, missing } = await busy("3");
+			expect(error).toBeInstanceOf(Busy);
+			expect((error as Busy).delay).toBe(3750);
+			expect((error as Busy).cause).toBe(failure);
+			expect(load).toHaveBeenCalledTimes(1);
+			expect(missing).not.toHaveBeenCalled();
+		});
+
+		it("is asked for again after two seconds and a little more when the server doesn't say", async () => {
+			expect(((await busy(undefined)).error as Busy).delay).toBe(2500);
+		});
+
+		it("is busy at every level above full resolution", async () => {
+			for (const id of ["1/0/0/0", "2/0/0/0"]) expect((await busy("1", id)).error).toBeInstanceOf(Busy);
+		});
+
+		it("isn't called busy for a full resolution chunk, which the server doesn't make", async () => {
+			const { error, failure } = await busy("1", "0/0/0");
+			expect(error).toBe(failure);
+		});
+	});
+
+	it("passes on every other failure, as it was", async () => {
+		for (const status of [401, 500, 502, undefined]) {
+			const failure = new LoadError("Error", status);
+			const { loader, missing, signal } = loading(async () => {
+				throw failure;
+			});
+			await expect(loader("1/0/0/0", signal)).rejects.toBe(failure);
+			expect(missing).not.toHaveBeenCalled();
+		}
+	});
+
+	it("doesn't call full resolution missing when the server answers 404 for it", async () => {
+		const failure = new LoadError("NotFoundError", 404);
+		const { loader, missing, signal } = loading(async () => {
+			throw failure;
+		});
+		await expect(loader("0/0/0", signal)).rejects.toBe(failure);
+		expect(missing).not.toHaveBeenCalled();
+	});
+
+	it("ends a load of a level that was cut meanwhile without asking the server", async () => {
+		const { loader, load, signal } = loading();
+		const error = await loader("5/0/0/0", signal).catch((e: unknown) => e);
+		expect((error as DOMException).name).toBe("AbortError");
+		expect(load).not.toHaveBeenCalled();
 	});
 });

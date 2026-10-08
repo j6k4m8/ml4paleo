@@ -8,8 +8,8 @@ import { api } from "#lib/api.ts";
 import { applyLocally, type DeltaIn, decodeDelta } from "../labels/deltas";
 import { ChunkStore } from "./chunks";
 import { absolute } from "./image";
-import { LoadError, labelLoader, type WorkerPool } from "./loader";
-import type { Vec3 } from "./tiles";
+import { LoadError, labelLevelLoader, type WorkerPool } from "./loader";
+import type { Level, TileKey, Vec3 } from "./tiles";
 
 export interface LabelClass {
 	value: number;
@@ -36,7 +36,9 @@ interface LocalDelta {
 	again?: boolean;
 }
 
-const CACHE_BYTES = 128 * 1024 * 1024;
+// Every chunk is 256 KiB, whatever its level, and a view draws up to
+// MAX_LABEL_TILES of them (see overlays.ts), which the three views share.
+export const CACHE_BYTES = 256 * 1024 * 1024;
 // How many of the chunks this page edited last it remembers (`recent`).
 const RECENT = 256;
 // A reload that failed is tried again after this long, doubling each time up
@@ -47,12 +49,17 @@ const RETRY_LONGEST_MS = 30_000;
 const RETRY_SPREAD = 0.25;
 // Failing this many times in a row, other than for the network, a chunk isn't tried again.
 const FAILURES = 8;
+// How many chunks it remembers having asked for the coarser chunks above
+// of, before it forgets the earliest half.
+const COVERED = 4096;
 
 /**
  * Whether a reload that failed is worth trying again, `failures` failures in
  * a row in. A network failure is: it ends when the network comes back. A
- * server error, or a failure to read what it sent, is for a while. Being
- * signed out or refused isn't, and neither is any other answer.
+ * server error, or a failure to read what it sent, is for a while, and so
+ * is a chunk the server was still making when the store gave up waiting for
+ * it (`Busy`, which isn't a `LoadError`). Being signed out or refused isn't,
+ * and neither is any other answer.
  */
 function worthRetrying(error: unknown, failures: number): boolean {
 	const status = error instanceof LoadError ? error.status : undefined;
@@ -63,6 +70,71 @@ function worthRetrying(error: unknown, failures: number): boolean {
 	}
 	if (status >= 500 || status === 408 || status === 425 || status === 429) return failures < FAILURES;
 	return false;
+}
+
+/** The labels at full resolution, which every server has. */
+function fullResolution(shape: Vec3): Level {
+	return { index: 0, path: "class", shape, scale: [1, 1, 1] };
+}
+
+const isTriple = (value: unknown): value is Vec3 =>
+	Array.isArray(value) && value.length === 3 && value.every((n) => Number.isInteger(n) && n >= 1);
+
+/**
+ * The levels of the labels that a project's label zarr lists in its group
+ * metadata (`ml4paleo.label_levels`, one per level of the image's pyramid,
+ * named `class`, `class_1`, ...), finest first, up to the first it lists
+ * that doesn't make sense after the ones before: a name that isn't the
+ * next, a shape or factor that isn't three whole numbers, a shape that isn't
+ * the image's divided by the factor and rounded up (as the server plans its
+ * levels), a level no coarser than the one before. Without a list, or one
+ * whose full resolution isn't `shape`, only full resolution (the server
+ * doesn't make the coarser levels, or the page can't tell what they are).
+ */
+export function labelLevels(group: unknown, shape: Vec3): Level[] {
+	const listed = (group as { attributes?: { ml4paleo?: { label_levels?: unknown } } } | null | undefined)?.attributes?.ml4paleo?.label_levels;
+	const levels: Level[] = [];
+	if (Array.isArray(listed)) {
+		for (const [index, entry] of listed.entries()) {
+			const { array, shape: size, factor_zyx: scale } = (entry ?? {}) as Record<string, unknown>;
+			if (array !== (index === 0 ? "class" : `class_${index}`) || !isTriple(size) || !isTriple(scale)) break;
+			// Its voxels are `scale` full resolution ones along each axis, so it has the image's shape divided by that, rounded up.
+			if (size.some((n, axis) => n !== Math.ceil(shape[axis]! / scale[axis]!))) break;
+			const finer = levels[index - 1]?.scale;
+			// Each level is coarser than the one before.
+			if (finer && !(scale.every((s, axis) => s >= finer[axis]!) && scale.some((s, axis) => s > finer[axis]!))) break;
+			levels.push({ index, path: array, shape: size, scale });
+		}
+	}
+	const [full] = levels;
+	if (!full || full.shape.some((n, axis) => n !== shape[axis]) || full.scale.some((s) => s !== 1)) return [fullResolution(shape)];
+	return levels;
+}
+
+/** The id of a label chunk in the labels' store: `cz/cy/cx` at full resolution, else `level/cz/cy/cx`. */
+export function labelId(key: TileKey): string {
+	return key.level === 0 ? `${key.cz}/${key.cy}/${key.cx}` : `${key.level}/${key.cz}/${key.cy}/${key.cx}`;
+}
+
+/** The level and chunk key a label chunk id (see `labelId`) names. */
+export function labelKey(id: string): TileKey {
+	const parts = id.split("/").map(Number);
+	const [cz = 0, cy = 0, cx = 0] = parts.slice(-3);
+	return { level: parts.length > 3 ? (parts[0] ?? 0) : 0, cz, cy, cx };
+}
+
+/**
+ * The chunks of the coarser `levels` that hold the full resolution chunks
+ * `keys`, as ids (`level/cz/cy/cx`), each once: a chunk of a level whose voxels
+ * are `scale` full resolution ones along an axis holds the chunks numbered
+ * `scale` times its own, so a chunk `c` is in the one numbered `floor(c / scale)`.
+ */
+export function coarseIds(levels: Level[], keys: Vec3[]): string[] {
+	const ids = new Set<string>();
+	for (const level of levels.slice(1)) {
+		for (const key of keys) ids.add(`${level.index}/${key.map((c, axis) => Math.floor(c / level.scale[axis]!)).join("/")}`);
+	}
+	return [...ids];
 }
 
 /**
@@ -80,8 +152,16 @@ export function strictOn<T extends { strict: boolean; deltas: DeltaIn[] }>(layer
 export class LabelLayer {
 	store: ChunkStore;
 	classes: LabelClass[] = [];
+	/**
+	 * The levels of the labels, finest first: full resolution, then the
+	 * coarser ones (the image's pyramid) the server makes when asked, once
+	 * `start` has read which it has. Their chunks are in `store` too, with
+	 * ids `level/cz/cy/cx`.
+	 */
+	levels: Level[];
 	#listeners = new Set<(ids: string[]) => void>();
 	#classListeners = new Set<() => void>();
+	#levelListeners = new Set<() => void>();
 	#events: EventSource | null = null;
 	// This page's edits that a copy of their chunk may not show yet, by op,
 	// in order: chunk id → delta. Until the server answers, an op's deltas
@@ -94,6 +174,9 @@ export class LabelLayer {
 	// failed in a row, and the timer of the next try.
 	#failures = new Map<string, number>();
 	#retries = new Map<string, ReturnType<typeof setTimeout>>();
+	// Full resolution chunks whose coarser chunks were loaded again for a
+	// change: the latest version each was done for.
+	#covered = new Map<string, number>();
 	#stopped = false;
 	/** Called if live updates stop for good (signed out, or removed from the project). */
 	onStopped: (() => void) | null = null;
@@ -104,7 +187,18 @@ export class LabelLayer {
 		shape: Vec3,
 	) {
 		const url = absolute(`/api/projects/${projectId}/labels/zarr/`);
-		this.store = new ChunkStore(labelLoader(pool, url, shape), CACHE_BYTES, 4);
+		this.levels = [fullResolution(shape)];
+		this.store = new ChunkStore(
+			labelLevelLoader(pool, url, () => this.levels, (level) => this.#without(level)),
+			CACHE_BYTES,
+			4,
+			// The server makes the coarser levels when asked, which can take it a
+			// second or more a chunk, and it makes two at a time: while full
+			// resolution chunks, which it only reads, are waited for, two places
+			// are theirs. Without them the coarser chunks, which it may have
+			// ready, use all four.
+			{ slow: (id) => labelKey(id).level > 0, places: 2 },
+		);
 		// Whatever the server sends, this page's edits stay on screen.
 		this.store.onLoad = (id, chunk) => {
 			let stale = false;
@@ -196,7 +290,7 @@ export class LabelLayer {
 	async start(): Promise<void> {
 		const base = `/api/projects/${this.projectId}/labels`;
 		this.classes = await api<LabelClass[]>(`${base}/classes`);
-		const [latest] = await api<{ seq: number }[]>(`${base}/ops?limit=1`);
+		const [[latest]] = await Promise.all([api<{ seq: number }[]>(`${base}/ops?limit=1`), this.#readLevels()]);
 		this.#events = new EventSource(`${base}/events?after=${latest?.seq ?? 0}`);
 		this.#events.onerror = () => {
 			// The browser retries dropped streams itself; a closed one is final,
@@ -211,6 +305,34 @@ export class LabelLayer {
 			const change = JSON.parse((event as MessageEvent<string>).data) as { chunks: { key: Vec3; version: number }[] };
 			this.changed(change.chunks);
 		});
+	}
+
+	/** Read which coarser levels the server has. Without them (or if it can't say) the labels stay at full resolution. */
+	async #readLevels(): Promise<void> {
+		try {
+			const group = await api<unknown>(`/api/projects/${this.projectId}/labels/zarr/zarr.json`);
+			this.levels = labelLevels(group, this.levels[0]!.shape);
+		} catch {
+			// The labels work without the coarser levels, just as they did before them.
+		}
+	}
+
+	/**
+	 * The server turned out not to have level `level`, so it, and any coarser,
+	 * are given up: views go on with the finer ones, as with a server that has no
+	 * coarser levels at all.
+	 */
+	#without(level: number): void {
+		if (level < 1 || level >= this.levels.length) return;
+		this.levels = this.levels.slice(0, level);
+		for (const id of [...this.store.ids()]) if (labelKey(id).level >= level) this.store.invalidate(id);
+		for (const listener of this.#levelListeners) listener();
+	}
+
+	/** Call `listener` when the levels the labels have are fewer than they were. */
+	onLevels(listener: () => void): () => void {
+		this.#levelListeners.add(listener);
+		return () => this.#levelListeners.delete(listener);
 	}
 
 	/**
@@ -231,6 +353,28 @@ export class LabelLayer {
 			stale.map(({ key }) => key.join("/")),
 			new Map(stale.map(({ key, version }) => [key.join("/"), version])),
 		);
+		this.#refreshCoarser(chunks);
+	}
+
+	/**
+	 * Chunks changed at these versions (by anyone's edit, this page's too),
+	 * so the coarser chunks holding them are out of date: load those again
+	 * (the server answers `304` for one the change left as it was), unless
+	 * that was already done for these versions, as when an edit's answer and
+	 * its change event both name it. A coarser chunk is made from the ones
+	 * under it, so what it says of its version says nothing of theirs.
+	 */
+	#refreshCoarser(chunks: { key: Vec3; version: number }[]): void {
+		if (this.levels.length < 2) return;
+		const news = chunks.filter(({ key, version }) => version > (this.#covered.get(key.join("/")) ?? 0));
+		for (const { key, version } of news) this.#covered.set(key.join("/"), version);
+		if (this.#covered.size > COVERED) {
+			for (const id of this.#covered.keys()) {
+				this.#covered.delete(id);
+				if (this.#covered.size <= COVERED / 2) break;
+			}
+		}
+		this.reload(coarseIds(this.levels, news.map(({ key }) => key)));
 	}
 
 	/**
@@ -280,7 +424,7 @@ export class LabelLayer {
 		clearTimeout(this.#retries.get(id));
 		const stale = this.store.peek(id);
 		const failures = (this.#failures.get(id) ?? 0) + 1;
-		if (this.#stopped || !stale || !worthRetrying(error, failures)) return this.#giveUp(id);
+		if (this.#stopped || !stale || !worthRetrying(error, failures)) return this.#abandon(id);
 		this.#failures.set(id, failures);
 		const timer = setTimeout(() => {
 			// A newer copy came since, or the chunk is loading again, or it's gone.
@@ -295,6 +439,19 @@ export class LabelLayer {
 		clearTimeout(this.#retries.get(id));
 		this.#retries.delete(id);
 		this.#failures.delete(id);
+	}
+
+	/**
+	 * Stop trying to load a chunk again, for good. The out-of-date copy of a
+	 * coarser chunk, which nothing else would ever change, is dropped, so
+	 * views load it afresh when they next need it rather than show it.
+	 */
+	#abandon(id: string): void {
+		this.#giveUp(id);
+		if (labelKey(id).level > 0 && this.store.peek(id)) {
+			this.store.invalidate(id);
+			this.#emit([id]);
+		}
 	}
 
 	/**
@@ -341,6 +498,8 @@ export class LabelLayer {
 	 * may predate the op, keeps showing the edit until a copy with it comes.
 	 */
 	settle(op: string, versions: { key: Vec3; version: number }[] | null): void {
+		// However the edit stays on screen, the coarser chunks over it are out of date now.
+		if (versions) this.#refreshCoarser(versions);
 		const local = this.#local.get(op);
 		if (!local) return;
 		for (const id of local.keys()) this.store.unpin(id);
@@ -447,5 +606,6 @@ export class LabelLayer {
 		this.store.keepOnly(new Set());
 		this.#listeners.clear();
 		this.#classListeners.clear();
+		this.#levelListeners.clear();
 	}
 }

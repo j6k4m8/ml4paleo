@@ -73,12 +73,13 @@ describe("levelFactors", () => {
 	});
 });
 
-/** A WebGL context that does nothing, counting the textures it's asked to delete. */
-function fakeGl() {
+/** A WebGL context that does nothing, counting the textures it's asked to delete, except as `overrides` say. */
+function fakeGl(overrides: Record<string, unknown> = {}) {
 	const deleted: unknown[] = [];
 	let created = 0;
 	const gl = new Proxy({} as Record<string, unknown>, {
 		get(_target, name: string) {
+			if (name in overrides) return overrides[name];
 			if (name === "createTexture") return () => ({ texture: created++ });
 			if (name === "deleteTexture") return (texture: unknown) => deleted.push(texture);
 			if (name === "getShaderParameter" || name === "getProgramParameter") return () => true;
@@ -177,5 +178,49 @@ describe("PlaneRenderer's textures", () => {
 		frame(r, wanted);
 		frame(r, wanted.slice(0, 5));
 		for (const k of wanted) expect(r.hasImage(k, 0)).toBe(true);
+	});
+});
+
+describe("PlaneRenderer's overlays", () => {
+	/** A renderer on a context that has, or lacks, the stencil buffer it asked for, and the widths of the tiles it draws, in voxels. */
+	const drawing = (stencil: boolean) => {
+		const widths: number[] = [];
+		let rect: number[] = [];
+		const { gl } = fakeGl({
+			getContextAttributes: () => ({ stencil }),
+			getUniformLocation: (_program: unknown, name: string) => ({ name }),
+			uniform4f: (location: { name: string }, ...values: number[]) => {
+				if (location?.name === "rect") rect = values;
+			},
+			drawArrays: () => widths.push(rect[2]!),
+		});
+		const renderer = new PlaneRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement, PLANES.xy, [128, 128, 128]);
+		return { renderer, widths };
+	};
+	const chunk = { data: new Uint8Array(4), shape: [1, 2, 2] };
+	// A tile of full resolution, and one of level 1 (voxels twice as big) over the same chunk.
+	const fine = { id: "0/0/0", key: { level: 0, cz: 0, cy: 0, cx: 0 } };
+	const coarse = { id: "1/0/0/0", key: { level: 1, cz: 0, cy: 0, cx: 0 }, scale: [2, 2, 2] as [number, number, number] };
+	const view = { plane: PLANES.xy, position: [0, 0, 0] as [number, number, number], zoom: 1, aspect: [1, 1, 1] as [number, number, number], width: 100, height: 100 };
+
+	const drawn = (stencil: boolean, level?: number) => {
+		const { renderer, widths } = drawing(stencil);
+		renderer.uploadLabels(fine, 0, chunk);
+		renderer.uploadLabels(coarse, 0, chunk);
+		renderer.draw(view, [0, 1], [], [{ slice: 0, tiles: [fine, coarse], opacity: 1, level }]);
+		return widths;
+	};
+
+	it("draws the tiles of every level, finest first, where the canvas has a stencil buffer to keep them from drawing over each other", () => {
+		expect(drawn(true, 1)).toEqual([2, 4]);
+	});
+
+	it("draws only the overlay's level where the canvas has no stencil buffer, for tiles of several levels would blend over each other", () => {
+		expect(drawn(false, 1)).toEqual([4]);
+		expect(drawn(false, 0)).toEqual([2]);
+	});
+
+	it("draws every tile of an overlay that names no level, stencil or not", () => {
+		expect(drawn(false)).toEqual([2, 4]);
 	});
 });
