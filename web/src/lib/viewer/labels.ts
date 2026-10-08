@@ -24,9 +24,9 @@ interface LocalDelta {
 	onlyIf: string;
 	/**
 	 * Once the server has applied the op, the chunk version it made: copies
-	 * from then on have the edit, and only older ones need it put back. Such
-	 * a delta lasts only as long as the load of its chunk that may predate
-	 * the op: any later load has the edit.
+	 * from then on have the edit, and only older ones (or ones whose version
+	 * isn't known) need it put back. Such a delta lasts only as long as the
+	 * load of its chunk that may predate the op: any later load has the edit.
 	 */
 	made?: number;
 	/** A copy older than `made` arrived and the chunk was sent for once more. */
@@ -66,12 +66,12 @@ export class LabelLayer {
 				const delta = deltas.get(id);
 				if (!delta) continue;
 				if (delta.made !== undefined) {
-					if (chunk.version === undefined || chunk.version >= delta.made) {
+					if (chunk.version !== undefined && chunk.version >= delta.made) {
 						this.#forget(op, id);
 						continue;
 					}
-					// A copy from before the edit (its load started first): show the
-					// edit on it, and load it once more.
+					// A copy from before the edit (its load started first), or of
+					// a version not known: show the edit on it, and load it once more.
 					if (delta.again) {
 						this.#forget(op, id);
 					} else {
@@ -269,6 +269,10 @@ export class LabelLayer {
 					// A copy newer than the op, which went over it again.
 					again.push(id);
 				}
+			} else if (chunk) {
+				// A copy of a version not known: load it again, showing the edit meanwhile.
+				keep = true;
+				again.push(id);
 			}
 			if (keep) delta.made = version;
 			else local.delete(id);

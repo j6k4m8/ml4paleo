@@ -9,7 +9,7 @@ import type { WorkerPool } from "./loader";
  * `held`, loads answer from the map as it is when they start but arrive
  * only when the test calls `release`.
  */
-function fakePool(server: Map<string, { value: number; version: number }>, held = false) {
+function fakePool(server: Map<string, { value: number; version?: number }>, held = false) {
 	const loads: string[] = [];
 	const waiting: (() => void)[] = [];
 	const pool = {
@@ -226,6 +226,26 @@ describe("LabelLayer", () => {
 		await tick();
 		expect(first(layer, "0/0/0")).toBe(0);
 		expect(layer.versionOf("0/0/0")).toBe(3);
+	});
+
+	it("loads a copy of a version not known once more, showing the edit on it", async () => {
+		const server = new Map<string, { value: number; version?: number }>([["0/0/0", { value: 0 }]]);
+		const { pool, loads, release } = fakePool(server, true);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		const loading = loaded(layer, "0/0/0");
+		layer.applyLocal("op", [delta(5)]);
+		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
+		release();
+		await loading;
+		expect(first(layer, "0/0/0")).toBe(5);
+		await tick();
+		expect(loads).toHaveLength(2);
+		// The second copy's version isn't known either: the edit goes on it, and that's all.
+		release();
+		await tick();
+		await tick();
+		expect(first(layer, "0/0/0")).toBe(5);
+		expect(loads).toHaveLength(2);
 	});
 
 	it("remembers the chunks it edited, the latest last", () => {
