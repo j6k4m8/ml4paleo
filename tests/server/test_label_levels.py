@@ -17,8 +17,9 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import pytest
 from helpers import run_db, signup
-from ml4paleo_server import artifacts, label_pyramid
+from ml4paleo_server import artifacts, label_pyramid, labels
 from ml4paleo_server.app import create_app
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ml4paleo.labels import LABEL_CHUNK_ZYX
 from ml4paleo.labels.codec import ZARR_CODECS, decode_chunk, encode_chunk
@@ -598,13 +599,16 @@ class Spy:
     """
     What label chunks were read to make coarse ones, and how many were held at
     once: read, but not yet combined. Reads take a little while, so requests
-    that start together overlap.
+    that start together overlap. Also how many database connections were lent
+    out at each read and combine, which should be none: nobody holds one
+    while waiting on storage or computing.
     """
 
     def __init__(self, monkeypatch, app, delay=0.2):
         self.engine = app.state.engine.sync_engine
         self.reads = self.combines = self.held = self.most_held = 0
         self.connections = []
+        self.combining = []
         self._lock = threading.Lock()
         real_read, real_combine = label_pyramid._read, label_pyramid._combine
 
@@ -621,6 +625,8 @@ class Spy:
             return data
 
         def combine(parts, *args):
+            with self._lock:
+                self.combining.append(self.engine.pool.checkedout())
             try:
                 return real_combine(parts, *args)
             finally:
@@ -656,6 +662,122 @@ def test_requests_for_one_cold_chunk_share_one_build(ada, project, monkeypatch):
     np.testing.assert_array_equal(
         decode_chunk(answers[0].content), expected_chunk(expected, (0, 0, 0))
     )
+
+
+def test_no_connection_is_held_while_chunks_are_read_or_combined(
+    ada, project, monkeypatch
+):
+    volume = messy_volume()
+    paint(ada, project, volume)
+    spy = Spy(monkeypatch, ada.client.app, delay=0.01)
+    levels = plan_levels(SHAPE)
+    # Chunks of level 2 first, so the top one only has them to combine.
+    for key in np.ndindex(*(-(-n // 64) for n in levels[2].shape_zyx)):
+        assert get(ada, project, 2, key).status_code == 200
+    reads, combines = len(spy.connections), len(spy.combining)
+    assert get(ada, project, len(levels) - 1, (0, 0, 0)).status_code == 200
+    assert len(spy.connections) == reads and len(spy.combining) == combines + 1
+    # Level 1 reads every labeled chunk, and every level combines.
+    assert len(spy.connections) == labeled_chunks(volume) > 8
+    assert len(spy.combining) == spy.combines > 3
+    assert set(spy.connections) == set(spy.combining) == {0}
+
+
+def test_the_state_is_taken_before_anything_is_read(ada, project, monkeypatch):
+    # A chunk's ETag says how recent its pixels are at least, only if read
+    # in this order: the state, then the chunks it was of.
+    paint(ada, project, messy_volume())
+    events = []
+    real_fingerprint, real_read = label_pyramid.fingerprint, label_pyramid._read
+
+    async def fingerprint(*args):
+        events.append("state")
+        return await real_fingerprint(*args)
+
+    async def read(*args):
+        events.append("read")
+        return await real_read(*args)
+
+    monkeypatch.setattr(label_pyramid, "fingerprint", fingerprint)
+    monkeypatch.setattr(label_pyramid, "_read", read)
+    assert get(ada, project, 3, (0, 0, 0)).status_code == 200
+    assert events[0] == "state" and events.count("state") == 1
+    assert events.count("read") > 1
+
+
+@pytest.mark.parametrize("level", [1, 2, 3])
+def test_pixels_are_never_older_than_their_etag_says(
+    ada, project, settings, monkeypatch, level
+):
+    levels = plan_levels(SHAPE)
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    volume[5:9, 5:9, 5:9] = 2
+    paint(ada, project, volume)
+    edits = []
+
+    async def edit(db, project_id):
+        # Another request edits a chunk after the state was taken (once).
+        if edits:
+            return
+        edits.append(1)
+        deltas = split_into_deltas(np.ones((1, 1, 1), bool), (40, 40, 40), value=3)
+        async with AsyncSession(db.bind) as other:
+            await labels.apply_edit(
+                other,
+                settings,
+                uuid.UUID(project),
+                client_op_id=uuid.uuid4(),
+                deltas=deltas,
+            )
+            await other.commit()
+
+    real_leaves, real_children = label_pyramid._leaves, label_pyramid._children
+
+    async def leaves(db, project_id, *args):
+        await edit(db, project_id)
+        return await real_leaves(db, project_id, *args)
+
+    async def children(db, project_id, *args):
+        await edit(db, project_id)
+        return await real_children(db, project_id, *args)
+
+    monkeypatch.setattr(label_pyramid, "_leaves", leaves)
+    monkeypatch.setattr(label_pyramid, "_children", children)
+    first = get(ada, project, level, (0, 0, 0))
+    assert first.status_code == 200 and edits
+    volume[40, 40, 40] = 3
+    expected = expected_chunk(shrink(volume, levels)[level], (0, 0, 0))
+    # It has the edit, which its ETag doesn't say: newer is safe.
+    np.testing.assert_array_equal(decode_chunk(first.content), expected)
+    again = get(
+        ada,
+        project,
+        level,
+        (0, 0, 0),
+        headers={"If-None-Match": first.headers["etag"]},
+    )
+    # Nothing is kept on a 304 that the edit changed.
+    assert again.status_code == 200
+    assert int(again.headers["x-pyramid-version"]) > int(
+        first.headers["x-pyramid-version"]
+    )
+    np.testing.assert_array_equal(decode_chunk(again.content), expected)
+
+
+def test_a_chunk_erased_since_its_state_was_taken_is_missing(ada, project, monkeypatch):
+    paint(ada, project, messy_volume())
+
+    async def nothing(*args):
+        return []
+
+    with monkeypatch.context() as patch:
+        patch.setattr(label_pyramid, "_leaves", nothing)
+        response = get(ada, project, 1, (0, 0, 0))
+    assert response.status_code == 404
+    # It has a version, for what that says of a chunk made of labels.
+    assert int(response.headers["x-pyramid-version"]) > 0
+    assert "etag" not in response.headers
+    assert get(ada, project, 1, (0, 0, 0)).status_code == 200
 
 
 def test_a_waiting_request_gives_up_when_the_build_does(ada, project, monkeypatch):
