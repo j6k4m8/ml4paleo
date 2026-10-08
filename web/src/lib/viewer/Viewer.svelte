@@ -55,7 +55,7 @@
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
 	import { type Action, actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
-	import { type LabelClass, LabelLayer } from "./labels";
+	import { type LabelClass, LabelLayer, strictOn } from "./labels";
 	import { imageLoader, labelLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
 	import { LAYOUTS, type Stroke, ViewerState } from "./state.svelte";
@@ -129,12 +129,7 @@
 	// Strict edits compare against the chunk versions current when they're
 	// sent, after this page's earlier edits have landed; if any version is
 	// unknown, the edit applies like a brush stroke instead.
-	queue.beforeSend = (op: QueuedEdit) => {
-		if (!op.strict || !labels) return op;
-		const versions = op.deltas.map((d) => labels!.versionOf(d.key.join("/")));
-		if (versions.some((v) => v === undefined)) return { ...op, strict: false };
-		return { ...op, deltas: op.deltas.map((d, i) => ({ ...d, base_version: versions[i]! })) };
-	};
+	queue.beforeSend = (op: QueuedEdit) => (labels ? strictOn(labels, op) : op);
 	const rois = new RoiList(project);
 	const firstRoi = untrack(() => startRoi);
 	const firstBox = untrack(() => startBox);
@@ -188,7 +183,7 @@
 				if ("cancelled" in outcome) {
 					layer.settle(outcome.op.local, null);
 				} else if (outcome.op.kind !== "edit") {
-					if ("result" in outcome) layer.noteVersions(outcome.result.chunks);
+					if ("result" in outcome) layer.changed(outcome.result.chunks);
 					else if (!outcome.alreadyDone) notice = `That ${outcome.op.kind} didn't go through: ${outcome.error}`;
 				} else if ("result" in outcome) {
 					layer.settle(outcome.op.local, outcome.result.chunks);
@@ -230,7 +225,6 @@
 	$effect(() => {
 		void [
 			viewer.opacity,
-			viewer.showLabels,
 			viewer.layout,
 			viewer.brushRadius,
 			viewer.protectLabels,
@@ -276,6 +270,7 @@
 		const deltas = splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value, onlyIf });
 		notice = "";
 		for (const op of queue.edit(deltas, { strict, tool })) labels.applyLocal(op.local, op.deltas);
+		viewer.revealLabels();
 	}
 
 	function stroke(drawn: Stroke) {
@@ -631,6 +626,7 @@
 			const ops = queue.editMany(parts, { accept: { prediction: artifact, roi: roi.id } });
 			for (const op of ops) labels.applyLocal(op.local, op.deltas);
 			if (ops.length === 0) notice = `The ${kind} has nothing in that ROI.`;
+			else viewer.revealLabels();
 		} catch (e) {
 			notice = `Couldn't read the ${kind}: ${e instanceof Error ? e.message : String(e)}`;
 		} finally {

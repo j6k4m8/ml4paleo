@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "#lib/api.ts";
 import type { DeltaIn } from "./deltas";
-import { batches, MAX_DELTAS, MAX_OP_BYTES, type OpOut, OpQueue, type Outcome } from "./opqueue.svelte";
+import { batches, MAX_DELTAS, MAX_OP_BYTES, type OpOut, OpQueue, type Outcome, type Queued } from "./opqueue.svelte";
 
 const delta = (x: number): DeltaIn => ({ key: [0, 0, x], base_version: 0, box: [0, 0, 0, 1, 1, 1], mask: "", value: 2, only_if: "any" });
 
@@ -157,6 +157,41 @@ describe("OpQueue", () => {
 		queue.edit([delta(0)], { strict: true });
 		await settle(queue);
 		expect((bodies[0] as { deltas: { base_version: number }[] }).deltas[0]?.base_version).toBe(7);
+	});
+
+	it("sends the edits a previous page left unsent even if an edit went out before they were read", async () => {
+		const sent: string[] = [];
+		let answer!: () => void;
+		const send = async (_path: string, body: unknown): Promise<OpOut> => {
+			sent.push((body as { client_op_id: string }).client_op_id);
+			if (sent.length === 1) await new Promise<void>((resolve) => (answer = resolve));
+			return { seq: sent.length, chunks: [] };
+		};
+		const saved: Queued = { kind: "edit", local: "saved", clientOpId: "saved-op", deltas: [delta(1)], strict: false, tool: {} };
+		let read!: (ops: Queued[]) => void;
+		const removed: string[] = [];
+		const storage = {
+			load: () => new Promise<Queued[]>((resolve) => (read = resolve)),
+			save: async () => {},
+			remove: async (id: string) => void removed.push(id),
+		};
+		const queue = new OpQueue("p", storage, send);
+		const outcomes: Outcome[] = [];
+		queue.onOutcome((outcome) => outcomes.push(outcome));
+		const starting = queue.start();
+		const [mine] = queue.edit([delta(0)]);
+		// The new edit goes out while the saved ones are still being read.
+		await new Promise((r) => setTimeout(r, 5));
+		read([saved]);
+		await starting;
+		answer();
+		await settle(queue);
+		await new Promise((r) => setTimeout(r, 5));
+		// Each is sent once, and answered once: the new edit's answer doesn't take the saved edit's place.
+		expect(sent).toEqual([mine!.clientOpId, "saved-op"]);
+		expect(outcomes.map((o) => o.op.local)).toEqual([mine!.local, "saved"]);
+		expect(removed.sort()).toEqual(["saved", mine!.local].sort());
+		expect(queue.pending).toBe(0);
 	});
 
 	it("resumes edits a previous page left unsent", async () => {

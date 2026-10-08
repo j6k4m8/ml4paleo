@@ -11,7 +11,7 @@
 	import type { ViewerState } from "./state.svelte";
 	import {
 		boxOnPlane,
-		chooseLevel,
+		countTiles,
 		type Level,
 		type Plane,
 		pixelsPerVoxel,
@@ -20,8 +20,12 @@
 		type TileKey,
 		tileCrosses,
 		tileId,
+		tilesShown,
+		tilesToLoad,
+		tilesUnder,
 		type Vec3,
 		type View,
+		viewLevel,
 		visibleTiles,
 		voxelAt,
 	} from "./tiles";
@@ -71,8 +75,12 @@
 	// zoomed far out they'd need too many chunks (each is 256 KiB; three
 	// views share a 128 MiB cache).
 	const MAX_LABEL_TILES = 128;
-	// More image chunks than this in view, and the view uses a coarser level
-	// (each chunk is 64³ voxels, so this bounds memory on big screens).
+	// Once hidden, overlays show again only when the view needs this many
+	// times fewer chunks, so zooming near the limit doesn't flicker them.
+	const OVERLAY_HYSTERESIS = 1.25;
+	// More image chunks than this drawn (the level's and the coarser ones
+	// under it), and the view uses a coarser level (each chunk is 64³ voxels,
+	// so this bounds the memory a view keeps on big screens).
 	const MAX_IMAGE_TILES = 400;
 	const AXIS_NAMES = ["z", "y", "x"];
 
@@ -81,7 +89,12 @@
 	let width = $state(0);
 	let height = $state(0);
 	let error = $state("");
+	// Why chunks didn't load, until one does.
+	let loadError = $state("");
 	let labelsHidden = $state(false);
+	// The level this view showed last, which it keeps a little longer as it
+	// zooms in, so it doesn't flip between two levels.
+	let shownLevel: number | undefined;
 	let frame = 0;
 	let destroyed = false;
 
@@ -224,43 +237,52 @@
 
 	function failed(e: unknown) {
 		if (e instanceof DOMException && e.name === "AbortError") return;
-		error = e instanceof Error ? e.message : String(e);
+		loadError = e instanceof Error ? e.message : String(e);
 	}
 
 	function render() {
 		if (destroyed || !renderer || levels.length === 0 || width === 0) return;
 		const current = view();
-		const coarsest = levels[levels.length - 1]!;
-		let chosen = chooseLevel(levels, current);
-		while (chosen !== coarsest && visibleTiles(chosen, current, 0).length > MAX_IMAGE_TILES) {
-			chosen = levels[chosen.index + 1]!;
+		const chosen = viewLevel(levels, current, shownLevel, MAX_IMAGE_TILES);
+		shownLevel = chosen.index;
+		const slices = levels.map((level) => sliceIndex(level, current));
+		// Every coarser level loads first, where the view shows it, and stays
+		// drawn under the finer ones: whatever moves (zoom, pan, slice), the
+		// view shows the best it has while the rest arrives, never a gap.
+		// What it draws stays cached; the margin loads ahead but may go.
+		const { tiles: wanted, shown } = tilesToLoad(levels, chosen, current);
+		images.want(plane.name, wanted.map(tileId), wanted.slice(0, shown).map(tileId));
+		const top = { level: chosen, slice: slices[chosen.index]!, tiles: visibleTiles(chosen, current, 0) };
+		const finer = levels[chosen.index - 1];
+		// Room on the GPU for every texture this frame may upload, made before
+		// any upload, so none pushes out another the frame draws: the chunks
+		// wanted, and the finer chunks loaded and not yet on the GPU that
+		// fill in under the level's missing ones.
+		const fine = finer ? sliceIndex(finer, current) : 0;
+		const fillers = finer ? underMissing(finer, top, current).filter((key) => images.peek(tileId(key)) && !renderer!.hasImage(key, fine)) : [];
+		renderer.reserve(wanted.length + fillers.length, 4 * MAX_LABEL_TILES);
+		for (const key of wanted) loadImage(key, slices[key.level]!);
+		const layers: { level: Level; slice: number; tiles: TileKey[] }[] = [];
+		for (let i = levels.length - 1; i > chosen.index; i--) {
+			layers.push({ level: levels[i]!, slice: slices[i]!, tiles: visibleTiles(levels[i]!, current, 0) });
 		}
-		const layers = (coarsest === chosen ? [chosen] : [coarsest, chosen]).map((level) => ({
-			level,
-			slice: sliceIndex(level, current),
-			tiles: visibleTiles(level, current),
-		}));
-		const imageIds = new Set(layers.flatMap(({ tiles }) => tiles.map(tileId)));
-		// Tiles just outside the view load ahead but may be evicted.
-		const shownIds = new Set(
-			layers.flatMap(({ level }) => visibleTiles(level, current, 0).map(tileId)),
-		);
-		images.want(plane.name, imageIds, shownIds);
-		renderer.reserve(imageIds.size, 4 * MAX_LABEL_TILES);
-		for (const { slice, tiles } of layers) {
-			for (const key of tiles) loadImage(key, slice);
-		}
+		// Zooming out, what the finer level already has fills in until the
+		// chosen level's chunks arrive.
+		const filling = finer ? { level: finer, slice: slices[finer.index]!, tiles: stopgaps(finer, top, current) } : null;
+		if (filling && filling.tiles.length > 0) layers.push(filling);
+		layers.push(top);
 
 		const full = levels[0]!;
-		const fullTiles = visibleTiles(full, current, 0);
-		const at = sliceIndex(full, current);
+		const at = slices[0]!;
 		// Only layers that exist and are shown get hidden when zoomed out.
 		const overlaid = !!(
 			(viewer.showLabels && labels) ||
 			(viewer.showPrediction && (prediction || proposal)) ||
 			(viewer.showSegmentation && segmentation)
 		);
-		labelsHidden = overlaid && fullTiles.length > MAX_LABEL_TILES;
+		const needed = countTiles(full, current);
+		labelsHidden = overlaid && needed > (labelsHidden ? MAX_LABEL_TILES / OVERLAY_HYSTERESIS : MAX_LABEL_TILES);
+		const fullTiles = labelsHidden ? [] : visibleTiles(full, current, 0);
 		const overlays: Overlay[] = [];
 		/** Draw a layer's chunks in view (or just `keys`), leaving out `hole`. */
 		const add = (
@@ -271,9 +293,9 @@
 			{ keys = fullTiles, hole }: { keys?: TileKey[]; hole?: Rect } = {},
 		) => {
 			if (!store) return;
-			if (!shown || labelsHidden) return store.want(plane.name, new Set());
+			if (!shown || keys.length === 0) return store.want(plane.name, []);
 			const tiles = keys.map((key) => ({ id: `${key.cz}/${key.cy}/${key.cx}`, key }));
-			store.want(plane.name, new Set(tiles.map((t) => t.id)));
+			store.want(plane.name, tiles.map((t) => t.id));
 			for (const tile of tiles) loadOverlay(store, prefix, tile, at);
 			overlays.push({ slice: at, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity, hole });
 		};
@@ -284,8 +306,42 @@
 			keys: inlay ? fullTiles.filter((key) => tileCrosses(key, plane, inlay)) : [],
 		});
 		add(segmentation, "segmentation/", viewer.showSegmentation, viewer.segmentationOpacity);
-		add(labels?.store, "", viewer.showLabels, viewer.opacity);
+		// Zoomed out past the limit, this page's latest edits still show, so a
+		// stroke doesn't vanish as it's finished.
+		const edited = labelsHidden && labels ? tilesShown(labels.recent.map(labelTile), full, current).slice(0, MAX_LABEL_TILES) : fullTiles;
+		add(labels?.store, "", viewer.showLabels, viewer.opacity, { keys: edited });
 		renderer.draw(current, viewer.window, layers, overlays);
+	}
+
+	/** The level-0 chunk key of a label chunk id (`cz/cy/cx`). */
+	function labelTile(id: string): TileKey {
+		const [cz = 0, cy = 0, cx = 0] = id.split("/").map(Number);
+		return { level: 0, cz, cy, cx };
+	}
+
+	/**
+	 * The chunks of `finer` the view shows under the chosen level's chunks
+	 * that can't be drawn this frame (not on the GPU, and not loaded to put
+	 * there).
+	 */
+	function underMissing(finer: Level, top: { level: Level; slice: number; tiles: TileKey[] }, current: View): TileKey[] {
+		const missing = new Set(top.tiles.filter((key) => !renderer!.hasImage(key, top.slice) && !images.peek(tileId(key))).map(tileId));
+		return missing.size === 0 ? [] : tilesUnder(finer, top.level, missing, current);
+	}
+
+	/**
+	 * Chunks of `finer` already at hand (on the GPU, or loaded) where the
+	 * chosen level's chunks haven't arrived, to draw under them meanwhile.
+	 */
+	function stopgaps(finer: Level, top: { level: Level; slice: number; tiles: TileKey[] }, current: View): TileKey[] {
+		if (!renderer) return [];
+		const at = sliceIndex(finer, current);
+		return underMissing(finer, top, current).filter((key) => {
+			if (renderer!.hasImage(key, at)) return true;
+			const cached = images.peek(tileId(key));
+			if (cached) renderer!.uploadImage(key, at, cached);
+			return !!cached;
+		});
 	}
 
 	function loadImage(key: TileKey, at: number) {
@@ -298,6 +354,7 @@
 		images
 			.request(id)
 			.then((chunk) => {
+				loadError = "";
 				if (!renderer || renderer.hasImage(key, at)) return;
 				if (sliceIndex(levels[key.level]!, view()) !== at) return schedule();
 				renderer.uploadImage(key, at, chunk);
@@ -730,9 +787,10 @@
 	<div class="caption">
 		{plane.name.toUpperCase()} · {AXIS_NAMES[plane.normal]}
 		{slice}
+		{#if labels && !viewer.showLabels}<span class="warn">· labels hidden (V)</span>{/if}
 		{#if labelsHidden}<span class="muted">· zoom in to see labels</span>{/if}
 	</div>
-	{#if error}<p class="error" role="alert">{error}</p>{/if}
+	{#if error || loadError}<p class="error" role="alert">{error || loadError}</p>{/if}
 </div>
 
 <style>
@@ -856,6 +914,9 @@
 	}
 	.caption .muted {
 		color: #a8a8a8;
+	}
+	.caption .warn {
+		color: var(--color-warn);
 	}
 	.error {
 		position: absolute;
