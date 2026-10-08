@@ -30,6 +30,7 @@ from .auth.sessions import cookie_name
 from .auth.tokens import csrf_token, tokens_match
 from .db import create_engine, create_sessionmaker
 from .jobs import JobSignal
+from .label_pyramid import LabelPyramid
 from .settings import Settings
 from .storage import project_storage
 from .viewer import (
@@ -138,6 +139,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/api/openapi.json",
     )
     app.state.settings = settings
+    app.state.label_pyramid = LabelPyramid(settings.label_cache_mb * 1024 * 1024)
 
     @app.middleware("http")
     async def csrf_protection(request: Request, call_next) -> Response:

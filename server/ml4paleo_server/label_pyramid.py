@@ -1,0 +1,427 @@
+"""
+The coarse levels of a project's labels, made for viewers as they ask.
+
+A viewer zoomed out far enough to see the whole volume can't fetch every
+full-resolution label chunk, so the label zarr also offers `class_1`,
+`class_2`, ... : the labels at the image's pyramid levels 1, 2, ... (`class` is
+level 0). They have the image's level shapes, and a voxel at level k covers the
+same block of the volume as the image's voxel there. Chunks stay 64-cubed.
+
+These levels exist only to be looked at. Nothing stores them, edits never
+touch them, and training, exports, accepts, and segmentation read the full
+resolution labels. How a level shrinks the one below it (`downsample_labels`)
+is in `ml4paleo.labels.pyramid`.
+
+A chunk of level k is made from the chunks of level k - 1 under it (level 1,
+from the full resolution chunks), when someone asks for it:
+
+- What it was made from is known without reading any pixels. A level-k chunk
+  covers a box of full-resolution chunks (`footprint`), and every edit of one
+  of those chunks (an undo or redo too) raises its version. So the sum of the
+  versions of the chunks in the box says exactly which state of the labels the
+  chunk shows: it goes up whenever anything in the box changes. One query on
+  the label chunk rows gives it, with how many of the chunks have labels. The
+  sum is the chunk's `X-Chunk-Version`, and its `ETag` has it too, so a
+  viewer's revalidation costs one query. A chunk with no labeled chunk under
+  it is simply missing (unlabeled), as at level 0.
+- A computed chunk is kept, as the bytes a viewer gets, in a cache that holds
+  the most recently used ones under a memory limit. Its key includes that sum,
+  so an edit leaves the stale copy behind rather than finding it. An edit
+  therefore costs recomputing the chunk above it at each level, each from one
+  new chunk and seven cached ones, and an untouched chunk is never recomputed.
+- Nothing is cached below level 1, so the first request for a chunk high in
+  the pyramid has to build everything under it, which can mean reading every
+  labeled chunk below. One request works on that for about a second and a half,
+  or until it has read 512 stored chunks (`seconds`, `blobs`), and always
+  finishes the chunk it is on. Then it gives up with `Busy`, having cached what
+  it made. The viewer asks again and carries on from there, so no request holds
+  the server for long however big the volume, and each is cheap once the levels
+  below it are cached.
+
+Each process has its own cache.
+"""
+
+import asyncio
+import functools
+import logging
+import time
+import uuid
+from collections import OrderedDict
+from collections.abc import Hashable, Mapping, Sequence
+from dataclasses import dataclass
+
+import numpy as np
+import obstore
+from sqlalchemy import Integer, and_, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
+
+from ml4paleo.labels import LABEL_CHUNK_ZYX
+from ml4paleo.labels.codec import blob_key, decode_chunk, encode_chunk
+from ml4paleo.labels.pyramid import downsample_labels
+from ml4paleo.ome import DEFAULT_CHUNK_ZYX, LevelSpec, plan_levels
+
+from .db import LabelChunk
+
+log = logging.getLogger(__name__)
+
+ChunkKey = tuple[int, int, int]
+Box = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
+
+# Bump when `downsample_labels` changes what it makes, so viewers drop the
+# chunks they kept.
+RULE_VERSION = 1
+# Memory for cached chunks, in each API process.
+CACHE_BYTES = 64 * 1024 * 1024
+# How long one request works on a chunk, and how many stored chunks it reads,
+# before it gives up and asks the viewer to come back. Shrinking a chunk takes
+# from under a millisecond (a few classes in big regions) to 5 ms (many classes,
+# mixed everywhere), so a request makes some hundreds.
+SECONDS = 1.5
+BLOBS = 512
+# Chunks being computed at once, in each process.
+COMPUTE_SLOTS = 2
+# What a cached chunk costs besides its bytes (its key, and the cache's).
+ENTRY_OVERHEAD = 256
+
+
+class Busy(Exception):
+    """
+    The chunk takes more work than one request does. What was done is kept:
+    ask again.
+    """
+
+
+class MissingBlob(Exception):
+    """
+    A label chunk the database lists isn't in storage.
+    """
+
+
+@dataclass(frozen=True)
+class Fingerprint:
+    """
+    Which state of the labels a chunk shows: how many full-resolution chunks
+    under it have labels, and the sum of the versions of all the chunks under
+    it, erased ones too (which only goes up).
+    """
+
+    count: int
+    versions: int
+
+    def etag(self, level: LevelSpec) -> str:
+        z, y, x = level.factor_zyx
+        return f'"p{RULE_VERSION}.{z}.{y}.{x}.{self.versions}"'
+
+
+def array_name(level: int) -> str:
+    """
+    The label zarr's array for a level of the pyramid.
+    """
+    return "class" if level == 0 else f"class_{level}"
+
+
+def levels_of(manifest: Mapping) -> list[LevelSpec]:
+    """
+    The levels of a project's labels, which are its image's. Images don't
+    record them, but a pyramid follows from the shape and voxel size, so
+    this plans it as ingest did. If the image has a different number of levels
+    than that plan, it was made some other way, and only level 0 is offered.
+    """
+    z, y, x = manifest["shape_czyx"][1:]
+    try:
+        levels = plan_levels(
+            (z, y, x), manifest.get("voxel_size_zyx"), DEFAULT_CHUNK_ZYX
+        )
+    except (TypeError, ValueError) as exc:
+        _warn(f"An image's levels can't be planned: {exc}")
+        return [LevelSpec("0", (z, y, x), (1, 1, 1))]
+    declared = manifest.get("levels")
+    if isinstance(declared, int) and declared != len(levels):
+        _warn(f"An image has {declared} levels, not the {len(levels)} planned")
+        return levels[:1]
+    return levels
+
+
+@functools.cache
+def _warn(message: str) -> None:
+    # Once per message: this runs for every request.
+    log.warning(message)
+
+
+def grid(level: LevelSpec) -> ChunkKey:
+    """
+    How many chunks a level has along each axis.
+    """
+    z, y, x = (
+        -(-n // c) for n, c in zip(level.shape_zyx, LABEL_CHUNK_ZYX, strict=True)
+    )
+    return (z, y, x)
+
+
+def footprint(level: LevelSpec, key: ChunkKey) -> Box:
+    """
+    The full-resolution chunks under a chunk of `level`, as half-open ranges
+    of chunk positions. A chunk covers 64 voxels of its level along each axis,
+    which are 64 times the level's factor full-resolution voxels.
+    """
+    z, y, x = ((c * f, (c + 1) * f) for c, f in zip(key, level.factor_zyx, strict=True))
+    return (z, y, x)
+
+
+def _step(levels: Sequence[LevelSpec], level: int) -> ChunkKey:
+    """
+    How many voxels of `level - 1` make one voxel of `level`, along each axis.
+    """
+    below = levels[level - 1].factor_zyx
+    z, y, x = (a // b for a, b in zip(levels[level].factor_zyx, below, strict=True))
+    return (z, y, x)
+
+
+def _within(project_id: uuid.UUID, box: Box):
+    (z0, z1), (y0, y1), (x0, x1) = box
+    return and_(
+        LabelChunk.project_id == project_id,
+        LabelChunk.cz >= z0,
+        LabelChunk.cz < z1,
+        LabelChunk.cy >= y0,
+        LabelChunk.cy < y1,
+        LabelChunk.cx >= x0,
+        LabelChunk.cx < x1,
+    )
+
+
+# Chunks that have labels, and the versions of every chunk in the box.
+_COUNT = func.count(LabelChunk.class_sha)
+_VERSIONS = func.coalesce(func.sum(LabelChunk.version), 0)
+
+
+async def fingerprint(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    levels: Sequence[LevelSpec],
+    level: int,
+    key: ChunkKey,
+) -> Fingerprint:
+    """
+    Which state of the labels a chunk of `level` shows (one query).
+    """
+    box = footprint(levels[level], key)
+    row = (
+        await db.execute(select(_COUNT, _VERSIONS).where(_within(project_id, box)))
+    ).one()
+    return Fingerprint(count=int(row[0]), versions=int(row[1]))
+
+
+async def _children(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    levels: Sequence[LevelSpec],
+    level: int,
+    key: ChunkKey,
+) -> dict[ChunkKey, Fingerprint]:
+    """
+    The chunks of `level - 1` under a chunk of `level` that have labels, and
+    their fingerprints, in one query (grouping the full-resolution chunks by
+    the chunk of `level - 1` they are in).
+    """
+    fz, fy, fx = levels[level - 1].factor_zyx
+    gz = LabelChunk.cz.op("/", return_type=Integer)(fz).label("gz")
+    gy = LabelChunk.cy.op("/", return_type=Integer)(fy).label("gy")
+    gx = LabelChunk.cx.op("/", return_type=Integer)(fx).label("gx")
+    rows = await db.execute(
+        select(gz, gy, gx, _COUNT, _VERSIONS)
+        .where(_within(project_id, footprint(levels[level], key)))
+        .group_by("gz", "gy", "gx")
+    )
+    return {
+        (z, y, x): Fingerprint(count=int(count), versions=int(versions))
+        for z, y, x, count, versions in rows
+        if count
+    }
+
+
+async def _leaves(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    levels: Sequence[LevelSpec],
+    key: ChunkKey,
+) -> list[tuple[ChunkKey, str]]:
+    """
+    The full-resolution chunks with labels under a chunk of level 1, and their
+    blobs.
+    """
+    rows = await db.execute(
+        select(LabelChunk.cz, LabelChunk.cy, LabelChunk.cx, LabelChunk.class_sha)
+        .where(
+            _within(project_id, footprint(levels[1], key)),
+            LabelChunk.class_sha.is_not(None),
+        )
+        .order_by(LabelChunk.cz, LabelChunk.cy, LabelChunk.cx)
+    )
+    return [((z, y, x), sha) for z, y, x, sha in rows if sha is not None]
+
+
+async def _read(store, sha: str) -> bytes:
+    try:
+        result = await obstore.get_async(store, blob_key(sha))
+    except FileNotFoundError:
+        raise MissingBlob(sha) from None
+    return bytes(await result.bytes_async())
+
+
+def _combine(parts: Sequence[tuple[ChunkKey, bytes]], step: ChunkKey) -> bytes | None:
+    """
+    Make the chunk covering `parts`, which are chunks (as stored) at the given
+    positions among the `step` chunks along each axis that it covers.
+    """
+    made = np.zeros(LABEL_CHUNK_ZYX, dtype=np.uint8)
+    size = [n // s for n, s in zip(LABEL_CHUNK_ZYX, step, strict=True)]
+    for position, data in parts:
+        start = [p * n for p, n in zip(position, size, strict=True)]
+        place = tuple(slice(a, a + n) for a, n in zip(start, size, strict=True))
+        made[place] = downsample_labels(decode_chunk(data), step)
+    return encode_chunk(made) if made.any() else None
+
+
+class _Cache:
+    """
+    Byte strings under a memory limit, least recently used first to go.
+    """
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.size = 0
+        self._items = OrderedDict[Hashable, bytes]()
+
+    def get(self, key: Hashable) -> bytes | None:
+        data = self._items.get(key)
+        if data is not None:
+            self._items.move_to_end(key)
+        return data
+
+    def put(self, key: Hashable, data: bytes) -> None:
+        cost = len(data) + ENTRY_OVERHEAD
+        if cost > self.limit:
+            return
+        if (old := self._items.pop(key, None)) is not None:
+            self.size -= len(old) + ENTRY_OVERHEAD
+        self._items[key] = data
+        self.size += cost
+        while self.size > self.limit:
+            _, evicted = self._items.popitem(last=False)
+            self.size -= len(evicted) + ENTRY_OVERHEAD
+
+
+class _Budget:
+    """
+    How long a request may keep working, and how many stored chunks it may
+    read, checked as it goes from chunk to chunk. The first chunk is always
+    done, so every request gets somewhere.
+    """
+
+    def __init__(self, seconds: float, blobs: int):
+        self.deadline = time.monotonic() + seconds
+        self.blobs = blobs
+        self.started = False
+
+    def spend(self, blobs: int = 0) -> None:
+        self.blobs -= blobs
+        if self.started and (self.blobs < 0 or time.monotonic() > self.deadline):
+            raise Busy
+        self.started = True
+
+
+class LabelPyramid:
+    """
+    Computes, and keeps, chunks of a project's coarse label levels. Use one
+    per process, from one event loop.
+    """
+
+    def __init__(
+        self,
+        cache_bytes: int = CACHE_BYTES,
+        seconds: float = SECONDS,
+        blobs: int = BLOBS,
+    ):
+        self.seconds = seconds
+        self.blobs = blobs
+        self._cache = _Cache(cache_bytes)
+        self._slots = asyncio.Semaphore(COMPUTE_SLOTS)
+
+    async def chunk(
+        self,
+        db: AsyncSession,
+        store,
+        project_id: uuid.UUID,
+        levels: Sequence[LevelSpec],
+        level: int,
+        key: ChunkKey,
+        state: Fingerprint,
+    ) -> bytes | None:
+        """
+        A chunk of `level` (1 or more), as zarr chunk bytes; None if nothing
+        under it has labels. `state` says which state to compute, from
+        `fingerprint`. Raises `Busy` if that takes more than the budget. The
+        session's connection is given back, as storage and computing are slow.
+        """
+        return await self._build(
+            db,
+            store,
+            project_id,
+            levels,
+            level,
+            key,
+            state,
+            _Budget(self.seconds, self.blobs),
+        )
+
+    async def _build(
+        self,
+        db: AsyncSession,
+        store,
+        project_id: uuid.UUID,
+        levels: Sequence[LevelSpec],
+        level: int,
+        key: ChunkKey,
+        state: Fingerprint,
+        budget: _Budget,
+    ) -> bytes | None:
+        cached = (project_id, level, key, levels[level].factor_zyx, state)
+        if (data := self._cache.get(cached)) is not None:
+            return data
+        step = _step(levels, level)
+        origin = (key[0] * step[0], key[1] * step[1], key[2] * step[2])
+        parts: list[tuple[ChunkKey, bytes]] = []
+        if level == 1:
+            leaves = await _leaves(db, project_id, levels, key)
+            budget.spend(len(leaves))
+            await db.rollback()
+            blobs = await asyncio.gather(*(_read(store, sha) for _, sha in leaves))
+            parts = [
+                (_position(at, origin), blob)
+                for (at, _), blob in zip(leaves, blobs, strict=True)
+            ]
+        else:
+            below = await _children(db, project_id, levels, level, key)
+            for child, child_state in sorted(below.items()):
+                made = await self._build(
+                    db, store, project_id, levels, level - 1, child, child_state, budget
+                )
+                if made is not None:
+                    parts.append((_position(child, origin), made))
+            budget.spend()
+            await db.rollback()
+        async with self._slots:
+            data = await run_in_threadpool(_combine, parts, step)
+        if data is not None:
+            self._cache.put(cached, data)
+        return data
+
+
+def _position(key: ChunkKey, origin: ChunkKey) -> ChunkKey:
+    """
+    Where a chunk is among the ones under a chunk starting at `origin`.
+    """
+    z, y, x = (k - o for k, o in zip(key, origin, strict=True))
+    return (z, y, x)
