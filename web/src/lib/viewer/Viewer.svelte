@@ -36,7 +36,7 @@
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
 	import { acceptParts, MAX_ACCEPT_VOXELS, readBox } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
-	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
+	import { indexedDbStorage, OpQueue, type QueuedEdit, saveState } from "../labels/opqueue.svelte";
 	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
 	import type { PlaneMask } from "../labels/raster";
 	import {
@@ -670,13 +670,13 @@
 	}
 
 	const status = $derived(
-		queue.error
-			? queue.error
-			: queue.offline
-				? `Offline · ${queue.pending} waiting`
-				: queue.pending > 0
-					? `Saving ${queue.pending}`
-					: "Saved",
+		{
+			offline: `Offline · ${queue.pending} waiting`,
+			retrying: `Can't save right now · ${queue.pending} waiting`,
+			error: queue.error,
+			saving: `Saving ${queue.pending}`,
+			saved: "Saved",
+		}[saveState(queue)],
 	);
 
 	function keyUp(event: KeyboardEvent) {
@@ -928,7 +928,7 @@
 	const zoomPercent = $derived(Math.round((viewer.zoom / (globalThis.devicePixelRatio || 1)) * 100));
 	const [, imageZ, imageY, imageX] = manifest.shape_czyx;
 	const histogram = manifest.histogram && !Array.isArray(manifest.histogram) ? manifest.histogram : null;
-	const saveState = $derived(queue.error ? "error" : queue.offline ? "offline" : queue.pending > 0 ? "saving" : "saved");
+	const chip = $derived(saveState(queue));
 
 	const hint = $derived(
 		{
@@ -1342,8 +1342,8 @@
 			<span class="text-axis-z">z</span>{Math.floor(viewer.position[0])}
 		</span>
 		<span class="hidden sm:inline">{LAYOUT_NAMES[viewer.layout]}</span>
-		<span class="ml-auto flex items-center gap-1.5 font-sans {saveState === 'error' ? 'text-danger' : saveState === 'offline' ? 'text-warn' : ''}" role="status">
-			{#if saveState === "saved"}<Check size={12} class="text-ok" />{:else if saveState === "saving"}<LoaderCircle size={12} class="animate-spin" />{:else}<CloudOff size={12} />{/if}
+		<span class="ml-auto flex items-center gap-1.5 font-sans {chip === 'error' ? 'text-danger' : chip === 'offline' || chip === 'retrying' ? 'text-warn' : ''}" role="status">
+			{#if chip === "saved"}<Check size={12} class="text-ok" />{:else if chip === "saving"}<LoaderCircle size={12} class="animate-spin" />{:else}<CloudOff size={12} />{/if}
 			{status}
 		</span>
 	</footer>
