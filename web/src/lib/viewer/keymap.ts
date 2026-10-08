@@ -3,6 +3,8 @@
  * help overlay (`?`). `mod` is Ctrl, or ⌘ on a Mac.
  */
 
+import { SHOW_ROIS } from "../features";
+
 export type Action =
 	| "slice-next"
 	| "slice-previous"
@@ -36,7 +38,9 @@ export interface Binding {
 	label: string;
 }
 
-export const KEYMAP: Binding[] = [
+const ROI_ACTIONS = new Set<Action>(["roi", "next-roi", "complete-roi", "accept"]);
+
+const ALL_KEYS: Binding[] = [
 	// With Shift, "." and "," arrive as ">" and "<" (on US keyboards).
 	{ action: "slice-next", keys: [".", ">", "ArrowUp"], label: "Next slice (with Shift: 10)" },
 	{ action: "slice-previous", keys: [",", "<", "ArrowDown"], label: "Previous slice (with Shift: 10)" },
@@ -56,7 +60,7 @@ export const KEYMAP: Binding[] = [
 	{ action: "accept", keys: ["a"], label: "Accept the prediction in the selected ROI as labels" },
 	{ action: "smaller", keys: ["["], label: "Smaller brush" },
 	{ action: "bigger", keys: ["]"], label: "Bigger brush" },
-	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class" },
+	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class (1 is Background)" },
 	{ action: "close-polygon", keys: ["Enter"], label: "Close the polygon (with Alt: cut it out of the class; with Shift: fill it)" },
 	{ action: "remove-point", keys: ["Backspace"], label: "Remove the polygon's last point" },
 	{ action: "cancel", keys: ["Escape"], label: "Drop the polygon, then go back to navigating" },
@@ -65,8 +69,11 @@ export const KEYMAP: Binding[] = [
 	{ action: "help", keys: ["?"], label: "Show or hide these keys (Esc closes)" },
 ];
 
+/** The keys the viewer answers: ROIs' only while ROIs are shown. */
+export const KEYMAP: Binding[] = ALL_KEYS.filter((binding) => SHOW_ROIS || !ROI_ACTIONS.has(binding.action));
+
 /** What the mouse does, for the help overlay. */
-export const MOUSE: [string, string][] = [
+const ALL_MOUSE: [string, string][] = [
 	["Wheel", "Next or previous slice"],
 	["Ctrl + wheel, or pinch", "Zoom"],
 	["Drag (navigating), middle drag, or Space + drag", "Pan"],
@@ -79,6 +86,8 @@ export const MOUSE: [string, string][] = [
 	["Alt or Shift while closing (polygon)", "Cut out of the active class, or fill, whatever the mode"],
 	["Drag (ROI)", "Draw an ROI on this slice"],
 ];
+
+export const MOUSE = ALL_MOUSE.filter(([what]) => SHOW_ROIS || !what.includes("ROI"));
 
 const MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 

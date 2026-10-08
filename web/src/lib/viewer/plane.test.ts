@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { levelFactors } from "./image";
-import { PlaneRenderer, paletteBytes, planeSlice, TextureCache } from "./plane";
+import { BACKGROUND_ALPHA } from "./background";
+import { PlaneRenderer, paletteBytes, paletteRows, planeSlice, TextureCache } from "./plane";
 import { PLANES, type TileKey } from "./tiles";
 
 describe("planeSlice", () => {
@@ -41,6 +42,20 @@ describe("paletteBytes", () => {
 		expect(Array.from(bytes.slice(8, 12))).toEqual([255, 128, 0, 255]);
 		expect(Array.from(bytes.slice(0, 4))).toEqual([0, 0, 0, 0]);
 		expect(Array.from(bytes.slice(12, 16))).toEqual([0, 0, 0, 0]);
+	});
+});
+
+describe("paletteRows", () => {
+	it("shows painted background as a haze in the labels' row only", () => {
+		const bytes = paletteRows(new Map([[2, "#ff8000"]]));
+		expect(bytes.length).toBe(256 * 4 * 2);
+		// Classes look the same in both rows; background is clear in the first and a haze in the second.
+		expect(Array.from(bytes.slice(8, 12))).toEqual([255, 128, 0, 255]);
+		expect(Array.from(bytes.slice(1024 + 8, 1024 + 12))).toEqual([255, 128, 0, 255]);
+		expect(Array.from(bytes.slice(4, 8))).toEqual([0, 0, 0, 0]);
+		const [r, g, b, a] = bytes.slice(1024 + 4, 1024 + 8);
+		expect(a).toBe(BACKGROUND_ALPHA);
+		expect([r, g, b]).toEqual([0x7c, 0x8a, 0xa5]);
 	});
 });
 

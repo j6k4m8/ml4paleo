@@ -4,7 +4,8 @@
 	import { PlaneMask } from "../labels/raster";
 	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
-	import type { ChunkStore } from "./chunks";
+	import { withBackground } from "./background";
+import type { ChunkStore } from "./chunks";
 	import { isRightClick } from "./keymap";
 	import type { LabelLayer } from "./labels";
 	import { type LabelTile, type Overlay, PlaneRenderer } from "./plane";
@@ -290,14 +291,14 @@
 			prefix: string,
 			shown: boolean,
 			opacity: number,
-			{ keys = fullTiles, hole }: { keys?: TileKey[]; hole?: Rect } = {},
+			{ keys = fullTiles, hole, background }: { keys?: TileKey[]; hole?: Rect; background?: boolean } = {},
 		) => {
 			if (!store) return;
 			if (!shown || keys.length === 0) return store.want(plane.name, []);
 			const tiles = keys.map((key) => ({ id: `${key.cz}/${key.cy}/${key.cx}`, key }));
 			store.want(plane.name, tiles.map((t) => t.id));
 			for (const tile of tiles) loadOverlay(store, prefix, tile, at);
-			overlays.push({ slice: at, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity, hole });
+			overlays.push({ slice: at, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity, hole, background });
 		};
 		// A proposal shows in its box, in place of the prediction there.
 		const inlay = proposal ? boxOnPlane(proposal.box, plane, at) : null;
@@ -309,7 +310,7 @@
 		// Zoomed out past the limit, this page's latest edits still show, so a
 		// stroke doesn't vanish as it's finished.
 		const edited = labelsHidden && labels ? tilesShown(labels.recent.map(labelTile), full, current).slice(0, MAX_LABEL_TILES) : fullTiles;
-		add(labels?.store, "", viewer.showLabels, viewer.opacity, { keys: edited });
+		add(labels?.store, "", viewer.showLabels, viewer.opacity, { keys: edited, background: true });
 		renderer.draw(current, viewer.window, layers, overlays);
 	}
 
@@ -615,7 +616,7 @@
 	const activeColor = $derived(
 		viewer.tool === "eraser"
 			? "#ffffff"
-			: (labels?.classes.find((c) => c.value === viewer.activeClass)?.color ?? "#ffffff"),
+			: (withBackground(labels?.classes ?? []).find((c) => c.value === viewer.activeClass)?.color ?? "#ffffff"),
 	);
 
 	function clearStroke() {

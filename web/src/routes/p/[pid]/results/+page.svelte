@@ -283,8 +283,7 @@
 		<h2 class="panel-title">Final segmentation</h2>
 		<div class="flex flex-col gap-3 p-3">
 			<p class="text-ink-dim">
-				The prediction with your labels on top (unlabeled voxels in complete ROIs count as background), and specks of each
-				class removed unless someone labeled part of them.
+				The prediction with your labels on top, and specks of each class removed unless someone labeled part of them.
 			</p>
 			{#if segmentation}
 				<div class="flex items-start gap-2 rounded-sm border border-edge bg-field p-2">
