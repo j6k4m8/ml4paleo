@@ -3,17 +3,18 @@ import { api } from "#lib/api.ts";
 import { base64, packBits, zstdFrame } from "../labels/deltas";
 import type { Chunk } from "./chunks";
 import { LabelLayer, strictOn } from "./labels";
-import type { WorkerPool } from "./loader";
+import { LoadError, type WorkerPool } from "./loader";
 
 /**
  * A worker pool whose label chunks come from a map the test controls. With
  * `held`, loads answer from the map as it is when they start but arrive
- * only when the test calls `release`. The next `failures.left` loads fail.
+ * only when the test calls `release`. The next `failures.left` loads fail,
+ * as if the server answered with `failures.status`, or the network failed.
  */
 function fakePool(server: Map<string, { value: number; version?: number }>, held = false) {
 	const loads: string[] = [];
 	const waiting: (() => void)[] = [];
-	const failures = { left: 0 };
+	const failures: { left: number; status?: number } = { left: 0 };
 	const pool = {
 		load: async (request: { region: [number, number][] }): Promise<Chunk> => {
 			const id = request.region.map(([start]) => start / 64).join("/");
@@ -22,7 +23,7 @@ function fakePool(server: Map<string, { value: number; version?: number }>, held
 			if (held) await new Promise<void>((resolve) => waiting.push(resolve));
 			if (failures.left > 0) {
 				failures.left -= 1;
-				throw new Error("offline");
+				throw failures.status === undefined ? new Error("offline") : new LoadError("failed", failures.status);
 			}
 			return { data: new Uint8Array(8).fill(value), shape: [2, 2, 2], version };
 		},
@@ -498,8 +499,11 @@ describe("LabelLayer", () => {
 			vi.useRealTimers();
 		});
 
-		/** A chunk loaded at version 1 whose reload, for someone's edit (2), fails `failures` times. */
-		const loadedWithFailures = async (failures: number, held = false) => {
+		/**
+		 * A chunk loaded at version 1 whose reload, for someone's edit (2),
+		 * fails `failures` times, with the HTTP `status` if there's one.
+		 */
+		const loadedWithFailures = async (failures: number, held = false, status?: number) => {
 			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 			const server = new Map([["0/0/0", { value: 1, version: 1 }]]);
 			const pool = fakePool(server, held);
@@ -509,10 +513,19 @@ describe("LabelLayer", () => {
 			await loading;
 			server.set("0/0/0", { value: 2, version: 2 });
 			pool.failures.left = failures;
+			pool.failures.status = status;
 			layer.changed([{ key: [0, 0, 0], version: 2 }]);
 			pool.release();
 			await settled();
-			return { layer, ...pool };
+			return { layer, server, ...pool };
+		};
+
+		/** Let `ms` pass, a little at a time, so the tries that come of it all run. */
+		const wait = async (ms: number) => {
+			for (let left = ms; left > 0; left -= 500) {
+				await vi.advanceTimersByTimeAsync(Math.min(500, left));
+				await settled();
+			}
 		};
 
 		it("leaves the copy shown, and is tried again", async () => {
@@ -594,6 +607,95 @@ describe("LabelLayer", () => {
 			await vi.advanceTimersByTimeAsync(60_000);
 			await settled();
 			expect(loads).toHaveLength(2);
+		});
+
+		it("isn't tried again when the server says you're signed out or not allowed", async () => {
+			for (const status of [401, 403]) {
+				const { loads } = await loadedWithFailures(1, false, status);
+				expect(vi.getTimerCount()).toBe(0);
+				await wait(60_000);
+				expect(loads).toHaveLength(2);
+				vi.useRealTimers();
+			}
+		});
+
+		it("isn't tried again for answers that a try won't change", async () => {
+			const { loads } = await loadedWithFailures(1, false, 400);
+			expect(vi.getTimerCount()).toBe(0);
+			await wait(60_000);
+			expect(loads).toHaveLength(2);
+		});
+
+		it("is tried again when the server is busy, or fails", async () => {
+			for (const status of [429, 503]) {
+				const { layer, loads } = await loadedWithFailures(1, false, status);
+				await wait(1000);
+				expect(loads).toHaveLength(3);
+				expect(first(layer, "0/0/0")).toBe(2);
+				vi.useRealTimers();
+			}
+		});
+
+		it("stops trying again after a server error eight times in a row", async () => {
+			const { loads, failures } = await loadedWithFailures(100, false, 500);
+			// The waits: 1, 2, 4, 8, 16, 30, 30 s, then no more.
+			await wait((1 + 2 + 4 + 8 + 16 + 30 + 30) * 1000 - 1);
+			expect(loads).toHaveLength(8);
+			await wait(1);
+			expect(loads).toHaveLength(9);
+			expect(failures.left).toBe(100 - 8);
+			expect(vi.getTimerCount()).toBe(0);
+			await wait(10 * 60_000);
+			expect(loads).toHaveLength(9);
+		});
+
+		it("goes on trying again while the network is down, far past the tries a server error gets", async () => {
+			const { layer, loads, failures } = await loadedWithFailures(40);
+			// Every 30 s once the waits have grown to that.
+			await wait(60 * 60_000);
+			expect(failures.left).toBe(0);
+			expect(loads).toHaveLength(1 + 40 + 1);
+			expect(first(layer, "0/0/0")).toBe(2);
+		});
+
+		it("stops trying again for good once live updates stop", async () => {
+			const sources: { readyState: number; onerror: (() => void) | null }[] = [];
+			vi.stubGlobal(
+				"EventSource",
+				class {
+					static CLOSED = 2;
+					readyState = 1;
+					onerror: (() => void) | null = null;
+					constructor() {
+						sources.push(this);
+					}
+					addEventListener() {}
+					close() {}
+				},
+			);
+			try {
+				vi.mocked(api).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+				const { layer, server, loads, failures } = await loadedWithFailures(1);
+				await layer.start();
+				let stopped = 0;
+				layer.onStopped = () => stopped++;
+				// The stream closes for good: signed out, or out of the project.
+				sources[0]!.readyState = 2;
+				sources[0]!.onerror?.();
+				expect(stopped).toBe(1);
+				expect(vi.getTimerCount()).toBe(0);
+				await wait(60_000);
+				expect(loads).toHaveLength(2);
+				// And a reload that fails now isn't tried again.
+				server.set("0/0/0", { value: 3, version: 3 });
+				failures.left = 1;
+				layer.changed([{ key: [0, 0, 0], version: 3 }]);
+				await settled();
+				expect(vi.getTimerCount()).toBe(0);
+			} finally {
+				vi.unstubAllGlobals();
+				vi.mocked(api).mockReset();
+			}
 		});
 
 		it("keeps what's shown through a failure that isn't followed by a retry", async () => {

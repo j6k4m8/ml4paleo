@@ -8,7 +8,7 @@ import { api } from "#lib/api.ts";
 import { applyLocally, type DeltaIn, decodeDelta } from "../labels/deltas";
 import { ChunkStore } from "./chunks";
 import { absolute } from "./image";
-import { labelLoader, type WorkerPool } from "./loader";
+import { LoadError, labelLoader, type WorkerPool } from "./loader";
 import type { Vec3 } from "./tiles";
 
 export interface LabelClass {
@@ -42,6 +42,21 @@ const RECENT = 256;
 // A reload that failed is tried again after this long, doubling each time up to the longest.
 const RETRY_MS = 1000;
 const RETRY_LONGEST_MS = 30_000;
+// Failing this many times in a row with a server error, a chunk isn't tried again.
+const SERVER_FAILURES = 8;
+
+/**
+ * Whether a reload that failed is worth trying again, `failures` failures in
+ * a row in. A network failure is: it ends when the network comes back. A
+ * server error is for a while. Being signed out or refused isn't, and
+ * neither is any other answer.
+ */
+function worthRetrying(error: unknown, failures: number): boolean {
+	const status = error instanceof LoadError ? error.status : undefined;
+	if (status === undefined) return true;
+	if (status >= 500 || status === 408 || status === 425 || status === 429) return failures < SERVER_FAILURES;
+	return false;
+}
 
 /**
  * An edit as it goes out. A strict one is refused if its chunks changed since
@@ -171,8 +186,13 @@ export class LabelLayer {
 		const [latest] = await api<{ seq: number }[]>(`${base}/ops?limit=1`);
 		this.#events = new EventSource(`${base}/events?after=${latest?.seq ?? 0}`);
 		this.#events.onerror = () => {
-			// The browser retries dropped streams itself; a closed one is final.
-			if (this.#events?.readyState === EventSource.CLOSED) this.onStopped?.();
+			// The browser retries dropped streams itself; a closed one is final,
+			// and what it means (signed out, or removed from the project) means
+			// reloads that fail won't work when tried again either.
+			if (this.#events?.readyState === EventSource.CLOSED) {
+				this.#stopRetrying();
+				this.onStopped?.();
+			}
 		};
 		this.#events.addEventListener("change", (event) => {
 			const change = JSON.parse((event as MessageEvent<string>).data) as { chunks: { key: Vec3; version: number }[] };
@@ -219,7 +239,7 @@ export class LabelLayer {
 					(error: unknown) => {
 						// A reload that failed leaves the copy shown, and is tried again.
 						if (!(error instanceof DOMException && error.name === "AbortError")) {
-							this.#retry(id, versions?.get(id));
+							this.#retry(id, versions?.get(id), error);
 							return;
 						}
 						// One stopped (no view wants the chunk now) took the out-of-date
@@ -238,12 +258,15 @@ export class LabelLayer {
 		this.#emit(dropped);
 	}
 
-	/** Load a chunk again after a failed reload, if the copy shown is still the out-of-date one. */
-	#retry(id: string, version: number | undefined): void {
+	/**
+	 * Load a chunk again after a failed reload (the `error`), if that's worth
+	 * doing and the copy shown is still the out-of-date one.
+	 */
+	#retry(id: string, version: number | undefined, error: unknown): void {
 		clearTimeout(this.#retries.get(id));
 		const stale = this.store.peek(id);
-		if (this.#stopped || !stale) return this.#giveUp(id);
 		const failures = (this.#failures.get(id) ?? 0) + 1;
+		if (this.#stopped || !stale || !worthRetrying(error, failures)) return this.#giveUp(id);
 		this.#failures.set(id, failures);
 		const timer = setTimeout(() => {
 			// A newer copy came since, or the chunk is loading again, or it's gone.
@@ -397,11 +420,15 @@ export class LabelLayer {
 		return () => this.#classListeners.delete(listener);
 	}
 
-	stop(): void {
+	#stopRetrying(): void {
 		this.#stopped = true;
 		for (const timer of this.#retries.values()) clearTimeout(timer);
 		this.#retries.clear();
 		this.#failures.clear();
+	}
+
+	stop(): void {
+		this.#stopRetrying();
 		this.#events?.close();
 		this.store.keepOnly(new Set());
 		this.#listeners.clear();

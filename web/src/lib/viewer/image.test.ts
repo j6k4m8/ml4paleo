@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as zarr from "zarrita";
-import { shardedFetch } from "./image";
+import { failure, httpStatus, shardedFetch } from "./image";
 
 /**
  * A 4 × 4 uint8 array in one shard of four 2 × 2 chunks (chunk k holds the
@@ -97,5 +97,38 @@ describe("shardedFetch", () => {
 		await expect(read).rejects.toThrow();
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(reads.filter((r) => r.includes("bytes=8-11"))).toHaveLength(0);
+	});
+});
+
+describe("httpStatus", () => {
+	/** What opening an array throws when the server answers with `status`. */
+	const opening = (status: number) =>
+		zarr
+			.open(zarr.root(new zarr.FetchStore("http://test/image/", { fetch: async () => new Response("no", { status, statusText: "No" }) })), { kind: "array" })
+			.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+
+	it("reads the status out of the error zarrita throws for an answer that isn't a chunk", async () => {
+		for (const status of [401, 403, 500, 503]) {
+			const error = await opening(status);
+			expect(error).toBeInstanceOf(Error);
+			expect(httpStatus(error)).toBe(status);
+		}
+	});
+
+	it("is passed on with the error, for the page to decide whether to try again", async () => {
+		const answered = failure(await opening(503));
+		expect(answered.status).toBe(503);
+		expect(answered.error).toContain("503");
+		expect(failure(new TypeError("Failed to fetch"))).toEqual({ error: "TypeError: Failed to fetch", status: undefined });
+	});
+
+	it("says nothing for failures that weren't an answer", () => {
+		expect(httpStatus(new TypeError("Failed to fetch"))).toBeUndefined();
+		expect(httpStatus(new DOMException("Aborted", "AbortError"))).toBeUndefined();
+		expect(httpStatus("a string")).toBeUndefined();
+		expect(httpStatus(undefined)).toBeUndefined();
 	});
 });

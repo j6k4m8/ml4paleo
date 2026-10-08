@@ -38,6 +38,23 @@ export function shardedFetch(
 	};
 }
 
+/**
+ * The HTTP status in the error zarrita throws for a response that is neither
+ * a chunk nor a missing one (404), if `error` is that.
+ */
+export function httpStatus(error: unknown): number | undefined {
+	const match = /Unexpected response status (\d{3})/.exec(error instanceof Error ? error.message : String(error));
+	return match ? Number(match[1]) : undefined;
+}
+
+/**
+ * What a decode worker tells the page about a read that failed: the error,
+ * and the HTTP status the server answered with, if it did.
+ */
+export function failure(error: unknown): { error: string; status?: number } {
+	return { error: String(error), status: httpStatus(error) };
+}
+
 /** Level-0 voxels per voxel of each level, from the levels' scales. */
 export function levelFactors(multiscales: Multiscales): [number, number, number][] {
 	const scales = multiscales.datasets.map((dataset) => {
