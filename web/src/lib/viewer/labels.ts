@@ -30,6 +30,7 @@ export class LabelLayer {
 	store: ChunkStore;
 	classes: LabelClass[] = [];
 	#listeners = new Set<(ids: string[]) => void>();
+	#classListeners = new Set<() => void>();
 	#events: EventSource | null = null;
 	// Edits sent but not yet confirmed, in order, by op: chunk id → delta.
 	#local = new Map<string, Map<string, LocalDelta>>();
@@ -168,9 +169,51 @@ export class LabelLayer {
 		return () => this.#listeners.delete(listener);
 	}
 
+	/**
+	 * Add a class to the project. It gets the next value never used, and the
+	 * views learn its color.
+	 */
+	async addClass(name: string, color: string): Promise<LabelClass> {
+		const made = await api<LabelClass>(`/api/projects/${this.projectId}/labels/classes`, { body: { name, color } });
+		// Along with whatever others added meanwhile; but the new one is ours either way.
+		await this.refreshClasses().catch(() => {});
+		if (!this.classes.some((c) => c.value === made.value)) {
+			// A new class's value is the highest ever used, so it goes last.
+			this.classes = [...this.classes, made];
+			this.#classesChanged();
+		}
+		return made;
+	}
+
+	/** Read the project's classes again, in case someone added some. Views hear of any change. */
+	async refreshClasses(): Promise<void> {
+		const found = await api<LabelClass[]>(`/api/projects/${this.projectId}/labels/classes`);
+		if (JSON.stringify(found) === JSON.stringify(this.classes)) return;
+		this.classes = found;
+		this.#classesChanged();
+	}
+
+	#classesChanged(): void {
+		for (const listener of this.#classListeners) {
+			// One view's trouble mustn't keep the rest from hearing.
+			try {
+				listener();
+			} catch (e) {
+				console.error(e);
+			}
+		}
+	}
+
+	/** Call `listener` when a class is added here (its color needs drawing). */
+	onClasses(listener: () => void): () => void {
+		this.#classListeners.add(listener);
+		return () => this.#classListeners.delete(listener);
+	}
+
 	stop(): void {
 		this.#events?.close();
 		this.store.keepOnly(new Set());
 		this.#listeners.clear();
+		this.#classListeners.clear();
 	}
 }
