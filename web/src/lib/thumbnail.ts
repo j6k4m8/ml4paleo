@@ -7,7 +7,7 @@
 
 import * as zarr from "zarrita";
 import { type Box, thinAxis } from "./rois.svelte";
-import { absolute } from "./viewer/image";
+import { absolute, shardedFetch } from "./viewer/image";
 import { paletteBytes } from "./viewer/plane";
 import { type Level, PLANES, type Plane } from "./viewer/tiles";
 import { useZstd } from "./viewer/zstd";
@@ -25,7 +25,7 @@ function openArray(url: string, path: string): Promise<OpenArray> {
 	const key = `${url}#${path}`;
 	let found = arrays.get(key);
 	if (!found) {
-		const store = new zarr.FetchStore(absolute(url), { useSuffixRequest: true });
+		const store = new zarr.FetchStore(absolute(url), { useSuffixRequest: true, fetch: shardedFetch() });
 		found = zarr.open.v3(zarr.root(store).resolve(path), { kind: "array" });
 		found.catch(() => arrays.delete(key));
 		arrays.set(key, found);
