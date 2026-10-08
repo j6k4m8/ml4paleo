@@ -3,10 +3,13 @@ The coarse levels of the label zarr: the image's pyramid for labels, made
 from the full-resolution labels when a viewer asks, for display only.
 """
 
+import asyncio
 import base64
 import pathlib
 import shutil
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
@@ -539,6 +542,130 @@ def test_a_chunk_too_big_for_one_request_comes_in_several(
         for key in np.ndindex(*(-(-n // 64) for n in levels[level].shape_zyx)):
             assert get(ada, project, level, key).status_code in (200, 404)
     assert reads == []
+
+
+class Spy:
+    """
+    What label chunks were read to make coarse ones, and how many were held at
+    once: read, but not yet combined. Reads take a little while, so requests
+    that start together overlap.
+    """
+
+    def __init__(self, monkeypatch, app, delay=0.2):
+        self.engine = app.state.engine.sync_engine
+        self.reads = self.combines = self.held = self.most_held = 0
+        self.connections = []
+        self._lock = threading.Lock()
+        real_read, real_combine = label_pyramid._read, label_pyramid._combine
+
+        async def read(store, sha):
+            await asyncio.sleep(delay)
+            data = await real_read(store, sha)
+            with self._lock:
+                self.reads += 1
+                self.held += 1
+                self.most_held = max(self.most_held, self.held)
+                # Connections the pool has lent out, which nobody should hold
+                # while waiting on storage.
+                self.connections.append(self.engine.pool.checkedout())
+            return data
+
+        def combine(parts, *args):
+            try:
+                return real_combine(parts, *args)
+            finally:
+                with self._lock:
+                    self.combines += 1
+                    self.held -= len(parts)
+
+        monkeypatch.setattr(label_pyramid, "_read", read)
+        monkeypatch.setattr(label_pyramid, "_combine", combine)
+
+
+def concurrently(count, function):
+    with ThreadPoolExecutor(count) as pool:
+        return list(pool.map(function, range(count)))
+
+
+def test_requests_for_one_cold_chunk_share_one_build(ada, project, monkeypatch):
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    # Eight labeled chunks under the chunk of level 1 that everyone asks for.
+    for z, y, x in np.ndindex(2, 2, 2):
+        volume[64 * z + 1, 64 * y + 1, 64 * x + 1] = 2
+    paint(ada, project, volume)
+    spy = Spy(monkeypatch, ada.client.app)
+    answers = concurrently(16, lambda _: get(ada, project, 1, (0, 0, 0)))
+    assert [a.status_code for a in answers] == [200] * 16
+    assert len({a.content for a in answers}) == 1
+    assert len({a.headers["etag"] for a in answers}) == 1
+    # One request built it, from its eight chunks, and the rest took the result.
+    assert (spy.reads, spy.combines, spy.most_held) == (8, 1, 8)
+    # Nobody held a database connection while waiting on storage or a build.
+    assert spy.connections == [0] * 8
+    expected = shrink(volume, plan_levels(SHAPE))[1]
+    np.testing.assert_array_equal(
+        decode_chunk(answers[0].content), expected_chunk(expected, (0, 0, 0))
+    )
+
+
+def test_a_waiting_request_gives_up_when_the_build_does(ada, project, monkeypatch):
+    paint(ada, project, messy_volume())
+    pyramid = ada.client.app.state.label_pyramid
+    pyramid.seconds = 0
+    Spy(monkeypatch, ada.client.app, delay=0.3)
+    top = len(plan_levels(SHAPE)) - 1
+    answers = concurrently(6, lambda _: get(ada, project, top, (0, 0, 0)))
+    # The one that built it ran out of time, and so did those who waited.
+    assert [a.status_code for a in answers] == [503] * 6
+    assert {a.headers["retry-after"] for a in answers} == {"1"}
+
+
+def test_builds_hold_only_what_their_slots_allow_and_a_long_queue_is_turned_away(
+    ada, project, monkeypatch
+):
+    levels = plan_levels(SHAPE)
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    for key in np.ndindex(3, 3, 5):
+        volume[tuple(64 * k + 1 for k in key)] = 2
+    paint(ada, project, volume)
+    spy = Spy(monkeypatch, ada.client.app)
+    keys = list(np.ndindex(*(-(-n // 64) for n in levels[1].shape_zyx)))
+    assert len(keys) == 12
+    answers = concurrently(12, lambda i: get(ada, project, 1, keys[i]))
+    busy = [a for a in answers if a.status_code == 503]
+    # Two build and eight wait; the last two come back another time.
+    assert len(busy) == 2
+    assert {a.headers["retry-after"] for a in busy} == {"1"}
+    assert [a.status_code for a in answers if a not in busy] == [200] * 10
+    # At most two chunks of level 1 were being read and made at once.
+    assert spy.most_held <= 2 * 8
+    for i, answer in enumerate(answers):
+        again = answer if answer.status_code == 200 else get(ada, project, 1, keys[i])
+        assert again.status_code == 200
+
+
+def test_a_gate_turns_away_what_would_wait_too_long():
+    async def scenario():
+        gate = label_pyramid._Gate(slots=1, queue=1)
+        order = []
+
+        async def work(name):
+            async with gate():
+                order.append(name)
+                await asyncio.sleep(0.05)
+
+        first = asyncio.create_task(work("first"))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(work("second"))
+        await asyncio.sleep(0)
+        with pytest.raises(label_pyramid.Busy):
+            await work("third")
+        await asyncio.gather(first, second)
+        # The slot is free again, and the queue empty.
+        await work("fourth")
+        assert order == ["first", "second", "fourth"]
+
+    asyncio.run(scenario())
 
 
 def test_coarse_chunks_of_other_projects_and_people_stay_apart(

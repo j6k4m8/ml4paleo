@@ -37,11 +37,19 @@ from the full resolution chunks), when someone asks for it:
   it made. The viewer asks again and carries on from there, so no request holds
   the server for long however big the volume, and each is cheap once the levels
   below it are cached.
+- Requests share the work, and the memory it takes is bounded. A chunk is
+  built by one request at a time: another that wants it waits for that build
+  (and gets `Busy` if it gives up). A chunk of level 1 is read and shrunk, or a
+  chunk of a higher level combined, only when one of a few slots is free, and a
+  request that would queue behind too many others gets `Busy` at once. The
+  slots are never held while waiting for another chunk, so they can't deadlock;
+  a request holds no database connection while it waits for one.
 
 Each process has its own cache.
 """
 
 import asyncio
+import contextlib
 import functools
 import logging
 import time
@@ -79,8 +87,13 @@ CACHE_BYTES = 64 * 1024 * 1024
 # mixed everywhere), so a request makes some hundreds.
 SECONDS = 1.5
 BLOBS = 512
-# Chunks being computed at once, in each process.
-COMPUTE_SLOTS = 2
+# Pieces of work (the chunks under a chunk of level 1 read and shrunk, or a
+# chunk of a higher level combined) running at once in each process, and how
+# many more may wait for a slot before a request is turned away.
+BUILD_SLOTS = 2
+BUILD_QUEUE = 8
+# How much longer than its own budget a request waits for another's build.
+WAIT_SECONDS = 5
 # What a cached chunk costs besides its bytes (its key, and the cache's).
 ENTRY_OVERHEAD = 256
 
@@ -332,6 +345,32 @@ class _Budget:
         self.started = True
 
 
+class _Gate:
+    """
+    Lets a few pieces of work run at once, and a few more wait for a turn; one
+    that would wait behind more is turned away (`Busy`) instead of held.
+    """
+
+    def __init__(self, slots: int, queue: int):
+        self._slots = asyncio.Semaphore(slots)
+        self._queue = queue
+        self._waiting = 0
+
+    @contextlib.asynccontextmanager
+    async def __call__(self):
+        if self._slots.locked() and self._waiting >= self._queue:
+            raise Busy
+        self._waiting += 1
+        try:
+            await self._slots.acquire()
+        finally:
+            self._waiting -= 1
+        try:
+            yield
+        finally:
+            self._slots.release()
+
+
 class LabelPyramid:
     """
     Computes, and keeps, chunks of a project's coarse label levels. Use one
@@ -343,11 +382,15 @@ class LabelPyramid:
         cache_bytes: int = CACHE_BYTES,
         seconds: float = SECONDS,
         blobs: int = BLOBS,
+        slots: int = BUILD_SLOTS,
+        queue: int = BUILD_QUEUE,
     ):
         self.seconds = seconds
         self.blobs = blobs
         self._cache = _Cache(cache_bytes)
-        self._slots = asyncio.Semaphore(COMPUTE_SLOTS)
+        self._gate = _Gate(slots, queue)
+        # The chunks being built now, by cache key, and what each will be.
+        self._building: dict[Hashable, asyncio.Future[bytes | None]] = {}
 
     async def chunk(
         self,
@@ -390,19 +433,62 @@ class LabelPyramid:
         cached = (project_id, level, key, levels[level].factor_zyx, state)
         if (data := self._cache.get(cached)) is not None:
             return data
+        if (building := self._building.get(cached)) is not None:
+            # Someone is already making it: wait for that, not holding a
+            # connection, and share whatever comes of it.
+            await db.rollback()
+            return await self._wait(building)
+        made: asyncio.Future[bytes | None] = asyncio.get_running_loop().create_future()
+        self._building[cached] = made
+        try:
+            data = await self._make(
+                db, store, project_id, levels, level, key, cached, budget
+            )
+        except BaseException as exc:
+            # Anyone waiting can only ask again, whatever stopped this.
+            made.set_exception(exc if isinstance(exc, Exception) else Busy())
+            made.exception()
+            raise
+        else:
+            made.set_result(data)
+            return data
+        finally:
+            del self._building[cached]
+
+    async def _wait(self, building: asyncio.Future[bytes | None]) -> bytes | None:
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(building), self.seconds + WAIT_SECONDS
+            )
+        except TimeoutError:
+            raise Busy from None
+
+    async def _make(
+        self,
+        db: AsyncSession,
+        store,
+        project_id: uuid.UUID,
+        levels: Sequence[LevelSpec],
+        level: int,
+        key: ChunkKey,
+        cached: Hashable,
+        budget: _Budget,
+    ) -> bytes | None:
         step = _step(levels, level)
         origin = (key[0] * step[0], key[1] * step[1], key[2] * step[2])
-        parts: list[tuple[ChunkKey, bytes]] = []
         if level == 1:
             leaves = await _leaves(db, project_id, levels, key)
             budget.spend(len(leaves))
             await db.rollback()
-            blobs = await asyncio.gather(*(_read(store, sha) for _, sha in leaves))
-            parts = [
-                (_position(at, origin), blob)
-                for (at, _), blob in zip(leaves, blobs, strict=True)
-            ]
+            async with self._gate():
+                blobs = await asyncio.gather(*(_read(store, sha) for _, sha in leaves))
+                parts = [
+                    (_position(at, origin), blob)
+                    for (at, _), blob in zip(leaves, blobs, strict=True)
+                ]
+                data = await run_in_threadpool(_combine, parts, step)
         else:
+            parts = []
             below = await _children(db, project_id, levels, level, key)
             for child, child_state in sorted(below.items()):
                 made = await self._build(
@@ -412,8 +498,8 @@ class LabelPyramid:
                     parts.append((_position(child, origin), made))
             budget.spend()
             await db.rollback()
-        async with self._slots:
-            data = await run_in_threadpool(_combine, parts, step)
+            async with self._gate():
+                data = await run_in_threadpool(_combine, parts, step)
         if data is not None:
             self._cache.put(cached, data)
         return data
