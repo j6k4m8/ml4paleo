@@ -72,6 +72,7 @@ Others worth knowing (nested settings use `__`; see
 | `M4P_AUTH__REQUIRE_EMAIL` | true | Whether sign-up asks for an email address, with starter limits until it's confirmed (admins can change it later). |
 | `M4P_UNCONFIRMED_QUOTA__STORAGE_GB`, `M4P_UNCONFIRMED_QUOTA__TRAINED_MODELS` | 1, 1 | The starter limits. |
 | `M4P_AUTH__SESSION_IDLE_DAYS`, `M4P_AUTH__SESSION_MAX_DAYS` | 7, 30 | When sessions end. |
+| `M4P_LABEL_CACHE_MB` | 64 | Memory each API process keeps for the zoomed-out views of labels, which it works out as viewers ask for them. |
 
 To lift a limit entirely, set the whole group as JSON, for example
 `M4P_QUOTA={"storage_gb": null, "trained_models": 20}`. After changing `.env`,
