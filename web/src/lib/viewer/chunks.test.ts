@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type Chunk, ChunkStore } from "./chunks";
 
 function chunk(bytes: number): Chunk {
@@ -259,6 +259,19 @@ describe("ChunkStore", () => {
 		calls[1]?.finish();
 		await again;
 		expect(store.refreshing("a")).toBeUndefined();
+	});
+
+	it("cancels many loads in a few passes over its lists, not one per load", () => {
+		const { load } = controlled();
+		const store = new ChunkStore(load, 1e9, 1);
+		for (let i = 0; i < 500; i++) store.request(`c${i}`).catch(() => {});
+		const filter = vi.spyOn(Array.prototype, "filter");
+		try {
+			store.keepOnly(new Set(["c0"]));
+			expect(filter.mock.calls.length).toBeLessThanOrEqual(3);
+		} finally {
+			filter.mockRestore();
+		}
 	});
 
 	it("cancels many loads at once, keeping the rest in order", async () => {
