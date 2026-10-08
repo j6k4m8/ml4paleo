@@ -141,6 +141,7 @@ export async function drawImageSlice(
 	const bbox: Box = [0, 0, 0, z, y, x];
 	const level = thumbnailLevel(levels, bbox, plane, options.target);
 	const image = await readPlane(options.imageUrl, level.path, true, level, bbox, plane, signal);
+	signal?.throwIfAborted();
 	paint(canvas, image, options.window, null, null, 0);
 }
 
