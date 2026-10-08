@@ -102,17 +102,23 @@ export function paletteBytes(colors: Map<number, string>): Uint8Array {
 	return bytes;
 }
 
-interface Texture {
+export interface Texture {
 	texture: WebGLTexture;
 	width: number;
 	height: number;
 }
 
-class TextureCache {
+/**
+ * Textures by name, the least recently used going first once there are more
+ * than `limit`. Looking one up counts as using it, so a frame that checks
+ * what it will draw before uploading what's missing can't have the checked
+ * ones pushed out by those uploads.
+ */
+export class TextureCache {
 	#textures = new Map<string, Texture>();
 
 	constructor(
-		private gl: WebGL2RenderingContext,
+		private gl: Pick<WebGL2RenderingContext, "deleteTexture">,
 		public limit: number,
 	) {}
 
@@ -123,10 +129,6 @@ class TextureCache {
 			this.#textures.set(id, entry);
 		}
 		return entry;
-	}
-
-	has(id: string): boolean {
-		return this.#textures.has(id);
 	}
 
 	set(id: string, entry: Texture): void {
@@ -266,9 +268,9 @@ export class PlaneRenderer {
 		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteBytes(colors));
 	}
 
-	/** Whether the image slice of `key` that the view cuts is on the GPU. */
+	/** Whether the image slice of `key` that the view cuts is on the GPU (and, if so, just used). */
 	hasImage(key: TileKey, slice: number): boolean {
-		return this.#imageTextures.has(`${tileId(key)}@${slice}`);
+		return this.#imageTextures.get(`${tileId(key)}@${slice}`) !== undefined;
 	}
 
 	/** Upload the slice at level index `slice` of a loaded image chunk. */
@@ -281,8 +283,9 @@ export class PlaneRenderer {
 		this.#imageTextures.set(`${tileId(key)}@${slice}`, { texture, width, height });
 	}
 
+	/** Whether the slice of a label chunk is on the GPU (and, if so, just used). */
 	hasLabels(id: string, slice: number): boolean {
-		return this.#labelTextures.has(`${id}@${slice}`);
+		return this.#labelTextures.get(`${id}@${slice}`) !== undefined;
 	}
 
 	uploadLabels(tile: LabelTile, slice: number, chunk: Chunk): void {
