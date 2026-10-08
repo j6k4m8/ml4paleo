@@ -282,7 +282,9 @@ export class OpQueue {
 				}
 				this.#retryDelay = 0;
 				this.offline = false;
-				this.#queue.shift();
+				// Not the first: saved ops from a previous page may have come in ahead of it.
+				const at = this.#queue.indexOf(op);
+				if (at >= 0) this.#queue.splice(at, 1);
 				this.storage?.remove(op.local).catch(() => {});
 				this.pending = this.#queue.length;
 				this.#emit(outcome);
