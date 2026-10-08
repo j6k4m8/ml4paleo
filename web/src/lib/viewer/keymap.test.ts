@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { actionFor, isRightClick, KEYMAP } from "./keymap";
+import { SHOW_ROIS } from "../features";
+import { actionFor, isRightClick, KEYMAP, MOUSE } from "./keymap";
 
 function press(key: string, init: Partial<KeyboardEventInit> = {}, tagName = "CANVAS") {
 	return { key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...init, target: { tagName, isContentEditable: false } } as unknown as KeyboardEvent;
@@ -9,6 +10,16 @@ describe("keymap", () => {
 	it("binds each key once", () => {
 		const keys = KEYMAP.flatMap((binding) => binding.keys);
 		expect(new Set(keys).size).toBe(keys.length);
+	});
+
+	it("answers ROIs' keys, and lists them, only while ROIs are shown", () => {
+		for (const [key, action] of [["r", "roi"], ["g", "next-roi"], ["c", "complete-roi"], ["a", "accept"]] as const) {
+			expect(actionFor(press(key)) === action).toBe(SHOW_ROIS);
+		}
+		expect(KEYMAP.some((binding) => binding.label.includes("ROI"))).toBe(SHOW_ROIS);
+		expect(MOUSE.some(([what]) => what.includes("ROI"))).toBe(SHOW_ROIS);
+		// The class keys leave `1` for Background.
+		expect(KEYMAP.find((binding) => binding.action === "class")?.label).toContain("1 is Background");
 	});
 
 	it("maps presses to actions", () => {

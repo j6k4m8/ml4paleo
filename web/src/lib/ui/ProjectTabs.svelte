@@ -6,14 +6,17 @@
 	import RotateCcwClock from "@lucide/svelte/icons/rotate-ccw-clock";
 	import Settings from "@lucide/svelte/icons/settings";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
+	import Tags from "@lucide/svelte/icons/tags";
 	import { page } from "$app/state";
+	import { SHOW_ROIS } from "#lib/features.ts";
 
 	let { pid }: { pid: string } = $props();
 
 	const tabs = $derived([
 		{ href: `/p/${pid}`, label: "Overview", icon: House },
 		{ href: `/p/${pid}/annotate`, label: "Annotate", icon: Brush },
-		{ href: `/p/${pid}/rois`, label: "ROIs", icon: SquareDashed },
+		{ href: `/p/${pid}/labels`, label: "Labels", icon: Tags },
+		...(SHOW_ROIS ? [{ href: `/p/${pid}/rois`, label: "ROIs", icon: SquareDashed }] : []),
 		{ href: `/p/${pid}/models`, label: "Models", icon: Brain },
 		{ href: `/p/${pid}/results`, label: "Results", icon: Shapes },
 		{ href: `/p/${pid}/history`, label: "History", icon: RotateCcwClock },

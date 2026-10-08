@@ -378,7 +378,7 @@
 								{@render failed()}
 								<p class="rounded-sm border border-warn/40 bg-warn/10 p-2 text-warn">
 									A new scan replaces this one for everyone in the project. Predictions and results made from this one won't
-									match it; labels and ROIs stay where they are, so they only line up if the new scan covers the same space.
+									match it; labels stay where they are, so they only line up if the new scan covers the same space.
 								</p>
 								{@render dropzone("Drop the new scan here, or click to choose")}
 							</div>
@@ -394,7 +394,7 @@
 			</section>
 
 			{#if image}
-				<Loop {pid} importHref="/p/{pid}/rois#import-labels" />
+				<Loop {pid} importHref="/p/{pid}/labels" />
 			{/if}
 		</div>
 

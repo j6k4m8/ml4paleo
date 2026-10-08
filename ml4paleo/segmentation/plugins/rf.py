@@ -244,15 +244,11 @@ class RandomForestPlugin:
         if len(reservoir.rows) < 2:
             # Index 0 is background; the others are the project's classes.
             (only,) = reservoir.rows
-            if only == 0:
-                has, fix = "background", "Label a class"
-            else:
-                has = "one class"
-                fix = (
-                    "Label another class, or mark an ROI complete (one held out "
-                    "for validation doesn't count) so the unlabeled voxels in it "
-                    "count as background"
-                )
+            has, fix = (
+                ("background", "Label what you're looking for too")
+                if only == 0
+                else ("one class", "Paint some Background, or label another class")
+            )
             raise ValueError(
                 "Training needs labels of at least two classes (background "
                 f"counts), and only {has} has any. {fix}"

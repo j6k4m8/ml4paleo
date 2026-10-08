@@ -793,6 +793,23 @@ describe("LabelLayer", () => {
 	});
 });
 
+describe("counting labels", () => {
+	afterEach(() => vi.mocked(api).mockReset());
+
+	it("reads the voxels labeled with each value, background (1) included", async () => {
+		const layer = new LabelLayer("p1", fakePool(new Map()).pool, [4, 4, 4]);
+		vi.mocked(api).mockResolvedValueOnce({ "1": 0, "2": 1234 });
+
+		const counts = await layer.counts();
+
+		expect(api).toHaveBeenCalledWith("/api/projects/p1/labels/counts");
+		expect([...counts]).toEqual([
+			[1, 0],
+			[2, 1234],
+		]);
+	});
+});
+
 describe("adding a class", () => {
 	afterEach(() => vi.mocked(api).mockReset());
 

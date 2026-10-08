@@ -187,6 +187,12 @@ export class LabelLayer {
 		return new Map(this.classes.map((c) => [c.value, c.color]));
 	}
 
+	/** Voxels labeled with each value (background is 1), as the server counts them. */
+	async counts(): Promise<Map<number, number>> {
+		const counts = await api<Record<string, number>>(`/api/projects/${this.projectId}/labels/counts`);
+		return new Map(Object.entries(counts).map(([value, voxels]) => [Number(value), voxels]));
+	}
+
 	async start(): Promise<void> {
 		const base = `/api/projects/${this.projectId}/labels`;
 		this.classes = await api<LabelClass[]>(`${base}/classes`);

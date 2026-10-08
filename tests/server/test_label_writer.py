@@ -131,6 +131,21 @@ def test_class_values_are_never_reused(ada, project):
     assert ada.post(base, json={"name": "x", "color": "red"}).status_code == 422
 
 
+def test_counts_say_what_has_been_labeled(ada, project):
+    base = f"/api/projects/{project}/labels"
+    assert ada.get(f"{base}/counts").json() == {"1": 0, "2": 0, "3": 0}
+    mask = np.ones((2, 3, 4), dtype=bool)
+    assert edit(ada, project, mask, (0, 0, 0), 2).status_code == 201
+    assert edit(ada, project, mask, (5, 5, 5), 1).status_code == 201
+    # Across chunks too, and a later edit over earlier labels counts once.
+    assert edit(ada, project, mask, (5, 66, 5), 1).status_code == 201
+    assert edit(ada, project, mask, (5, 5, 5), 3).status_code == 201
+    assert ada.get(f"{base}/counts").json() == {"1": 24, "2": 24, "3": 24}
+    # A deleted class isn't listed.
+    assert ada.request("DELETE", f"{base}/classes/2").status_code == 204
+    assert ada.get(f"{base}/counts").json() == {"1": 24, "3": 24}
+
+
 def test_an_edit_shows_up_in_the_label_zarr(ada, project):
     mask = np.zeros((4, 70, 4), dtype=bool)
     mask[:, :, :] = True  # crosses from chunk y=0 into y=1
