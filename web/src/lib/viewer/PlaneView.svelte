@@ -179,11 +179,18 @@
 	$effect(() => {
 		if (!labels) return;
 		renderer?.setPalette(labels.colors);
+		const stopClasses = labels.onClasses(() => {
+			renderer?.setPalette(labels.colors);
+			schedule();
+		});
 		const stop = labels.onChange((ids) => {
 			for (const id of ids) renderer?.dropLabels(id);
 			schedule();
 		});
-		return stop;
+		return () => {
+			stopClasses();
+			stop();
+		};
 	});
 
 	$effect(() => {
