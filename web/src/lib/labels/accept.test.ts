@@ -1,7 +1,9 @@
 import { decompress } from "fzstd";
 import { describe, expect, it } from "vitest";
 import type { Chunk } from "../viewer/chunks";
-import { PLANES } from "../viewer/tiles";
+import { labelId, labelKey } from "../viewer/labels";
+import { MAX_OVERLAY_TILES } from "../viewer/overlays";
+import { PLANES, TILE_HYSTERESIS } from "../viewer/tiles";
 import {
 	type Box,
 	MAX_ACCEPT_VOXELS,
@@ -151,6 +153,23 @@ describe("accepting what a view shows", () => {
 		expect(acceptParts(new Uint8Array(64), box)).toEqual([]);
 	});
 
+	it("asks only for full resolution chunks, never one of a coarser level of the labels", async () => {
+		// The labels' store holds every level's chunks, a coarser level's with four-part ids.
+		const asked: string[] = [];
+		// Inside the 100 × 70 × 130 volume: two chunks across z, one along y, two along x.
+		const box: Box = [62, 10, 60, 66, 60, 128];
+		await readBox((id) => {
+			asked.push(id);
+			return fakeChunk(id);
+		}, box);
+		expect(asked.sort()).toEqual(["0/0/0", "0/0/1", "1/0/0", "1/0/1"]);
+		expect(asked).toHaveLength(chunksIn(box));
+		for (const id of asked) {
+			expect(labelKey(id).level, id).toBe(0);
+			expect(labelId(labelKey(id))).toBe(id);
+		}
+	});
+
 	it("reads a slice from the chunks it crosses", async () => {
 		const box: Box = [62, 0, 60, 63, 70, 70];
 		const values = await readBox(fakeChunk, box);
@@ -182,6 +201,8 @@ describe("accepting what a view shows", () => {
 
 	it("is too big when it takes more chunks than a view surely draws the prediction from", () => {
 		// A view draws it for up to 128 chunks, and again after being over only once it needs a fifth fewer.
+		expect(MAX_OVERLAY_TILES).toBe(128);
+		expect(MAX_VIEW_CHUNKS).toBe(Math.floor(MAX_OVERLAY_TILES / TILE_HYSTERESIS));
 		expect(MAX_VIEW_CHUNKS).toBe(102);
 		// 6 × 17 chunks of one slice.
 		expect(tooBigForView([9, 0, 0, 10, 384, 1088])).toBe(false);

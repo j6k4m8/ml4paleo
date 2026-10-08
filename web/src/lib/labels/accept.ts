@@ -6,6 +6,7 @@
  */
 
 import type { Chunk } from "../viewer/chunks";
+import { MAX_OVERLAY_TILES } from "../viewer/overlays";
 import type { Layout } from "../viewer/state.svelte";
 import { type Plane, PLANES, TILE_HYSTERESIS, type Vec3 } from "../viewer/tiles";
 import { CHUNK, type DeltaIn, splitIntoDeltas } from "./deltas";
@@ -14,26 +15,23 @@ import { CHUNK, type DeltaIn, splitIntoDeltas } from "./deltas";
 export const MAX_ACCEPT_VOXELS = 256 ** 3;
 
 /**
- * The most chunks (64³ voxels) a view draws the prediction from: with more
- * in view it's left out (see `PlaneView`), until the view needs this many
- * times fewer (`TILE_HYSTERESIS`).
- */
-const MOST_DRAWN_CHUNKS = 128;
-
-/**
  * The most chunks one accept in a view reads: as many as a view surely draws
  * the prediction from, so what's accepted is what's shown, and already
- * loaded. A view's slice has a chunk for each 64 × 64 of its voxels, so this
+ * loaded. A view leaves the prediction out with more than `MAX_OVERLAY_TILES`
+ * chunks in view, and draws it again only once it needs `TILE_HYSTERESIS`
+ * times fewer (see `overlayHidden`), so it's drawn for certain with this
+ * many. A view's slice has a chunk for each 64 × 64 of its voxels, so this
  * also holds it to far fewer voxels than the server takes at once (256³),
  * which is why only chunks are counted.
  */
-export const MAX_VIEW_CHUNKS = Math.floor(MOST_DRAWN_CHUNKS / TILE_HYSTERESIS);
+export const MAX_VIEW_CHUNKS = Math.floor(MAX_OVERLAY_TILES / TILE_HYSTERESIS);
 
 export type Box = [number, number, number, number, number, number];
 
 /**
  * A box of a (z, y, x) uint8 array stored in 64³ chunks, assembled from the
- * chunks `load` gives by id (`cz/cy/cx`).
+ * chunks `load` gives by id (`cz/cy/cx`: those of full resolution, which are
+ * all it asks for, so never a coarser level of the labels' `level/cz/cy/cx`).
  */
 export async function readBox(load: (id: string) => Promise<Chunk>, box: Box): Promise<Uint8Array> {
 	const size = [box[3] - box[0], box[4] - box[1], box[5] - box[2]];
