@@ -271,7 +271,8 @@ export class LabelLayer {
 		for (const id of local.keys()) this.store.unpin(id);
 		if (!versions) {
 			this.#local.delete(op);
-			this.reload([...local.keys()]);
+			// Chunks already loading come clean: the refused edit is out of `#local`.
+			this.reload([...local.keys()].filter((id) => !this.store.isLoading(id)));
 			return;
 		}
 		const made = new Map(versions.map(({ key, version }) => [key.join("/"), version]));

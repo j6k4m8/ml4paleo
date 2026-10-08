@@ -431,4 +431,25 @@ describe("LabelLayer", () => {
 		await new Promise((r) => setTimeout(r, 0));
 		expect(first(layer, "0/0/0")).toBe(0);
 	});
+
+	it("leaves a load already under way to bring a refused edit's chunk back clean", async () => {
+		const server = new Map([["0/0/0", { value: 0, version: 2 }]]);
+		const { pool, loads, release } = fakePool(server, true);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		const loading = loaded(layer, "0/0/0");
+		release();
+		await loading;
+		// Someone else's edit has the chunk loading again when our edit is refused.
+		server.set("0/0/0", { value: 3, version: 3 });
+		layer.changed([{ key: [0, 0, 0], version: 3 }]);
+		layer.applyLocal("op", [delta(9)]);
+		expect(first(layer, "0/0/0")).toBe(9);
+		layer.settle("op", null);
+		expect(loads).toHaveLength(2);
+		release();
+		await tick();
+		// The load that was under way landed clean, without the refused edit.
+		expect(first(layer, "0/0/0")).toBe(3);
+		expect(loads).toHaveLength(2);
+	});
 });
