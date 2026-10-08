@@ -25,6 +25,7 @@
 	import Undo2 from "@lucide/svelte/icons/undo-2";
 	import X from "@lucide/svelte/icons/x";
 	import { onDestroy, onMount, tick, untrack } from "svelte";
+	import { SvelteMap } from "svelte/reactivity";
 	import Histogram from "#lib/ui/Histogram.svelte";
 	import Panel from "#lib/ui/Panel.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
@@ -34,7 +35,7 @@
 	import { nextColor } from "#lib/labelimport.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
-	import { acceptParts, MAX_ACCEPT_VOXELS, readBox } from "../labels/accept";
+	import { acceptParts, MAX_ACCEPT_VOXELS, planeToAccept, readBox, unlabeledOnly, viewExtent, whyNotInView } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit, saveState } from "../labels/opqueue.svelte";
 	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
@@ -114,6 +115,11 @@
 	let imageReplaced = $state(false);
 	let pool: WorkerPool | undefined;
 	let hovered: Plane = PLANES.xy;
+	// In a four-view layout, the view the pointer is over now, and the one last used (pressed in,
+	// scrolled, focused, or keys pressed over): which "this view" is when accepting. Moving to the
+	// panel crosses other views, so what the pointer passed over on the way doesn't count.
+	let pointed = $state.raw<Plane | null>(null);
+	let used = $state.raw<Plane>(PLANES.xy);
 	let notice = $state("");
 	let classesOpen = $state(true);
 	// The form for a new class: open on request, and from the start while the project has none.
@@ -140,7 +146,8 @@
 	const rois = new RoiList(project);
 	const firstRoi = untrack(() => startRoi);
 	const firstBox = untrack(() => startBox);
-	const sizes = new Map<string, [number, number]>();
+	// Each view's size in pixels, which what accepting in a view covers follows.
+	const sizes = new SvelteMap<string, [number, number]>();
 	const controller = new AbortController();
 
 	const voxelSize = manifest.voxel_size_zyx;
@@ -460,26 +467,65 @@
 	}
 
 	/**
-	 * The layer an ROI shows, which accepting there reads: the proposal if the
-	 * ROI is inside its box, else the prediction.
+	 * The layer a box (inside the image) shows, which accepting there reads:
+	 * the proposal if the box is inside its box, else the prediction.
 	 */
+	function showing(box: Box): Prediction | null {
+		return [proposal, prediction].find((layer) => layer && within(box, layer.box)) ?? null;
+	}
+
+	/** The layer an ROI shows, which accepting there reads. */
 	function covering(roi: Roi): Prediction | null {
 		const box = inImage(roi);
-		return box ? ([proposal, prediction].find((layer) => layer && within(box, layer.box)) ?? null) : null;
+		return box ? showing(box) : null;
 	}
 
 	/**
-	 * Why accepting in an ROI can't go ahead, if it can't: where it reaches
-	 * past the proposal's box, part of it shows the proposal and part the
-	 * prediction, and accepting reads only one of them (unless the same
-	 * model made both, so they agree).
+	 * Whether a box reaches past the proposal's box, so part of it shows the
+	 * proposal and part the prediction, and accepting reads only one of them
+	 * (unless the same model made both, so they agree).
 	 */
+	function mixesProposal(box: Box): boolean {
+		if (!proposal || !overlaps(box, proposal.box) || within(box, proposal.box)) return false;
+		return !(prediction && prediction.model_id === proposal.model_id);
+	}
+
+	/** Why accepting in an ROI can't go ahead because of that, if it can't. */
 	function acceptBlockedIn(roi: Roi): string {
 		const box = inImage(roi);
-		if (!box || !proposal || !overlaps(box, proposal.box) || within(box, proposal.box)) return "";
-		if (prediction && prediction.model_id === proposal.model_id) return "";
-		return "Part of this ROI shows your proposal and part doesn't; propose the whole ROI to accept it";
+		return box && mixesProposal(box) ? "Part of this ROI shows your proposal and part doesn't; propose the whole ROI to accept it" : "";
 	}
+
+	/**
+	 * What accepting in the view would do: the part of its slice the active
+	 * view shows (once the view has a size), and how many chunks that view
+	 * counts to draw the prediction there (see `viewExtent`, which counts them
+	 * as the view does, so accepting is on only where the prediction is
+	 * drawn), the layer that shows there, which accepting reads, and why it
+	 * can't go ahead, if it can't. These words are the button's tooltip and the
+	 * notice for the key.
+	 */
+	const inView = $derived.by(() => {
+		const plane = planeToAccept(viewer.layout, pointed, used);
+		const size = sizes.get(plane.name);
+		const full = levels[0];
+		const { box, tiles } =
+			size && full
+				? viewExtent({ plane, position: viewer.position, zoom: viewer.zoom, aspect: viewer.aspect, width: size[0], height: size[1] }, full)
+				: { box: null, tiles: 0 };
+		const layer = box ? showing(box) : null;
+		const blocked = whyNotInView({
+			imageReplaced,
+			predicted: !!(prediction || proposal),
+			shown: viewer.showPrediction,
+			opacity: viewer.predictionOpacity,
+			box,
+			tiles,
+			mixed: !!box && mixesProposal(box),
+			covered: !!layer,
+		});
+		return { plane, box, layer, blocked };
+	});
 
 	/**
 	 * Follow a pipeline, passing on its updates, until it ends or its stream
@@ -632,20 +678,56 @@
 			notice = "That ROI is too big to accept at once; draw a smaller one.";
 			return;
 		}
+		await acceptFrom(layer, box, { roi: roi.id });
+	}
+
+	/**
+	 * Copy what the active view shows of the model's prediction (the part of
+	 * its slice the view covers, see `inView`) into the labels, as accepted
+	 * (model-verified) labels, without touching voxels anyone labeled. Undo
+	 * takes it back in one step. If it can't go ahead, the notice says why.
+	 */
+	async function acceptView() {
+		if (!labels || accepting) return;
+		const { box, layer, blocked } = inView;
+		if (blocked) notice = blocked;
+		else if (box && layer) await acceptFrom(layer, box, { box }, true);
+	}
+
+	/**
+	 * Read what `layer` holds inside `box` (inside the image, and small enough
+	 * to accept) and send it to be accepted there, showing it at once; `where`
+	 * is the ROI or the box the server is told it goes in. With `skipLabeled`,
+	 * what the page knows is labeled already isn't sent (the server leaves it
+	 * alone either way), so accepting twice says there's nothing left to fill
+	 * rather than making an edit that changes nothing.
+	 */
+	async function acceptFrom(layer: Prediction, box: Box, where: { roi: string } | { box: Box }, skipLabeled = false) {
+		if (!labels) return;
 		accepting = true;
 		notice = "";
 		const { store, artifact_id: artifact, kind } = layer;
-		try {
-			const values = await readBox((id) => {
-				// Keep these loads from being cancelled by the views' own requests.
-				store.want(`accept:${id}`, new Set([id]));
-				return store.request(id).finally(() => store.want(`accept:${id}`, new Set()));
+		/** Read a box of a store's chunks, which no view's own requests cancel; one loading again (after an edit) is waited for. */
+		const read = (from: ChunkStore) =>
+			readBox((id) => {
+				from.want(`accept:${id}`, new Set([id]));
+				return (from.loading(id) ?? from.request(id)).finally(() => from.want(`accept:${id}`, new Set()));
 			}, box);
+		try {
+			let values = await read(store);
+			const predicted = values.some((value) => value > 0);
+			// Not while an undo or redo is on its way: the copies don't show it yet. And if the
+			// labels can't be read, the server still fills only what's unlabeled.
+			if (skipLabeled && predicted && !queue.toggling) {
+				values = unlabeledOnly(values, await read(labels.store).catch(() => new Uint8Array(values.length)));
+			}
 			const parts = acceptParts(values, box);
-			const ops = queue.editMany(parts, { accept: { prediction: artifact, roi: roi.id } });
+			const ops = queue.editMany(parts, { accept: { prediction: artifact, ...where } });
 			for (const op of ops) labels.applyLocal(op.local, op.deltas);
-			if (ops.length === 0) notice = `The ${kind} has nothing in that ROI.`;
-			else viewer.revealLabels();
+			const place = "roi" in where ? "that ROI" : "this view";
+			if (ops.length > 0) viewer.revealLabels();
+			else if (!predicted) notice = `The ${kind} has nothing in ${place}.`;
+			else notice = `What the ${kind} covers in ${place} is labeled already.`;
 		} catch (e) {
 			notice = `Couldn't read the ${kind}: ${e instanceof Error ? e.message : String(e)}`;
 		} finally {
@@ -723,6 +805,12 @@
 		return viewer.layout === "four" ? hovered : PLANES[viewer.layout];
 	}
 
+	// A view that went away took the pointer with it.
+	$effect(() => {
+		void viewer.layout;
+		pointed = null;
+	});
+
 	function key(event: KeyboardEvent) {
 		viewer.noteKeys(event);
 		holdAlt(event);
@@ -738,6 +826,7 @@
 		}
 		const action = actionFor(event);
 		if (!action) return;
+		if (pointed) used = pointed;
 		// Enter and Backspace only mean something while drawing a polygon.
 		if ((action === "close-polygon" || action === "remove-point") && !viewer.polygon) return;
 		event.preventDefault();
@@ -753,7 +842,10 @@
 			case "next-roi":
 				return nextOpen();
 			case "accept":
+				// Holding the key down would go on to accept what's already accepted.
+				if (event.repeat) return;
 				if (selectedRoi) void acceptPrediction(selectedRoi);
+				else void acceptView();
 				return;
 			case "complete-roi":
 				if (viewer.selectedRoi) rois.update(viewer.selectedRoi, { status: event.shiftKey ? "open" : "complete" });
@@ -1109,22 +1201,34 @@
 			>
 				{#if images && levels.length > 0}
 					{#each shown as plane (plane.name)}
-						<PlaneView
-							{plane}
-							{viewer}
-							{levels}
-							{images}
-							{labels}
-							prediction={prediction?.store}
-							{proposal}
-							{segmentation}
-							onhover={(p) => (hovered = p)}
-							onresize={resized}
-							onstroke={stroke}
-							onpolygon={closePolygon}
-							rois={rois.items}
-							onroi={drawRoi}
-						/>
+						<div
+							class="contents"
+							role="presentation"
+							onpointerover={() => (pointed = plane)}
+							onpointerout={(event) => {
+								if (!event.currentTarget.contains(event.relatedTarget as Node | null)) pointed = null;
+							}}
+							onpointerdown={() => (used = plane)}
+							onwheel={() => (used = plane)}
+							onfocusin={() => (used = plane)}
+						>
+							<PlaneView
+								{plane}
+								{viewer}
+								{levels}
+								{images}
+								{labels}
+								prediction={prediction?.store}
+								{proposal}
+								{segmentation}
+								onhover={(p) => (hovered = p)}
+								onresize={resized}
+								onstroke={stroke}
+								onpolygon={closePolygon}
+								rois={rois.items}
+								onroi={drawRoi}
+							/>
+						</div>
 					{/each}
 					{#if viewer.layout === "four"}
 						<div class="flex flex-col justify-center gap-1 bg-pasteboard p-4 font-mono text-2xs text-ink-dim">
@@ -1194,6 +1298,29 @@
 								</span>
 							{/if}
 							<input type="range" min="0" max="1" step="0.05" bind:value={viewer.predictionOpacity} aria-label="Prediction opacity" />
+							{#if labels}
+								{@const { plane, box, layer, blocked } = inView}
+								{@const kind = (layer ?? prediction ?? proposal)?.kind ?? "prediction"}
+								<!-- A goes to the selected ROI, if one is, so it's this button's key only without one. -->
+								{@const keyHint = selectedRoi ? "" : " (A)"}
+								<button
+									class="btn w-full"
+									disabled={accepting || !!blocked}
+									title={blocked ||
+										`Fills the unlabeled voxels in the visible part of this slice (${plane.name.toUpperCase()} view, ${"zyx"[plane.normal]} ${box?.[plane.normal]}) with the ${kind}; you can undo it${keyHint}`}
+									aria-describedby={blocked && !accepting ? "accept-view-why" : undefined}
+									onclick={acceptView}
+								>
+									<CheckCheck size={13} />
+									{accepting ? "Accepting…" : `Accept ${kind} in this view`}
+									{#if !selectedRoi}<span class="kbd ml-auto">A</span>{/if}
+								</button>
+								{#if blocked && !accepting}
+									<p id="accept-view-why" class="text-2xs text-ink-dim">{blocked}</p>
+								{:else if viewer.layout === "four" && box}
+									<p class="text-2xs text-ink-dim">In the {plane.name.toUpperCase()} view, at {"zyx"[plane.normal]} {box[plane.normal]}</p>
+								{/if}
+							{/if}
 						</li>
 					{/if}
 					{#if segmentation}

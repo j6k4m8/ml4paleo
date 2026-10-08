@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SHOW_ROIS } from "../features";
 import { actionFor, isRightClick, KEYMAP, MOUSE } from "./keymap";
 
@@ -13,13 +13,21 @@ describe("keymap", () => {
 	});
 
 	it("answers ROIs' keys, and lists them, only while ROIs are shown", () => {
-		for (const [key, action] of [["r", "roi"], ["g", "next-roi"], ["c", "complete-roi"], ["a", "accept"]] as const) {
+		for (const [key, action] of [["r", "roi"], ["g", "next-roi"], ["c", "complete-roi"]] as const) {
 			expect(actionFor(press(key)) === action).toBe(SHOW_ROIS);
 		}
 		expect(KEYMAP.some((binding) => binding.label.includes("ROI"))).toBe(SHOW_ROIS);
 		expect(MOUSE.some(([what]) => what.includes("ROI"))).toBe(SHOW_ROIS);
 		// The class keys leave `1` for Background.
 		expect(KEYMAP.find((binding) => binding.action === "class")?.label).toContain("1 is Background");
+	});
+
+	it("accepts the prediction in the view with A, ROIs or not, and says so", () => {
+		expect(actionFor(press("a"))).toBe("accept");
+		const binding = KEYMAP.find((b) => b.action === "accept");
+		expect(binding?.keys).toEqual(["a"]);
+		expect(binding?.label).toContain("this view");
+		expect(binding?.label.includes("ROI")).toBe(SHOW_ROIS);
 	});
 
 	it("maps presses to actions", () => {
@@ -93,5 +101,33 @@ describe("right-click", () => {
 			expect(isRightClick({ button: 1, ctrlKey: true }, mac)).toBe(false);
 			expect(isRightClick({ button: 5, ctrlKey: false }, mac)).toBe(false);
 		}
+	});
+});
+
+describe("the keymap with ROIs either way", () => {
+	afterEach(() => {
+		vi.doUnmock("../features");
+		vi.resetModules();
+	});
+
+	/** The keymap as it is with ROIs shown or hidden. */
+	async function keymapWith(showRois: boolean) {
+		vi.resetModules();
+		vi.doMock("../features", () => ({ SHOW_ROIS: showRois }));
+		return import("./keymap");
+	}
+
+	it.each([false, true])("answers A to accept, and an ROI's other keys only with ROIs shown (shown: %s)", async (shown) => {
+		const { actionFor: act, KEYMAP: keys } = await keymapWith(shown);
+		expect(act(press("a"))).toBe("accept");
+		expect(act(press("r"))).toBe(shown ? "roi" : undefined);
+		expect(act(press("g"))).toBe(shown ? "next-roi" : undefined);
+		expect(act(press("c"))).toBe(shown ? "complete-roi" : undefined);
+		const accept = keys.find((b) => b.action === "accept");
+		expect(accept?.label.includes("ROI")).toBe(shown);
+		expect(accept?.label).toContain("this view");
+		// One binding for each key, however it's configured.
+		const all = keys.flatMap((binding) => binding.keys);
+		expect(new Set(all).size).toBe(all.length);
 	});
 });

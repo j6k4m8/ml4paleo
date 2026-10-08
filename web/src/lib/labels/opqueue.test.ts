@@ -130,6 +130,28 @@ describe("OpQueue", () => {
 		expect(calls.filter((c) => c.path.endsWith("/ops"))).toHaveLength(3);
 	});
 
+	it("says while an undo or redo waits to be sent or answered, not for one that drops an unsent edit", async () => {
+		const { send } = server();
+		const queue = new OpQueue("p", null, send);
+		expect(queue.toggling).toBe(false);
+		queue.edit([delta(0)]);
+		// Undone before it was sent: the edit is dropped, and nothing waits.
+		queue.undo();
+		expect(queue.toggling).toBe(false);
+		queue.redo();
+		await settle(queue);
+		expect(queue.toggling).toBe(false);
+		// Undone and redone once sent: the undo waits to be sent, and then the redo.
+		queue.undo();
+		expect(queue.toggling).toBe(true);
+		await settle(queue);
+		expect(queue.toggling).toBe(false);
+		queue.redo();
+		expect(queue.toggling).toBe(true);
+		await settle(queue);
+		expect(queue.toggling).toBe(false);
+	});
+
 	it("saves undos of sent edits, with their seq", async () => {
 		const { send } = server();
 		const saved: { kind: string; seq?: number }[] = [];
@@ -161,6 +183,38 @@ describe("OpQueue", () => {
 		await settle(queue);
 		expect(calls.slice(2).map((c) => c.path.split("/labels/")[1])).toEqual(["ops/2/undo", "ops/1/undo"]);
 		expect(queue.undoable).toBe(0);
+	});
+
+	it("sends a prediction accepted in a box with the box, not an ROI, and undoes it as one", async () => {
+		const { calls, send } = server();
+		const queue = new OpQueue("p", null, send);
+		const box: [number, number, number, number, number, number] = [3, 10, 20, 4, 90, 100];
+		queue.editMany([[delta(0)], [delta(1)]], { accept: { prediction: "pred", box } });
+		await settle(queue);
+		expect(calls.map((c) => c.path)).toEqual(["/api/projects/p/labels/accept", "/api/projects/p/labels/accept"]);
+		for (const call of calls) {
+			expect(call.body).toMatchObject({ prediction_artifact_id: "pred", box });
+			expect(call.body).not.toHaveProperty("roi_id");
+		}
+		queue.undo();
+		await settle(queue);
+		expect(calls.slice(2).map((c) => c.path.split("/labels/")[1])).toEqual(["ops/2/undo", "ops/1/undo"]);
+		expect(queue.undoable).toBe(0);
+		queue.redo();
+		await settle(queue);
+		expect(calls.slice(4).map((c) => c.path.split("/labels/")[1])).toEqual(["ops/1/redo", "ops/2/redo"]);
+	});
+
+	it("still sends an accept an earlier page saved with only its ROI", async () => {
+		const { calls, send } = server();
+		const saved = { kind: "edit" as const, local: "old", clientOpId: "old-op", deltas: [delta(0)], strict: false, tool: {}, accept: { prediction: "pred", roi: "roi" } };
+		const storage = { load: async () => [saved], save: async () => {}, remove: async () => {} };
+		const queue = new OpQueue("p", storage, send);
+		await queue.start();
+		await settle(queue);
+		expect(calls[0]?.path).toBe("/api/projects/p/labels/accept");
+		expect(calls[0]?.body).toMatchObject({ prediction_artifact_id: "pred", roi_id: "roi" });
+		expect(calls[0]?.body).not.toHaveProperty("box");
 	});
 
 	it("lets the page adjust an edit just before it goes", async () => {

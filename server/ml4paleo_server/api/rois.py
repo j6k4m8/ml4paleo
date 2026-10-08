@@ -102,10 +102,10 @@ async def add_roi(
             status_code=409, detail="This project has no image yet."
         ) from None
     start, stop = body.bbox[:3], body.bbox[3:]
-    if any(
-        a < 0 or b > n or a >= b for a, b, n in zip(start, stop, shape, strict=True)
-    ):
-        raise HTTPException(status_code=422, detail="The box must be inside the image.")
+    try:
+        labels.check_box(body.bbox, shape)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     if (
         body.kind == "slice"
         and min(b - a for a, b in zip(start, stop, strict=True)) != 1

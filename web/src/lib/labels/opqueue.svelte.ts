@@ -11,6 +11,7 @@
 
 import { ApiError, api } from "#lib/api.ts";
 import type { Vec3 } from "../viewer/tiles";
+import type { Box } from "./accept";
 import type { DeltaIn } from "./deltas";
 
 export const MAX_DELTAS = 512;
@@ -29,14 +30,12 @@ export interface QueuedEdit {
 	deltas: DeltaIn[];
 	strict: boolean;
 	tool: Record<string, unknown>;
-	/** Set when the edit accepts a model's prediction inside an ROI; the server checks it. */
+	/** Set when the edit accepts a model's prediction inside an ROI or a box; the server checks it. */
 	accept?: Accept;
 }
 
-export interface Accept {
-	prediction: string;
-	roi: string;
-}
+/** Where a prediction is accepted: in an ROI (`roi`), or in a box (z0, y0, x0, z1, y1, x1) of the image (`box`). */
+export type Accept = { prediction: string } & ({ roi: string; box?: never } | { box: Box; roi?: never });
 
 export interface QueuedToggle {
 	kind: "undo" | "redo";
@@ -145,6 +144,15 @@ export class OpQueue {
 		private storage: OpStorage | null = null,
 		private send: Send = defaultSend,
 	) {}
+
+	/**
+	 * Whether an undo or redo is waiting to be sent or answered. The page's
+	 * copies of the labels don't show one until its answer has made them
+	 * load again, so they can't be trusted to say what is labeled meanwhile.
+	 */
+	get toggling(): boolean {
+		return this.#queue.some((op) => op.kind !== "edit");
+	}
 
 	/** Resume ops a previous page left unsent, ahead of anything new. */
 	async start(): Promise<Queued[]> {
@@ -326,7 +334,7 @@ export class OpQueue {
 					? await this.send(`${base}/accept`, {
 							client_op_id: ready.clientOpId,
 							prediction_artifact_id: ready.accept.prediction,
-							roi_id: ready.accept.roi,
+							...("roi" in ready.accept && ready.accept.roi ? { roi_id: ready.accept.roi } : { box: ready.accept.box }),
 							deltas: ready.deltas,
 						})
 					: await this.send(`${base}/ops`, {

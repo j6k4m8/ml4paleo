@@ -20,6 +20,7 @@ import {
 	type Vec3,
 	type View,
 	viewLevel,
+	visibleBox,
 	visibleTiles,
 	voxelAt,
 	windowed,
@@ -383,5 +384,81 @@ describe("tileCrosses", () => {
 		// On a YZ plane u is z: z 30..70 reaches chunks z 0 and 1.
 		expect(tileCrosses(key(1, 0, 5), PLANES.yz, rect)).toBe(true);
 		expect(tileCrosses(key(2, 0, 5), PLANES.yz, rect)).toBe(false);
+	});
+});
+
+describe("visibleBox", () => {
+	// A view of an image 100 (z) × 200 (y) × 300 (x) voxels, and where its canvas reaches.
+	const SHAPE: Vec3 = [100, 200, 300];
+
+	it("is the voxels the canvas covers on the slice, one voxel thick", () => {
+		// 400 × 200 pixels at 4 pixels a voxel: 100 × 50 voxels about x 150, y 100.
+		const zoomedIn = view({ position: [10.5, 100, 150], zoom: 4, width: 400, height: 200 });
+		expect(visibleBox(zoomedIn, SHAPE)).toEqual([10, 75, 100, 11, 125, 200]);
+	});
+
+	it("counts a voxel the canvas covers only in part", () => {
+		// x 90.25 to 110.25, y 49.5 to 50.5.
+		const partly = view({ position: [3, 50, 100.25], zoom: 10, width: 200, height: 10 });
+		expect(visibleBox(partly, SHAPE)).toEqual([3, 49, 90, 4, 51, 111]);
+		// A single voxel, at ten pixels a voxel.
+		expect(visibleBox(view({ position: [3.5, 50.5, 100.5], zoom: 10, width: 10, height: 10 }), SHAPE)).toEqual([3, 50, 100, 4, 51, 101]);
+	});
+
+	it("doesn't take in a voxel the canvas only touches, however the pixels round", () => {
+		// Its edges are at x 89.999999999 and 109.999999999, y 40 and 60.
+		const edge = view({ position: [3, 50, 100 - 1e-9], zoom: 1, width: 20, height: 20 });
+		expect(visibleBox(edge, SHAPE)).toEqual([3, 40, 90, 4, 60, 110]);
+	});
+
+	it("is cut to the image where the canvas is bigger", () => {
+		const whole = view({ position: [50, 100, 150], zoom: 1, width: 1000, height: 800 });
+		expect(visibleBox(whole, SHAPE)).toEqual([50, 0, 0, 51, 200, 300]);
+		// Panned to a corner: x -30 to 70, y -15 to 35.
+		const corner = view({ position: [0.5, 10, 20], zoom: 2, width: 200, height: 100 });
+		expect(visibleBox(corner, SHAPE)).toEqual([0, 0, 0, 1, 35, 70]);
+		const far = view({ position: [99.5, 190, 290], zoom: 2, width: 200, height: 100 });
+		expect(visibleBox(far, SHAPE)).toEqual([99, 165, 240, 100, 200, 300]);
+	});
+
+	it("takes each plane's own axes", () => {
+		// 40 × 20 pixels at 2 a voxel: 20 voxels across and 10 up and down.
+		const around = { position: [30.5, 40.5, 50.5] as Vec3, zoom: 2, width: 40, height: 20 };
+		const shape: Vec3 = [60, 80, 100];
+		// XY: x across, y up and down, at z 30.
+		expect(visibleBox(view({ ...around, plane: PLANES.xy }), shape)).toEqual([30, 35, 40, 31, 46, 61]);
+		// XZ: x across, z up and down, at y 40.
+		expect(visibleBox(view({ ...around, plane: PLANES.xz }), shape)).toEqual([25, 40, 40, 36, 41, 61]);
+		// YZ: z across, y up and down, at x 50.
+		expect(visibleBox(view({ ...around, plane: PLANES.yz }), shape)).toEqual([20, 35, 50, 41, 46, 51]);
+	});
+
+	it("shows fewer voxels along an axis whose voxels are thicker", () => {
+		// z voxels four times as thick as the rest: each is 8 pixels at zoom 2.
+		const aspect: Vec3 = [4, 1, 1];
+		const thick = { position: [50.5, 100, 150] as Vec3, zoom: 2, aspect, width: 400, height: 400 };
+		const shape: Vec3 = [200, 300, 400];
+		// XZ: 400 pixels across is 200 voxels of x, and up and down 50 voxels of z.
+		expect(visibleBox(view({ ...thick, plane: PLANES.xz }), shape)).toEqual([25, 100, 50, 76, 101, 250]);
+		// XY has no thick axis on screen, and YZ has it across.
+		expect(visibleBox(view({ ...thick, plane: PLANES.xy }), shape)).toEqual([50, 0, 50, 51, 200, 250]);
+		expect(visibleBox(view({ ...thick, plane: PLANES.yz }), shape)).toEqual([25, 0, 150, 76, 200, 151]);
+	});
+
+	it("takes the slice the crosshair is in", () => {
+		const at = (z: number) => visibleBox(view({ position: [z, 100, 150], width: 20, height: 20 }), SHAPE)!;
+		expect([at(0.5)[0], at(0.99)[0], at(1)[0], at(99.99)[0]]).toEqual([0, 0, 1, 99]);
+	});
+
+	it("is null where nothing of the image shows", () => {
+		const base = { position: [10.5, 100, 150] as Vec3, width: 100, height: 100 };
+		expect(visibleBox(view({ ...base, width: 0 }), SHAPE)).toBeNull();
+		expect(visibleBox(view({ ...base, height: 0 }), SHAPE)).toBeNull();
+		expect(visibleBox(view({ ...base, zoom: 0 }), SHAPE)).toBeNull();
+		expect(visibleBox(view({ ...base, position: [100, 100, 150] }), SHAPE)).toBeNull();
+		expect(visibleBox(view({ ...base, position: [-0.5, 100, 150] }), SHAPE)).toBeNull();
+		// Off the side of the image.
+		expect(visibleBox(view({ ...base, position: [10, 100, 400] }), SHAPE)).toBeNull();
+		expect(visibleBox(view({ ...base, position: [10, 100, Number.NaN] }), SHAPE)).toBeNull();
 	});
 });

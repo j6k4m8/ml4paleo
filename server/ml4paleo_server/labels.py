@@ -226,6 +226,18 @@ async def result_of(db: AsyncSession, op: LabelOp) -> OpResult:
     )
 
 
+def check_box(box: Sequence[int], shape: Sequence[int]) -> None:
+    """
+    Raise ValueError unless `box` (z0, y0, x0, z1, y1, x1) is half-open, has
+    a voxel in it, and lies inside an image of `shape` (z, y, x).
+    """
+    if any(
+        a < 0 or b > n or a >= b
+        for a, b, n in zip(box[:3], box[3:], shape, strict=True)
+    ):
+        raise ValueError("The box must be inside the image.")
+
+
 def global_box(deltas: Sequence[ChunkDelta]) -> list[int]:
     """The level-0 box (z0, y0, x0, z1, y1, x1) the deltas cover."""
     starts, stops = [], []
@@ -480,6 +492,7 @@ __all__ = [
     "OpResult",
     "apply_edit",
     "changes_since",
+    "check_box",
     "existing",
     "global_box",
     "labels_root",

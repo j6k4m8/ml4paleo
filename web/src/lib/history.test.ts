@@ -122,6 +122,13 @@ describe("link", () => {
 		expect(link("p1", edit)).toBe("/p/p1/annotate?roi=r1&box=5,20,30,6,29,42");
 		expect(link("p1", undo(3, edit))).toBe("/p/p1/annotate?roi=r1&box=5,20,30,6,29,42");
 	});
+
+	it("opens the annotator on the box alone for labels accepted in a view, which have no ROI", () => {
+		const edit = op(2, { source: 2, bbox: [3, 0, 0, 4, 80, 100], tool: { name: "accept-prediction", box: [3, 0, 0, 4, 80, 100] }, accepted: accepted({ kind: "prediction", roi_id: null }) });
+		expect([action(edit), what(edit), origin(edit)]).toEqual(["accept", "Accepted prediction", "From rf one"]);
+		expect(link("p1", edit)).toBe("/p/p1/annotate?box=3,0,0,4,80,100");
+		expect(link("p1", undo(3, edit))).toBe("/p/p1/annotate?box=3,0,0,4,80,100");
+	});
 });
 
 describe("toggles", () => {

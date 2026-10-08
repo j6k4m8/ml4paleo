@@ -38,7 +38,7 @@ export interface Binding {
 	label: string;
 }
 
-const ROI_ACTIONS = new Set<Action>(["roi", "next-roi", "complete-roi", "accept"]);
+const ROI_ACTIONS = new Set<Action>(["roi", "next-roi", "complete-roi"]);
 
 const ALL_KEYS: Binding[] = [
 	// With Shift, "." and "," arrive as ">" and "<" (on US keyboards).
@@ -57,7 +57,13 @@ const ALL_KEYS: Binding[] = [
 	{ action: "roi", keys: ["r"], label: "Draw an ROI" },
 	{ action: "next-roi", keys: ["g"], label: "Go to the next open ROI" },
 	{ action: "complete-roi", keys: ["c"], label: "Mark the selected ROI complete (with Shift: reopen)" },
-	{ action: "accept", keys: ["a"], label: "Accept the prediction in the selected ROI as labels" },
+	{
+		action: "accept",
+		keys: ["a"],
+		label: SHOW_ROIS
+			? "Accept the prediction in the selected ROI, or in this view if none is selected, as labels (fills unlabeled voxels)"
+			: "Accept the prediction in this view as labels (fills unlabeled voxels)",
+	},
 	{ action: "smaller", keys: ["["], label: "Smaller brush" },
 	{ action: "bigger", keys: ["]"], label: "Bigger brush" },
 	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class (1 is Background)" },
@@ -69,7 +75,7 @@ const ALL_KEYS: Binding[] = [
 	{ action: "help", keys: ["?"], label: "Show or hide these keys (Esc closes)" },
 ];
 
-/** The keys the viewer answers: ROIs' only while ROIs are shown. */
+/** The keys the viewer answers: ROIs' only while ROIs are shown (accepting works in a view without them). */
 export const KEYMAP: Binding[] = ALL_KEYS.filter((binding) => SHOW_ROIS || !ROI_ACTIONS.has(binding.action));
 
 /** What the mouse does, for the help overlay. */
