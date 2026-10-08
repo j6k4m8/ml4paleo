@@ -23,19 +23,34 @@ interface LocalDelta {
 	written: Uint8Array | number;
 	onlyIf: string;
 	/**
-	 * Once the server has applied the op, the chunk version it made: copies
-	 * from then on have the edit, and only older ones (or ones whose version
-	 * isn't known) need it put back. Such a delta lasts only as long as the
-	 * load of its chunk that may predate the op: any later load has the edit.
+	 * Once the server has applied the op, the chunk version it made. A copy
+	 * read at that version or later has the edit. One read just before it
+	 * gets the edit put back, which makes it that version. An older one
+	 * (someone else changed the chunk too) or one whose version isn't known
+	 * gets it put back and the chunk loads once more. Such a delta lasts
+	 * only as long as the load of its chunk that may predate the op: any
+	 * later load has the edit.
 	 */
 	made?: number;
-	/** A copy older than `made` arrived and the chunk was sent for once more. */
+	/** A copy that needed it put back and wasn't made current by it arrived, and the chunk was sent for once more. */
 	again?: boolean;
 }
 
 const CACHE_BYTES = 128 * 1024 * 1024;
 // How many of the chunks this page edited last it remembers (`recent`).
 const RECENT = 256;
+
+/**
+ * An edit as it goes out. A strict one is refused if its chunks changed since
+ * the page read them, so it carries the versions the page's copies stand
+ * for; where any isn't known, it goes out as a plain edit instead.
+ */
+export function strictOn<T extends { strict: boolean; deltas: DeltaIn[] }>(layer: Pick<LabelLayer, "versionOf">, op: T): T {
+	if (!op.strict) return op;
+	const versions = op.deltas.map((d) => layer.versionOf(d.key.join("/")));
+	if (versions.some((v) => v === undefined)) return { ...op, strict: false };
+	return { ...op, deltas: op.deltas.map((d, i) => ({ ...d, base_version: versions[i]! })) };
+}
 
 export class LabelLayer {
 	store: ChunkStore;
@@ -65,21 +80,26 @@ export class LabelLayer {
 			for (const [op, deltas] of this.#local) {
 				const delta = deltas.get(id);
 				if (!delta) continue;
-				if (delta.made !== undefined) {
-					if (chunk.version !== undefined && chunk.version >= delta.made) {
-						this.#forget(op, id);
-						continue;
-					}
-					// A copy from before the edit (its load started first), or of
-					// a version not known: show the edit on it, and load it once more.
-					if (delta.again) {
-						this.#forget(op, id);
-					} else {
-						delta.again = true;
-						stale = true;
-					}
+				if (delta.made !== undefined && chunk.version !== undefined && chunk.version >= delta.made) {
+					// Read after the op: it has the edit.
+					this.#forget(op, id);
+					continue;
 				}
 				applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, delta.mask, delta.written, delta.onlyIf);
+				if (delta.made === undefined) continue;
+				// A copy from before the edit (its load started first).
+				if (chunk.version === delta.made - 1) {
+					// Just before it: with the edit put back it is what the server has.
+					chunk.version = delta.made;
+					this.#forget(op, id);
+				} else if (delta.again) {
+					this.#forget(op, id);
+				} else {
+					// Someone else changed the chunk too, or its version isn't known:
+					// show the edit on it, and load it once more.
+					delta.again = true;
+					stale = true;
+				}
 			}
 			if (stale) queueMicrotask(() => this.#reloadFor([id]));
 		};
@@ -203,12 +223,12 @@ export class LabelLayer {
 	}
 
 	/**
-	 * The chunk version this page last read, if it has the chunk and its
-	 * copy may be current: not while a copy older than one of this page's
-	 * own edits stands in (a strict edit on it would be refused for nothing).
+	 * The server's chunk version that the copy shown stands for (this
+	 * page's own edits on it counted in), if it has the chunk: the version
+	 * a strict edit goes out on. Where someone else changed the chunk
+	 * between, it is the version before, so the edit is refused.
 	 */
 	versionOf(id: string): number | undefined {
-		if (!this.#confirmed([id]).next().done) return undefined;
 		return this.store.get(id)?.version;
 	}
 
@@ -262,28 +282,22 @@ export class LabelLayer {
 				local.delete(id);
 				continue;
 			}
+			delta.made = version;
 			const chunk = this.store.peek(id);
-			let keep = this.store.isLoading(id);
-			if (chunk?.version !== undefined) {
-				if (chunk.version === version - 1) {
-					chunk.version = version;
-				} else if (chunk.version < version - 1) {
-					keep = true;
-					again.push(id);
-				} else if (chunk.version > version) {
-					// A copy newer than the op, which went over it again.
-					again.push(id);
-				}
-			} else if (chunk) {
+			if (chunk?.version === undefined) {
 				// A copy of a version not known: load it again, showing the edit meanwhile.
-				keep = true;
+				if (chunk) again.push(id);
+			} else if (chunk.version === version - 1) {
+				chunk.version = version;
+			} else if (chunk.version < version - 1 || chunk.version > version) {
+				// Someone else changed the chunk too, or a copy newer than the
+				// op was read and the edit went over it again: load it again.
 				again.push(id);
 			}
-			if (keep) delta.made = version;
-			else local.delete(id);
 		}
 		if (local.size === 0) this.#local.delete(op);
 		this.reload(again, made);
+		// What's left waits for the loads of its chunks that may predate it.
 		this.#tie([...local.keys()]);
 	}
 

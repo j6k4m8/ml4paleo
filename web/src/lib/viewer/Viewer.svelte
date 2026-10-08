@@ -53,7 +53,7 @@
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
 	import { type Action, actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
-	import { type LabelClass, LabelLayer } from "./labels";
+	import { type LabelClass, LabelLayer, strictOn } from "./labels";
 	import { imageLoader, labelLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
 	import { LAYOUTS, type Stroke, ViewerState } from "./state.svelte";
@@ -114,12 +114,7 @@
 	// Strict edits compare against the chunk versions current when they're
 	// sent, after this page's earlier edits have landed; if any version is
 	// unknown, the edit applies like a brush stroke instead.
-	queue.beforeSend = (op: QueuedEdit) => {
-		if (!op.strict || !labels) return op;
-		const versions = op.deltas.map((d) => labels!.versionOf(d.key.join("/")));
-		if (versions.some((v) => v === undefined)) return { ...op, strict: false };
-		return { ...op, deltas: op.deltas.map((d, i) => ({ ...d, base_version: versions[i]! })) };
-	};
+	queue.beforeSend = (op: QueuedEdit) => (labels ? strictOn(labels, op) : op);
 	const rois = new RoiList(project);
 	const firstRoi = untrack(() => startRoi);
 	const firstBox = untrack(() => startBox);

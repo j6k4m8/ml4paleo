@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { base64, packBits, zstdFrame } from "../labels/deltas";
 import type { Chunk } from "./chunks";
-import { LabelLayer } from "./labels";
+import { LabelLayer, strictOn } from "./labels";
 import type { WorkerPool } from "./loader";
 
 /**
@@ -46,6 +46,13 @@ function first(layer: LabelLayer, id: string): number | undefined {
 async function loaded(layer: LabelLayer, id: string) {
 	layer.store.want("view", new Set([id]));
 	return layer.store.request(id);
+}
+
+/** What views are told, as the layer tells them. */
+function told(layer: LabelLayer): string[][] {
+	const heard: string[][] = [];
+	layer.onChange((ids) => heard.push(ids));
+	return heard;
 }
 
 describe("LabelLayer", () => {
@@ -97,7 +104,7 @@ describe("LabelLayer", () => {
 		expect(first(layer, "0/0/0")).toBe(5);
 	});
 
-	it("puts an edit back on a copy that started loading before the edit applied", async () => {
+	it("puts an edit back on a copy read just before it, which makes the copy that version", async () => {
 		const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
 		const { pool, loads, release } = fakePool(server, true);
 		const layer = new LabelLayer("p", pool, [2, 2, 2]);
@@ -108,9 +115,35 @@ describe("LabelLayer", () => {
 		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
 		release();
 		await loading;
-		// The copy predates the edit: it shows the edit anyway, and loads again.
+		// The copy predates the edit, but with it put back is what the server has.
 		expect(first(layer, "0/0/0")).toBe(5);
+		expect(layer.versionOf("0/0/0")).toBe(4);
 		await tick();
+		expect(loads).toHaveLength(1);
+		// Its change event has nothing new to load either.
+		layer.changed([{ key: [0, 0, 0], version: 4 }]);
+		expect(loads).toHaveLength(1);
+	});
+
+	it("puts an edit back on a copy others changed the chunk since, and loads the chunk once more", async () => {
+		const server = new Map([["0/0/0", { value: 0, version: 2 }]]);
+		const { pool, loads, release } = fakePool(server, true);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		const loading = loaded(layer, "0/0/0");
+		layer.applyLocal("op", [delta(5)]);
+		// Someone else's edit (3), then ours (4), reach the server before the load lands.
+		server.set("0/0/0", { value: 5, version: 4 });
+		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
+		release();
+		await loading;
+		// The copy is from before both: it shows our edit, and stands for the
+		// version before the other, so a strict edit on it is refused.
+		expect(first(layer, "0/0/0")).toBe(5);
+		expect(layer.versionOf("0/0/0")).toBe(2);
+		await tick();
+		expect(loads).toHaveLength(2);
+		// The reload is for our edit's version: its change event doesn't start it over.
+		layer.changed([{ key: [0, 0, 0], version: 4 }]);
 		expect(loads).toHaveLength(2);
 		release();
 		await tick();
@@ -135,15 +168,27 @@ describe("LabelLayer", () => {
 		expect(loads).toHaveLength(2);
 	});
 
-	it("tells views when a refresh stops for good, so they load the chunk afresh", async () => {
+	it("tells views once a reload has landed", async () => {
+		const server = new Map([["0/0/0", { value: 1, version: 1 }]]);
+		const { pool } = fakePool(server);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		await loaded(layer, "0/0/0");
+		const heard = told(layer);
+		server.set("0/0/0", { value: 2, version: 2 });
+		layer.changed([{ key: [0, 0, 0], version: 2 }]);
+		expect(heard).toEqual([]);
+		await tick();
+		expect(heard).toEqual([["0/0/0"]]);
+	});
+
+	it("tells views when a reload stops for good, so they load the chunk afresh", async () => {
 		const server = new Map([["0/0/0", { value: 1, version: 1 }]]);
 		const { pool, loads, release } = fakePool(server, true);
 		const layer = new LabelLayer("p", pool, [2, 2, 2]);
 		const loading = loaded(layer, "0/0/0");
 		release();
 		await loading;
-		const told: string[][] = [];
-		layer.onChange((ids) => told.push(ids));
+		const heard = told(layer);
 		// Someone edits the chunk; while it reloads, the view zooms out past the label limit.
 		server.set("0/0/0", { value: 2, version: 2 });
 		layer.changed([{ key: [0, 0, 0], version: 2 }]);
@@ -152,20 +197,41 @@ describe("LabelLayer", () => {
 		await tick();
 		// The old copy is gone, and views drop what they drew from it.
 		expect(layer.store.peek("0/0/0")).toBeUndefined();
-		expect(told).toEqual([["0/0/0"]]);
+		expect(heard).toEqual([["0/0/0"]]);
 		// Back in view, it loads afresh.
 		const again = loaded(layer, "0/0/0");
 		release();
 		expect((await again).version).toBe(2);
 	});
 
+	it("says nothing when a reload is taken over by another, which says so when it lands", async () => {
+		const server = new Map([["0/0/0", { value: 1, version: 1 }]]);
+		const { pool, loads, release } = fakePool(server, true);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		const loading = loaded(layer, "0/0/0");
+		release();
+		await loading;
+		const heard = told(layer);
+		layer.reload(["0/0/0"]);
+		layer.reload(["0/0/0"]);
+		await tick();
+		expect(loads).toHaveLength(3);
+		// The first reload was replaced, not stopped: the copy stays, and nothing is said yet.
+		expect(heard).toEqual([]);
+		expect(layer.store.peek("0/0/0")).toBeDefined();
+		server.set("0/0/0", { value: 2, version: 2 });
+		release();
+		await tick();
+		expect(heard).toEqual([["0/0/0"]]);
+		expect(first(layer, "0/0/0")).toBe(1);
+	});
+
 	it("has views load a chunk it edits without a copy of it", () => {
 		const { pool } = fakePool(new Map());
 		const layer = new LabelLayer("p", pool, [2, 2, 2]);
-		const told: string[][] = [];
-		layer.onChange((ids) => told.push(ids));
+		const heard = told(layer);
 		layer.applyLocal("op", [delta(5)]);
-		expect(told).toEqual([["0/0/0"]]);
+		expect(heard).toEqual([["0/0/0"]]);
 	});
 
 	it("doesn't restart the reload an answered edit started when the edit's change event comes", async () => {
@@ -188,28 +254,6 @@ describe("LabelLayer", () => {
 		expect(first(layer, "0/0/0")).toBe(5);
 	});
 
-	it("doesn't restart the reload a copy older than an edit started when the edit's change event comes", async () => {
-		const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
-		const { pool, loads, release } = fakePool(server, true);
-		const layer = new LabelLayer("p", pool, [2, 2, 2]);
-		const loading = loaded(layer, "0/0/0");
-		layer.applyLocal("op", [delta(5)]);
-		server.set("0/0/0", { value: 5, version: 4 });
-		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
-		release();
-		await loading;
-		await tick();
-		// The copy predated the edit, so the chunk was sent for once more.
-		expect(loads).toHaveLength(2);
-		// While a copy older than the edit stands in, a strict edit there can't be based on it.
-		expect(layer.versionOf("0/0/0")).toBeUndefined();
-		layer.changed([{ key: [0, 0, 0], version: 4 }]);
-		expect(loads).toHaveLength(2);
-		release();
-		await tick();
-		expect(layer.versionOf("0/0/0")).toBe(4);
-	});
-
 	it("lets go of an answered edit once the load it waited on is cancelled", async () => {
 		const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
 		const { pool, release } = fakePool(server, true);
@@ -228,6 +272,25 @@ describe("LabelLayer", () => {
 		await tick();
 		expect(first(layer, "0/0/0")).toBe(0);
 		expect(layer.versionOf("0/0/0")).toBe(3);
+	});
+
+	it("lets go of an answered edit at once when nothing is loading the chunk", async () => {
+		const server = new Map([["0/0/0", { value: 0, version: 2 }]]);
+		const { pool, loads } = fakePool(server);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		await loaded(layer, "0/0/0");
+		// No view shows the chunk now.
+		layer.store.want("view", []);
+		layer.applyLocal("op", [delta(5)]);
+		// Someone else's edit came between: the copy is behind, so it would load again, but nothing shows it.
+		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
+		await tick();
+		expect(loads).toHaveLength(1);
+		expect(layer.store.peek("0/0/0")).toBeUndefined();
+		// A later load starts after the answer, so it has the edit; one that doesn't is left as it came.
+		const again = loaded(layer, "0/0/0");
+		await again;
+		expect(first(layer, "0/0/0")).toBe(0);
 	});
 
 	it("loads a copy of a version not known once more, showing the edit on it", async () => {
@@ -250,23 +313,89 @@ describe("LabelLayer", () => {
 		expect(loads).toHaveLength(2);
 	});
 
-	it("gives no version to base a strict edit on while a copy older than your edit stands in", async () => {
-		const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
-		const { pool, release } = fakePool(server, true);
+	it("loads a copy of a version not known once more when its edit is answered", async () => {
+		const server = new Map<string, { value: number; version?: number }>([["0/0/0", { value: 0 }]]);
+		const { pool, loads } = fakePool(server);
 		const layer = new LabelLayer("p", pool, [2, 2, 2]);
-		const loading = loaded(layer, "0/0/0");
+		await loaded(layer, "0/0/0");
 		layer.applyLocal("op", [delta(5)]);
-		server.set("0/0/0", { value: 5, version: 4 });
 		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
-		release();
-		await loading;
-		// The copy shown is at 3 with the edit put back; the server is at 4.
-		expect(layer.store.peek("0/0/0")?.version).toBe(3);
-		expect(layer.versionOf("0/0/0")).toBeUndefined();
+		expect(first(layer, "0/0/0")).toBe(5);
+		expect(loads).toHaveLength(2);
+	});
+
+	it("loads again a copy newer than the edit that was answered, which the edit went over twice", async () => {
+		const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
+		const { pool, loads } = fakePool(server);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		await loaded(layer, "0/0/0");
+		layer.applyLocal("op", [delta(5)]);
+		// Our edit (4) and someone's after it (5) reached the server, and a copy
+		// read after both lands before the answer, with our edit put on top again.
+		server.set("0/0/0", { value: 7, version: 5 });
+		layer.changed([{ key: [0, 0, 0], version: 5 }]);
 		await tick();
-		release();
+		expect(first(layer, "0/0/0")).toBe(5);
+		expect(loads).toHaveLength(2);
+		layer.settle("op", [{ key: [0, 0, 0], version: 4 }]);
+		expect(loads).toHaveLength(3);
 		await tick();
-		expect(layer.versionOf("0/0/0")).toBe(4);
+		expect(first(layer, "0/0/0")).toBe(7);
+		expect(layer.versionOf("0/0/0")).toBe(5);
+	});
+
+	describe("strict edits", () => {
+		it("go out on the version your own edit made, even after another edit of yours was refused", async () => {
+			const server = new Map([["0/0/0", { value: 0, version: 2 }]]);
+			const { pool, release } = fakePool(server, true);
+			const layer = new LabelLayer("p", pool, [2, 2, 2]);
+			const loading = loaded(layer, "0/0/0");
+			layer.applyLocal("op1", [delta(5)]);
+			server.set("0/0/0", { value: 5, version: 3 });
+			layer.settle("op1", [{ key: [0, 0, 0], version: 3 }]);
+			release();
+			await loading;
+			await tick();
+			// A later edit is refused, and its chunk loads again.
+			layer.applyLocal("op2", [delta(7)]);
+			layer.settle("op2", null);
+			await tick();
+			const sent = strictOn(layer, { strict: true, deltas: [delta(9)] });
+			expect(sent.strict).toBe(true);
+			// The server is at 3, our own edit's version.
+			expect(sent.deltas[0]?.base_version).toBe(3);
+		});
+
+		it("stay strict, on what you saw, when someone else changed the chunk between two of yours, so the server refuses them", async () => {
+			const server = new Map([["0/0/0", { value: 0, version: 3 }]]);
+			const { pool } = fakePool(server);
+			const layer = new LabelLayer("p", pool, [2, 2, 2]);
+			await loaded(layer, "0/0/0");
+			layer.applyLocal("op", [delta(5)]);
+			// Someone else's edit (4), then ours (5).
+			const serverVersion = 5;
+			server.set("0/0/0", { value: 5, version: serverVersion });
+			layer.settle("op", [{ key: [0, 0, 0], version: serverVersion }]);
+			const sent = strictOn(layer, { strict: true, deltas: [delta(9)] });
+			expect(sent.strict).toBe(true);
+			// Based on 3, where the server is at 5: it refuses, and the polygon is redrawn over what changed.
+			expect(sent.deltas[0]?.base_version).toBe(3);
+			expect(sent.deltas[0]?.base_version).not.toBe(serverVersion);
+		});
+
+		it("go out as plain edits where a chunk's version isn't known", async () => {
+			const { pool } = fakePool(new Map());
+			const layer = new LabelLayer("p", pool, [2, 2, 2]);
+			const edit = { strict: true, deltas: [delta(9)] };
+			expect(strictOn(layer, edit).strict).toBe(false);
+		});
+
+		it("are left as they are when they're not strict", async () => {
+			const { pool } = fakePool(new Map());
+			const layer = new LabelLayer("p", pool, [2, 2, 2]);
+			const edit = { strict: false, deltas: [delta(9)] };
+			expect(strictOn(layer, edit)).toBe(edit);
+		});
 	});
 
 	it("remembers the chunks it edited, the latest last", () => {
@@ -293,11 +422,12 @@ describe("LabelLayer", () => {
 
 	it("refetches a refused edit's chunks", async () => {
 		const server = new Map([["0/0/0", { value: 0, version: 2 }]]);
-		const { pool } = fakePool(server);
+		const { pool, loads } = fakePool(server);
 		const layer = new LabelLayer("p", pool, [2, 2, 2]);
 		await loaded(layer, "0/0/0");
 		layer.applyLocal("op", [delta(9)]);
 		layer.settle("op", null);
+		expect(loads).toHaveLength(2);
 		await new Promise((r) => setTimeout(r, 0));
 		expect(first(layer, "0/0/0")).toBe(0);
 	});
