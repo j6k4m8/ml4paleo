@@ -1,7 +1,8 @@
 import { decompress } from "fzstd";
 import { describe, expect, it } from "vitest";
 import type { Chunk } from "../viewer/chunks";
-import { type Box, MAX_VIEW_CHUNKS, acceptParts, chunksIn, readBox, tooBigForView, unlabeledOnly } from "./accept";
+import { PLANES } from "../viewer/tiles";
+import { type Box, MAX_VIEW_CHUNKS, acceptParts, chunksIn, planeToAccept, readBox, tooBigForView, unlabeledOnly } from "./accept";
 import { CHUNK, type DeltaIn, decodeDelta, fromBase64, unpackBits } from "./deltas";
 
 /** A 100 × 70 × 130 volume whose value at (z, y, x) is (z + y + x) % 4. */
@@ -143,6 +144,18 @@ describe("accepting what a view shows", () => {
 		const values = await readBox(fakeChunk, box);
 		let i = 0;
 		for (let y = 0; y < 70; y++) for (let x = 60; x < 70; x++) expect(values[i++]).toBe((62 + y + x) % 4);
+	});
+
+	it("means the only view there is, or in four views the one pointed at, else the one last used", () => {
+		const { xy, xz, yz } = PLANES;
+		// One view at a time: that one, whatever the pointer passed over.
+		expect(planeToAccept("xz", yz, xy)).toBe(xz);
+		expect(planeToAccept("yz", null, xy)).toBe(yz);
+		expect(planeToAccept("xy", xz, yz)).toBe(xy);
+		// Four views: the pointer's, and where it isn't over a view (on the panel, say), the last used,
+		// not whichever it crossed on the way.
+		expect(planeToAccept("four", yz, xy)).toBe(yz);
+		expect(planeToAccept("four", null, xz)).toBe(xz);
 	});
 
 	it("counts the chunks a box touches", () => {

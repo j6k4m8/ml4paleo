@@ -35,7 +35,7 @@
 	import { nextColor } from "#lib/labelimport.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
-	import { acceptParts, MAX_ACCEPT_VOXELS, readBox, tooBigForView, unlabeledOnly } from "../labels/accept";
+	import { acceptParts, MAX_ACCEPT_VOXELS, planeToAccept, readBox, tooBigForView, unlabeledOnly } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit, saveState } from "../labels/opqueue.svelte";
 	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
@@ -114,8 +114,12 @@
 	// predictions don't fit the image here.
 	let imageReplaced = $state(false);
 	let pool: WorkerPool | undefined;
-	// The view last pointed at, which accepting in "this view" means in a four-view layout.
-	let hovered = $state.raw<Plane>(PLANES.xy);
+	let hovered: Plane = PLANES.xy;
+	// In a four-view layout, the view the pointer is over now, and the one last used (pressed in,
+	// scrolled, focused, or keys pressed over): which "this view" is when accepting. Moving to the
+	// panel crosses other views, so what the pointer passed over on the way doesn't count.
+	let pointed = $state.raw<Plane | null>(null);
+	let used = $state.raw<Plane>(PLANES.xy);
 	let notice = $state("");
 	let classesOpen = $state(true);
 	// The form for a new class: open on request, and from the start while the project has none.
@@ -492,11 +496,6 @@
 		return box && mixesProposal(box) ? "Part of this ROI shows your proposal and part doesn't; propose the whole ROI to accept it" : "";
 	}
 
-	/** The view that slice keys step and accepting means: the only one, or the one last pointed at. */
-	function activePlane(): Plane {
-		return viewer.layout === "four" ? hovered : PLANES[viewer.layout];
-	}
-
 	/**
 	 * What accepting in the view would do: the part of its slice the active
 	 * view shows (`visibleBox`, once the view has a size), the layer that
@@ -504,7 +503,7 @@
 	 * can't. These words are the button's tooltip and the notice for the key.
 	 */
 	const inView = $derived.by(() => {
-		const plane = activePlane();
+		const plane = planeToAccept(viewer.layout, pointed, used);
 		const size = sizes.get(plane.name);
 		const box = size
 			? visibleBox({ plane, position: viewer.position, zoom: viewer.zoom, aspect: viewer.aspect, width: size[0], height: size[1] }, viewer.shape)
@@ -791,6 +790,17 @@
 	// Keys that move the views, which wait while a polygon is dragged out on its slice.
 	const MOVES = new Set<Action>(["slice-next", "slice-previous", "fit", "next-roi", "layout"]);
 
+	/** The view that slice keys step: the only one, or the one last pointed at. */
+	function activePlane(): Plane {
+		return viewer.layout === "four" ? hovered : PLANES[viewer.layout];
+	}
+
+	// A view that went away took the pointer with it.
+	$effect(() => {
+		void viewer.layout;
+		pointed = null;
+	});
+
 	function key(event: KeyboardEvent) {
 		viewer.noteKeys(event);
 		holdAlt(event);
@@ -806,6 +816,7 @@
 		}
 		const action = actionFor(event);
 		if (!action) return;
+		if (pointed) used = pointed;
 		// Enter and Backspace only mean something while drawing a polygon.
 		if ((action === "close-polygon" || action === "remove-point") && !viewer.polygon) return;
 		event.preventDefault();
@@ -1180,22 +1191,34 @@
 			>
 				{#if images && levels.length > 0}
 					{#each shown as plane (plane.name)}
-						<PlaneView
-							{plane}
-							{viewer}
-							{levels}
-							{images}
-							{labels}
-							prediction={prediction?.store}
-							{proposal}
-							{segmentation}
-							onhover={(p) => (hovered = p)}
-							onresize={resized}
-							onstroke={stroke}
-							onpolygon={closePolygon}
-							rois={rois.items}
-							onroi={drawRoi}
-						/>
+						<div
+							class="contents"
+							role="presentation"
+							onpointerover={() => (pointed = plane)}
+							onpointerout={(event) => {
+								if (!event.currentTarget.contains(event.relatedTarget as Node | null)) pointed = null;
+							}}
+							onpointerdown={() => (used = plane)}
+							onwheel={() => (used = plane)}
+							onfocusin={() => (used = plane)}
+						>
+							<PlaneView
+								{plane}
+								{viewer}
+								{levels}
+								{images}
+								{labels}
+								prediction={prediction?.store}
+								{proposal}
+								{segmentation}
+								onhover={(p) => (hovered = p)}
+								onresize={resized}
+								onstroke={stroke}
+								onpolygon={closePolygon}
+								rois={rois.items}
+								onroi={drawRoi}
+							/>
+						</div>
 					{/each}
 					{#if viewer.layout === "four"}
 						<div class="flex flex-col justify-center gap-1 bg-pasteboard p-4 font-mono text-2xs text-ink-dim">
@@ -1282,7 +1305,11 @@
 									{accepting ? "Accepting…" : `Accept ${kind} in this view`}
 									{#if !selectedRoi}<span class="kbd ml-auto">A</span>{/if}
 								</button>
-								{#if blocked && !accepting}<p id="accept-view-why" class="text-2xs text-ink-dim">{blocked}</p>{/if}
+								{#if blocked && !accepting}
+									<p id="accept-view-why" class="text-2xs text-ink-dim">{blocked}</p>
+								{:else if viewer.layout === "four" && box}
+									<p class="text-2xs text-ink-dim">In the {plane.name.toUpperCase()} view, at {"zyx"[plane.normal]} {box[plane.normal]}</p>
+								{/if}
 							{/if}
 						</li>
 					{/if}

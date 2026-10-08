@@ -6,7 +6,8 @@
  */
 
 import type { Chunk } from "../viewer/chunks";
-import type { Vec3 } from "../viewer/tiles";
+import type { Layout } from "../viewer/state.svelte";
+import { type Plane, PLANES, type Vec3 } from "../viewer/tiles";
 import { CHUNK, type DeltaIn, splitIntoDeltas } from "./deltas";
 
 /** Boxes bigger than this would make the page hold too much at once. */
@@ -58,6 +59,14 @@ export async function readBox(load: (id: string) => Promise<Chunk>, box: Box): P
 	}
 	await Promise.all(loads);
 	return out;
+}
+
+/**
+ * The view that accepting "in this view" means: the only one, or in a
+ * four-view layout the one the pointer is over, else the one last used.
+ */
+export function planeToAccept(layout: Layout, pointed: Plane | null, used: Plane): Plane {
+	return layout === "four" ? (pointed ?? used) : PLANES[layout];
 }
 
 /** How many chunks (64³ voxels) a box touches. */
