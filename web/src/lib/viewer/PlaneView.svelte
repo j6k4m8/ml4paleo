@@ -12,7 +12,6 @@
 	import {
 		boxOnPlane,
 		countTiles,
-		coveringTile,
 		type Level,
 		type Plane,
 		pixelsPerVoxel,
@@ -23,6 +22,7 @@
 		tileId,
 		tilesShown,
 		tilesToLoad,
+		tilesUnder,
 		type Vec3,
 		type View,
 		viewLevel,
@@ -249,10 +249,11 @@
 		const finer = levels[chosen.index - 1];
 		// Room on the GPU for every texture this frame may upload, made before
 		// any upload, so none pushes out another the frame draws: the chunks
-		// wanted, and the finer chunks under each of the level's still missing.
-		const under = finer ? (chosen.scale[plane.u] / finer.scale[plane.u]) * (chosen.scale[plane.v] / finer.scale[plane.v]) : 0;
-		const missing = under ? top.tiles.filter((key) => !renderer!.hasImage(key, top.slice)).length : 0;
-		renderer.reserve(wanted.length + missing * under, 4 * MAX_LABEL_TILES);
+		// wanted, and the finer chunks loaded and not yet on the GPU that
+		// fill in under the level's missing ones.
+		const fine = finer ? sliceIndex(finer, current) : 0;
+		const fillers = finer ? underMissing(finer, top, current).filter((key) => images.peek(tileId(key)) && !renderer!.hasImage(key, fine)) : [];
+		renderer.reserve(wanted.length + fillers.length, 4 * MAX_LABEL_TILES);
 		for (const key of wanted) loadImage(key, slices[key.level]!);
 		const layers: { level: Level; slice: number; tiles: TileKey[] }[] = [];
 		for (let i = levels.length - 1; i > chosen.index; i--) {
@@ -312,16 +313,23 @@
 	}
 
 	/**
+	 * The chunks of `finer` the view shows under the chosen level's chunks
+	 * that can't be drawn this frame (not on the GPU, and not loaded to put
+	 * there).
+	 */
+	function underMissing(finer: Level, top: { level: Level; slice: number; tiles: TileKey[] }, current: View): TileKey[] {
+		const missing = new Set(top.tiles.filter((key) => !renderer!.hasImage(key, top.slice) && !images.peek(tileId(key))).map(tileId));
+		return missing.size === 0 ? [] : tilesUnder(finer, top.level, missing, current);
+	}
+
+	/**
 	 * Chunks of `finer` already at hand (on the GPU, or loaded) where the
 	 * chosen level's chunks haven't arrived, to draw under them meanwhile.
 	 */
 	function stopgaps(finer: Level, top: { level: Level; slice: number; tiles: TileKey[] }, current: View): TileKey[] {
 		if (!renderer) return [];
-		const missing = new Set(top.tiles.filter((key) => !renderer!.hasImage(key, top.slice)).map(tileId));
-		if (missing.size === 0) return [];
 		const at = sliceIndex(finer, current);
-		return visibleTiles(finer, current, 0).filter((key) => {
-			if (!missing.has(tileId(coveringTile(key, finer, top.level, current)))) return false;
+		return underMissing(finer, top, current).filter((key) => {
 			if (renderer!.hasImage(key, at)) return true;
 			const cached = images.peek(tileId(key));
 			if (cached) renderer!.uploadImage(key, at, cached);

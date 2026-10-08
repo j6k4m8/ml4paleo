@@ -262,6 +262,14 @@ export function tilesToLoad(levels: Level[], level: Level, view: View, padding =
 }
 
 /**
+ * The chunks of the finer level `finer` the view shows under `missing`, ids
+ * of chunks of the coarser `level` it shows, nearest the center first.
+ */
+export function tilesUnder(finer: Level, level: Level, missing: ReadonlySet<string>, view: View): TileKey[] {
+	return visibleTiles(finer, view, 0).filter((key) => missing.has(tileId(coveringTile(key, finer, level, view))));
+}
+
+/**
  * The chunk of the coarser level `to` that holds `key`'s part of the plane
  * the view shows.
  */

@@ -11,10 +11,12 @@ import {
 	type Level,
 	PLANES,
 	TILE_HYSTERESIS,
+	type TileKey,
 	tileCrosses,
 	tileId,
 	tilesShown,
 	tilesToLoad,
+	tilesUnder,
 	type Vec3,
 	type View,
 	viewLevel,
@@ -266,6 +268,34 @@ describe("coveringTile", () => {
 		const coarse = levels[2] as Level;
 		// z 130 is level-2 slice 32, in chunk 0; x chunk 5 (320..383) is in level-2 chunk 1.
 		expect(coveringTile({ level: 0, cz: 2, cy: 7, cx: 5 }, fine, coarse, view())).toEqual({ level: 2, cz: 0, cy: 1, cx: 1 });
+	});
+});
+
+describe("tilesUnder", () => {
+	it("finds the finer chunks shown under the missing coarser ones, nearest the center first", () => {
+		const fine = levels[0] as Level;
+		const coarse = levels[1] as Level;
+		const at = view({ width: 256, height: 256 });
+		const shown = visibleTiles(coarse, at, 0);
+		const missing = new Set([tileId(shown[0] as TileKey)]);
+		const under = tilesUnder(fine, coarse, missing, at);
+		expect(under.length).toBeGreaterThan(0);
+		// Each lies under the one missing chunk, and every such chunk the view shows is there.
+		expect(under.every((key) => missing.has(tileId(coveringTile(key, fine, coarse, at))))).toBe(true);
+		const all = visibleTiles(fine, at, 0).filter((key) => missing.has(tileId(coveringTile(key, fine, coarse, at))));
+		expect(under.map(tileId)).toEqual(all.map(tileId));
+		// A missing chunk the view doesn't show has nothing under it, and none missing, nothing.
+		expect(tilesUnder(fine, coarse, new Set(["1/0/0/0"]), at)).toEqual([]);
+		expect(tilesUnder(fine, coarse, new Set(), at)).toEqual([]);
+	});
+
+	it("finds a quarter of each missing chunk's area in the next finer level", () => {
+		const fine = levels[0] as Level;
+		const coarse = levels[1] as Level;
+		// Level 1's chunks cover 128 voxels a side, level 0's 64: four chunks under one.
+		const at = view({ width: 1024, height: 1024, zoom: 1 });
+		const middle = visibleTiles(coarse, at, 0).filter((key) => key.cy === 3 && key.cx === 3);
+		expect(tilesUnder(fine, coarse, new Set(middle.map(tileId)), at)).toHaveLength(4);
 	});
 });
 
