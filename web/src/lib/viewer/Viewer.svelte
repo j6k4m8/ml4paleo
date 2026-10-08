@@ -16,6 +16,7 @@
 	import Maximize2 from "@lucide/svelte/icons/maximize-2";
 	import PanelRight from "@lucide/svelte/icons/panel-right";
 	import Pentagon from "@lucide/svelte/icons/pentagon";
+	import Plus from "@lucide/svelte/icons/plus";
 	import Redo2 from "@lucide/svelte/icons/redo-2";
 	import Sparkles from "@lucide/svelte/icons/sparkles";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
@@ -23,13 +24,14 @@
 	import SquaresUnite from "@lucide/svelte/icons/squares-unite";
 	import Undo2 from "@lucide/svelte/icons/undo-2";
 	import X from "@lucide/svelte/icons/x";
-	import { onDestroy, onMount, untrack } from "svelte";
+	import { onDestroy, onMount, tick, untrack } from "svelte";
 	import Histogram from "#lib/ui/Histogram.svelte";
 	import Panel from "#lib/ui/Panel.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
 	import { ApiError, api, message } from "#lib/api.ts";
 	import { unfinished } from "#lib/pipelines.ts";
 	import { whileVisible } from "#lib/refresh.ts";
+	import { nextColor } from "#lib/labelimport.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
 	import { acceptParts, MAX_ACCEPT_VOXELS, readBox } from "../labels/accept";
@@ -107,6 +109,19 @@
 	let hovered: Plane = PLANES.xy;
 	let notice = $state("");
 	let classesOpen = $state(true);
+	// The form for a new class: open on request, and from the start while the project has none.
+	let addingClass = $state(false);
+	let className = $state("");
+	// The color the person picked, if they did; until then the form offers the next one not in use.
+	let pickedColor = $state("");
+	const classColor = $derived(pickedColor || nextColor(classes.map((c) => c.color)));
+	let classError = $state("");
+	let savingClass = $state(false);
+	let classInput: HTMLInputElement | null = $state(null);
+	let addClassButton: HTMLButtonElement | null = $state(null);
+	// Said to screen readers when a class is added.
+	let classAdded = $state("");
+	const classFormOpen = $derived(addingClass || (labels !== null && classes.length === 0));
 	// On narrow screens the dock floats over the views until closed.
 	let dockOpen = $state(false);
 	const me = session.current?.user.id ?? "";
@@ -161,6 +176,8 @@
 			layer.onStopped = () => (error = "Live label updates stopped. Reload the page to see others' edits.");
 			labels = layer;
 			classes = layer.classes;
+			// Classes added here or elsewhere reach the list, and the palette.
+			layer.onClasses(() => (classes = layer.classes));
 			viewer.activeClass ??= classes[0]?.value ?? null;
 			queue.onOutcome((outcome) => {
 				if ("cancelled" in outcome) {
@@ -190,7 +207,10 @@
 	const stopRefreshing = rois.keepFresh();
 	// Models trained or deleted, and predictions and proposals made, since.
 	// A reload that fails keeps what's shown, quietly, and the next one tries again.
-	const stopReloading = whileVisible(() => void loadPrediction(controller.signal).catch(() => {}));
+	const stopReloading = whileVisible(() => {
+		void loadPrediction(controller.signal).catch(() => {});
+		void labels?.refreshClasses().catch(() => {});
+	});
 
 	onDestroy(() => {
 		controller.abort();
@@ -841,6 +861,70 @@
 	];
 
 	const activeClass = $derived(classes.find((c) => c.value === viewer.activeClass));
+
+	/** Open the new-class form, its name ready to type (what's typed already stays). */
+	async function startClass() {
+		if (!labels) return;
+		classesOpen = true;
+		dockOpen = true;
+		if (!classFormOpen) {
+			className = "";
+			pickedColor = "";
+			classError = "";
+			classAdded = "";
+		}
+		addingClass = true;
+		// Someone may have added classes since this page loaded; the color offered is a fresh one.
+		await labels.refreshClasses().catch(() => {});
+		await tick();
+		classInput?.focus();
+	}
+
+	/** Escape, from anywhere in the form, closes it (while there are classes to go back to) and does nothing else. */
+	function closesOnEscape(form: HTMLFormElement) {
+		const onKey = (event: KeyboardEvent) => {
+			if (event.key !== "Escape" || event.isComposing || classes.length === 0) return;
+			event.stopPropagation();
+			void closeClassForm();
+		};
+		form.addEventListener("keydown", onKey);
+		return () => form.removeEventListener("keydown", onKey);
+	}
+
+	/** Close the form, leaving keyboard focus on the button that opens it. */
+	async function closeClassForm() {
+		if (savingClass) return;
+		addingClass = false;
+		className = "";
+		pickedColor = "";
+		classError = "";
+		await tick();
+		addClassButton?.focus();
+	}
+
+	async function saveClass(event: SubmitEvent) {
+		event.preventDefault();
+		const name = className.trim();
+		if (!labels || !name || savingClass) return;
+		if (classes.some((c) => c.name.trim().toLowerCase() === name.toLowerCase())) {
+			classError = `There's a class called ${name} already.`;
+			return;
+		}
+		savingClass = true;
+		classError = "";
+		try {
+			const made = await labels.addClass(name, classColor);
+			// Ready to paint with it, which is why anyone adds one.
+			viewer.activeClass = made.value;
+			classAdded = `Added ${made.name}.`;
+			savingClass = false;
+			await closeClassForm();
+		} catch (e) {
+			classError = message(e);
+		} finally {
+			savingClass = false;
+		}
+	}
 	const zoomPercent = $derived(Math.round((viewer.zoom / (globalThis.devicePixelRatio || 1)) * 100));
 	const [, imageZ, imageY, imageX] = manifest.shape_czyx;
 	const histogram = manifest.histogram && !Array.isArray(manifest.histogram) ? manifest.histogram : null;
@@ -969,12 +1053,9 @@
 			<button
 				class="size-7 rounded-sm border-2 border-ink/80 shadow-[0_0_0_1px_black]"
 				style:background={activeClass?.color ?? "transparent"}
-				title={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "No class to paint"}
-				aria-label={activeClass ? `Active class: ${activeClass.name}` : "No active class"}
-				onclick={() => {
-					classesOpen = true;
-					dockOpen = true;
-				}}
+				title={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "Add a class to start labeling"}
+				aria-label={activeClass ? `Active class: ${activeClass.name}` : "Add a class"}
+				onclick={() => (activeClass ? ((classesOpen = true), (dockOpen = true)) : startClass())}
 			></button>
 			<span class="my-1.5 h-px w-6 bg-line"></span>
 			<ToolButton icon={Undo2} label="Undo" shortcut="Ctrl+Z" disabled={queue.undoable === 0} onclick={() => queue.undo()} />
@@ -1115,6 +1196,13 @@
 			</Panel>
 
 			<Panel title="Classes" bind:open={classesOpen}>
+				{#snippet actions()}
+					{#if labels && !classFormOpen}
+						<button class="btn btn-ghost gap-1" bind:this={addClassButton} title="Add a class to label with" onclick={startClass}>
+							<Plus size={12} /> Add class
+						</button>
+					{/if}
+				{/snippet}
 				{#if classes.length > 0}
 					<ul class="-mx-2.5 -my-1 flex flex-col">
 						{#each classes as label, index (label.value)}
@@ -1132,7 +1220,39 @@
 						{/each}
 					</ul>
 				{:else if labels}
-					<p class="text-ink-dim">Add label classes in the project settings to start labeling.</p>
+					<p class="text-ink-dim">No classes yet. Add one to start labeling.</p>
+				{/if}
+				<p class="sr-only" role="status">{classAdded}</p>
+				{#if classFormOpen}
+					<form class="flex flex-col gap-2" onsubmit={saveClass} {@attach closesOnEscape}>
+						<div class="flex items-center gap-2">
+							<input
+								class="field"
+								bind:this={classInput}
+								bind:value={className}
+								maxlength="100"
+								placeholder="Class name, like bone"
+								aria-label="Class name"
+								autocomplete="off"
+								required
+							/>
+							<input
+								type="color"
+								class="h-6 w-8 shrink-0 cursor-pointer rounded-sm border border-edge bg-field p-0.5"
+								value={classColor}
+								oninput={(event) => (pickedColor = event.currentTarget.value)}
+								aria-label="Class color"
+								title="Class color"
+							/>
+						</div>
+						{#if classError}<p class="error" role="alert">{classError}</p>{/if}
+						<div class="flex items-center gap-2">
+							<button class="btn btn-primary" disabled={!className.trim()} aria-disabled={savingClass}>Add</button>
+							{#if classes.length > 0}
+								<button type="button" class="btn btn-ghost" disabled={savingClass} onclick={closeClassForm}>Cancel</button>
+							{/if}
+						</div>
+					</form>
 				{/if}
 			</Panel>
 
