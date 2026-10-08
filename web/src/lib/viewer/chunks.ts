@@ -40,6 +40,17 @@ export class Busy extends Error {
 	}
 }
 
+/**
+ * A limit on the loads of chunks a server takes long to make, so that
+ * whatever it only has to read never waits for them.
+ */
+export interface SlowLimit {
+	/** Whether the server takes long to make a chunk. */
+	slow: (id: string) => boolean;
+	/** The most places the loads of such chunks take at once; the rest are for the other chunks. */
+	places: number;
+}
+
 /** The longest a chunk answered busy is waited for, counted from the start of its first load. */
 export const PATIENCE_MS = 120_000;
 /**
@@ -58,6 +69,8 @@ interface Pending {
 	refresh: boolean;
 	/** For a refresh, the version the new copy is asked for (see `refresh`). */
 	version?: number;
+	/** Whether the server takes long to make it (see `SlowLimit`). */
+	slow: boolean;
 	/** When its first load began, which its patience is counted from. */
 	began?: number;
 	/**
@@ -78,6 +91,8 @@ export class ChunkStore {
 	#queue: Pending[] = [];
 	#sorted = true;
 	#running = 0;
+	// How many of the loads running are of slow chunks (see `SlowLimit`).
+	#runningSlow = 0;
 	// When the next load asked again may start, and the timer that wakes the
 	// queue for one that isn't due yet (with the time it is set for).
 	#retryFrom = 0;
@@ -95,6 +110,7 @@ export class ChunkStore {
 		private load: Loader,
 		private maxBytes: number,
 		private concurrency = 8,
+		private limit?: SlowLimit,
 	) {}
 
 	get bytes(): number {
@@ -169,7 +185,7 @@ export class ChunkStore {
 			resolve = ok;
 			reject = fail;
 		});
-		const entry: Pending = { id, promise, resolve, reject, controller: new AbortController(), refresh, version };
+		const entry: Pending = { id, promise, resolve, reject, controller: new AbortController(), refresh, version, slow: this.limit?.slow(id) ?? false };
 		this.#pending.set(id, entry);
 		this.#queue.push(entry);
 		this.#sorted = false;
@@ -267,7 +283,8 @@ export class ChunkStore {
 	/**
 	 * The queued load to start next: the most wanted, and any never started
 	 * before those asked again (in the order they came due), which wait
-	 * until they are due, a few at a time.
+	 * until they are due, a few at a time. A slow chunk's load that would
+	 * take more of the places than it may is passed over.
 	 */
 	#next(): Pending | undefined {
 		if (!this.#sorted) {
@@ -279,14 +296,19 @@ export class ChunkStore {
 			});
 			this.#sorted = true;
 		}
-		const entry = this.#queue[0];
-		if (entry?.retryAt !== undefined) {
-			const now = Date.now();
-			const at = Math.max(entry.retryAt, this.#retryFrom);
-			if (at > now) return this.#wake(at - now);
-			this.#retryFrom = now + RETRY_GAP_MS;
+		const now = Date.now();
+		for (const [index, entry] of this.#queue.entries()) {
+			if (entry.slow && this.#runningSlow >= (this.limit?.places ?? Number.POSITIVE_INFINITY)) continue;
+			if (entry.retryAt !== undefined) {
+				const at = Math.max(entry.retryAt, this.#retryFrom);
+				// The ones after it come due later still.
+				if (at > now) return this.#wake(at - now);
+				this.#retryFrom = now + RETRY_GAP_MS;
+			}
+			this.#queue.splice(index, 1);
+			return entry;
 		}
-		return this.#queue.shift();
+		return undefined;
 	}
 
 	/** Start the queue again in `ms`, unless it is to be woken sooner anyway. */
@@ -322,6 +344,7 @@ export class ChunkStore {
 			entry.began ??= Date.now();
 			entry.retryAt = undefined;
 			this.#running += 1;
+			if (entry.slow) this.#runningSlow += 1;
 			let loading: Promise<Chunk>;
 			try {
 				loading = this.load(entry.id, entry.controller.signal);
@@ -350,6 +373,7 @@ export class ChunkStore {
 				})
 				.finally(() => {
 					this.#running -= 1;
+					if (entry.slow) this.#runningSlow -= 1;
 					this.#pump();
 				});
 		}

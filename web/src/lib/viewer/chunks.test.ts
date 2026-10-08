@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Busy, type Chunk, ChunkStore, PATIENCE_MS, RETRY_GAP_MS } from "./chunks";
+import { Busy, type Chunk, ChunkStore, type Loader, PATIENCE_MS, RETRY_GAP_MS } from "./chunks";
 
 function chunk(bytes: number): Chunk {
 	return { data: new Uint8Array(bytes), shape: [1, 1, bytes] };
@@ -635,5 +635,94 @@ describe("ChunkStore, for chunks the server is still making", () => {
 		expect(store.isLoading("a")).toBe(false);
 		await vi.advanceTimersByTimeAsync(10_000);
 		expect(calls).toHaveLength(1);
+	});
+});
+
+describe("ChunkStore, for chunks the server takes long to make", () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	const settle = () => vi.advanceTimersByTimeAsync(0);
+	// Slow chunks' ids start with "s", the others' with "f"; four places, two for the slow.
+	const store = (load: Loader) => new ChunkStore(load, 1e9, 4, { slow: (id) => id.startsWith("s"), places: 2 });
+	const ask = (s: ChunkStore, ids: string[]) => {
+		s.want("xy", ids);
+		for (const id of ids) s.request(id).catch(() => {});
+	};
+	const started = (calls: { id: string }[]) => calls.map((c) => c.id);
+
+	it("keeps places for the chunks the server only reads, however the chunks rank", async () => {
+		const { calls, load } = controlled();
+		const chunks = store(load);
+		ask(chunks, ["s1", "s2", "s3", "s4", "f1", "f2", "f3", "f4"]);
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2"]);
+		calls[0]?.finish();
+		await settle();
+		// A slow place is free again, and the next slow chunk takes it.
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2", "s3"]);
+		calls[2]?.finish();
+		await settle();
+		// Both slow places are taken, so a place that frees goes to a chunk that isn't.
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2", "s3", "f3"]);
+		calls[1]?.finish();
+		calls[4]?.finish();
+		await settle();
+		expect(started(calls).slice(6)).toEqual(["s4", "f4"]);
+	});
+
+	it("keeps those places for them even when none waits now", async () => {
+		const { calls, load } = controlled();
+		const chunks = store(load);
+		ask(chunks, ["s1", "s2", "s3", "s4"]);
+		expect(started(calls)).toEqual(["s1", "s2"]);
+		calls[1]?.finish();
+		await settle();
+		expect(started(calls)).toEqual(["s1", "s2", "s3"]);
+		// A chunk that arrives meanwhile finds its places free.
+		chunks.request("f1").catch(() => {});
+		chunks.request("f2").catch(() => {});
+		expect(started(calls)).toEqual(["s1", "s2", "s3", "f1", "f2"]);
+	});
+
+	it("gives a slow place up at once when the server answers busy, to the next slow chunk", async () => {
+		const { calls, load } = controlled();
+		const chunks = store(load);
+		ask(chunks, ["s1", "s2", "s3", "s4"]);
+		calls[0]?.fail(new Busy(1000));
+		calls[1]?.fail(new Busy(1000));
+		await settle();
+		expect(started(calls)).toEqual(["s1", "s2", "s3", "s4"]);
+	});
+
+	it("asks again for a slow chunk only when a slow place is free", async () => {
+		const { calls, load } = controlled();
+		const chunks = store(load);
+		ask(chunks, ["s1", "s2", "s3"]);
+		calls[0]?.fail(new Busy(1000));
+		await settle();
+		// s3 took the place s1 left; s2 and s3 hold both.
+		expect(started(calls)).toEqual(["s1", "s2", "s3"]);
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(started(calls)).toEqual(["s1", "s2", "s3"]);
+		calls[2]?.finish();
+		await settle();
+		expect(started(calls)).toEqual(["s1", "s2", "s3", "s1"]);
+	});
+
+	it("doesn't count a load it cancelled against the places once it has ended", async () => {
+		const { calls, load } = controlled();
+		const chunks = store(load);
+		ask(chunks, ["s1", "s2", "s3"]);
+		chunks.want("xy", ["s3"]);
+		for (const call of calls.slice(0, 2)) call.fail(new DOMException("No longer needed", "AbortError"));
+		await settle();
+		expect(started(calls)).toEqual(["s1", "s2", "s3"]);
+	});
+
+	it("puts no limit on a store without one", async () => {
+		const { calls, load } = controlled();
+		const unlimited = new ChunkStore(load, 1e9, 4);
+		ask(unlimited, ["s1", "s2", "s3", "s4"]);
+		expect(started(calls)).toEqual(["s1", "s2", "s3", "s4"]);
 	});
 });

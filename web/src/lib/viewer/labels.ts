@@ -187,6 +187,11 @@ export class LabelLayer {
 			labelLevelLoader(pool, url, () => this.levels, (level) => this.#without(level)),
 			CACHE_BYTES,
 			4,
+			// The server makes the coarser levels when asked, which can take it a
+			// second or more a chunk, and it makes two at a time: more asks at once
+			// wouldn't be answered sooner, and the other places stay free for the
+			// chunks it only reads.
+			{ slow: (id) => labelKey(id).level > 0, places: 2 },
 		);
 		// Whatever the server sends, this page's edits stay on screen.
 		this.store.onLoad = (id, chunk) => {

@@ -1025,7 +1025,7 @@ function levelPool(chunks: Map<string, { value: number; version?: number; pyrami
 	const waiting: (() => void)[] = [];
 	const failures: { left: number; status: number } = { left: 0, status: 500 };
 	const pool = {
-		load: async (request: { path: string; region: [number, number][]; derived?: boolean }): Promise<Chunk> => {
+		load: async (request: { path: string; region: [number, number][]; derived?: boolean }, signal?: AbortSignal): Promise<Chunk> => {
 			const level = request.path === "class" ? 0 : Number(request.path.slice("class_".length));
 			const [z, y, x] = request.region.map(([start]) => start / 64);
 			const id = labelId({ level, cz: z!, cy: y!, cx: x! });
@@ -1033,7 +1033,13 @@ function levelPool(chunks: Map<string, { value: number; version?: number; pyrami
 			asked.push({ path: request.path, derived: request.derived });
 			if (absent.has(level)) throw new LoadError("NotFoundError: Not found: v3 array or group", 404);
 			const { value, version, pyramid } = chunks.get(id) ?? { value: 0 };
-			if (held) await new Promise<void>((resolve) => waiting.push(resolve));
+			if (held) {
+				// A load cancelled while it waits ends at once, as the pool's does.
+				await new Promise<void>((resolve, reject) => {
+					waiting.push(resolve);
+					signal?.addEventListener("abort", () => reject(new DOMException("No longer needed", "AbortError")), { once: true });
+				});
+			}
 			if (failures.left > 0) {
 				failures.left -= 1;
 				throw new LoadError(`Error: Unexpected response status ${failures.status}`, failures.status);
@@ -1193,6 +1199,16 @@ describe("label levels", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("take only two of the four places for loads at once, the others being for full resolution chunks", async () => {
+		const { layer, loads } = await started(group(pyramid), levelPool(new Map(), new Set(), true));
+		const coarse = ["2/0/0/0", "1/0/0/0", "1/0/0/1", "1/0/1/0"];
+		const full = ["0/0/0", "0/0/1", "0/1/0", "0/1/1"];
+		layer.store.want("view", [...coarse, ...full]);
+		for (const id of [...coarse, ...full]) layer.store.request(id).catch(() => {});
+		expect(loads.filter((id) => labelKey(id).level > 0)).toEqual(["2/0/0/0", "1/0/0/0"]);
+		expect(loads.filter((id) => labelKey(id).level === 0)).toEqual(["0/0/0", "0/0/1"]);
 	});
 
 	it("stop telling views once the layer stops", async () => {
