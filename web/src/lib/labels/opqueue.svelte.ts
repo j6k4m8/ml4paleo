@@ -101,6 +101,20 @@ function newId(): string {
 	return crypto.randomUUID();
 }
 
+export type SaveState = "offline" | "retrying" | "error" | "saving" | "saved";
+
+/**
+ * What the status chip says about saving. The newest failed attempt sets
+ * `offline` or `retrying` (each clears the other), so the latest answer wins
+ * over an `error` an earlier edit left behind.
+ */
+export function saveState(queue: Pick<OpQueue, "offline" | "retrying" | "error" | "pending">): SaveState {
+	if (queue.offline) return "offline";
+	if (queue.retrying) return "retrying";
+	if (queue.error) return "error";
+	return queue.pending > 0 ? "saving" : "saved";
+}
+
 export class OpQueue {
 	/** Ops not yet confirmed by the server. */
 	pending = $state(0);
@@ -254,6 +268,10 @@ export class OpQueue {
 
 	#changed(): void {
 		this.pending = this.#queue.length;
+		if (this.#queue.length === 0) {
+			this.offline = false;
+			this.retrying = false;
+		}
 		this.undoable = this.#undo.length;
 		this.redoable = this.#redo.length;
 		this.#schedule(0);
@@ -330,14 +348,18 @@ export class OpQueue {
 			if (!(e instanceof ApiError)) {
 				// fetch failed: offline, or the server is unreachable.
 				this.offline = true;
+				this.retrying = false;
 				return "retry";
 			}
 			if (e.status >= 500 || e.status === 429) {
 				this.retrying = true;
+				this.offline = false;
 				return "retry";
 			}
 			if (e.status === 401 || e.status === 403) {
 				this.error = "Sign in again to save your labels.";
+				this.offline = false;
+				this.retrying = false;
 				return "retry";
 			}
 			const detail = e.detail as { message?: string; chunks?: Vec3[] } | string;
