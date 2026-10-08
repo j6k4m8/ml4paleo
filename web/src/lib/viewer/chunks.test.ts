@@ -785,6 +785,25 @@ describe("ChunkStore, for chunks the server is still making", () => {
 		}
 	});
 
+	it("starts a slow chunk that was being held for a chunk that ends past its patience", async () => {
+		const { calls, load } = controlled();
+		// Two places, one of them for slow chunks (those named s...).
+		const store = new ChunkStore(load, 1000, 2, { slow: (id) => id.startsWith("s"), places: 1 });
+		store.request("s1").catch(() => {});
+		const lost = store.request("f1").catch((e: unknown) => e);
+		calls[1]?.fail(new Busy(1000));
+		await settle();
+		// Held back for as long as f1 is waiting.
+		store.request("s2").catch(() => {});
+		expect(calls.map((c) => c.id)).toEqual(["s1", "f1"]);
+		// The clock passes f1's patience before its timer fires, as when a machine wakes up.
+		vi.setSystemTime(Date.now() + PATIENCE_MS + 1000);
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(await lost).toBeInstanceOf(Busy);
+		// f1 is gone, so nothing holds s2 back, and a place is free.
+		expect(calls.map((c) => c.id)).toEqual(["s1", "f1", "s2"]);
+	});
+
 	it("ends a refresh that waited past its patience as any other load, leaving the copy it was to replace", async () => {
 		const { calls, load } = controlled();
 		const store = new ChunkStore(load, 1000, 1);

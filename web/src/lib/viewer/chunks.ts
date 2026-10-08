@@ -318,6 +318,11 @@ export class ChunkStore {
 				this.#queue.splice(index, 1);
 				this.#pending.delete(entry.id);
 				entry.reject(entry.busy);
+				// The chunks passed over so far may have been held for this one: look again from the start.
+				if (index > 0) {
+					held = undefined;
+					index = 0;
+				}
 				continue;
 			}
 			if (entry.slow && this.limit && this.#runningSlow >= this.limit.places) {
