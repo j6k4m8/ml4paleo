@@ -189,7 +189,7 @@ describe("polygonEdit", () => {
 		expect(counts).toEqual([SIZE * SIZE - (24 * 24 - 12 * 12) - 1, 24 * 24 - 12 * 12, 1]);
 	});
 
-	it("cuts a hole a lasso drew, and leaves the class alone outside what was filled", () => {
+	it("cuts out only the active class where two classes meet", () => {
 		const labels = slice();
 		apply(labels, { plane: "xy", slice: 0, points: square(0, 0, 16, 32) }, "add", 2);
 		apply(labels, { plane: "xy", slice: 0, points: square(16, 0, 32, 32) }, "add", 4);
