@@ -188,6 +188,23 @@ describe("viewLevel", () => {
 		expect(seen.size).toBe(1);
 	});
 
+	it("doesn't flip levels as panning takes the level's own chunks across the limit", () => {
+		// Level 0 takes 88 or 99 chunks as y moves, so a limit between them
+		// used to switch levels back and forth with every row that came or went.
+		const limit = 94;
+		let shown: number | undefined;
+		const seen = new Set<number>();
+		const counts = new Set<number>();
+		for (const y of [480, 510, 500, 530, 470, 515, 490, 505]) {
+			const at = view({ zoom: 2, width: 1800, height: 1000, position: [130, y, 350] });
+			counts.add(countTiles(levels[0] as Level, at));
+			shown = viewLevel(levels, at, shown, limit).index;
+			seen.add(shown);
+		}
+		expect([...counts].sort()).toEqual([88, 99]);
+		expect(seen.size).toBe(1);
+	});
+
 	it("goes finer again once well under the limit", () => {
 		const limit = 120;
 		const near = view({ zoom: 2, width: 1800, height: 1000, position: [130, 500, 350] });
