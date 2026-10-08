@@ -59,7 +59,9 @@ from the full resolution chunks), when someone asks for it:
   built by one request at a time: another that wants it waits for that build
   (and gets `Busy` if it gives up). A chunk of level 1 is read and shrunk, or a
   chunk of a higher level combined, only when one of a few slots is free, and a
-  request that would queue behind too many others gets `Busy` at once. The
+  request that would queue behind too many others, or for longer than it may
+  wait for anything (what is left of its time and a few seconds more, whether
+  for a slot or for other requests' builds, in all), gets `Busy`. The
   slots are never held while waiting for another chunk, so they can't deadlock;
   a request holds no database connection while it waits for one, or for
   storage.
@@ -125,7 +127,8 @@ BLOBS = 512
 # many more may wait for a slot before a request is turned away.
 BUILD_SLOTS = 2
 BUILD_QUEUE = 8
-# How much longer than its own budget a request waits for another's build.
+# How much longer than its own budget a request waits, in all, for the builds
+# of others and for a slot to work in.
 WAIT_SECONDS = 5
 # How long chunks a build finished stay pinned without anyone using them, and
 # the least memory (more, if the cache is bigger) they may take in all. A build
@@ -593,11 +596,21 @@ class _Budget:
             raise Busy
         self.started = True
 
+    def patience(self) -> float:
+        """
+        How much longer a request may wait for others, in seconds: until a little
+        after its time is up. The same moment ends every wait, so a request that
+        waits for several chunks, one after another, waits no longer in all than
+        for one.
+        """
+        return max(0.0, self.deadline + WAIT_SECONDS - time.monotonic())
+
 
 class _Gate:
     """
     Lets a few pieces of work run at once, and a few more wait for a turn; one
-    that would wait behind more is turned away (`Busy`) instead of held.
+    that would wait behind more, or for longer than its `patience` (seconds),
+    is turned away (`Busy`) instead of held.
     """
 
     def __init__(self, slots: int, queue: int):
@@ -606,12 +619,17 @@ class _Gate:
         self._waiting = 0
 
     @contextlib.asynccontextmanager
-    async def __call__(self):
+    async def __call__(self, patience: float | None = None):
         if self._slots.locked() and self._waiting >= self._queue:
             raise Busy
         self._waiting += 1
         try:
-            await self._slots.acquire()
+            if self._slots.locked():
+                await asyncio.wait_for(self._slots.acquire(), patience)
+            else:
+                await self._slots.acquire()
+        except TimeoutError:
+            raise Busy from None
         finally:
             self._waiting -= 1
         try:
@@ -689,7 +707,7 @@ class LabelPyramid:
             # Someone is already making it: wait for that, not holding a
             # connection, and share whatever comes of it.
             await db.rollback()
-            return await self._wait(building)
+            return await self._wait(building, budget)
         made: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
         self._building[cached] = made
         try:
@@ -707,11 +725,9 @@ class LabelPyramid:
         finally:
             del self._building[cached]
 
-    async def _wait(self, building: asyncio.Future[bytes]) -> bytes:
+    async def _wait(self, building: asyncio.Future[bytes], budget: _Budget) -> bytes:
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(building), self.seconds + WAIT_SECONDS
-            )
+            return await asyncio.wait_for(asyncio.shield(building), budget.patience())
         except TimeoutError:
             raise Busy from None
 
@@ -772,7 +788,7 @@ class LabelPyramid:
             leaves = await _leaves(db, project_id, levels, key)
             budget.spend(len(leaves))
             await db.rollback()
-            async with self._gate():
+            async with self._gate(budget.patience()):
                 blobs = await asyncio.gather(*(_read(store, sha) for _, sha in leaves))
                 parts = [
                     (_position(at, origin), blob)
@@ -804,7 +820,7 @@ class LabelPyramid:
         await db.rollback()
         if not parts:
             return _NOTHING, kept
-        async with self._gate():
+        async with self._gate(budget.patience()):
             data = await run_in_threadpool(_combine, parts, step)
         return data or _NOTHING, kept
 

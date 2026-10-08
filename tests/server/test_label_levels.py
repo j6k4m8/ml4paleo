@@ -11,6 +11,7 @@ import hashlib
 import pathlib
 import shutil
 import threading
+import time
 import tracemalloc
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -984,6 +985,90 @@ def test_a_gate_turns_away_what_would_wait_too_long():
         # The slot is free again, and the queue empty.
         await work("fourth")
         assert order == ["first", "second", "fourth"]
+
+    asyncio.run(scenario())
+
+
+def test_a_gate_stops_waiting_for_a_slot_once_its_patience_is_over():
+    async def scenario():
+        gate = label_pyramid._Gate(slots=1, queue=8)
+
+        async def hold():
+            async with gate():
+                await asyncio.sleep(0.4)
+
+        holder = asyncio.create_task(hold())
+        await asyncio.sleep(0)
+        started = time.monotonic()
+        with pytest.raises(label_pyramid.Busy):
+            async with gate(0.05):
+                pytest.fail("a slot wasn't free")
+        assert time.monotonic() - started < 0.3
+        # It left the queue, and the slot is still the holder's, then free.
+        assert gate._waiting == 0
+        async with gate(2):
+            assert holder.done()
+        # A free slot is there for the taking, whatever the patience.
+        async with gate(0):
+            pass
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("level", [1, 2])
+def test_a_request_gives_up_when_it_has_waited_as_long_as_it_may_for_a_slot(
+    monkeypatch, level
+):
+    async def scenario():
+        monkeypatch.setattr(label_pyramid, "WAIT_SECONDS", 0.1)
+        pyramid = label_pyramid.LabelPyramid(seconds=0.05, slots=1)
+        project = uuid.uuid4()
+        plan = label_pyramid.Plan(uuid.uuid4(), plan_levels(SHAPE))
+        state = label_pyramid.Fingerprint(count=1, versions=1)
+
+        async def leaves(*args):
+            return [((0, 0, 0), "a blob")]
+
+        async def children(*args):
+            return {(0, 0, 0): state}
+
+        monkeypatch.setattr(label_pyramid, "_leaves", leaves)
+        monkeypatch.setattr(label_pyramid, "_children", children)
+        if level == 2:
+            # The chunk under the one asked for is at hand.
+            pyramid._cache.put(
+                label_pyramid._cache_key(project, plan, 1, (0, 0, 0), state),
+                b"a chunk",
+            )
+        started = time.monotonic()
+        async with pyramid._gate():
+            # The one slot is busy as long as this is.
+            with pytest.raises(label_pyramid.Busy):
+                await asyncio.wait_for(
+                    pyramid.chunk(
+                        Session(), None, project, plan, level, (0, 0, 0), state
+                    ),
+                    2,
+                )
+        assert time.monotonic() - started < 1
+
+    asyncio.run(scenario())
+
+
+def test_a_request_waits_no_longer_for_several_builds_than_for_one(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(label_pyramid, "WAIT_SECONDS", 0.1)
+        pyramid = label_pyramid.LabelPyramid(seconds=0.05)
+        budget = label_pyramid._Budget(0.05, 10**9)
+        building = [asyncio.get_running_loop().create_future() for _ in range(4)]
+        started = time.monotonic()
+        for future in building:
+            with pytest.raises(label_pyramid.Busy):
+                await pyramid._wait(future, budget)
+        # Each of four builds never ends: the first wait uses what is left of
+        # the request's time and a little more, and there is nothing left for
+        # the others.
+        assert 0.1 <= time.monotonic() - started < 0.3
 
     asyncio.run(scenario())
 
