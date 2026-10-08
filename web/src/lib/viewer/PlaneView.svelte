@@ -342,7 +342,7 @@
 			labelsHidden = picked.hidden;
 			labels.store.want(plane.name, picked.wanted, picked.shown);
 			for (const tile of picked.draw) loadOverlay(labels.store, "", tile, labels.levels, at);
-			overlays.push({ slice: at, tiles: picked.draw, opacity: viewer.opacity, background: true });
+			overlays.push({ slice: at, tiles: picked.draw, opacity: viewer.opacity, background: true, level: picked.level.index });
 			if (unfinished.size > 0) {
 				// Not waiting for chunks the view no longer needs.
 				const wanted = new Set(picked.wanted);

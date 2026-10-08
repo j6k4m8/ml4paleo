@@ -184,7 +184,9 @@ export class TextureCache {
 /**
  * Label-valued tiles drawn over the image with the palette. Where tiles of
  * several levels cover a point, the first listed that is on the GPU draws
- * there and the rest don't, so list them finest first.
+ * there and the rest don't, so list them finest first. That takes a stencil
+ * buffer, which a browser may not give a canvas: without one, only the tiles
+ * of `level` are drawn.
  */
 export interface Overlay {
 	/** The slice of full resolution that the tiles hold unless they say, in their own level's voxels. */
@@ -195,6 +197,8 @@ export interface Overlay {
 	hole?: Rect;
 	/** Whether painted background shows (for the labels; a model's background stays clear). */
 	background?: boolean;
+	/** The level whose tiles are all that is drawn on a canvas without a stencil buffer (every level's, if not said). */
+	level?: number;
 }
 
 export interface LabelTile {
@@ -216,6 +220,8 @@ export class PlaneRenderer {
 	#imageTextures: TextureCache;
 	#labelTextures: TextureCache;
 	#palette: WebGLTexture;
+	// Whether the canvas has the stencil buffer it asked for (see `Overlay`).
+	#stencil: boolean;
 
 	/**
 	 * `extent` is the image's level-0 shape: coarse levels round their shape
@@ -231,6 +237,7 @@ export class PlaneRenderer {
 		const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, premultipliedAlpha: false, stencil: true });
 		if (!gl) throw new Error("This browser doesn't support WebGL2");
 		this.#gl = gl;
+		this.#stencil = gl.getContextAttributes()?.stencil === true;
 		this.#image = this.#link(IMAGE);
 		this.#labels = this.#link(LABELS);
 		for (const name of ["rect", "uvMax", "center", "toClip", "tile", "window"]) {
@@ -418,6 +425,7 @@ export class PlaneRenderer {
 			gl.uniform4f(this.#labelUniforms.hole ?? null, u0, v0, u1, v1);
 			gl.clear(gl.STENCIL_BUFFER_BIT);
 			for (const tile of overlay.tiles) {
+				if (!this.#stencil && overlay.level !== undefined && tile.key.level !== overlay.level) continue;
 				const entry = this.#labelTextures.get(`${tile.id}@${tile.slice ?? overlay.slice}`);
 				if (!entry) continue;
 				gl.bindTexture(gl.TEXTURE_2D, entry.texture);
