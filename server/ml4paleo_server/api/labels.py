@@ -22,9 +22,17 @@ its version (send it back as `base_version`); chunks that are all zero are
 
 For zoomed-out views there are also `class_1`, `class_2`, ... : the labels at
 the image's pyramid levels (see `label_pyramid`), made when asked for, to look
-at only. Their `X-Chunk-Version` and ETag change when any chunk under them
-changes. A chunk too big to make in one request is a 503 with `Retry-After`;
-what was done is kept, so asking again gets further.
+at only. Their `X-Pyramid-Version` (not `X-Chunk-Version`, which is for edits)
+and ETag change when any chunk under them changes, and finding that out takes
+one pass over the label rows under the chunk, which for the top chunk is every
+row of the project. Their ETags are only unique to the URL: two chunks can have
+the same one, so don't tell chunks apart by it.
+
+A chunk too big to make in one request is a 503 with `Retry-After`, and what
+was done is kept, so asking again gets further. A client must ask again, as
+zarr readers don't (they take a 503 for an error and show nothing): wait
+`Retry-After` seconds and a little more at random, so chunks asked for together
+don't all come back together, and keep asking while the chunk is wanted.
 """
 
 import asyncio
@@ -944,7 +952,7 @@ async def _coarse_chunk(
         state = label_pyramid.Fingerprint(count=0, versions=0)
     else:
         state = await label_pyramid.fingerprint(db, project_id, levels, level, key)
-    headers["X-Chunk-Version"] = str(state.versions)
+    headers["X-Pyramid-Version"] = str(state.versions)
     if state.count == 0:
         await db.rollback()
         return Response(status_code=404, headers=headers)
@@ -962,7 +970,7 @@ async def _coarse_chunk(
         raise HTTPException(
             status_code=503,
             detail="These labels take a moment to work out; ask again.",
-            headers={"Retry-After": "1"},
+            headers={"Retry-After": str(label_pyramid.retry_after(level, key))},
         ) from None
     except label_pyramid.MissingBlob:
         raise HTTPException(

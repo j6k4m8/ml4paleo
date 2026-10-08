@@ -23,7 +23,7 @@ from the full resolution chunks), when someone asks for it:
   versions of the chunks in the box says exactly which state of the labels the
   chunk shows: it goes up whenever anything in the box changes. One query on
   the label chunk rows gives it, with how many of the chunks have labels. The
-  sum is the chunk's `X-Chunk-Version`, and its `ETag` has it too, so a
+  sum is the chunk's `X-Pyramid-Version`, and its `ETag` has it too, so a
   viewer's revalidation costs one query. A chunk with no labeled chunk under
   it is simply missing (unlabeled), as at level 0. The `ETag` also names what
   else the pixels follow: the image whose levels these are (replacing it can
@@ -67,6 +67,7 @@ import logging
 import struct
 import time
 import uuid
+import zlib
 from collections import OrderedDict
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
@@ -168,6 +169,14 @@ class Plan:
     def etag(self, level: int, state: Fingerprint) -> str:
         z, y, x = self.levels[level].factor_zyx
         return f'"p{RULE_VERSION}.{self.digest.hex()}.{z}.{y}.{x}.{state.versions}"'
+
+
+def retry_after(level: int, key: ChunkKey) -> int:
+    """
+    Seconds to tell a viewer to wait before asking for a chunk again: one or
+    two, by the chunk, so chunks asked for together don't all come back at once.
+    """
+    return 1 + zlib.crc32(f"{level}/{key[0]}/{key[1]}/{key[2]}".encode()) % 2
 
 
 def array_name(level: int) -> str:

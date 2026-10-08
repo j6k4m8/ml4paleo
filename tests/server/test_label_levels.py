@@ -343,6 +343,39 @@ def test_thin_labels_show_at_every_level(ada, project):
         )
 
 
+def test_coarse_chunks_name_their_version_apart_from_an_edits(
+    ada, project, migrated_database_url
+):
+    # The viewer takes `X-Chunk-Version` as the version an edit builds on,
+    # which a coarse chunk has no use for.
+    paint(ada, project, messy_volume())
+    full = get(ada, project, 0, (0, 0, 0))
+    assert "x-chunk-version" in full.headers and "x-pyramid-version" not in full.headers
+    first = get(ada, project, 1, (0, 0, 0))
+    again = get(
+        ada, project, 1, (0, 0, 0), headers={"If-None-Match": first.headers["etag"]}
+    )
+    unlabeled = get(ada, make_project(ada, migrated_database_url), 1, (0, 0, 0))
+    past_the_edge = get(ada, project, 1, (5, 0, 0))
+    for response, status in [
+        (first, 200),
+        (again, 304),
+        (unlabeled, 404),
+        (past_the_edge, 404),
+    ]:
+        assert response.status_code == status
+        assert "x-pyramid-version" in response.headers
+        assert "x-chunk-version" not in response.headers
+
+
+def test_retries_are_spread_over_a_second_or_two_by_the_chunk():
+    keys = list(np.ndindex(4, 4, 4))
+    waits = [label_pyramid.retry_after(2, key) for key in keys]
+    assert set(waits) == {1, 2} and 16 < waits.count(1) < 48
+    # By the chunk, so asking again about one gets the same answer.
+    assert waits == [label_pyramid.retry_after(2, key) for key in keys]
+
+
 def test_a_coarse_chunk_is_missing_where_nothing_is_labeled(ada, project):
     levels = plan_levels(SHAPE)
     volume = np.zeros(SHAPE, dtype=np.uint8)
@@ -351,7 +384,7 @@ def test_a_coarse_chunk_is_missing_where_nothing_is_labeled(ada, project):
     for level in range(1, len(levels)):
         assert chunk(ada, project, level, (0, 0, 0)) is not None
     response = get(ada, project, 1, (1, 1, 2))
-    assert (response.status_code, response.headers["x-chunk-version"]) == (404, "0")
+    assert (response.status_code, response.headers["x-pyramid-version"]) == (404, "0")
     assert "etag" not in response.headers
     # Past the edge of the level.
     assert get(ada, project, 1, (5, 0, 0)).status_code == 404
@@ -361,7 +394,7 @@ def test_a_coarse_chunk_is_missing_where_nothing_is_labeled(ada, project):
     for level in range(1, len(levels)):
         response = get(ada, project, level, (0, 0, 0))
         assert response.status_code == 404
-        assert int(response.headers["x-chunk-version"]) > 0
+        assert int(response.headers["x-pyramid-version"]) > 0
 
 
 def test_a_coarse_chunk_changes_when_anything_under_it_does(ada, project):
@@ -382,7 +415,7 @@ def test_a_coarse_chunk_changes_when_anything_under_it_does(ada, project):
                 seen[level, key] = (
                     response.status_code,
                     response.headers.get("etag"),
-                    int(response.headers["x-chunk-version"]),
+                    int(response.headers["x-pyramid-version"]),
                     response.content,
                 )
         return seen
@@ -433,7 +466,7 @@ def test_a_coarse_chunk_changes_when_anything_under_it_does(ada, project):
             revalidated = get(ada, project, level, key, headers={"If-None-Match": etag})
             assert revalidated.status_code == 304 and revalidated.content == b""
             assert revalidated.headers["etag"] == etag
-            assert revalidated.headers["x-chunk-version"] == str(version)
+            assert revalidated.headers["x-pyramid-version"] == str(version)
     # An old ETag gets the new chunk, not a 304.
     stale = get(
         ada, project, 1, over(1), headers={"If-None-Match": before[1, over(1)][1]}
@@ -538,7 +571,9 @@ def test_a_chunk_too_big_for_one_request_comes_in_several(
         asked.append((response.status_code, len(reads) - before))
         if response.status_code != 503:
             break
-        assert response.headers["retry-after"] == "1"
+        assert response.headers["retry-after"] == str(
+            label_pyramid.retry_after(top, (0, 0, 0))
+        )
     assert asked[-1][0] == 200
     assert [code for code, _ in asked[:-1]] == [503] * (len(asked) - 1)
     assert len(asked) > 2
@@ -632,7 +667,9 @@ def test_a_waiting_request_gives_up_when_the_build_does(ada, project, monkeypatc
     answers = concurrently(6, lambda _: get(ada, project, top, (0, 0, 0)))
     # The one that built it ran out of time, and so did those who waited.
     assert [a.status_code for a in answers] == [503] * 6
-    assert {a.headers["retry-after"] for a in answers} == {"1"}
+    assert {a.headers["retry-after"] for a in answers} == {
+        str(label_pyramid.retry_after(top, (0, 0, 0)))
+    }
 
 
 def test_builds_hold_only_what_their_slots_allow_and_a_long_queue_is_turned_away(
@@ -650,7 +687,7 @@ def test_builds_hold_only_what_their_slots_allow_and_a_long_queue_is_turned_away
     busy = [a for a in answers if a.status_code == 503]
     # Two build and eight wait; the last two come back another time.
     assert len(busy) == 2
-    assert {a.headers["retry-after"] for a in busy} == {"1"}
+    assert {a.headers["retry-after"] for a in busy} <= {"1", "2"}
     assert [a.status_code for a in answers if a not in busy] == [200] * 10
     # At most two chunks of level 1 were being read and made at once.
     assert spy.most_held <= 2 * 8
@@ -690,7 +727,7 @@ def test_coarse_chunks_of_other_projects_and_people_stay_apart(
     other = make_project(ada, migrated_database_url)
     assert chunk(ada, project, 1, (0, 0, 0)) is not None
     response = get(ada, other, 1, (0, 0, 0))
-    assert (response.status_code, response.headers["x-chunk-version"]) == (404, "0")
+    assert (response.status_code, response.headers["x-pyramid-version"]) == (404, "0")
     bob = new_browser()
     signup(bob, username="bob")
     assert get(bob, project, 1, (0, 0, 0)).status_code == 404
