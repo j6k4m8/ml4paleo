@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "#lib/api.ts";
 import { base64, packBits, zstdFrame } from "../labels/deltas";
 import type { Chunk } from "./chunks";
@@ -495,7 +495,13 @@ describe("LabelLayer", () => {
 	});
 
 	describe("a reload that fails", () => {
+		// The waits are random by a quarter either way; this is the middle.
+		const random = vi.spyOn(Math, "random");
+		beforeEach(() => {
+			random.mockReturnValue(0.5);
+		});
 		afterEach(() => {
+			random.mockReset();
 			vi.useRealTimers();
 		});
 
@@ -607,6 +613,54 @@ describe("LabelLayer", () => {
 			await vi.advanceTimersByTimeAsync(60_000);
 			await settled();
 			expect(loads).toHaveLength(2);
+		});
+
+		it("is tried again after a wait a quarter shorter or longer, at random", async () => {
+			random.mockReturnValueOnce(0);
+			const quick = await loadedWithFailures(1);
+			await vi.advanceTimersByTimeAsync(749);
+			await settled();
+			expect(quick.loads).toHaveLength(2);
+			await vi.advanceTimersByTimeAsync(1);
+			await settled();
+			expect(quick.loads).toHaveLength(3);
+			vi.useRealTimers();
+			random.mockReturnValueOnce(1);
+			const slow = await loadedWithFailures(1);
+			await vi.advanceTimersByTimeAsync(1249);
+			await settled();
+			expect(slow.loads).toHaveLength(2);
+			await vi.advanceTimersByTimeAsync(1);
+			await settled();
+			expect(slow.loads).toHaveLength(3);
+		});
+
+		it("spreads chunks that failed together over different times", async () => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const server = new Map([
+				["0/0/0", { value: 1, version: 1 }],
+				["0/0/1", { value: 1, version: 1 }],
+			]);
+			const { pool, loads, failures } = fakePool(server);
+			const layer = new LabelLayer("p", pool, [2, 2, 128]);
+			layer.store.want("view", new Set(["0/0/0", "0/0/1"]));
+			await Promise.all([layer.store.request("0/0/0"), layer.store.request("0/0/1")]);
+			server.set("0/0/0", { value: 2, version: 2 });
+			server.set("0/0/1", { value: 2, version: 2 });
+			failures.left = 2;
+			random.mockReturnValueOnce(0).mockReturnValueOnce(1);
+			layer.changed([
+				{ key: [0, 0, 0], version: 2 },
+				{ key: [0, 0, 1], version: 2 },
+			]);
+			await settled();
+			expect(loads).toHaveLength(4);
+			await vi.advanceTimersByTimeAsync(750);
+			await settled();
+			expect(loads).toHaveLength(5);
+			await vi.advanceTimersByTimeAsync(500);
+			await settled();
+			expect(loads).toHaveLength(6);
 		});
 
 		it("isn't tried again when the server says you're signed out or not allowed", async () => {

@@ -39,9 +39,12 @@ interface LocalDelta {
 const CACHE_BYTES = 128 * 1024 * 1024;
 // How many of the chunks this page edited last it remembers (`recent`).
 const RECENT = 256;
-// A reload that failed is tried again after this long, doubling each time up to the longest.
+// A reload that failed is tried again after this long, doubling each time up
+// to the longest, each wait 25% shorter or longer at random so chunks that
+// failed together don't all try again together.
 const RETRY_MS = 1000;
 const RETRY_LONGEST_MS = 30_000;
+const RETRY_SPREAD = 0.25;
 // Failing this many times in a row with a server error, a chunk isn't tried again.
 const SERVER_FAILURES = 8;
 
@@ -273,7 +276,7 @@ export class LabelLayer {
 			if (this.store.peek(id) !== stale || this.store.isLoading(id)) return this.#giveUp(id);
 			this.#retries.delete(id);
 			this.reload([id], version === undefined ? undefined : new Map([[id, version]]));
-		}, Math.min(RETRY_LONGEST_MS, RETRY_MS * 2 ** (failures - 1)));
+		}, Math.min(RETRY_LONGEST_MS, RETRY_MS * 2 ** (failures - 1)) * (1 - RETRY_SPREAD + 2 * RETRY_SPREAD * Math.random()));
 		this.#retries.set(id, timer);
 	}
 
