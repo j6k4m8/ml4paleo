@@ -87,7 +87,12 @@ export class PlaneMask {
 		}
 	}
 
-	/** Fill a polygon (even-odd), taking voxels whose centers are inside. */
+	/**
+	 * Fill a polygon, taking voxels whose centers are inside it by the
+	 * nonzero winding rule: an outline that loops over itself (a freehand drag
+	 * past its start, or round twice) fills everything it goes round, as its
+	 * preview shows.
+	 */
 	polygon(points: [number, number][]): void {
 		if (points.length < 3) return;
 		const us = points.map((p) => p[0]);
@@ -96,17 +101,25 @@ export class PlaneMask {
 		if (this.width === 0) return;
 		for (let j = this.v0; j < this.v0 + this.height; j++) {
 			const v = j + 0.5;
-			const crossings: number[] = [];
+			// Where the outline crosses this row, and which way it's going.
+			const crossings: [number, number][] = [];
 			for (let k = 0; k < points.length; k++) {
 				const [ua, va] = points[k]!;
 				const [ub, vb] = points[(k + 1) % points.length]!;
-				if (va <= v !== vb <= v) crossings.push(ua + ((v - va) / (vb - va)) * (ub - ua));
+				if (va <= v !== vb <= v) crossings.push([ua + ((v - va) / (vb - va)) * (ub - ua), vb > va ? 1 : -1]);
 			}
-			crossings.sort((a, b) => a - b);
-			for (let k = 0; k + 1 < crossings.length; k += 2) {
-				const first = Math.ceil(crossings[k]! - 0.5);
-				const last = Math.ceil(crossings[k + 1]! - 0.5) - 1;
-				for (let i = first; i <= last; i++) this.#set(i, j);
+			crossings.sort((a, b) => a[0] - b[0]);
+			let winding = 0;
+			let start = 0;
+			for (const [u, direction] of crossings) {
+				const before = winding;
+				winding += direction;
+				if (before === 0) start = u;
+				else if (winding === 0) {
+					const first = Math.ceil(start - 0.5);
+					const last = Math.ceil(u - 0.5) - 1;
+					for (let i = first; i <= last; i++) this.#set(i, j);
+				}
 			}
 		}
 	}

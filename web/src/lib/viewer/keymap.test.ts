@@ -18,6 +18,20 @@ describe("keymap", () => {
 		expect(actionFor(press("?", { shiftKey: true }))).toBe("help");
 	});
 
+	it("closes polygons with Enter, with Alt or Shift held too", () => {
+		expect(actionFor(press("Enter"))).toBe("close-polygon");
+		expect(actionFor(press("Enter", { altKey: true }))).toBe("close-polygon");
+		expect(actionFor(press("Enter", { shiftKey: true }))).toBe("close-polygon");
+	});
+
+	it("keeps Backspace and Esc working while Alt is held over a polygon", () => {
+		expect(actionFor(press("Backspace", { altKey: true }))).toBe("remove-point");
+		expect(actionFor(press("Escape", { altKey: true }))).toBe("cancel");
+		// Alt with anything else is the browser's or the system's.
+		expect(actionFor(press("p", { altKey: true }))).toBeUndefined();
+		expect(actionFor(press("ArrowUp", { altKey: true }))).toBeUndefined();
+	});
+
 	it("leaves form fields and browser shortcuts alone", () => {
 		expect(actionFor(press("0", {}, "INPUT"))).toBeUndefined();
 		expect(actionFor(press("=", { metaKey: true }))).toBeUndefined();

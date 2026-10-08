@@ -19,6 +19,8 @@
 	import Redo2 from "@lucide/svelte/icons/redo-2";
 	import Sparkles from "@lucide/svelte/icons/sparkles";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
+	import SquaresSubtract from "@lucide/svelte/icons/squares-subtract";
+	import SquaresUnite from "@lucide/svelte/icons/squares-unite";
 	import Undo2 from "@lucide/svelte/icons/undo-2";
 	import X from "@lucide/svelte/icons/x";
 	import { onDestroy, onMount, untrack } from "svelte";
@@ -33,7 +35,8 @@
 	import { acceptParts, MAX_ACCEPT_VOXELS, readBox } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit } from "../labels/opqueue.svelte";
-	import { PlaneMask } from "../labels/raster";
+	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
+	import type { PlaneMask } from "../labels/raster";
 	import {
 		type Box,
 		clipBox,
@@ -49,7 +52,7 @@
 	} from "../rois.svelte";
 	import { ChunkStore } from "./chunks";
 	import { absolute, loadLevels } from "./image";
-	import { actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
+	import { type Action, actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
 	import { type LabelClass, LabelLayer } from "./labels";
 	import { imageLoader, labelLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
@@ -265,20 +268,15 @@
 		});
 	}
 
-	/** Fill the polygon being drawn; `erase` clears the active class inside it instead. */
-	function closePolygon(erase = false) {
+	/** Fill the polygon being drawn, or with `cut`, clear the active class inside it. */
+	function closePolygon(cut: boolean) {
 		const polygon = viewer.polygon;
 		viewer.polygon = null;
-		if (!polygon || polygon.points.length < 3 || viewer.activeClass === null) return;
+		if (!polygon || viewer.activeClass === null) return;
 		const plane = PLANES[polygon.plane];
-		const mask = new PlaneMask(viewer.shape[plane.u], viewer.shape[plane.v]);
-		mask.polygon(polygon.points);
-		if (mask.count === 0) return;
-		const value = erase ? 0 : viewer.activeClass;
-		const onlyIf = erase ? `class:${viewer.activeClass}` : viewer.protectLabels ? "unlabeled" : "any";
-		const points = polygon.points.map(([u, v]) => [Math.round(u * 10) / 10, Math.round(v * 10) / 10]);
-		const tool = { name: erase ? "polygon-erase" : "polygon", plane: plane.name, slice: polygon.slice, points: points.length <= 500 ? points : undefined };
-		commit(plane, polygon.slice, mask, value, onlyIf, tool, true);
+		const limits: [number, number] = [viewer.shape[plane.u], viewer.shape[plane.v]];
+		const edit = polygonEdit(polygon, cut ? "subtract" : "add", viewer.activeClass, viewer.protectLabels, limits);
+		if (edit) commit(plane, polygon.slice, edit.mask, edit.value, edit.onlyIf, edit.tool, true);
 	}
 
 	// --- ROIs ----------------------------------------------------------------
@@ -667,8 +665,24 @@
 	);
 
 	function keyUp(event: KeyboardEvent) {
+		viewer.noteKeys(event);
+		holdAlt(event);
 		if (event.key === " ") viewer.panning = false;
 	}
+
+	/** Alt held to cut out a polygon shouldn't open the browser's menu, as Alt alone does on Windows and Linux. */
+	function holdAlt(event: KeyboardEvent) {
+		if (event.key === "Alt" && viewer.tool === "polygon" && !forFocused(event)) event.preventDefault();
+	}
+
+	/** Leaving the window lets go of every key. */
+	function blurred() {
+		viewer.panning = false;
+		viewer.noteKeys({ altKey: false, shiftKey: false });
+	}
+
+	// Keys that move the views, which wait while a polygon is dragged out on its slice.
+	const MOVES = new Set<Action>(["slice-next", "slice-previous", "fit", "next-roi", "layout"]);
 
 	/** The view that slice keys step: the only one, or the one last pointed at. */
 	function activePlane(): Plane {
@@ -676,6 +690,8 @@
 	}
 
 	function key(event: KeyboardEvent) {
+		viewer.noteKeys(event);
+		holdAlt(event);
 		if (viewer.help && event.key === "Escape") {
 			viewer.help = false;
 			event.preventDefault();
@@ -691,6 +707,7 @@
 		// Enter and Backspace only mean something while drawing a polygon.
 		if ((action === "close-polygon" || action === "remove-point") && !viewer.polygon) return;
 		event.preventDefault();
+		if (viewer.lassoing && MOVES.has(action)) return;
 		const step = event.shiftKey ? 10 : 1;
 		switch (action) {
 			case "navigate":
@@ -719,7 +736,7 @@
 				return;
 			}
 			case "close-polygon":
-				return closePolygon(event.altKey);
+				return closePolygon(closingMode(viewer.polygonMode, event) === "subtract");
 			case "remove-point":
 				if (viewer.polygon) viewer.polygon = { ...viewer.polygon, points: viewer.polygon.points.slice(0, -1) };
 				return;
@@ -813,6 +830,21 @@
 
 	const LAYOUT_NAMES = { four: "Four views", xy: "XY", xz: "XZ", yz: "YZ" } as const;
 
+	const POLYGON_MODES: { mode: PolygonMode; label: string; icon: typeof SquaresUnite; title: string }[] = [
+		{
+			mode: "add",
+			label: "Add",
+			icon: SquaresUnite,
+			title: "Closing fills the shape with the active class (hold Shift to fill in either mode)",
+		},
+		{
+			mode: "subtract",
+			label: "Subtract",
+			icon: SquaresSubtract,
+			title: "Closing cuts the shape out of the active class, leaving other classes (hold Alt to cut out in either mode)",
+		},
+	];
+
 	const activeClass = $derived(classes.find((c) => c.value === viewer.activeClass));
 	const zoomPercent = $derived(Math.round((viewer.zoom / (globalThis.devicePixelRatio || 1)) * 100));
 	const [, imageZ, imageY, imageX] = manifest.shape_czyx;
@@ -824,13 +856,16 @@
 			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · click moves the crosshair",
 			brush: "Drag to paint the active class · [ ] change the size",
 			eraser: "Drag to erase labels · [ ] change the size",
-			polygon: "Click to add points · Enter or double-click fills · Alt+Enter erases the class inside · Esc cancels",
+			polygon:
+				viewer.polygonMode === "add"
+					? "Click points or drag freehand · click the first point, double-click, or Enter fills · hold Alt to cut out · Esc cancels"
+					: "Click points or drag freehand · click the first point, double-click, or Enter cuts out · hold Shift to fill · Esc cancels",
 			roi: "Drag a box on a slice · G goes to the next open ROI · C marks it complete",
 		}[viewer.tool],
 	);
 </script>
 
-<svelte:window onkeydown={key} onkeyup={keyUp} onblur={() => (viewer.panning = false)} />
+<svelte:window onkeydown={key} onkeyup={keyUp} onblur={blurred} />
 
 {#snippet problem(text: string, dismiss: () => void)}
 	<div
@@ -858,6 +893,22 @@
 					<input class="w-28" type="range" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} />
 					<input class="field w-14 font-mono" type="number" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} aria-label="Brush radius" />
 				</label>
+			{/if}
+			{#if viewer.tool === "polygon"}
+				<div class="flex shrink-0 rounded-sm border border-edge" role="group" aria-label="Polygon mode">
+					{#each POLYGON_MODES as entry (entry.mode)}
+						<button
+							aria-pressed={viewer.polygonMode === entry.mode}
+							class="relative flex h-6 items-center gap-1 px-2 first:rounded-l-[3px] last:rounded-r-[3px] focus-visible:z-10
+								{viewer.polygonMode === entry.mode ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
+							title={entry.title}
+							onclick={() => (viewer.polygonMode = entry.mode)}
+						>
+							<entry.icon size={12} />
+							{entry.label}
+						</button>
+					{/each}
+				</div>
 			{/if}
 			{#if viewer.tool === "brush" || viewer.tool === "polygon"}
 				<label class="flex shrink-0 items-center gap-1.5 text-ink-dim">
@@ -973,7 +1024,7 @@
 							onhover={(p) => (hovered = p)}
 							onresize={resized}
 							onstroke={stroke}
-							onpolygon={() => closePolygon()}
+							onpolygon={closePolygon}
 							rois={rois.items}
 							onroi={drawRoi}
 						/>

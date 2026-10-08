@@ -49,7 +49,7 @@ export const KEYMAP: Binding[] = [
 	{ action: "navigate", keys: ["n"], label: "Navigate" },
 	{ action: "brush", keys: ["b"], label: "Brush" },
 	{ action: "eraser", keys: ["e"], label: "Eraser" },
-	{ action: "polygon", keys: ["p"], label: "Polygon (with Alt when closing: erase that class)" },
+	{ action: "polygon", keys: ["p"], label: "Polygon: click points or drag freehand; Add fills, Subtract cuts out" },
 	{ action: "roi", keys: ["r"], label: "Draw an ROI" },
 	{ action: "next-roi", keys: ["g"], label: "Go to the next open ROI" },
 	{ action: "complete-roi", keys: ["c"], label: "Mark the selected ROI complete (with Shift: reopen)" },
@@ -57,7 +57,7 @@ export const KEYMAP: Binding[] = [
 	{ action: "smaller", keys: ["["], label: "Smaller brush" },
 	{ action: "bigger", keys: ["]"], label: "Bigger brush" },
 	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class" },
-	{ action: "close-polygon", keys: ["Enter"], label: "Close the polygon (or double-click)" },
+	{ action: "close-polygon", keys: ["Enter"], label: "Close the polygon (with Alt: cut it out of the class; with Shift: fill it)" },
 	{ action: "remove-point", keys: ["Backspace"], label: "Remove the polygon's last point" },
 	{ action: "cancel", keys: ["Escape"], label: "Drop the polygon, then go back to navigating" },
 	{ action: "undo", keys: ["mod+z"], label: "Undo your last edit" },
@@ -72,7 +72,10 @@ export const MOUSE: [string, string][] = [
 	["Drag (navigating), middle drag, or Space + drag", "Pan"],
 	["Click (navigating)", "Move the crosshair there"],
 	["Drag (brush, eraser)", "Paint"],
-	["Click (polygon)", "Add a point"],
+	["Click (polygon)", "Add a point; on the first point, close the polygon"],
+	["Drag (polygon)", "Draw freehand; letting go closes the polygon"],
+	["Double-click (polygon)", "Close the polygon"],
+	["Alt or Shift while closing (polygon)", "Cut out of the active class, or fill, whatever the mode"],
 	["Drag (ROI)", "Draw an ROI on this slice"],
 ];
 
@@ -106,9 +109,13 @@ export function forFocused(event: KeyboardEvent): boolean {
 	return tag === "BUTTON" || (tag === "INPUT" && (target.type === "range" || target.type === "radio"));
 }
 
+// Alt changes how a polygon closes, so it may be held while drawing one;
+// with it, only these keys are the viewer's.
+const WITH_ALT = new Set(["Enter", "Backspace", "Escape"]);
+
 /** The action for a key press, or undefined if it isn't the viewer's. */
 export function actionFor(event: KeyboardEvent): Action | undefined {
-	if (event.altKey && event.key !== "Enter") return undefined;
+	if (event.altKey && !WITH_ALT.has(event.key)) return undefined;
 	if (forFocused(event)) return undefined;
 	return BY_KEY.get(comboOf(event));
 }
