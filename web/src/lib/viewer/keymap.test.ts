@@ -63,14 +63,24 @@ describe("keymap", () => {
 });
 
 describe("right-click", () => {
-	it("is the right button, or Ctrl with the left, as on a Mac", () => {
-		expect(isRightClick({ button: 2, ctrlKey: false })).toBe(true);
-		expect(isRightClick({ button: 0, ctrlKey: true })).toBe(true);
+	it("is the right button anywhere", () => {
+		for (const mac of [true, false]) {
+			expect(isRightClick({ button: 2, ctrlKey: false }, mac)).toBe(true);
+			expect(isRightClick({ button: 2, ctrlKey: true }, mac)).toBe(true);
+		}
 	});
 
-	it("is never a plain left click or a middle click, which pans", () => {
-		expect(isRightClick({ button: 0, ctrlKey: false })).toBe(false);
-		expect(isRightClick({ button: 1, ctrlKey: false })).toBe(false);
-		expect(isRightClick({ button: 1, ctrlKey: true })).toBe(false);
+	it("is Ctrl with the left button on a Mac only, where Ctrl isn't also the zoom key", () => {
+		expect(isRightClick({ button: 0, ctrlKey: true }, true)).toBe(true);
+		expect(isRightClick({ button: 0, ctrlKey: true }, false)).toBe(false);
+	});
+
+	it("is never a plain left click, a middle click (which pans), or a pen's eraser", () => {
+		for (const mac of [true, false]) {
+			expect(isRightClick({ button: 0, ctrlKey: false }, mac)).toBe(false);
+			expect(isRightClick({ button: 1, ctrlKey: false }, mac)).toBe(false);
+			expect(isRightClick({ button: 1, ctrlKey: true }, mac)).toBe(false);
+			expect(isRightClick({ button: 5, ctrlKey: false }, mac)).toBe(false);
+		}
 	});
 });

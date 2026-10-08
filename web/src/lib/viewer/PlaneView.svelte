@@ -443,7 +443,7 @@
 		if (!press?.pan) return;
 		const dx = event.clientX - press.x;
 		const dy = event.clientY - press.y;
-		if (!press.moved && Math.hypot(dx, dy) < 3) return;
+		if (!press.moved && Math.hypot(dx, dy) < 3 * reach(event)) return;
 		press.moved = true;
 		viewer.autoFit = false;
 		const px = pixelsPerVoxel(view());
@@ -495,8 +495,8 @@
 				if (!last || last[0] !== end[0] || last[1] !== end[1]) viewer.polygon = { ...current, points: [...current.points, end] };
 				onpolygon(cuts(event));
 			}
-		} else if (press?.pan && !press.moved && viewer.tool === "navigate" && event.pointerType === "touch") {
-			// A tap on a touch screen, which has no right button.
+		} else if (press?.pan && !press.moved && viewer.tool === "navigate" && event.pointerType !== "mouse") {
+			// A tap with a finger or a pen, which may have no right button.
 			goHere(event);
 		}
 		press = null;
