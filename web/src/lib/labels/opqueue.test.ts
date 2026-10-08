@@ -55,6 +55,22 @@ describe("OpQueue", () => {
 		expect(queue.offline).toBe(false);
 	});
 
+	it("says so while the server can't save, and carries on when it can", async () => {
+		const { calls, failures, send } = server();
+		failures.push(new ApiError(500, "Internal Server Error"));
+		const queue = new OpQueue("p", null, send);
+		queue.edit([delta(0)]);
+		await new Promise((r) => setTimeout(r, 20));
+		// Waiting to try again, and not "offline": the server answered.
+		expect(queue.retrying).toBe(true);
+		expect(queue.offline).toBe(false);
+		expect(queue.pending).toBe(1);
+		await settle(queue);
+		expect(calls).toHaveLength(2);
+		expect(calls[0]?.body.client_op_id).toBe(calls[1]?.body.client_op_id);
+		expect(queue.retrying).toBe(false);
+	});
+
 	it("reports strict conflicts and moves on", async () => {
 		const { failures, send } = server();
 		failures.push(new ApiError(409, { message: "Some chunks changed; reload them.", chunks: [[0, 0, 1]] }));

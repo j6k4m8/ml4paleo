@@ -674,9 +674,11 @@
 			? queue.error
 			: queue.offline
 				? `Offline · ${queue.pending} waiting`
-				: queue.pending > 0
-					? `Saving ${queue.pending}`
-					: "Saved",
+				: queue.retrying
+					? `Can't save right now · ${queue.pending} waiting`
+					: queue.pending > 0
+						? `Saving ${queue.pending}`
+						: "Saved",
 	);
 
 	function keyUp(event: KeyboardEvent) {
@@ -928,7 +930,9 @@
 	const zoomPercent = $derived(Math.round((viewer.zoom / (globalThis.devicePixelRatio || 1)) * 100));
 	const [, imageZ, imageY, imageX] = manifest.shape_czyx;
 	const histogram = manifest.histogram && !Array.isArray(manifest.histogram) ? manifest.histogram : null;
-	const saveState = $derived(queue.error ? "error" : queue.offline ? "offline" : queue.pending > 0 ? "saving" : "saved");
+	const saveState = $derived(
+		queue.error ? "error" : queue.offline ? "offline" : queue.retrying ? "retrying" : queue.pending > 0 ? "saving" : "saved",
+	);
 
 	const hint = $derived(
 		{
@@ -1342,7 +1346,7 @@
 			<span class="text-axis-z">z</span>{Math.floor(viewer.position[0])}
 		</span>
 		<span class="hidden sm:inline">{LAYOUT_NAMES[viewer.layout]}</span>
-		<span class="ml-auto flex items-center gap-1.5 font-sans {saveState === 'error' ? 'text-danger' : saveState === 'offline' ? 'text-warn' : ''}" role="status">
+		<span class="ml-auto flex items-center gap-1.5 font-sans {saveState === 'error' ? 'text-danger' : saveState === 'offline' || saveState === 'retrying' ? 'text-warn' : ''}" role="status">
 			{#if saveState === "saved"}<Check size={12} class="text-ok" />{:else if saveState === "saving"}<LoaderCircle size={12} class="animate-spin" />{:else}<CloudOff size={12} />{/if}
 			{status}
 		</span>

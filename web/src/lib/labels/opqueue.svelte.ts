@@ -105,6 +105,8 @@ export class OpQueue {
 	/** Ops not yet confirmed by the server. */
 	pending = $state(0);
 	offline = $state(false);
+	/** The server answered a save with an error (or "slow down"), so the edits wait and try again. */
+	retrying = $state(false);
 	error = $state("");
 	/** How many edits can be undone and redone. */
 	undoable = $state(0);
@@ -282,6 +284,7 @@ export class OpQueue {
 				}
 				this.#retryDelay = 0;
 				this.offline = false;
+				this.retrying = false;
 				// Not the first: saved ops from a previous page may have come in ahead of it.
 				const at = this.#queue.indexOf(op);
 				if (at >= 0) this.#queue.splice(at, 1);
@@ -329,7 +332,10 @@ export class OpQueue {
 				this.offline = true;
 				return "retry";
 			}
-			if (e.status >= 500 || e.status === 429) return "retry";
+			if (e.status >= 500 || e.status === 429) {
+				this.retrying = true;
+				return "retry";
+			}
 			if (e.status === 401 || e.status === 403) {
 				this.error = "Sign in again to save your labels.";
 				return "retry";
