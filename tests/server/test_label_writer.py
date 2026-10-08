@@ -35,18 +35,24 @@ from ml4paleo.segmentation.predict import create_prediction, open_prediction
 SHAPE = (70, 130, 100)  # (z, y, x): chunks along each edge are partial
 
 
-def make_project(browser, settings, database_url, name="Skull") -> str:
-    project = browser.post("/api/projects", json={"name": name}).json()["id"]
+def add_image(database_url, project: str, shape=SHAPE) -> str:
+    """A committed image of `shape` as the project's image (replacing any)."""
 
-    async def add_image(db):
+    async def create(db):
         artifact = await artifacts.create_staging(
             db, project_id=uuid.UUID(project), kind="image", head_slot="image"
         )
         artifact.state = "committed"
-        artifact.manifest = {"shape_czyx": [1, *SHAPE]}
+        artifact.manifest = {"shape_czyx": [1, *shape]}
         await artifacts.set_head(db, artifact)
+        return str(artifact.id)
 
-    run_db(database_url, add_image)
+    return run_db(database_url, create)
+
+
+def make_project(browser, settings, database_url, name="Skull", shape=SHAPE) -> str:
+    project = browser.post("/api/projects", json={"name": name}).json()["id"]
+    add_image(database_url, project, shape)
     return project
 
 
@@ -395,7 +401,7 @@ def test_concurrent_retries_return_the_first_result(
 
 
 def add_prediction(
-    settings, database_url, project: str, head_slot=None, inputs=None
+    settings, database_url, project: str, head_slot=None, inputs=None, shape=SHAPE
 ) -> str:
     """
     A committed prediction: bone in z 0..8, y 0..8, x 0..8, background
@@ -411,13 +417,13 @@ def add_prediction(
             head_slot=head_slot,
         )
         group = create_prediction(
-            project_storage(settings).child(artifacts.artifact_path(artifact)), SHAPE
+            project_storage(settings).child(artifacts.artifact_path(artifact)), shape
         )
-        classes = np.ones(SHAPE, dtype=np.uint8)
+        classes = np.ones(shape, dtype=np.uint8)
         classes[:8, :8, :8] = 2
         group["class"][:] = classes  # type: ignore[index]
         artifact.state = "committed"
-        artifact.manifest = {"kind": "prediction", "shape_zyx": list(SHAPE)}
+        artifact.manifest = {"kind": "prediction", "shape_zyx": list(shape)}
         if head_slot is not None:
             await artifacts.set_head(db, artifact)
         return str(artifact.id)
@@ -664,6 +670,354 @@ def add_roi(browser, project) -> str:
     return browser.post(
         base, json={"bbox": [0, 0, 0, 10, 10, 10], "kind": "cube"}
     ).json()["id"]
+
+
+def accept_box(browser, project, prediction, box, mask, origin, value, **kw):
+    """Accept `value` over `mask` at `origin`, into `box` (z0, y0, x0, z1, y1, x1)."""
+    return browser.post(
+        f"/api/projects/{project}/labels/accept",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "prediction_artifact_id": prediction,
+            "box": box,
+            "deltas": deltas_for(
+                mask, origin, value=value, only_if=kw.pop("only_if", "unlabeled")
+            ),
+            **kw,
+        },
+    )
+
+
+def current_image(database_url, project: str) -> str:
+    async def find(db):
+        image = await artifacts.head(db, uuid.UUID(project), "image")
+        assert image is not None
+        return str(image.id)
+
+    return run_db(database_url, find)
+
+
+def toggle(browser, project, seq, action):
+    return browser.post(
+        f"/api/projects/{project}/labels/ops/{seq}/{action}",
+        json={"client_op_id": str(uuid.uuid4())},
+    )
+
+
+def test_accepting_a_prediction_into_a_box_is_checked_against_it(
+    ada, project, settings, migrated_database_url
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    box = [0, 0, 0, 10, 10, 10]
+    bone = np.ones((8, 8, 8), dtype=bool)
+
+    def accept(mask, origin, value, where=box, **kw):
+        return accept_box(ada, project, prediction, where, mask, origin, value, **kw)
+
+    # The prediction doesn't say tooth (3) there, or bone outside its cube.
+    assert accept(bone, (0, 0, 0), 3).status_code == 422
+    assert accept(np.ones((2, 2, 2), dtype=bool), (7, 7, 7), 2).status_code == 422
+    # Accepted labels go only into unlabeled voxels, and stay in the box.
+    assert accept(bone, (0, 0, 0), 2, only_if="any").status_code == 422
+    assert accept(np.ones((1, 1, 1), dtype=bool), (10, 0, 0), 1).status_code == 422
+    short = accept(bone, (0, 0, 0), 2, where=[0, 0, 0, 8, 8, 7])
+    assert short.status_code == 422
+    assert short.json()["detail"] == "Those labels reach outside the box"
+    # Nobody can claim the result is anything but the server's call.
+    assert accept(bone, (0, 0, 0), 2, tool={"name": "mine"}).status_code == 422
+    # A prediction that isn't the project's.
+    nowhere = accept_box(ada, project, str(uuid.uuid4()), box, bone, (0, 0, 0), 2)
+    assert nowhere.status_code == 404
+    assert nowhere.json()["detail"] == "No such prediction."
+    assert not chunk(ada, project, (0, 0, 0)).any()
+
+    # A box is whole voxels, has some, and is inside the image (70 × 130 × 100).
+    one = np.ones((1, 1, 1), dtype=bool)
+    for outside in (
+        [0, 0, 0, 71, 10, 10],
+        [0, 0, 0, 10, 131, 10],
+        [0, 0, 0, 10, 10, 101],
+        [-1, 0, 0, 10, 10, 10],
+        [5, 0, 0, 5, 10, 10],
+        [9, 0, 0, 3, 10, 10],
+    ):
+        refused = accept(one, (0, 0, 0), 2, where=outside)
+        assert refused.status_code == 422, outside
+        assert refused.json()["detail"] == "The box must be inside the image."
+    assert accept(one, (0, 0, 0), 2, where=[0, 0, 0, 10.5, 10, 10]).status_code == 422
+    assert accept(one, (0, 0, 0), 2, where=[0, 0, 0, 10, 10]).status_code == 422
+    assert accept(one, (0, 0, 0), 2, where=[0, 0, 0, 70, 130, 100]).status_code == 201
+
+    # Exactly one of an ROI and a box says where.
+    roi = add_roi(ada, project)
+    place = {
+        "client_op_id": str(uuid.uuid4()),
+        "prediction_artifact_id": prediction,
+        "deltas": deltas_for(one, (1, 0, 0), value=2, only_if="unlabeled"),
+    }
+    url = f"/api/projects/{project}/labels/accept"
+    for both_or_neither in (
+        {},
+        {"roi_id": None, "box": None},
+        {"roi_id": roi, "box": box},
+    ):
+        assert ada.post(url, json={**place, **both_or_neither}).status_code == 422
+    # A null for the one that isn't used is the same as leaving it out.
+    assert ada.post(url, json={**place, "roi_id": None, "box": box}).status_code == 201
+
+    accepted = accept(bone, (0, 0, 0), 2)
+    assert accepted.status_code == 201, accepted.text
+    classes = chunk(ada, project, (0, 0, 0))
+    source = chunk(ada, project, (0, 0, 0), array="source")
+    assert (classes[:8, :8, :8] == 2).all()
+    assert (source[:8, :8, :8] == Source.MODEL_VERIFIED).all()
+    [op] = ada.get(f"/api/projects/{project}/labels/ops?limit=1").json()
+    assert op["source"] == Source.MODEL_VERIFIED
+    assert op["bbox"] == [0, 0, 0, 8, 8, 8]
+    # The tool record names the prediction and the box, and no ROI.
+    assert op["tool"] == {
+        "name": "accept-prediction",
+        "prediction": prediction,
+        "model": None,
+        "box": box,
+    }
+
+
+def test_a_box_accept_fills_only_unlabeled_voxels_and_undoes_and_redoes(
+    ada, project, settings, migrated_database_url
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    base = f"/api/projects/{project}/labels"
+    # Someone labeled a corner of the bone by hand, as matrix (3).
+    mine = np.zeros((8, 8, 8), dtype=bool)
+    mine[:, :4, :4] = True
+    hand = edit(ada, project, mine[:, :4, :4], (0, 0, 0), 3)
+    assert hand.status_code == 201
+
+    box = [0, 0, 0, 8, 8, 8]
+    accepted = accept_box(
+        ada, project, prediction, box, np.ones((8, 8, 8), dtype=bool), (0, 0, 0), 2
+    )
+    assert accepted.status_code == 201, accepted.text
+
+    def region():
+        classes = chunk(ada, project, (0, 0, 0))
+        source = chunk(ada, project, (0, 0, 0), array="source")
+        return classes[:8, :8, :8], source[:8, :8, :8], classes
+
+    def filled():
+        classes, source, whole = region()
+        # The hand labels stay, the rest of the box is the model's, and
+        # nothing outside the box was touched.
+        assert (classes[mine] == 3).all() and (source[mine] == Source.HUMAN).all()
+        assert (classes[~mine] == 2).all()
+        assert (source[~mine] == Source.MODEL_VERIFIED).all()
+        assert whole.sum() == classes.sum()
+
+    def left_to_hand():
+        classes, source, whole = region()
+        assert (classes[mine] == 3).all() and (classes[~mine] == 0).all()
+        assert (source[~mine] == Source.NONE).all()
+        assert whole.sum() == classes.sum()
+
+    filled()
+    seq = accepted.json()["seq"]
+    assert toggle(ada, project, seq, "undo").status_code == 201
+    left_to_hand()
+    assert toggle(ada, project, seq, "redo").status_code == 201
+    filled()
+    assert ada.get(f"{base}/counts").json() == {"1": 0, "2": 512 - 128, "3": 128}
+
+
+def test_a_box_accept_across_chunks_takes_a_predicted_value_at_a_time(
+    ada, project, settings, migrated_database_url
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    # Chunks are 64 wide, so this box crosses their edges along every axis.
+    box = [0, 0, 0, 70, 70, 70]
+    place = np.ones((70, 70, 70), dtype=bool)
+    bone = np.zeros_like(place)
+    bone[:8, :8, :8] = True
+    # What the annotator sends: an op for each value the prediction has.
+    first = accept_box(ada, project, prediction, box, bone, (0, 0, 0), 2)
+    second = accept_box(ada, project, prediction, box, place & ~bone, (0, 0, 0), 1)
+    assert (first.status_code, second.status_code) == (201, 201), second.text
+    counts = ada.get(f"/api/projects/{project}/labels/counts").json()
+    assert counts == {"1": 70**3 - 512, "2": 512, "3": 0}
+    history = ada.get(f"/api/projects/{project}/labels/ops").json()
+    assert [h["tool"]["box"] for h in history] == [box, box]
+    # The first touched one chunk, the second all eight.
+    assert [len(r.json()["chunks"]) for r in (second, first)] == [8, 1]
+
+
+def test_a_box_to_accept_at_once_holds_at_most_256_cubed(
+    ada, settings, migrated_database_url
+):
+    big = make_project(ada, settings, migrated_database_url, "Big", (300, 300, 300))
+    prediction = add_prediction(
+        settings, migrated_database_url, big, shape=(300, 300, 300)
+    )
+    one = np.ones((1, 1, 1), dtype=bool)
+    ada.post(
+        f"/api/projects/{big}/labels/classes", json={"name": "bone", "color": "#ffffff"}
+    )
+
+    def accept(box):
+        return accept_box(ada, big, prediction, box, one, (0, 0, 0), 2)
+
+    too_much = "That's too much to accept at once; use a smaller box"
+    # One voxel more than 256 cubed, however it's shaped.
+    for over in (
+        [0, 0, 0, 257, 257, 257],
+        [0, 0, 0, 256, 256, 257],
+        [0, 0, 0, 300, 300, 300],
+    ):
+        refused = accept(over)
+        assert refused.status_code == 422, over
+        assert refused.json()["detail"] == too_much
+    assert accept([0, 0, 0, 256, 256, 256]).status_code == 201
+    assert accept([0, 0, 0, 1, 300, 300]).status_code == 201
+
+
+def test_accepting_refuses_a_prediction_of_an_image_that_was_replaced(
+    ada, project, settings, migrated_database_url
+):
+    named = {
+        "model_id": None,
+        "image_artifact_id": current_image(migrated_database_url, project),
+    }
+    prediction = add_prediction(settings, migrated_database_url, project, inputs=named)
+    roi = add_roi(ada, project)
+    one = np.ones((1, 1, 1), dtype=bool)
+    box = [0, 0, 0, 10, 10, 10]
+
+    def accept(z, *, into_roi=False):
+        where = {"roi_id": roi} if into_roi else {"box": box}
+        return ada.post(
+            f"/api/projects/{project}/labels/accept",
+            json={
+                "client_op_id": str(uuid.uuid4()),
+                "prediction_artifact_id": prediction,
+                "deltas": deltas_for(one, (z, 0, 0), value=2, only_if="unlabeled"),
+                **where,
+            },
+        )
+
+    assert accept(0).status_code == 201
+    assert accept(1, into_roi=True).status_code == 201
+    # A new image takes the place of the one the prediction was made from.
+    add_image(migrated_database_url, project)
+    for refused in (accept(2), accept(3, into_roi=True)):
+        assert refused.status_code == 409, refused.text
+        assert (
+            refused.json()["detail"]
+            == "That prediction is of an image that was replaced."
+        )
+    assert ada.get(f"/api/projects/{project}/labels/counts").json()["2"] == 2
+
+
+def test_a_prediction_that_does_not_cover_the_labels_is_refused(
+    ada, project, settings, migrated_database_url
+):
+    # Made for a smaller image, and not saying which.
+    small = add_prediction(settings, migrated_database_url, project, shape=(10, 10, 10))
+    refused = accept_box(
+        ada,
+        project,
+        small,
+        [0, 0, 0, 20, 20, 20],
+        np.ones((1, 1, 15), dtype=bool),
+        (0, 0, 0),
+        1,
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == "That prediction doesn't cover those labels"
+
+
+def test_predictions_labels_were_accepted_into_a_box_from_are_kept(
+    ada, project, settings, migrated_database_url
+):
+    me = uuid.UUID(ada.get("/api/auth/session").json()["user"]["id"])
+    accepted, unused = [], []
+    # A proposal, and a prediction of the whole image.
+    for z, slot in enumerate((artifacts.proposal_slot(me), "prediction")):
+        source = add_prediction(settings, migrated_database_url, project, slot)
+        response = accept_box(
+            ada,
+            project,
+            source,
+            [0, 0, 0, 10, 10, 10],
+            np.ones((1, 8, 8), dtype=bool),
+            (z, 0, 0),
+            2,
+        )
+        assert response.status_code == 201, response.text
+        if slot == "prediction":
+            # Undone labels still count: a redo brings them back.
+            assert (
+                toggle(ada, project, response.json()["seq"], "undo").status_code == 201
+            )
+        # Newer ones replace it, and the first of those in turn.
+        unused.append(add_prediction(settings, migrated_database_url, project, slot))
+        add_prediction(settings, migrated_database_url, project, slot)
+        accepted.append(source)
+
+    # Past every grace period.
+    no_wait = settings.model_copy(
+        update={
+            "storage": settings.storage.model_copy(update={"keep_superseded_days": 0})
+        }
+    )
+
+    async def collect(db):
+        long_ago = datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
+        await db.execute(
+            update(Artifact)
+            .where(Artifact.state == "superseded")
+            .values(state_changed_at=long_ago)
+        )
+        await db.commit()
+        return await artifacts.collect_garbage(create_sessionmaker(db.bind), no_wait)
+
+    assert run_db(migrated_database_url, collect) == len(unused)
+
+    async def rows(db, ids):
+        return [await db.get(Artifact, uuid.UUID(i)) for i in ids]
+
+    for artifact in run_db(migrated_database_url, lambda db: rows(db, unused)):
+        assert artifact.state == "deleted"
+    # The ones labels came from stay, files and all.
+    for artifact in run_db(migrated_database_url, lambda db: rows(db, accepted)):
+        assert artifact.state == "superseded"
+        group = open_prediction(
+            project_storage(settings).child(artifacts.artifact_path(artifact))
+        )
+        assert (np.asarray(group["class"][:8, :8, :8]) == 2).all()  # type: ignore[index]
+
+
+def test_the_history_lists_a_box_accept_without_an_roi(
+    ada, project, settings, migrated_database_url
+):
+    model = add_model(migrated_database_url, project, "rf one")
+    prediction = add_prediction(
+        settings, migrated_database_url, project, "prediction", {"model_id": model}
+    )
+    box = [0, 0, 0, 8, 8, 8]
+    accepted = accept_box(
+        ada, project, prediction, box, np.ones((1, 8, 8), dtype=bool), (3, 0, 0), 2
+    )
+    assert accepted.status_code == 201, accepted.text
+    [entry] = ada.get(f"/api/projects/{project}/labels/ops").json()
+    assert entry["source"] == Source.MODEL_VERIFIED
+    assert entry["bbox"] == [3, 0, 0, 4, 8, 8]
+    assert entry["tool"]["box"] == box
+    assert entry["accepted"] == {
+        "kind": "prediction",
+        "model_id": model,
+        "model_name": "rf one",
+        "v1_job_id": None,
+        "roi_id": None,
+    }
 
 
 def test_the_history_names_people_and_models(

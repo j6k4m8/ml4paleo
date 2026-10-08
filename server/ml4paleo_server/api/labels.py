@@ -10,10 +10,24 @@ feed collaborators follow, and the labels as a zarr group for viewers.
     POST   /api/projects/{id}/labels/ops                 apply an edit
     POST   /api/projects/{id}/labels/ops/{seq}/undo      {client_op_id}
     POST   /api/projects/{id}/labels/ops/{seq}/redo      {client_op_id}
+    POST   /api/projects/{id}/labels/accept              accept part of a prediction
     GET    /api/projects/{id}/labels/ops                 history, newest first
     GET    /api/projects/{id}/labels/changes?after=seq   what changed since
     GET    /api/projects/{id}/labels/events?after=seq    the same, as SSE
     GET    /api/projects/{id}/labels/zarr/{key}          the labels as zarr
+
+Accepting a prediction is how a model's labels become the project's:
+`{client_op_id, prediction_artifact_id, deltas}` and where they go, exactly
+one of `roi_id` (an ROI) or `box` (`[z0, y0, x0, z1, y1, x1]`, whole voxels,
+half-open, not empty, inside the image, as an ROI's box is; the annotator
+sends the part of a slice a view shows). Either way the deltas must stay
+inside it and it must hold at most 256^3 voxels, each delta writes one
+predicted value (never 0) into only unlabeled voxels, and the server reads
+the stored prediction and refuses the op unless it holds that value at every
+voxel a delta selects, and is of the project's current image if it says which
+image it was made from (409). The op is `Source.MODEL_VERIFIED`, and its tool
+record names the prediction, its model, and the ROI or the box; garbage
+collection keeps a prediction such an op names, undone or not.
 
 The zarr group has two uint8 arrays shaped like the image: `class` (label
 values) and `source` (who made each label, `ml4paleo.labels.Source`), in
@@ -41,6 +55,7 @@ import base64
 import binascii
 import datetime
 import json
+import math
 import re
 import uuid
 from collections.abc import Sequence
@@ -49,7 +64,7 @@ from typing import Annotated, Any, Literal
 import numpy as np
 from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import func, select, text
 from starlette.concurrency import run_in_threadpool
 
@@ -409,10 +424,42 @@ class AcceptIn(BaseModel):
 
     client_op_id: uuid.UUID
     prediction_artifact_id: uuid.UUID
-    roi_id: uuid.UUID
+    # Where the labels go: an ROI, or a box (z0, y0, x0, z1, y1, x1) of whole
+    # voxels, half-open, inside the image. Exactly one.
+    roi_id: uuid.UUID | None = None
+    box: tuple[int, int, int, int, int, int] | None = None
     # One predicted value per delta (an op touches a chunk once), written
     # only into unlabeled voxels.
     deltas: list[DeltaIn] = Field(min_length=1, max_length=MAX_DELTAS)
+
+    @model_validator(mode="after")
+    def _one_place(self) -> "AcceptIn":
+        if (self.roi_id is None) == (self.box is None):
+            raise ValueError("Give exactly one of roi_id and box")
+        return self
+
+
+def _check_size(box: Sequence[int], place: str) -> None:
+    """Raise ValueError if `box` (z0, y0, x0, z1, y1, x1) holds too much to accept."""
+    if math.prod(box[a + 3] - box[a] for a in range(3)) > MAX_ACCEPT_VOXELS:
+        raise ValueError(f"That's too much to accept at once; use a smaller {place}")
+
+
+async def _check_current_image(db, project_id: uuid.UUID, prediction: Artifact) -> None:
+    """
+    Refuse a prediction made from an image that has been replaced since, which
+    doesn't fit the labels (one that doesn't name its image isn't checked).
+    """
+    named = prediction.inputs.get("image_artifact_id")
+    if named is None:
+        return
+    image = await artifacts.head(db, project_id, "image")
+    if image is None:
+        raise labels.NoImage
+    if named != str(image.id):
+        raise HTTPException(
+            status_code=409, detail="That prediction is of an image that was replaced."
+        )
 
 
 def _check_against_prediction(
@@ -445,12 +492,15 @@ async def accept_prediction(
 ) -> OpOut:
     """
     Accept part of a model's prediction as labels, recorded as
-    model-verified with the prediction, its model, and the ROI.
+    model-verified with the prediction, its model, and where they went: the
+    ROI, or the box.
 
     The server checks the claim: each delta writes one predicted value (not
-    0) into only unlabeled voxels inside the ROI, and the stored prediction
-    has exactly that value at every voxel it selects. Undo and redo work as
-    for any edit.
+    0) into only unlabeled voxels inside the ROI or box, and the stored
+    prediction has exactly that value at every voxel it selects. A box is
+    checked as an ROI's is (whole voxels, not empty, inside the image), and
+    either may hold at most `MAX_ACCEPT_VOXELS`. Undo and redo work as for
+    any edit.
     """
     if done := await labels.existing(db, project.id, body.client_op_id):
         return _op_out(done)
@@ -468,11 +518,14 @@ async def accept_prediction(
         )
         .with_for_update(read=True)
     )
-    roi = await db.scalar(
-        select(Roi).where(Roi.id == body.roi_id, Roi.project_id == project.id)
-    )
-    if prediction is None or roi is None:
-        raise HTTPException(status_code=404, detail="No such prediction or ROI.")
+    roi = None
+    if body.roi_id is not None:
+        roi = await db.scalar(
+            select(Roi).where(Roi.id == body.roi_id, Roi.project_id == project.id)
+        )
+    if prediction is None or (body.roi_id is not None and roi is None):
+        what = "prediction or ROI" if body.roi_id is not None else "prediction"
+        raise HTTPException(status_code=404, detail=f"No such {what}.")
     try:
         deltas = [delta.to_delta() for delta in body.deltas]
         for delta in deltas:
@@ -487,16 +540,25 @@ async def accept_prediction(
                 )
         allowed = await allowed_values(db, project.id)
         await run_in_threadpool(check_values, deltas, allowed)
+        if roi is not None:
+            place, limit, named_for = "ROI", list(roi.bbox), {"roi": str(roi.id)}
+        else:
+            assert body.box is not None
+            place, limit, named_for = "box", list(body.box), {"box": list(body.box)}
+            labels.check_box(limit, await labels.volume_shape(db, project.id))
+            _check_size(limit, place)
         box = labels.global_box(deltas)
-        if any(box[a] < roi.bbox[a] or box[a + 3] > roi.bbox[a + 3] for a in range(3)):
-            raise ValueError("Those labels reach outside the ROI")
-        if np.prod([box[a + 3] - box[a] for a in range(3)]) > MAX_ACCEPT_VOXELS:
-            raise ValueError("That's too much to accept at once; use a smaller ROI")
+        if any(box[a] < limit[a] or box[a + 3] > limit[a + 3] for a in range(3)):
+            raise ValueError(f"Those labels reach outside the {place}")
+        _check_size(box, place)
+        await _check_current_image(db, project.id, prediction)
         grant = project_storage(settings).child(artifacts.artifact_path(prediction))
         region = tuple(slice(box[a], box[a + 3]) for a in range(3))
         predicted = await run_in_threadpool(
             lambda: np.asarray(open_prediction(grant)["class"][region])  # type: ignore[index]
         )
+        if predicted.shape != tuple(box[a + 3] - box[a] for a in range(3)):
+            raise ValueError("That prediction doesn't cover those labels")
         await run_in_threadpool(_check_against_prediction, deltas, predicted, box[:3])
         result = await labels.apply_edit(
             db,
@@ -509,7 +571,7 @@ async def accept_prediction(
                 "name": "accept-prediction",
                 "prediction": str(prediction.id),
                 "model": prediction.inputs.get("model_id"),
-                "roi": str(roi.id),
+                **named_for,
             },
             user_id=auth.user.id,
         )
