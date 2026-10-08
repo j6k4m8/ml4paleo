@@ -852,7 +852,7 @@
 
 	const hint = $derived(
 		{
-			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · click moves the crosshair",
+			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · right-click moves the crosshair",
 			brush: "Drag to paint the active class · [ ] change the size",
 			eraser: "Drag to erase labels · [ ] change the size",
 			polygon:

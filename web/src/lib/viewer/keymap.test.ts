@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionFor, KEYMAP } from "./keymap";
+import { actionFor, isRightClick, KEYMAP } from "./keymap";
 
 function press(key: string, init: Partial<KeyboardEventInit> = {}, tagName = "CANVAS") {
 	return { key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...init, target: { tagName, isContentEditable: false } } as unknown as KeyboardEvent;
@@ -59,5 +59,18 @@ describe("keymap", () => {
 		expect(actionFor(press("Z", { metaKey: true, shiftKey: true }))).toBe("redo");
 		expect(actionFor(press("y", { ctrlKey: true }))).toBe("redo");
 		expect(actionFor(press("z"))).toBeUndefined();
+	});
+});
+
+describe("right-click", () => {
+	it("is the right button, or Ctrl with the left, as on a Mac", () => {
+		expect(isRightClick({ button: 2, ctrlKey: false })).toBe(true);
+		expect(isRightClick({ button: 0, ctrlKey: true })).toBe(true);
+	});
+
+	it("is never a plain left click or a middle click, which pans", () => {
+		expect(isRightClick({ button: 0, ctrlKey: false })).toBe(false);
+		expect(isRightClick({ button: 1, ctrlKey: false })).toBe(false);
+		expect(isRightClick({ button: 1, ctrlKey: true })).toBe(false);
 	});
 });

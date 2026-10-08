@@ -5,6 +5,7 @@
 	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
 	import type { ChunkStore } from "./chunks";
+	import { isRightClick } from "./keymap";
 	import type { LabelLayer } from "./labels";
 	import { type LabelTile, type Overlay, PlaneRenderer } from "./plane";
 	import type { ViewerState } from "./state.svelte";
@@ -383,9 +384,11 @@
 	function pointerDown(event: PointerEvent) {
 		// One pointer at a time: a second finger doesn't join the stroke.
 		if (press) return;
-		canvas.setPointerCapture(event.pointerId);
 		canvas.focus();
 		viewer.noteKeys(event);
+		// Right-click goes to the spot, with any tool; a plain click never moves you.
+		if (isRightClick(event)) return goHere(event);
+		canvas.setPointerCapture(event.pointerId);
 		const pan = viewer.tool === "navigate" || viewer.panning || event.button === 1;
 		press = { x: event.clientX, y: event.clientY, moved: false, pan, pointer: event.pointerId, draws: false, before: 0 };
 		if (pan || event.button !== 0 || !canEdit()) return;
@@ -492,11 +495,17 @@
 				if (!last || last[0] !== end[0] || last[1] !== end[1]) viewer.polygon = { ...current, points: [...current.points, end] };
 				onpolygon(cuts(event));
 			}
-		} else if (press?.pan && !press.moved && viewer.tool === "navigate") {
-			viewer.autoFit = false;
-			viewer.moveTo(voxelAt(view(), ...offset(event)));
+		} else if (press?.pan && !press.moved && viewer.tool === "navigate" && event.pointerType === "touch") {
+			// A tap on a touch screen, which has no right button.
+			goHere(event);
 		}
 		press = null;
+	}
+
+	/** Move the crosshair to where the pointer is. */
+	function goHere(event: PointerEvent) {
+		viewer.autoFit = false;
+		viewer.moveTo(voxelAt(view(), ...offset(event)));
 	}
 
 	function cancel() {
@@ -647,6 +656,7 @@
 		onpointercancel={cancel}
 		onpointerenter={() => onhover(plane)}
 		onpointerleave={() => (cursor = null)}
+		oncontextmenu={(event) => event.preventDefault()}
 		ondblclick={(event) => viewer.tool === "polygon" && onpolygon(cuts(event))}
 		onfocus={() => onhover(plane)}
 		onwheel={wheel}
