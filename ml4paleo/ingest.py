@@ -11,6 +11,8 @@ own slices.
 `probe` looks at an archive once and records what it found, including the
 slices in stacking order, as a `SourceIndex`; `slab_provider` then gives the
 jobs that copy slabs of slices a volume provider without looking again.
+Files that aren't slices (notes, manifests, a DICOMDIR) are skipped and
+named in the index, so a scanner's export can be uploaded as it is.
 
 Problems with the upload itself raise `IngestError`, with a message for the
 person who uploaded it.
@@ -22,7 +24,7 @@ import re
 import struct
 import zipfile
 import zlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from typing import BinaryIO, Literal
 
 import numpy as np
@@ -38,6 +40,17 @@ MAX_EXPANSION = 1000
 SUPPORTED_COMPRESSION = {zipfile.ZIP_STORED: "stored", zipfile.ZIP_DEFLATED: "deflate"}
 READ_CHUNK = 1024 * 1024
 SourceKind = Literal["images", "dicom"]
+# Files that come with scans but are never slices: notes, manifests, and
+# checksums that scanners and image archives add to their exports.
+NOT_SLICES = frozenset(
+    {".txt", ".xml", ".json", ".html", ".htm", ".pdf", ".csv", ".md", ".rtf"}
+    | {".ini", ".cfg", ".log", ".nfo", ".url", ".lnk", ".md5", ".sha1", ".sha256"}
+)
+# How many files of an unknown kind a stack may carry and still be read
+# without them; more than that looks like slices ml4paleo can't read.
+MAX_UNKNOWN = 5
+# How many skipped names the index keeps (it also counts them all).
+SKIPPED_NAMES = 20
 
 
 @dataclass(frozen=True)
@@ -132,6 +145,20 @@ class ZipMember:
             raise IngestError(f"The archive is damaged ({self.name}: {exc}).") from None
         data.seek(0)
         return data
+
+    def head(self, size: int) -> bytes:
+        """The member's first `size` bytes, to tell what kind of file it is."""
+        try:
+            with self.archive.open(self.info) as member:
+                return member.read(size)
+        except (
+            zipfile.BadZipFile,
+            zlib.error,
+            EOFError,
+            RuntimeError,
+            ValueError,
+        ) as exc:
+            raise IngestError(f"The archive is damaged ({self.name}: {exc}).") from None
 
     def __str__(self) -> str:
         return self.name
@@ -240,6 +267,12 @@ class SourceIndex:
     dtype: str
     voxel_size_zyx: tuple[float, float, float] | None
     unit: str | None
+    # Files left out because they aren't slices (at most SKIPPED_NAMES of
+    # them by name), and how many there were.
+    skipped: list[str] = field(default_factory=list)
+    skipped_count: int = 0
+    # Anything else the person should know about what was read, in words.
+    notes: list[str] = field(default_factory=list)
 
     def to_json(self) -> bytes:
         return json.dumps(asdict(self)).encode()
@@ -256,6 +289,9 @@ class SourceIndex:
             if raw["voxel_size_zyx"]
             else None,
             unit=raw["unit"],
+            skipped=list(raw.get("skipped", [])),
+            skipped_count=int(raw.get("skipped_count", 0)),
+            notes=list(raw.get("notes", [])),
         )
 
 
@@ -283,50 +319,126 @@ def _check_dicom_size(dataset, name: str, limits: SliceLimits) -> None:
         )
 
 
-def _is_dicom(member: ZipMember) -> bool:
-    import pydicom
-    from pydicom.errors import InvalidDicomError
+# The first bytes of the image formats slices come in.
+IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"II*\x00", b"MM\x00*", b"\xff\xd8\xff", b"BM")
 
-    data = member.open()  # IngestError if the archive is damaged
-    try:
-        pydicom.dcmread(data, stop_before_pixels=True)
-    except (InvalidDicomError, EOFError, ValueError, TypeError, OSError):
-        return False
-    return True
+
+def _kind(member: ZipMember) -> Literal["dicom", "image", "other"]:
+    """What a member is, from its name and first bytes."""
+    if _known_extra(member.name):
+        return "other"
+    head = member.head(132)
+    if head[128:132] == b"DICM":
+        return "dicom"
+    if head.startswith(IMAGE_MAGIC):
+        return "image"
+    return "other"
+
+
+def _examples(members: list[ZipMember]) -> str:
+    names = [member.name for member in members[:3]]
+    return ", ".join(names) + (" and others" if len(members) > 3 else "")
 
 
 def probe(fileobj: BinaryIO, limits: SliceLimits = DEFAULT_LIMITS) -> SourceIndex:
     """
     Look at an archive and work out the volume in it, refusing slices too
-    large for `limits` before decoding them.
+    large for `limits` before decoding them. Files that aren't slices are
+    left out and named in the index.
     """
-    members = slice_members(open_archive(fileobj), limits)
-    if _is_dicom(members[0]):
-        from .volume_providers.dicomvp import DicomVolumeProvider
-
-        if not all(_is_dicom(member) for member in members[1:]):
-            raise IngestError(
-                "The archive mixes DICOM files with other files. Upload one "
-                "kind of slice per archive."
-            )
-        import pydicom
-
-        for member in members:
-            header = pydicom.dcmread(member.open(), stop_before_pixels=True)
-            _check_dicom_size(header, member.name, limits)
-        try:
-            provider = DicomVolumeProvider(members)  # type: ignore[arg-type]
-        except ValueError as exc:
-            raise IngestError(str(exc)) from exc
-        spacing = provider.voxel_size_xyz_mm
-        return SourceIndex(
-            kind="dicom",
-            members=[member.name for member in provider.files],
-            shape_xyz=_shape(provider),
-            dtype=np.dtype(provider.dtype).str,
-            voxel_size_zyx=tuple(spacing[::-1]) if spacing else None,  # type: ignore[arg-type]
-            unit="millimeter" if spacing else None,
+    by_kind: dict[str, list[ZipMember]] = {"dicom": [], "image": [], "other": []}
+    for member in slice_members(open_archive(fileobj), limits):
+        by_kind[_kind(member)].append(member)
+    dicoms, images, skipped = by_kind["dicom"], by_kind["image"], by_kind["other"]
+    if dicoms and images:
+        raise IngestError(
+            "The archive has both DICOM files and other images (for example "
+            f"{images[0].name}). Upload one kind of slice per archive."
         )
+    if not dicoms and not images:
+        raise IngestError(
+            f"The archive has no DICOM files or images ml4paleo reads ({_examples(skipped)})."
+        )
+    # Files of a kind ml4paleo knows aren't slices are fine to leave out;
+    # many of a kind it doesn't know look like slices it can't read.
+    unknown = [m for m in skipped if not _known_extra(m.name)]
+    if len(unknown) > MAX_UNKNOWN:
+        raise IngestError(
+            f"The archive has {len(unknown)} files ml4paleo doesn't read as slices "
+            f"({_examples(unknown)}). Upload only the slices, or one kind of slice."
+        )
+    if dicoms:
+        index, without_images = _probe_dicom(dicoms, limits)
+        skipped = skipped + without_images
+    else:
+        index = _probe_images(images, limits)
+    if not skipped:
+        return index
+    skipped.sort(key=lambda member: natural_key(member.name))
+    return replace(
+        index,
+        skipped=[member.name for member in skipped[:SKIPPED_NAMES]],
+        skipped_count=len(skipped),
+    )
+
+
+def _known_extra(name: str) -> bool:
+    """Whether a file is one that scans often come with, rather than a slice."""
+    base = re.split(r"[/\\]", name)[-1]
+    return base.upper() == "DICOMDIR" or (
+        "." in base and base[base.rindex(".") :].lower() in NOT_SLICES
+    )
+
+
+def _probe_dicom(
+    members: list[ZipMember], limits: SliceLimits
+) -> tuple[SourceIndex, list[ZipMember]]:
+    """
+    A DICOM series' index, and the DICOM files left out because they hold no
+    image (a DICOMDIR, structured reports).
+    """
+    import pydicom
+
+    from .volume_providers.dicomvp import DicomVolumeProvider
+
+    slices, without_images, series = [], [], set()
+    for member in members:
+        header = pydicom.dcmread(member.open(), stop_before_pixels=True)
+        if not hasattr(header, "Rows") or not hasattr(header, "Columns"):
+            without_images.append(member)
+            continue
+        _check_dicom_size(header, member.name, limits)
+        slices.append(member)
+        series.add(getattr(header, "SeriesInstanceUID", None))
+    if not slices:
+        raise IngestError("The archive's DICOM files have no images in them.")
+    try:
+        provider = DicomVolumeProvider(slices)  # type: ignore[arg-type]
+    except ValueError as exc:
+        raise IngestError(str(exc)) from exc
+    spacing = provider.voxel_size_xyz_mm
+    chosen = [member.name for member in provider.files]
+    notes = []
+    if len(series) > 1:
+        # The reader takes the series with the most slices.
+        notes.append(
+            f"The archive has {len(series)} DICOM series; ml4paleo used the largest "
+            f"({len(chosen)} slices) and left out the other {len(slices) - len(chosen)} "
+            "files. To use another series, upload it on its own."
+        )
+    index = SourceIndex(
+        kind="dicom",
+        members=chosen,
+        shape_xyz=_shape(provider),
+        dtype=np.dtype(provider.dtype).str,
+        voxel_size_zyx=tuple(spacing[::-1]) if spacing else None,  # type: ignore[arg-type]
+        unit="millimeter" if spacing else None,
+        notes=notes,
+    )
+    return index, without_images
+
+
+def _probe_images(members: list[ZipMember], limits: SliceLimits) -> SourceIndex:
     try:
         provider = ImageStackVolumeProvider(
             members,  # type: ignore[arg-type]

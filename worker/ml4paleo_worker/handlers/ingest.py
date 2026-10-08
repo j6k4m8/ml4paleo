@@ -126,6 +126,8 @@ def finalize(ctx: JobContext) -> dict[str, Any]:
     grant = ctx.grants[0]
     image = OmeImage.open(grant)
     coarsest = np.asarray(image.array(image.num_levels - 1)[0])
+    index_bytes = get_bytes(grant, INDEX_KEY)
+    index = SourceIndex.from_json(index_bytes) if index_bytes else None
     delete_object(grant, INDEX_KEY)
     manifest = {
         "kind": "image",
@@ -135,6 +137,10 @@ def finalize(ctx: JobContext) -> dict[str, Any]:
         "voxel_size_zyx": list(image.voxel_size_zyx) if image.voxel_size_zyx else None,
         "unit": image.unit,
         "source": ctx.payload.get("source", {}),
+        # Files in the upload that weren't slices, which ingest left out.
+        "skipped": index.skipped if index else [],
+        "skipped_count": index.skipped_count if index else 0,
+        "notes": index.notes if index else [],
         **intensity_summary(coarsest),
     }
     write_manifest(grant, manifest)

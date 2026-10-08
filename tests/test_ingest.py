@@ -101,7 +101,69 @@ def test_mixed_archives_are_refused(tmp_path, make_dicom_series):
     paths = make_dicom_series(tmp_path / "series", lambda i: np.zeros((4, 4)), count=2)
     entries = {path.name: path.read_bytes() for path in paths}
     entries["zz_photo.png"] = _png(np.zeros((4, 4), dtype=np.uint8))
-    with pytest.raises(IngestError, match="mixes DICOM"):
+    with pytest.raises(IngestError, match="both DICOM files and other images"):
+        probe(_stored(tmp_path, _zip(entries))())
+
+
+def test_files_that_arent_slices_are_left_out(tmp_path, make_dicom_series):
+    from pydicom.dataset import Dataset, FileMetaDataset
+    from pydicom.uid import ExplicitVRLittleEndian, MediaStorageDirectoryStorage
+
+    paths = make_dicom_series(
+        tmp_path / "series", lambda i: np.full((4, 5), i), count=3
+    )
+    entries = {f"DICOM/{path.stem}": path.read_bytes() for path in paths}
+    # What a PACS export adds: notes, a manifest, and a DICOMDIR (DICOM, but
+    # no image).
+    entries["README.TXT"] = b"Exported by a viewer."
+    entries["SECTRA/CONTENT.XML"] = b"<content/>"
+    meta = FileMetaDataset()
+    meta.MediaStorageSOPClassUID = MediaStorageDirectoryStorage
+    meta.MediaStorageSOPInstanceUID = "1.2.3"
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    directory = Dataset()
+    directory.file_meta = meta
+    buffer = io.BytesIO()
+    directory.save_as(buffer, enforce_file_format=True)
+    entries["INDEX/DIRECTORY"] = buffer.getvalue()
+
+    index = probe(_stored(tmp_path, _zip(entries))())
+    assert index.kind == "dicom"
+    assert index.shape_xyz == (5, 4, 3)
+    assert index.skipped == ["INDEX/DIRECTORY", "README.TXT", "SECTRA/CONTENT.XML"]
+    assert index.skipped_count == 3
+    assert SourceIndex.from_json(index.to_json()) == index
+
+
+def test_the_largest_dicom_series_is_used_and_the_others_noted(
+    tmp_path, make_dicom_series
+):
+    big = make_dicom_series(tmp_path / "big", lambda i: np.full((4, 5), i), count=4)
+    small = make_dicom_series(tmp_path / "small", lambda i: np.zeros((2, 2)), count=2)
+    entries = {f"a/{p.name}": p.read_bytes() for p in big}
+    entries |= {f"b/{p.name}": p.read_bytes() for p in small}
+    index = probe(_stored(tmp_path, _zip(entries))())
+    assert (index.shape_xyz, len(index.members)) == ((5, 4, 4), 4)
+    [note] = index.notes
+    assert "2 DICOM series" in note and "left out the other 2 files" in note
+
+
+def test_a_stack_with_a_note_is_read_without_it(tmp_path):
+    entries = {
+        f"slice_{z}.png": _png(np.full((4, 6), z, dtype=np.uint8)) for z in range(3)
+    }
+    entries["notes.txt"] = b"scanned on a Tuesday"
+    index = probe(_stored(tmp_path, _zip(entries))())
+    assert (index.kind, index.shape_xyz) == ("images", (6, 4, 3))
+    assert (index.skipped, index.skipped_count) == (["notes.txt"], 1)
+
+
+def test_many_files_of_an_unknown_kind_are_refused(tmp_path):
+    entries = {
+        f"slice_{z}.png": _png(np.full((4, 6), z, dtype=np.uint8)) for z in range(3)
+    }
+    entries |= {f"slice_{z}.jp2": b"\x00\x00\x00\x0cjP  " for z in range(3, 10)}
+    with pytest.raises(IngestError, match="doesn't read as slices"):
         probe(_stored(tmp_path, _zip(entries))())
 
 
