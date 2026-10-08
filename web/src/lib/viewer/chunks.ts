@@ -27,8 +27,8 @@ export type Loader = (id: string, signal: AbortSignal) => Promise<Chunk>;
  * level of the labels, which the server makes from the chunks under it, and
  * answers 503 while it works): the store asks again after `delay`
  * milliseconds, and the chunk takes no place in line meanwhile. `cause` is
- * what the server answered. A chunk still busy after `PATIENCE_MS` fails
- * with the last `Busy`.
+ * what the server answered. A chunk whose wait would end after `PATIENCE_MS`,
+ * or that comes up to be asked again after it, fails with the last `Busy`.
  */
 export class Busy extends Error {
 	constructor(
@@ -54,7 +54,7 @@ export interface SlowLimit {
 	places: number;
 }
 
-/** The longest a chunk answered busy is waited for, counted from the start of its first load. */
+/** The longest a chunk answered busy is waited for, counted from the start of its first load: it isn't asked again after. */
 export const PATIENCE_MS = 120_000;
 /**
  * The least time between one chunk being asked for again and the next, across
@@ -76,6 +76,8 @@ interface Pending {
 	slow: boolean;
 	/** When its first load began, which its patience is counted from. */
 	began?: number;
+	/** The latest answer that the server was busy, which the load ends with if its patience runs out. */
+	busy?: Busy;
 	/**
 	 * While a load answered busy waits to be asked again (in the queue, with
 	 * no place taken): the earliest it may be.
@@ -292,7 +294,9 @@ export class ChunkStore {
 	 * before those asked again (in the order they came due), which wait
 	 * until they are due, a few at a time. A slow chunk's load that would take
 	 * more of the places than it may, with a chunk that isn't slow waiting for
-	 * one, is passed over.
+	 * one, is passed over. One asked again that has waited past its patience
+	 * (behind others, or for a place) isn't started: it ends with its last
+	 * `Busy`, as it would have had it been answered busy then.
 	 */
 	#next(): Pending | undefined {
 		if (!this.#sorted) {
@@ -307,10 +311,21 @@ export class ChunkStore {
 		const now = Date.now();
 		// Whether places are held for chunks that aren't slow, looked into only if it matters.
 		let held: boolean | undefined;
-		for (const [index, entry] of this.#queue.entries()) {
+		let index = 0;
+		while (index < this.#queue.length) {
+			const entry = this.#queue[index]!;
+			if (entry.retryAt !== undefined && now - (entry.began ?? now) > PATIENCE_MS) {
+				this.#queue.splice(index, 1);
+				this.#pending.delete(entry.id);
+				entry.reject(entry.busy);
+				continue;
+			}
 			if (entry.slow && this.limit && this.#runningSlow >= this.limit.places) {
 				held ??= this.#wantsFast();
-				if (held) continue;
+				if (held) {
+					index += 1;
+					continue;
+				}
 			}
 			if (entry.retryAt !== undefined) {
 				const at = Math.max(entry.retryAt, this.#retryFrom);
@@ -319,8 +334,10 @@ export class ChunkStore {
 				this.#retryFrom = now + RETRY_GAP_MS;
 			}
 			this.#queue.splice(index, 1);
+			this.#unwake();
 			return entry;
 		}
+		this.#unwake();
 		return undefined;
 	}
 
@@ -366,6 +383,7 @@ export class ChunkStore {
 	#park(entry: Pending, busy: Busy): boolean {
 		const now = Date.now();
 		if (now + busy.delay - (entry.began ?? now) > PATIENCE_MS) return false;
+		entry.busy = busy;
 		entry.retryAt = now + busy.delay;
 		this.#queue.push(entry);
 		this.#sorted = false;

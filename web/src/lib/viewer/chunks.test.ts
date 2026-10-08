@@ -717,6 +717,143 @@ describe("ChunkStore, for chunks the server is still making", () => {
 		expect((await fresh).data.byteLength).toBe(20);
 		expect(vi.getTimerCount()).toBe(0);
 	});
+
+	it("doesn't ask again for chunks the spacing of asks left waiting past their patience, and ends each with its last busy answer", async () => {
+		const start = Date.now();
+		const askedAt: number[] = [];
+		const answers = new Map<string, Busy>();
+		const store = new ChunkStore(
+			async (id) => {
+				askedAt.push(Date.now() - start);
+				const busy = new Busy(1000, id);
+				answers.set(id, busy);
+				throw busy;
+			},
+			1e9,
+			1000,
+		);
+		const ids = Array.from({ length: 600 }, (_, i) => `c${i}`);
+		const ended = new Map<string, { error: unknown; at: number }>();
+		for (const id of ids) store.request(id).catch((error: unknown) => ended.set(id, { error, at: Date.now() - start }));
+		await vi.advanceTimersByTimeAsync(PATIENCE_MS + 30_000);
+		// Each was asked for at once, and again one every RETRY_GAP_MS from a second on: the last of those at the end of the patience.
+		expect(askedAt).toHaveLength(600 + (PATIENCE_MS - 1000) / RETRY_GAP_MS + 1);
+		expect(Math.max(...askedAt)).toBe(PATIENCE_MS);
+		// The rest came up to be asked again after it, and ended as they came up, with the answer they had last.
+		expect(ended.size).toBe(600);
+		for (const id of ids) expect(ended.get(id)?.error, id).toBe(answers.get(id));
+		expect(ids.filter((id) => ended.get(id)?.at === PATIENCE_MS + RETRY_GAP_MS).length).toBeGreaterThan(100);
+		expect(ids.some((id) => store.isLoading(id))).toBe(false);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("doesn't ask again for a chunk that waited for a place past its patience, and ends it with the last busy answer", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000, 1);
+		const busy = new Busy(1000, "503");
+		const lost = store.request("a").catch((e: unknown) => e);
+		calls[0]?.fail(busy);
+		await settle();
+		// b takes the only place, and keeps it past a's patience.
+		store.request("b").catch(() => {});
+		await vi.advanceTimersByTimeAsync(PATIENCE_MS + 10_000);
+		expect(calls.map((c) => c.id)).toEqual(["a", "b"]);
+		expect(store.isLoading("a")).toBe(true);
+		calls[1]?.finish();
+		await settle();
+		expect(await lost).toBe(busy);
+		expect((await lost) as Busy).toHaveProperty("cause", "503");
+		expect(store.isLoading("a")).toBe(false);
+		expect(store.loading("a")).toBeUndefined();
+		expect(calls).toHaveLength(2);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("asks again for a chunk that gets a place at the very end of its patience, and ends one that gets it a moment later", async () => {
+		for (const late of [0, 1]) {
+			const { calls, load } = controlled();
+			const store = new ChunkStore(load, 1000, 1);
+			const lost = store.request("a").catch((e: unknown) => e);
+			calls[0]?.fail(new Busy(1000));
+			await settle();
+			store.request("b").catch(() => {});
+			await vi.advanceTimersByTimeAsync(PATIENCE_MS + late);
+			calls[1]?.finish();
+			await settle();
+			expect(calls.map((c) => c.id), `${late} ms late`).toEqual(late === 0 ? ["a", "b", "a"] : ["a", "b"]);
+			if (late > 0) expect(await lost).toBeInstanceOf(Busy);
+		}
+	});
+
+	it("ends a refresh that waited past its patience as any other load, leaving the copy it was to replace", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000, 1);
+		const first = store.request("a");
+		calls[0]?.finish(10);
+		const old = await first;
+		await settle();
+		const busy = new Busy(1000);
+		const lost = store.refresh("a", 7).catch((e: unknown) => e);
+		calls[1]?.fail(busy);
+		await settle();
+		store.request("b").catch(() => {});
+		await vi.advanceTimersByTimeAsync(PATIENCE_MS + 10_000);
+		calls[2]?.finish();
+		await settle();
+		expect(await lost).toBe(busy);
+		expect(store.refreshing("a")).toBeUndefined();
+		expect(store.peek("a")).toBe(old);
+		expect(calls).toHaveLength(3);
+	});
+
+	it("leaves no timer armed when the clock went past a chunk's patience and it ends as a load ending first brings it up", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000, 2);
+		const lost = store.request("a").catch((e: unknown) => e);
+		calls[0]?.fail(new Busy(30_000));
+		await settle();
+		expect(vi.getTimerCount()).toBe(1);
+		store.request("b").catch(() => {});
+		// The clock jumps, as when a machine wakes from sleep, and the timer hasn't fired.
+		vi.setSystemTime(Date.now() + PATIENCE_MS + 1000);
+		calls[1]?.finish();
+		await settle();
+		expect(await lost).toBeInstanceOf(Busy);
+		expect(calls).toHaveLength(2);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("leaves no timer armed when a chunk that waited takes the last place as a load ending first brings it up", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000, 1);
+		store.request("a").catch(() => {});
+		calls[0]?.fail(new Busy(30_000));
+		await settle();
+		store.request("b").catch(() => {});
+		vi.setSystemTime(Date.now() + 31_000);
+		calls[1]?.finish();
+		await settle();
+		expect(calls.map((c) => c.id)).toEqual(["a", "b", "a"]);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("leaves no timer armed for a chunk that ended as it came up, and no place taken", async () => {
+		const { calls, load } = controlled();
+		const store = new ChunkStore(load, 1000, 1);
+		store.request("a").catch(() => {});
+		calls[0]?.fail(new Busy(1000));
+		await settle();
+		store.request("b").catch(() => {});
+		await vi.advanceTimersByTimeAsync(PATIENCE_MS + 10_000);
+		// A timer for a's turn was armed before b took the place; it has fired. Nothing is left to wake.
+		expect(vi.getTimerCount()).toBe(0);
+		calls[1]?.finish();
+		await settle();
+		expect(vi.getTimerCount()).toBe(0);
+		// The place b held is free again: a new load starts at once.
+		store.request("c").catch(() => {});
+		expect(calls.map((c) => c.id)).toEqual(["a", "b", "c"]);
+	});
 });
 
 describe("ChunkStore, for chunks the server takes long to make", () => {
