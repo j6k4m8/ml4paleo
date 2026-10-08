@@ -40,9 +40,10 @@ from starlette.concurrency import run_in_threadpool
 from ml4paleo.labels import LABEL_CHUNK_ZYX, Source
 from ml4paleo.labels.codec import blob_key, content_hash, decode_chunk, encode_chunk
 from ml4paleo.labels.deltas import ChunkDelta, Claim, apply_delta, recompute
+from ml4paleo.ome import LevelSpec
 from ml4paleo.storage import StorageGrant, get_bytes, put_bytes
 
-from . import artifacts
+from . import artifacts, label_pyramid
 from .db import LabelChunk, LabelOp, LabelOpChunk
 from .settings import Settings
 from .storage import project_storage
@@ -103,6 +104,19 @@ async def volume_shape(db: AsyncSession, project_id: uuid.UUID) -> tuple[int, in
         raise NoImage
     _, z, y, x = image.manifest["shape_czyx"]
     return (z, y, x)
+
+
+async def volume_levels(
+    db: AsyncSession, project_id: uuid.UUID
+) -> tuple[uuid.UUID, list[LevelSpec]]:
+    """
+    The levels of the labels as zarr: the project image's, whose level 0 is
+    the label volume itself. Also the image's id, since levels follow it.
+    """
+    image = await artifacts.head(db, project_id, "image")
+    if image is None or not image.manifest:
+        raise NoImage
+    return image.id, label_pyramid.levels_of(image.manifest)
 
 
 async def _read_chunk(grant: StorageGrant, sha: str | None) -> np.ndarray:
@@ -471,5 +485,6 @@ __all__ = [
     "labels_root",
     "result_of",
     "set_live",
+    "volume_levels",
     "volume_shape",
 ]

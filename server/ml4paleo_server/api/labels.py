@@ -20,6 +20,20 @@ values) and `source` (who made each label, `ml4paleo.labels.Source`), in
 64-cubed chunks. A chunk's ETag is its content hash and `X-Chunk-Version` is
 its version (send it back as `base_version`); chunks that are all zero are
 404, which zarr reads as zeros.
+
+For zoomed-out views there are also `class_1`, `class_2`, ... : the labels at
+the image's pyramid levels (see `label_pyramid`), made when asked for, to look
+at only. Their `X-Pyramid-Version` (not `X-Chunk-Version`, which is for edits)
+and ETag change when any chunk under them changes, and finding that out takes
+one pass over the label rows under the chunk, which for the top chunk is every
+row of the project. Their ETags are only unique to the URL: two chunks can have
+the same one, so don't tell chunks apart by it.
+
+A chunk too big to make in one request is a 503 with `Retry-After`, and what
+was done is kept, so asking again gets further. A client must ask again, as
+zarr readers don't (they take a 503 for an error and show nothing): wait
+`Retry-After` seconds and a little more at random, so chunks asked for together
+don't all come back together, and keep asking while the chunk is wanted.
 """
 
 import asyncio
@@ -42,10 +56,11 @@ from starlette.concurrency import run_in_threadpool
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
 from ml4paleo.labels.codec import ZARR_CODECS, blob_key
 from ml4paleo.labels.deltas import ChunkDelta, unpack_mask, unpack_values
+from ml4paleo.ome import LevelSpec
 from ml4paleo.segmentation.predict import open_prediction
-from ml4paleo.storage import get_bytes
+from ml4paleo.storage import get_bytes, object_store
 
-from .. import artifacts, audit, labels, streams
+from .. import artifacts, audit, label_pyramid, labels, streams
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import (
     Artifact,
@@ -836,8 +851,10 @@ async def events(
 
 # --- the labels as zarr ----------------------------------------------------
 
-ARRAYS = ("class", "source")
-_CHUNK_KEY = re.compile(r"^(class|source)/c/(\d{1,9})/(\d{1,9})/(\d{1,9})$")
+_ARRAY_KEY = re.compile(r"^(class|source|class_([1-9]\d?))/zarr\.json$")
+_CHUNK_KEY = re.compile(
+    r"^(class|source|class_([1-9]\d?))/c/(\d{1,9})/(\d{1,9})/(\d{1,9})$"
+)
 
 
 def _array_metadata(shape: tuple[int, int, int]) -> dict:
@@ -858,6 +875,23 @@ def _array_metadata(shape: tuple[int, int, int]) -> dict:
     }
 
 
+def _group_metadata(levels: Sequence[LevelSpec]) -> dict:
+    # The arrays of the labels' pyramid, which is the image's.
+    listed = [
+        {
+            "array": label_pyramid.array_name(level),
+            "shape": list(spec.shape_zyx),
+            "factor_zyx": list(spec.factor_zyx),
+        }
+        for level, spec in enumerate(levels)
+    ]
+    return {
+        "zarr_format": 3,
+        "node_type": "group",
+        "attributes": {"ml4paleo": {"label_levels": listed}},
+    }
+
+
 @router.get("/zarr/{key:path}")
 async def label_zarr(
     key: str,
@@ -867,35 +901,47 @@ async def label_zarr(
     request: Request,
 ) -> Response:
     revalidate = {"Cache-Control": "private, no-cache"}
+    project_id = project.id
     try:
-        shape = await labels.volume_shape(db, project.id)
+        image_id, levels = await labels.volume_levels(db, project_id)
     except labels.NoImage:
         raise HTTPException(
             status_code=404, detail="This project has no image yet."
         ) from None
     if key == "zarr.json":
-        body = {"zarr_format": 3, "node_type": "group", "attributes": {}}
         return Response(
-            json.dumps(body), media_type="application/json", headers=revalidate
+            json.dumps(_group_metadata(levels)),
+            media_type="application/json",
+            headers=revalidate,
         )
-    if key in (f"{name}/zarr.json" for name in ARRAYS):
+    if found := _ARRAY_KEY.match(key):
+        level = int(found.group(2) or 0)
+        if level >= len(levels):
+            raise HTTPException(status_code=404, detail="No such zarr key.")
         return Response(
-            json.dumps(_array_metadata(shape)),
+            json.dumps(_array_metadata(levels[level].shape_zyx)),
             media_type="application/json",
             headers=revalidate,
         )
     match = _CHUNK_KEY.match(key)
     if match is None:
         raise HTTPException(status_code=404, detail="No such zarr key.")
-    array, cz, cy, cx = (
+    array, level, cz, cy, cx = (
         match.group(1),
-        int(match.group(2)),
+        int(match.group(2) or 0),
         int(match.group(3)),
         int(match.group(4)),
+        int(match.group(5)),
     )
+    if level >= len(levels):
+        raise HTTPException(status_code=404, detail="No such zarr key.")
+    if level:
+        return await _coarse_chunk(
+            request, db, settings, project_id, image_id, levels, level, (cz, cy, cx)
+        )
     row = await db.scalar(
         select(LabelChunk).where(
-            LabelChunk.project_id == project.id,
+            LabelChunk.project_id == project_id,
             LabelChunk.cz == cz,
             LabelChunk.cy == cy,
             LabelChunk.cx == cx,
@@ -906,7 +952,7 @@ async def label_zarr(
         None if row is None else (row.class_sha if array == "class" else row.source_sha)
     )
     headers = {**revalidate, "X-Chunk-Version": str(version)}
-    root = labels.labels_root(settings, project.id)
+    root = labels.labels_root(settings, project_id)
     # Give the connection back before reading storage.
     await db.rollback()
     if sha is None:
@@ -920,3 +966,58 @@ async def label_zarr(
             status_code=500, detail="A label chunk is missing from storage."
         )
     return Response(data, media_type="application/octet-stream", headers=headers)
+
+
+async def _coarse_chunk(
+    request: Request,
+    db,
+    settings,
+    project_id: uuid.UUID,
+    image_id: uuid.UUID,
+    levels: Sequence[LevelSpec],
+    level: int,
+    key: tuple[int, int, int],
+) -> Response:
+    headers = {"Cache-Control": "private, no-cache"}
+    retired: frozenset[int] = frozenset()
+    if any(k >= n for k, n in zip(key, label_pyramid.grid(levels[level]), strict=True)):
+        state = label_pyramid.Fingerprint(count=0, versions=0)
+    else:
+        # Which retired classes the chunk has is part of the state.
+        retired = await label_pyramid.retired_classes(db, project_id)
+        state = await label_pyramid.fingerprint(
+            db, project_id, levels, level, key, retired
+        )
+    headers["X-Pyramid-Version"] = str(state.versions)
+    if state.count == 0:
+        await db.rollback()
+        return Response(status_code=404, headers=headers)
+    plan = label_pyramid.Plan(image_id, list(levels), retired)
+    etag = plan.etag(level, state)
+    if request.headers.get("if-none-match") == etag:
+        await db.rollback()
+        return Response(status_code=304, headers={**headers, "ETag": etag})
+    pyramid: label_pyramid.LabelPyramid = request.app.state.label_pyramid
+    store = object_store(labels.labels_root(settings, project_id))
+    try:
+        data = await pyramid.chunk(db, store, project_id, plan, level, key, state)
+    except label_pyramid.Busy:
+        raise HTTPException(
+            status_code=503,
+            detail="These labels take a moment to work out; ask again.",
+            headers={
+                **headers,
+                "Retry-After": str(label_pyramid.retry_after(level, key)),
+            },
+        ) from None
+    except label_pyramid.MissingBlob:
+        raise HTTPException(
+            status_code=500, detail="A label chunk is missing from storage."
+        ) from None
+    if data is None:
+        # Nothing under it shows a label: all erased since the fingerprint, or
+        # all of retired classes.
+        return Response(status_code=404, headers=headers)
+    return Response(
+        data, media_type="application/octet-stream", headers={**headers, "ETag": etag}
+    )
