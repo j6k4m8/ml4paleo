@@ -5,11 +5,13 @@ from the full-resolution labels when a viewer asks, for display only.
 
 import asyncio
 import base64
+import dataclasses
 import gc
 import hashlib
 import pathlib
 import shutil
 import threading
+import time
 import tracemalloc
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -26,7 +28,7 @@ from ml4paleo.labels.codec import ZARR_CODECS, decode_chunk, encode_chunk
 from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.labels.pyramid import downsample_labels
 from ml4paleo.ome import OmeImage, plan_levels
-from ml4paleo.storage import StorageGrant
+from ml4paleo.storage import StorageGrant, object_store
 
 # (z, y, x): levels of 4, with several chunks at the first two.
 SHAPE = (140, 150, 270)
@@ -103,6 +105,17 @@ def erase(browser, project, box) -> None:
     z0, y0, x0, z1, y1, x1 = box
     mask = np.ones((z1 - z0, y1 - y0, x1 - x0), dtype=bool)
     send(browser, project, split_into_deltas(mask, (z0, y0, x0), value=0), "eraser")
+
+
+def retire(browser, project, value) -> None:
+    """
+    Retire a class: its voxels stay in the chunks, but viewers draw them as
+    nothing.
+    """
+    removed = browser.request(
+        "DELETE", f"/api/projects/{project}/labels/classes/{value}"
+    )
+    assert removed.status_code == 204, removed.text
 
 
 def get(browser, project, level, key, **kwargs):
@@ -575,6 +588,10 @@ def test_a_chunk_too_big_for_one_request_comes_in_several(
         assert response.headers["retry-after"] == str(
             label_pyramid.retry_after(top, (0, 0, 0))
         )
+        # As on every answer for a coarse chunk: the state it was asked for,
+        # and not to be kept.
+        assert response.headers["cache-control"] == "private, no-cache"
+        assert int(response.headers["x-pyramid-version"]) > 0
     assert asked[-1][0] == 200
     assert [code for code, _ in asked[:-1]] == [503] * (len(asked) - 1)
     assert len(asked) > 2
@@ -600,8 +617,9 @@ class Spy:
     What label chunks were read to make coarse ones, and how many were held at
     once: read, but not yet combined. Reads take a little while, so requests
     that start together overlap. Also how many database connections were lent
-    out at each read and combine, which should be none: nobody holds one
-    while waiting on storage or computing.
+    out at each read and combine, and each time a chunk kept in storage was
+    looked for, which should be none: nobody holds one while waiting on
+    storage or computing.
     """
 
     def __init__(self, monkeypatch, app, delay=0.2):
@@ -609,8 +627,10 @@ class Spy:
         self.reads = self.combines = self.held = self.most_held = 0
         self.connections = []
         self.combining = []
+        self.stored = []
         self._lock = threading.Lock()
         real_read, real_combine = label_pyramid._read, label_pyramid._combine
+        real_get = label_pyramid.obstore.get_async
 
         async def read(store, sha):
             await asyncio.sleep(delay)
@@ -634,8 +654,16 @@ class Spy:
                     self.combines += 1
                     self.held -= len(parts)
 
+        async def get(store, path, *args, **kwargs):
+            if path.startswith("pyramid/"):
+                with self._lock:
+                    self.stored.append(self.engine.pool.checkedout())
+                await asyncio.sleep(delay)
+            return await real_get(store, path, *args, **kwargs)
+
         monkeypatch.setattr(label_pyramid, "_read", read)
         monkeypatch.setattr(label_pyramid, "_combine", combine)
+        monkeypatch.setattr(label_pyramid.obstore, "get_async", get)
 
 
 def concurrently(count, function):
@@ -764,20 +792,40 @@ def test_pixels_are_never_older_than_their_etag_says(
     np.testing.assert_array_equal(decode_chunk(again.content), expected)
 
 
-def test_a_chunk_erased_since_its_state_was_taken_is_missing(ada, project, monkeypatch):
+def test_a_chunk_erased_since_its_state_was_taken_is_missing(
+    ada, project, settings, monkeypatch
+):
     paint(ada, project, messy_volume())
+    real_leaves = label_pyramid._leaves
 
-    async def nothing(*args):
-        return []
+    async def leaves(db, project_id, *args):
+        # Another request erases everything under the chunk, after the state
+        # was taken.
+        async with AsyncSession(db.bind) as other:
+            await labels.apply_edit(
+                other,
+                settings,
+                uuid.UUID(project),
+                client_op_id=uuid.uuid4(),
+                deltas=split_into_deltas(
+                    np.ones((128, 128, 128), bool), (0, 0, 0), value=0
+                ),
+            )
+            await other.commit()
+        return await real_leaves(db, project_id, *args)
 
     with monkeypatch.context() as patch:
-        patch.setattr(label_pyramid, "_leaves", nothing)
+        patch.setattr(label_pyramid, "_leaves", leaves)
         response = get(ada, project, 1, (0, 0, 0))
     assert response.status_code == 404
     # It has a version, for what that says of a chunk made of labels.
-    assert int(response.headers["x-pyramid-version"]) > 0
+    taken = int(response.headers["x-pyramid-version"])
+    assert taken > 0
     assert "etag" not in response.headers
-    assert get(ada, project, 1, (0, 0, 0)).status_code == 200
+    # What was found isn't what a later request gets for the state it takes.
+    again = get(ada, project, 1, (0, 0, 0))
+    assert again.status_code == 404
+    assert int(again.headers["x-pyramid-version"]) > taken
 
 
 def test_a_waiting_request_gives_up_when_the_build_does(ada, project, monkeypatch):
@@ -844,6 +892,38 @@ def pyramid_that_makes(make, seconds=0.1):
     return pyramid, ask
 
 
+def test_what_a_build_held_is_let_go_of_even_if_storing_what_it_made_is_cancelled(
+    monkeypatch,
+):
+    async def scenario():
+        pyramid = label_pyramid.LabelPyramid()
+        child = b"a chunk under the one being made, held for it"
+        pyramid._cache.put(child, b"x" * 100, pin=True)
+        assert pyramid._cache.pinned_size > 0
+
+        async def assemble(*args):
+            return b"made", [child]
+
+        async def nothing_stored(*args):
+            return None, None
+
+        async def cancelled(*args):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(pyramid, "_assemble", assemble)
+        monkeypatch.setattr(label_pyramid, "_load", nothing_stored)
+        monkeypatch.setattr(label_pyramid, "_save", cancelled)
+        plan = label_pyramid.Plan(uuid.uuid4(), plan_levels(SHAPE))
+        state = label_pyramid.Fingerprint(count=label_pyramid.STORED_COUNT, versions=1)
+        with pytest.raises(asyncio.CancelledError):
+            await pyramid.chunk(
+                Session(), None, uuid.uuid4(), plan, 2, (0, 0, 0), state
+            )
+        assert pyramid._cache.pinned_size == 0
+
+    asyncio.run(scenario())
+
+
 def test_those_waiting_for_a_build_that_is_cancelled_are_told_to_ask_again():
     async def scenario():
         started = asyncio.Event()
@@ -905,6 +985,90 @@ def test_a_gate_turns_away_what_would_wait_too_long():
         # The slot is free again, and the queue empty.
         await work("fourth")
         assert order == ["first", "second", "fourth"]
+
+    asyncio.run(scenario())
+
+
+def test_a_gate_stops_waiting_for_a_slot_once_its_patience_is_over():
+    async def scenario():
+        gate = label_pyramid._Gate(slots=1, queue=8)
+
+        async def hold():
+            async with gate():
+                await asyncio.sleep(0.4)
+
+        holder = asyncio.create_task(hold())
+        await asyncio.sleep(0)
+        started = time.monotonic()
+        with pytest.raises(label_pyramid.Busy):
+            async with gate(0.05):
+                pytest.fail("a slot wasn't free")
+        assert time.monotonic() - started < 0.3
+        # It left the queue, and the slot is still the holder's, then free.
+        assert gate._waiting == 0
+        async with gate(2):
+            assert holder.done()
+        # A free slot is there for the taking, whatever the patience.
+        async with gate(0):
+            pass
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("level", [1, 2])
+def test_a_request_gives_up_when_it_has_waited_as_long_as_it_may_for_a_slot(
+    monkeypatch, level
+):
+    async def scenario():
+        monkeypatch.setattr(label_pyramid, "WAIT_SECONDS", 0.1)
+        pyramid = label_pyramid.LabelPyramid(seconds=0.05, slots=1)
+        project = uuid.uuid4()
+        plan = label_pyramid.Plan(uuid.uuid4(), plan_levels(SHAPE))
+        state = label_pyramid.Fingerprint(count=1, versions=1)
+
+        async def leaves(*args):
+            return [((0, 0, 0), "a blob")]
+
+        async def children(*args):
+            return {(0, 0, 0): state}
+
+        monkeypatch.setattr(label_pyramid, "_leaves", leaves)
+        monkeypatch.setattr(label_pyramid, "_children", children)
+        if level == 2:
+            # The chunk under the one asked for is at hand.
+            pyramid._cache.put(
+                label_pyramid._cache_key(project, plan, 1, (0, 0, 0), state),
+                b"a chunk",
+            )
+        started = time.monotonic()
+        async with pyramid._gate():
+            # The one slot is busy as long as this is.
+            with pytest.raises(label_pyramid.Busy):
+                await asyncio.wait_for(
+                    pyramid.chunk(
+                        Session(), None, project, plan, level, (0, 0, 0), state
+                    ),
+                    2,
+                )
+        assert time.monotonic() - started < 1
+
+    asyncio.run(scenario())
+
+
+def test_a_request_waits_no_longer_for_several_builds_than_for_one(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(label_pyramid, "WAIT_SECONDS", 0.1)
+        pyramid = label_pyramid.LabelPyramid(seconds=0.05)
+        budget = label_pyramid._Budget(0.05, 10**9)
+        building = [asyncio.get_running_loop().create_future() for _ in range(4)]
+        started = time.monotonic()
+        for future in building:
+            with pytest.raises(label_pyramid.Busy):
+                await pyramid._wait(future, budget)
+        # Each of four builds never ends: the first wait uses what is left of
+        # the request's time and a little more, and there is nothing left for
+        # the others.
+        assert 0.1 <= time.monotonic() - started < 0.3
 
     asyncio.run(scenario())
 
@@ -1022,6 +1186,18 @@ def stored_chunks(settings, project) -> list[str]:
     return sorted(str(f.relative_to(root.parent)) for f in found if f.is_file())
 
 
+def stored_state(settings, project, level, key=(0, 0, 0)) -> tuple[int, int]:
+    """
+    The labeled chunks and the sum of versions that a chunk kept in storage says it
+    shows.
+    """
+    root = pathlib.Path(settings.storage.url.removeprefix("file://"))
+    name = "/".join(str(k) for k in (level, *key))
+    data = (root / "projects" / project / "labels" / "pyramid" / name).read_bytes()
+    _, _, _, count, versions = label_pyramid._HEADER.unpack_from(data)
+    return count, versions
+
+
 def another_process(app) -> label_pyramid.LabelPyramid:
     """
     A pyramid with nothing cached, as another process, or this one after a
@@ -1127,6 +1303,271 @@ def test_storage_trouble_doesnt_stop_coarse_chunks_being_made(
         response = get(ada, project, top, (0, 0, 0))
     assert response.status_code == 200
     np.testing.assert_array_equal(decode_chunk(response.content), expected)
+
+
+def until_ready(browser, project, level, key, limit=200):
+    """
+    Ask for a chunk until it isn't `503`, as a viewer does: the last answer, and
+    how many were asked for.
+    """
+    for asked in range(1, limit + 1):
+        response = get(browser, project, level, key)
+        if response.status_code != 503:
+            return response, asked
+    raise AssertionError(f"still busy after {limit} requests")
+
+
+def test_chunks_of_retired_classes_alone_are_kept_like_any_other(
+    ada, migrated_database_url, settings, reads
+):
+    # One class, with no background or other class anywhere, which is then
+    # retired: everything under every chunk is left out, which takes as much
+    # to find out as to make anything, and must not be found out twice.
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    paint(ada, project, one_label_in_each_chunk())
+    retire(ada, project, 2)
+    top = len(plan_levels(MANY)) - 1
+    ada.client.app.state.label_pyramid.blobs = 16
+    answers = []
+    for _ in range(100):
+        before = len(reads)
+        response = get(ada, project, top, (0, 0, 0))
+        answers.append((response.status_code, len(reads) - before))
+        if response.status_code != 503:
+            break
+    # Nothing shows, and it took several requests to find that out, none of
+    # which read much or read what an earlier one had.
+    assert answers[-1][0] == 404
+    assert [code for code, _ in answers[:-1]] == [503] * (len(answers) - 1)
+    assert len(answers) > 2
+    assert max(n for _, n in answers) <= 16
+    assert sum(n for _, n in answers) == len(reads) == 125
+    # Each chunk that showed nothing was let go of once the one above it was made.
+    assert ada.client.app.state.label_pyramid._cache.pinned_size == 0
+    # Asking again reads nothing, nor does a process that has never asked, which
+    # finds the chunks that stand for many in storage (as chunks that show
+    # nothing).
+    reads.clear()
+    assert get(ada, project, top, (0, 0, 0)).status_code == 404
+    another_process(ada.client.app)
+    assert get(ada, project, top, (0, 0, 0)).status_code == 404
+    assert reads == []
+    names = [name.split("/labels/")[1] for name in stored_chunks(settings, project)]
+    assert names == ["pyramid/2/0/0/0", "pyramid/3/0/0/0"]
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_a_retired_region_is_made_once_and_leaves_the_rest_as_it_is(
+    ada, project, reads, live
+):
+    levels = plan_levels(SHAPE)
+    top = len(levels) - 1
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    # Bone with no background, as a brush makes it; and perhaps matrix elsewhere.
+    volume[:, :, :128] = 2
+    if live:
+        volume[:, :, 192:] = 3
+    paint(ada, project, volume)
+    retire(ada, project, 2)
+    # Two chunks of level 1, which are 16 stored chunks, are all a request reads.
+    ada.client.app.state.label_pyramid.blobs = 16
+    response, asked = until_ready(ada, project, top, (0, 0, 0))
+    assert asked >= 2
+    shown = np.where(volume == 2, 0, volume)
+    expected = expected_chunk(shrink(shown, levels)[top], (0, 0, 0))
+    if live:
+        assert response.status_code == 200
+        np.testing.assert_array_equal(decode_chunk(response.content), expected)
+    else:
+        assert response.status_code == 404
+    assert len(reads) == labeled_chunks(volume)
+    reads.clear()
+    check_every_level(ada, project, volume, levels, shown)
+    assert reads == []
+
+
+def test_no_connection_is_held_while_chunks_kept_in_storage_are_looked_for(
+    ada, migrated_database_url, monkeypatch
+):
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    paint(ada, project, one_label_in_each_chunk())
+    top = len(plan_levels(MANY)) - 1
+    spy = Spy(monkeypatch, ada.client.app, delay=0.05)
+    assert get(ada, project, top, (0, 0, 0)).status_code == 200
+    # The top chunk and the first of level 2 stand for enough to be kept, so
+    # were looked for in storage, where there was nothing yet.
+    assert len(spy.stored) == 2
+    another_process(ada.client.app)
+    assert get(ada, project, top, (0, 0, 0)).status_code == 200
+    assert len(spy.stored) == 3
+    # The state of the labels is taken in a transaction, which is given back
+    # before the wait.
+    assert spy.stored == [0, 0, 0]
+
+
+def test_the_shape_and_factors_of_every_level_are_part_of_the_plan():
+    # Chunks kept in storage outlast deploys, so a change in how levels are
+    # planned must not be taken for the same plan, for any level above it too.
+    image = uuid.uuid4()
+    levels = plan_levels(SHAPE)
+    state = label_pyramid.Fingerprint(count=1, versions=1)
+    plan = label_pyramid.Plan(image, levels)
+    assert plan.etag(2, state) == label_pyramid.Plan(image, list(levels)).etag(2, state)
+    for change in (
+        {"factor_zyx": (2, 4, 4)},
+        {"shape_zyx": (70, 75, 136)},
+    ):
+        other = [levels[0], dataclasses.replace(levels[1], **change), *levels[2:]]
+        assert label_pyramid.Plan(image, other).etag(2, state) != plan.etag(2, state), (
+            change
+        )
+        assert label_pyramid.Plan(image, other).digest(frozenset()) != plan.digest(
+            frozenset()
+        )
+
+
+def test_retiring_a_class_nothing_was_painted_with_changes_nothing(
+    ada, migrated_database_url, settings, reads
+):
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    paint(ada, project, one_label_in_each_chunk())
+    levels = plan_levels(MANY)
+    top = len(levels) - 1
+    chunks = [(level, (0, 0, 0)) for level in range(1, top + 1)]
+    before = {at: get(ada, project, *at) for at in chunks}
+    assert {r.status_code for r in before.values()} == {200}
+    unused = ada.post(
+        f"/api/projects/{project}/labels/classes",
+        json={"name": "teeth", "color": "#112233"},
+    )
+    assert unused.status_code == 201, unused.text
+    retire(ada, project, unused.json()["value"])
+    for at, was in before.items():
+        # What a viewer kept still holds.
+        now = get(ada, project, *at, headers={"If-None-Match": was.headers["etag"]})
+        assert now.status_code == 304, at
+        assert now.headers["etag"] == was.headers["etag"]
+    # So do the chunks this process kept, and those kept in storage, which
+    # another process takes as they are.
+    reads.clear()
+    for at, was in before.items():
+        assert get(ada, project, *at).content == was.content
+    another_process(ada.client.app)
+    assert get(ada, project, top, (0, 0, 0)).content == before[(top, (0, 0, 0))].content
+    assert reads == []
+
+
+def test_retiring_a_class_changes_only_the_chunks_it_is_in(ada, project):
+    levels = plan_levels(SHAPE)
+    volume = np.zeros(SHAPE, dtype=np.uint8)
+    # A chunk of level 1 with bone and a little matrix, and another, far from
+    # it, with matrix only.
+    volume[0:60, 0:60, 0:60] = 2
+    volume[60:64, 60:64, 60:64] = 3
+    volume[130:140, 140:150, 260:270] = 3
+    paint(ada, project, volume)
+    bone, matrix = (0, 0, 0), (1, 1, 2)
+    etags = {
+        (level, key): get(ada, project, level, key).headers["etag"]
+        for level, key in [(1, bone), (1, matrix), (2, (0, 0, 0)), (3, (0, 0, 0))]
+    }
+    retire(ada, project, 2)
+
+    def revalidate(level, key):
+        return get(
+            ada, project, level, key, headers={"If-None-Match": etags[(level, key)]}
+        )
+
+    # The chunk with only matrix shows what it did, and a viewer keeps its copy.
+    assert revalidate(1, matrix).status_code == 304
+    # The ones with bone in them don't.
+    for level, key in [(1, bone), (2, (0, 0, 0)), (3, (0, 0, 0))]:
+        changed = revalidate(level, key)
+        assert changed.status_code == 200, (level, key)
+        assert changed.headers["etag"] != etags[(level, key)]
+    shown = np.where(volume == 2, 0, volume)
+    check_every_level(ada, project, volume, levels, shown)
+
+
+def test_a_build_that_took_an_older_state_leaves_a_stored_chunk_of_a_newer_one(
+    ada, migrated_database_url, settings
+):
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    volume = one_label_in_each_chunk()
+    paint(ada, project, volume)
+    top = len(plan_levels(MANY)) - 1
+    older = get(ada, project, top, (0, 0, 0))
+    assert stored_state(settings, project, top) == (
+        125,
+        int(older.headers["x-pyramid-version"]),
+    )
+    # An edit, and a process that makes the chunk for what it made of the labels.
+    volume[130, 130, 130] = 3
+    paint(ada, project, volume[130:131, 130:131, 130:131], (130, 130, 130))
+    another_process(ada.client.app)
+    newer = get(ada, project, top, (0, 0, 0))
+    now = int(newer.headers["x-pyramid-version"])
+    assert now > int(older.headers["x-pyramid-version"])
+    assert stored_state(settings, project, top) == (125, now)
+
+    async def late(db):
+        # A build that took the state before the edit, and finishes after.
+        project_id = uuid.UUID(project)
+        image, levels = await labels.volume_levels(db, project_id)
+        plan = label_pyramid.Plan(image, levels)
+        state = label_pyramid.Fingerprint(
+            count=125, versions=int(older.headers["x-pyramid-version"])
+        )
+        store = object_store(labels.labels_root(settings, project_id))
+        pyramid = label_pyramid.LabelPyramid(seconds=3600, blobs=10**9)
+        return await pyramid.chunk(db, store, project_id, plan, top, (0, 0, 0), state)
+
+    assert run_db(migrated_database_url, late) is not None
+    # What is kept is still for the newer state, which a process that comes
+    # after takes as it is.
+    assert stored_state(settings, project, top) == (125, now)
+    another_process(ada.client.app)
+    final = get(ada, project, top, (0, 0, 0))
+    assert final.content == newer.content
+
+
+@pytest.mark.parametrize("change", ["retire", "image", "rule"])
+def test_a_stored_chunk_is_not_used_once_the_plan_changes(
+    ada, migrated_database_url, settings, reads, monkeypatch, change
+):
+    # With no label edited, a retired class, a new image, or a new rule each
+    # change what a chunk shows, or can, so a process that finds one stored
+    # for what was must make it again.
+    project = make_project(ada, migrated_database_url, shape=MANY)
+    volume = one_label_in_each_chunk()
+    volume[100:110, 100:110, 100:110] = 3
+    paint(ada, project, volume)
+    levels = plan_levels(MANY)
+    top = len(levels) - 1
+    first = get(ada, project, top, (0, 0, 0))
+    assert first.status_code == 200
+    assert len(stored_chunks(settings, project)) == 2
+    shown = volume
+    if change == "retire":
+        retire(ada, project, 3)
+        shown = np.where(volume == 3, 0, volume)
+    elif change == "image":
+        # The same shape, so the same plan, but another image.
+        add_image(migrated_database_url, project, MANY)
+    else:
+        monkeypatch.setattr(
+            label_pyramid, "RULE_VERSION", label_pyramid.RULE_VERSION + 1
+        )
+    another_process(ada.client.app)
+    reads.clear()
+    again = get(ada, project, top, (0, 0, 0))
+    assert again.status_code == 200
+    assert again.headers["etag"] != first.headers["etag"]
+    assert reads
+    np.testing.assert_array_equal(
+        decode_chunk(again.content),
+        expected_chunk(shrink(shown, levels)[top], (0, 0, 0)),
+    )
 
 
 def requests_to_make_the_top(ada, project, processes, top) -> int:

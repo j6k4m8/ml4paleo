@@ -26,14 +26,20 @@ from the full resolution chunks), when someone asks for it:
   sum is the chunk's `X-Pyramid-Version`, and its `ETag` has it too, so a
   viewer's revalidation costs one query. A chunk with no labeled chunk under
   it is simply missing (unlabeled), as at level 0. The `ETag` also names what
-  else the pixels follow: the image whose levels these are (replacing it can
-  change them, labels unchanged), the retired classes, and `RULE_VERSION`.
-  It is only unique to its URL: two chunks can have the same one.
+  else the pixels follow: the image whose levels these are, and the shape and
+  factors of each (replacing the image can change them, labels unchanged), the
+  retired classes that have voxels under the chunk (the same query says which,
+  from the chunks' voxel counts per class, so retiring a class changes only
+  the chunks it is in), and `RULE_VERSION`. It is only unique to its URL: two
+  chunks can have the same one.
 - A computed chunk is kept, as the bytes a viewer gets, in a cache that holds
   the most recently used ones under a memory limit. Its key includes that sum,
   so an edit leaves the stale copy behind rather than finding it. An edit
   therefore costs recomputing the chunk above it at each level, each from one
   new chunk and seven cached ones, and an untouched chunk is never recomputed.
+  A chunk that is made and shows nothing (everything under it is of retired
+  classes) is kept like any other, as an empty one: it took the same work to
+  find out, and asking again must not do it again.
 - Nothing is cached below level 1, so the first request for a chunk high in
   the pyramid has to build everything under it, which can mean reading every
   labeled chunk below. One request works on that for about a second and a half,
@@ -53,9 +59,12 @@ from the full resolution chunks), when someone asks for it:
   built by one request at a time: another that wants it waits for that build
   (and gets `Busy` if it gives up). A chunk of level 1 is read and shrunk, or a
   chunk of a higher level combined, only when one of a few slots is free, and a
-  request that would queue behind too many others gets `Busy` at once. The
+  request that would queue behind too many others, or for longer than it may
+  wait for anything (what is left of its time and a few seconds more, whether
+  for a slot or for other requests' builds, in all), gets `Busy`. The
   slots are never held while waiting for another chunk, so they can't deadlock;
-  a request holds no database connection while it waits for one.
+  a request holds no database connection while it waits for one, or for
+  storage.
 - Each process has its own cache, so a build one process made is not another's:
   asked in turn, several processes would each make the same chunks, and they
   would start over after a restart. So a chunk that stands for many labeled
@@ -76,7 +85,7 @@ import time
 import uuid
 import zlib
 from collections import OrderedDict
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -100,7 +109,10 @@ Box = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
 _KEY = struct.Struct(">BIIIIq")
 
 # Bump when `downsample_labels` or the chunk codec changes the bytes a chunk
-# is made of, so viewers drop the chunks they kept. A test pins both.
+# is made of, so viewers drop the chunks they kept (and chunks kept in storage,
+# which outlast deploys, aren't used). A test pins both. How the levels are
+# planned (`plan_levels`, `levels_of`) needs no bump: a plan's digest names
+# every level's shape and factors, so a change to them is a change of plan.
 RULE_VERSION = 2
 # Memory for cached chunks, in each API process.
 CACHE_BYTES = 64 * 1024 * 1024
@@ -115,7 +127,8 @@ BLOBS = 512
 # many more may wait for a slot before a request is turned away.
 BUILD_SLOTS = 2
 BUILD_QUEUE = 8
-# How much longer than its own budget a request waits for another's build.
+# How much longer than its own budget a request waits, in all, for the builds
+# of others and for a slot to work in.
 WAIT_SECONDS = 5
 # How long chunks a build finished stay pinned without anyone using them, and
 # the least memory (more, if the cache is bigger) they may take in all. A build
@@ -130,6 +143,9 @@ STORED_COUNT = 64
 # for it, and a pinned one's pin. Measured for tiny chunks, which are the ones
 # it matters for: 253 bytes, or 333 pinned (a test checks).
 ENTRY_OVERHEAD = 320
+# What a chunk that shows nothing is, as kept in the cache and in storage (a
+# chunk is never empty otherwise).
+_NOTHING = b""
 
 
 class Busy(Exception):
@@ -149,19 +165,22 @@ class MissingBlob(Exception):
 class Fingerprint:
     """
     Which state of the labels a chunk shows: how many full-resolution chunks
-    under it have labels, and the sum of the versions of all the chunks under
-    it, erased ones too (which only goes up).
+    under it have labels, the sum of the versions of all the chunks under it,
+    erased ones too (which only goes up), and which of the project's retired
+    classes have voxels in them, as those are left out of what it shows.
     """
 
     count: int
     versions: int
+    retired: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
 class Plan:
     """
     What a project's coarse levels follow besides its labels: the image whose
-    levels they share, and the classes retired, which they leave out.
+    levels they share, the levels themselves, and the classes retired, which
+    they leave out.
     """
 
     image: uuid.UUID
@@ -169,17 +188,28 @@ class Plan:
     retired: frozenset[int] = frozenset()
 
     @functools.cached_property
-    def digest(self) -> bytes:
-        """
-        Says which image and retired classes this is, in a few bytes.
-        """
+    def _levels_digest(self) -> bytes:
         digest = hashlib.blake2s(self.image.bytes, digest_size=6)
-        digest.update(bytes(sorted(self.retired)))
+        for level in self.levels:
+            digest.update(struct.pack(">6Q", *level.shape_zyx, *level.factor_zyx))
+        return digest.digest()
+
+    def digest(self, retired: frozenset[int]) -> bytes:
+        """
+        Says in a few bytes what a chunk's pixels follow besides the versions
+        of the labels under it: the image and its levels, and which retired
+        classes (of those `retired`, the ones with voxels under the chunk)
+        they leave out. Retiring a class that isn't under a chunk, or was never
+        used, leaves its digest as it was.
+        """
+        digest = hashlib.blake2s(self._levels_digest, digest_size=6)
+        digest.update(bytes(sorted(retired)))
         return digest.digest()
 
     def etag(self, level: int, state: Fingerprint) -> str:
         z, y, x = self.levels[level].factor_zyx
-        return f'"p{RULE_VERSION}.{self.digest.hex()}.{z}.{y}.{x}.{state.versions}"'
+        digest = self.digest(state.retired).hex()
+        return f'"p{RULE_VERSION}.{digest}.{z}.{y}.{x}.{state.versions}"'
 
 
 def retry_after(level: int, key: ChunkKey) -> int:
@@ -274,21 +304,42 @@ _COUNT = func.count(LabelChunk.class_sha)
 _VERSIONS = func.coalesce(func.sum(LabelChunk.version), 0)
 
 
+def _seen(retired: Iterable[int]) -> list:
+    """
+    For each retired class, in order, whether any of the chunks in a box has
+    voxels of it (a chunk's counts of its voxels per class say).
+    """
+    return [
+        func.coalesce(func.bool_or(LabelChunk.class_counts.has_key(str(value))), False)
+        for value in sorted(retired)
+    ]
+
+
+def _present(retired: Iterable[int], seen: Iterable) -> frozenset[int]:
+    return frozenset(v for v, here in zip(sorted(retired), seen, strict=True) if here)
+
+
 async def fingerprint(
     db: AsyncSession,
     project_id: uuid.UUID,
     levels: Sequence[LevelSpec],
     level: int,
     key: ChunkKey,
+    retired: frozenset[int] = frozenset(),
 ) -> Fingerprint:
     """
-    Which state of the labels a chunk of `level` shows (one query).
+    Which state of the labels a chunk of `level` shows (one query), counting
+    which of the `retired` classes are in it.
     """
     box = footprint(levels[level], key)
     row = (
-        await db.execute(select(_COUNT, _VERSIONS).where(_within(project_id, box)))
+        await db.execute(
+            select(_COUNT, _VERSIONS, *_seen(retired)).where(_within(project_id, box))
+        )
     ).one()
-    return Fingerprint(count=int(row[0]), versions=int(row[1]))
+    return Fingerprint(
+        count=int(row[0]), versions=int(row[1]), retired=_present(retired, row[2:])
+    )
 
 
 async def _children(
@@ -297,6 +348,7 @@ async def _children(
     levels: Sequence[LevelSpec],
     level: int,
     key: ChunkKey,
+    retired: frozenset[int] = frozenset(),
 ) -> dict[ChunkKey, Fingerprint]:
     """
     The chunks of `level - 1` under a chunk of `level` that have labels, and
@@ -308,13 +360,15 @@ async def _children(
     gy = LabelChunk.cy.op("/", return_type=Integer)(fy).label("gy")
     gx = LabelChunk.cx.op("/", return_type=Integer)(fx).label("gx")
     rows = await db.execute(
-        select(gz, gy, gx, _COUNT, _VERSIONS)
+        select(gz, gy, gx, _COUNT, _VERSIONS, *_seen(retired))
         .where(_within(project_id, footprint(levels[level], key)))
         .group_by("gz", "gy", "gx")
     )
     return {
-        (z, y, x): Fingerprint(count=int(count), versions=int(versions))
-        for z, y, x, count, versions in rows
+        (z, y, x): Fingerprint(
+            count=int(count), versions=int(versions), retired=_present(retired, seen)
+        )
+        for z, y, x, count, versions, *seen in rows
         if count
     }
 
@@ -370,26 +424,37 @@ def _stored_key(level: int, key: ChunkKey) -> str:
 
 
 def _stored_header(plan: Plan, state: Fingerprint) -> bytes:
-    return _HEADER.pack(b"m4py", RULE_VERSION, plan.digest, state.count, state.versions)
+    return _HEADER.pack(
+        b"m4py", RULE_VERSION, plan.digest(state.retired), state.count, state.versions
+    )
 
 
 async def _load(
     store, plan: Plan, level: int, key: ChunkKey, state: Fingerprint
-) -> bytes | None:
+) -> tuple[bytes | None, int | None]:
     """
-    A chunk kept in storage, if it is there and shows the state asked for.
+    A chunk kept in storage, if it is there and shows the state asked for;
+    and the sum of versions of the labels under whatever is there, if it was
+    made for this plan, whatever state it shows (so a build for an older one
+    can leave it be).
     """
     try:
         result = await obstore.get_async(store, _stored_key(level, key))
         data = bytes(await result.bytes_async())
     except FileNotFoundError:
-        return None
+        return None, None
     except Exception:
         _warn("Reading chunks of the label pyramid from storage failed")
         log.debug("Reading a stored chunk failed", exc_info=True)
-        return None
+        return None, None
     header = _stored_header(plan, state)
-    return data[len(header) :] if data.startswith(header) else None
+    if data.startswith(header):
+        return data[len(header) :], state.versions
+    if len(data) >= _HEADER.size:
+        magic, rule, digest, _, versions = _HEADER.unpack_from(data)
+        if (magic, rule, digest) == (b"m4py", RULE_VERSION, plan.digest(state.retired)):
+            return None, versions
+    return None, None
 
 
 async def _save(
@@ -540,11 +605,21 @@ class _Budget:
             raise Busy
         self.started = True
 
+    def patience(self) -> float:
+        """
+        How much longer a request may wait for others, in seconds: until a little
+        after its time is up. The same moment ends every wait, so a request that
+        waits for several chunks, one after another, waits no longer in all than
+        for one.
+        """
+        return max(0.0, self.deadline + WAIT_SECONDS - time.monotonic())
+
 
 class _Gate:
     """
     Lets a few pieces of work run at once, and a few more wait for a turn; one
-    that would wait behind more is turned away (`Busy`) instead of held.
+    that would wait behind more, or for longer than its `patience` (seconds),
+    is turned away (`Busy`) instead of held.
     """
 
     def __init__(self, slots: int, queue: int):
@@ -553,12 +628,17 @@ class _Gate:
         self._waiting = 0
 
     @contextlib.asynccontextmanager
-    async def __call__(self):
+    async def __call__(self, patience: float | None = None):
         if self._slots.locked() and self._waiting >= self._queue:
             raise Busy
         self._waiting += 1
         try:
-            await self._slots.acquire()
+            if self._slots.locked():
+                await asyncio.wait_for(self._slots.acquire(), patience)
+            else:
+                await self._slots.acquire()
+        except TimeoutError:
+            raise Busy from None
         finally:
             self._waiting -= 1
         try:
@@ -586,7 +666,7 @@ class LabelPyramid:
         self._cache = _Cache(cache_bytes)
         self._gate = _Gate(slots, queue)
         # The chunks being built now, by cache key, and what each will be.
-        self._building: dict[Hashable, asyncio.Future[bytes | None]] = {}
+        self._building: dict[Hashable, asyncio.Future[bytes]] = {}
 
     async def chunk(
         self,
@@ -604,7 +684,7 @@ class LabelPyramid:
         `fingerprint`. Raises `Busy` if that takes more than the budget. The
         session's connection is given back, as storage and computing are slow.
         """
-        return await self._build(
+        made = await self._build(
             db,
             store,
             project_id,
@@ -615,6 +695,7 @@ class LabelPyramid:
             _Budget(self.seconds, self.blobs),
             pin=False,
         )
+        return made or None
 
     async def _build(
         self,
@@ -627,7 +708,7 @@ class LabelPyramid:
         state: Fingerprint,
         budget: _Budget,
         pin: bool,
-    ) -> bytes | None:
+    ) -> bytes:
         cached = _cache_key(project_id, plan, level, key, state)
         if (data := self._cache.get(cached)) is not None:
             return data
@@ -635,8 +716,8 @@ class LabelPyramid:
             # Someone is already making it: wait for that, not holding a
             # connection, and share whatever comes of it.
             await db.rollback()
-            return await self._wait(building)
-        made: asyncio.Future[bytes | None] = asyncio.get_running_loop().create_future()
+            return await self._wait(building, budget)
+        made: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
         self._building[cached] = made
         try:
             data = await self._make(
@@ -653,11 +734,9 @@ class LabelPyramid:
         finally:
             del self._building[cached]
 
-    async def _wait(self, building: asyncio.Future[bytes | None]) -> bytes | None:
+    async def _wait(self, building: asyncio.Future[bytes], budget: _Budget) -> bytes:
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(building), self.seconds + WAIT_SECONDS
-            )
+            return await asyncio.wait_for(asyncio.shield(building), budget.patience())
         except TimeoutError:
             raise Busy from None
 
@@ -673,20 +752,33 @@ class LabelPyramid:
         cached: Hashable,
         budget: _Budget,
         pin: bool,
-    ) -> bytes | None:
+    ) -> bytes:
         stored = state.count >= STORED_COUNT
-        if stored and (data := await _load(store, plan, level, key, state)):
-            self._cache.put(cached, data, pin=pin)
-            return data
+        stored_versions = None
+        if stored:
+            # Storage can be slow, and a transaction is open from taking the
+            # state (or the chunks under this one).
+            await db.rollback()
+            data, stored_versions = await _load(store, plan, level, key, state)
+            if data is not None:
+                self._cache.put(cached, data, pin=pin)
+                return data
         data, kept = await self._assemble(
             db, store, project_id, plan, level, key, budget
         )
-        if data is not None:
-            self._cache.put(cached, data, pin=pin)
-            if stored:
+        # Even one that shows nothing: finding that out was the work.
+        self._cache.put(cached, data, pin=pin)
+        try:
+            # Not over a chunk kept for a newer state, which a build that took
+            # its state earlier would only replace with an older one.
+            if stored and (
+                stored_versions is None or stored_versions <= state.versions
+            ):
                 await _save(store, plan, level, key, state, data)
-        for child_key in kept:
-            self._cache.unpin(child_key)
+        finally:
+            # However storing it ends, what it was made of is let go of.
+            for child_key in kept:
+                self._cache.unpin(child_key)
         return data
 
     async def _assemble(
@@ -698,7 +790,7 @@ class LabelPyramid:
         level: int,
         key: ChunkKey,
         budget: _Budget,
-    ) -> tuple[bytes | None, list[Hashable]]:
+    ) -> tuple[bytes, list[Hashable]]:
         """
         A chunk made of the ones under it, and the cache keys of the chunks of
         the level below that were made into it.
@@ -711,20 +803,20 @@ class LabelPyramid:
             leaves = await _leaves(db, project_id, levels, key)
             budget.spend(len(leaves))
             await db.rollback()
-            async with self._gate():
+            async with self._gate(budget.patience()):
                 blobs = await asyncio.gather(*(_read(store, sha) for _, sha in leaves))
                 parts = [
                     (_position(at, origin), blob)
                     for (at, _), blob in zip(leaves, blobs, strict=True)
                 ]
                 data = await run_in_threadpool(_combine, parts, step, plan.retired)
-            return data, kept
+            return data or _NOTHING, kept
         parts = []
-        below = await _children(db, project_id, levels, level, key)
+        below = await _children(db, project_id, levels, level, key, plan.retired)
         for child, child_state in sorted(below.items()):
             # What is made of a chunk under this one is kept (pinned) until
             # this one is made, so a request that gives up before then leaves
-            # its work for the next.
+            # its work for the next. That includes chunks that show nothing.
             made = await self._build(
                 db,
                 store,
@@ -736,14 +828,16 @@ class LabelPyramid:
                 budget,
                 pin=True,
             )
-            if made is not None:
+            kept.append(_cache_key(project_id, plan, level - 1, child, child_state))
+            if made:
                 parts.append((_position(child, origin), made))
-                kept.append(_cache_key(project_id, plan, level - 1, child, child_state))
         budget.spend()
         await db.rollback()
-        async with self._gate():
+        if not parts:
+            return _NOTHING, kept
+        async with self._gate(budget.patience()):
             data = await run_in_threadpool(_combine, parts, step)
-        return data, kept
+        return data or _NOTHING, kept
 
 
 def _cache_key(
@@ -754,7 +848,7 @@ def _cache_key(
     z, y, x = key
     return (
         project_id.bytes
-        + plan.digest
+        + plan.digest(state.retired)
         + _KEY.pack(level, z, y, x, state.count, state.versions)
     )
 
