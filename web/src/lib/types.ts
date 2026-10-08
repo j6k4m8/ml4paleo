@@ -67,6 +67,11 @@ export interface ImageManifest {
 	histogram?: { counts: number[]; edges: number[] } | [];
 	min: number;
 	max: number;
+	/** Files in the upload that ingest left out because they aren't slices (some, by name), and how many. */
+	skipped?: string[];
+	skipped_count?: number;
+	/** Anything else about what was read, in words. */
+	notes?: string[];
 }
 
 export interface ProjectImage {

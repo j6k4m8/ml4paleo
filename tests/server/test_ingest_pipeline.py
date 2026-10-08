@@ -167,6 +167,26 @@ def test_an_upload_becomes_the_projects_image(
     assert [p["id"] for p in listed] == [pipeline["id"]]
 
 
+def test_one_scan_is_brought_in_at_a_time(new_browser):
+    browser = new_browser()
+    signup(browser)
+    project = browser.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    archive = _zip({"z0.png": _png(np.zeros((4, 4), dtype=np.uint8))})
+    first, second = upload(browser, project, archive), upload(browser, project, archive)
+    started = browser.post(f"/api/projects/{project}/ingest", json={"upload_id": first})
+    assert started.status_code == 202
+    refused = browser.post(
+        f"/api/projects/{project}/ingest", json={"upload_id": second}
+    )
+    assert refused.status_code == 409
+    assert "already being brought in" in refused.json()["detail"]
+    # Once the first is stopped, the next can start.
+    pipeline = started.json()["id"]
+    browser.post(f"/api/projects/{project}/pipelines/{pipeline}/cancel")
+    again = browser.post(f"/api/projects/{project}/ingest", json={"upload_id": second})
+    assert again.status_code == 202
+
+
 def test_a_bad_upload_fails_with_a_reason(
     new_browser, migrated_database_url, live_server
 ):

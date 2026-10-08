@@ -11,10 +11,11 @@ the finalize job, whose success commits the artifact as the project's image.
 
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import artifacts, jobs
-from ..db import Artifact, Job, Upload
+from ..db import Artifact, Job, Project, Upload
 from ..settings import Settings
 from ..uploads import upload_path
 
@@ -25,6 +26,23 @@ WEIGHTS = {"probe": 2.0, "slabs": 70.0, "pyramid": 20.0, "finalize": 3.0}
 async def start(
     db: AsyncSession, upload: Upload, created_by: uuid.UUID
 ) -> tuple[Job, Artifact]:
+    """
+    Start bringing `upload` in as the project's image, unless a scan (an
+    upload or a v1 import) is already being brought in: the last to finish
+    would win, so a second one is refused (ValueError) until the first ends.
+    """
+    from .predict import running
+
+    # Starts in a project happen one at a time, so each sees the others.
+    await db.scalar(
+        select(Project.id)
+        .where(Project.id == upload.project_id)
+        .with_for_update(key_share=True)
+    )
+    if await running(db, upload.project_id, kinds=("ingest.probe", "v1.probe")):
+        raise ValueError(
+            "A scan is already being brought in. Wait for it to finish, or stop it."
+        )
     artifact = await artifacts.create_staging(
         db,
         project_id=upload.project_id,
