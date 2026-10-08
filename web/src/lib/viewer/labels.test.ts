@@ -135,6 +135,39 @@ describe("LabelLayer", () => {
 		expect(loads).toHaveLength(2);
 	});
 
+	it("tells views when a refresh stops for good, so they load the chunk afresh", async () => {
+		const server = new Map([["0/0/0", { value: 1, version: 1 }]]);
+		const { pool, loads, release } = fakePool(server, true);
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		const loading = loaded(layer, "0/0/0");
+		release();
+		await loading;
+		const told: string[][] = [];
+		layer.onChange((ids) => told.push(ids));
+		// Someone edits the chunk; while it reloads, the view zooms out past the label limit.
+		server.set("0/0/0", { value: 2, version: 2 });
+		layer.changed([{ key: [0, 0, 0], version: 2 }]);
+		expect(loads).toHaveLength(2);
+		layer.store.want("view", []);
+		await tick();
+		// The old copy is gone, and views drop what they drew from it.
+		expect(layer.store.peek("0/0/0")).toBeUndefined();
+		expect(told).toEqual([["0/0/0"]]);
+		// Back in view, it loads afresh.
+		const again = loaded(layer, "0/0/0");
+		release();
+		expect((await again).version).toBe(2);
+	});
+
+	it("has views load a chunk it edits without a copy of it", () => {
+		const { pool } = fakePool(new Map());
+		const layer = new LabelLayer("p", pool, [2, 2, 2]);
+		const told: string[][] = [];
+		layer.onChange((ids) => told.push(ids));
+		layer.applyLocal("op", [delta(5)]);
+		expect(told).toEqual([["0/0/0"]]);
+	});
+
 	it("remembers the chunks it edited, the latest last", () => {
 		const { pool } = fakePool(new Map());
 		const layer = new LabelLayer("p", pool, [128, 128, 128]);

@@ -142,7 +142,15 @@ export class LabelLayer {
 			if (this.store.get(id) && this.store.isWanted(id)) {
 				this.store.refresh(id).then(
 					() => this.#emit([id]),
-					() => {},
+					() => {
+						// Stopped for good (no view wants it now) or failed: the
+						// out-of-date copy goes, and views drop what they drew from it,
+						// so the next look loads it afresh. A refresh that took over
+						// says so itself.
+						if (this.store.isLoading(id)) return;
+						this.store.invalidate(id);
+						this.#emit([id]);
+					},
 				);
 			} else {
 				this.store.invalidate(id);
@@ -169,7 +177,9 @@ export class LabelLayer {
 			this.#recent.delete(id);
 			this.#recent.add(id);
 			const chunk = this.store.get(id);
-			if (chunk && applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, mask, written, delta.only_if) > 0) {
+			// Without a copy here, views drop anything drawn from an old one and
+			// load the chunk again, which shows the edit.
+			if (!chunk || applyLocally(chunk.data as Uint8Array, chunk.shape, delta.box, mask, written, delta.only_if) > 0) {
 				changed.push(id);
 			}
 		}
