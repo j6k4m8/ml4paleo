@@ -188,9 +188,10 @@ export class LabelLayer {
 			CACHE_BYTES,
 			4,
 			// The server makes the coarser levels when asked, which can take it a
-			// second or more a chunk, and it makes two at a time: more asks at once
-			// wouldn't be answered sooner, and the other places stay free for the
-			// chunks it only reads.
+			// second or more a chunk, and it makes two at a time: while full
+			// resolution chunks, which it only reads, are waited for, two places
+			// are theirs. Without them the coarser chunks, which it may have
+			// ready, use all four.
 			{ slow: (id) => labelKey(id).level > 0, places: 2 },
 		);
 		// Whatever the server sends, this page's edits stay on screen.

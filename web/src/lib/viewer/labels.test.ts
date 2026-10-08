@@ -1230,6 +1230,16 @@ describe("label levels", () => {
 		expect(loads.filter((id) => labelKey(id).level === 0)).toEqual(["0/0/0", "0/0/1"]);
 	});
 
+	it("take all four places for loads while no full resolution chunk is wanted, as zoomed out views do", async () => {
+		const { layer, loads } = await started(group(pyramid), levelPool(new Map(), new Set(), true));
+		const coarse = ["2/0/0/0", "1/0/0/0", "1/0/0/1", "1/0/1/0", "1/0/1/1"];
+		layer.store.want("view", coarse);
+		for (const id of coarse.slice(0, 3)) layer.store.request(id).catch(() => {});
+		expect(loads).toEqual(coarse.slice(0, 3));
+		for (const id of coarse.slice(3)) layer.store.request(id).catch(() => {});
+		expect(loads).toEqual(coarse.slice(0, 4));
+	});
+
 	it("stop telling views once the layer stops", async () => {
 		const { layer } = await started(group(pyramid), levelPool(new Map(), new Set([1])));
 		const heard = vi.fn();

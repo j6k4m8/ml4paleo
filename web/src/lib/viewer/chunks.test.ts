@@ -636,6 +636,7 @@ describe("ChunkStore, for chunks the server is still making", () => {
 		await vi.advanceTimersByTimeAsync(10_000);
 		expect(calls).toHaveLength(1);
 	});
+
 });
 
 describe("ChunkStore, for chunks the server takes long to make", () => {
@@ -643,10 +644,11 @@ describe("ChunkStore, for chunks the server takes long to make", () => {
 	afterEach(() => vi.useRealTimers());
 
 	const settle = () => vi.advanceTimersByTimeAsync(0);
-	// Slow chunks' ids start with "s", the others' with "f"; four places, two for the slow.
+	// Slow chunks' ids start with "s", the others' with "f"; four places, two held for the others while they wait.
 	const store = (load: Loader) => new ChunkStore(load, 1e9, 4, { slow: (id) => id.startsWith("s"), places: 2 });
-	const ask = (s: ChunkStore, ids: string[]) => {
-		s.want("xy", ids);
+	/** A view shows these chunks (every one, or `shown`), and asks for each in turn. */
+	const ask = (s: ChunkStore, ids: string[], shown?: string[]) => {
+		s.want("xy", ids, shown);
 		for (const id of ids) s.request(id).catch(() => {});
 	};
 	const started = (calls: { id: string }[]) => calls.map((c) => c.id);
@@ -670,53 +672,103 @@ describe("ChunkStore, for chunks the server takes long to make", () => {
 		expect(started(calls).slice(6)).toEqual(["s4", "f4"]);
 	});
 
-	it("keeps those places for them even when none waits now", async () => {
+	it("lets slow chunks take every place while no other chunk waits, those a view shows and hasn't asked for yet included", async () => {
+		const { calls, load } = controlled();
+		const chunks = store(load);
+		chunks.want("xy", ["s1", "s2", "s3", "s4", "s5"]);
+		for (const id of ["s1", "s2", "s3"]) chunks.request(id).catch(() => {});
+		expect(started(calls)).toEqual(["s1", "s2", "s3"]);
+		for (const id of ["s4", "s5"]) chunks.request(id).catch(() => {});
+		expect(started(calls)).toEqual(["s1", "s2", "s3", "s4"]);
+		calls[3]?.finish();
+		await settle();
+		expect(started(calls)).toEqual(["s1", "s2", "s3", "s4", "s5"]);
+	});
+
+	it("holds the places for a chunk a view shows and hasn't asked for yet, and gives them up once it has it", async () => {
+		const { calls, load } = controlled();
+		const chunks = store(load);
+		chunks.want("xy", ["s1", "s2", "s3", "s4", "f1"]);
+		for (const id of ["s1", "s2", "s3", "s4"]) chunks.request(id).catch(() => {});
+		// Two places are held for f1, which the view asks for next.
+		expect(started(calls)).toEqual(["s1", "s2"]);
+		chunks.request("f1").catch(() => {});
+		// f1 has its place, and nothing else that isn't slow is waiting: the places aren't held any more.
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "s3"]);
+		calls[2]?.finish();
+		await settle();
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "s3", "s4"]);
+	});
+
+	it("takes the hold off at once when the view stops showing the chunk it was held for", async () => {
+		const { calls, load } = controlled();
+		const chunks = store(load);
+		chunks.want("xy", ["s1", "s2", "s3", "f1"]);
+		for (const id of ["s1", "s2", "s3"]) chunks.request(id).catch(() => {});
+		expect(started(calls)).toEqual(["s1", "s2"]);
+		// A zoom out: only slow chunks are shown now.
+		chunks.want("xy", ["s1", "s2", "s3"]);
+		expect(started(calls)).toEqual(["s1", "s2", "s3"]);
+	});
+
+	it("holds them while a chunk that isn't slow is queued, behind slow ones that took every place", async () => {
 		const { calls, load } = controlled();
 		const chunks = store(load);
 		ask(chunks, ["s1", "s2", "s3", "s4"]);
-		expect(started(calls)).toEqual(["s1", "s2"]);
+		expect(started(calls)).toEqual(["s1", "s2", "s3", "s4"]);
+		// s5 waits first, then f1, which isn't slow: f1 gets the next place that frees.
+		chunks.request("s5").catch(() => {});
+		chunks.request("f1").catch(() => {});
+		calls[0]?.finish();
+		await settle();
+		expect(started(calls)).toEqual(["s1", "s2", "s3", "s4", "f1"]);
+		// Nothing but s5 waits now, and it takes the place that frees next.
 		calls[1]?.finish();
 		await settle();
-		expect(started(calls)).toEqual(["s1", "s2", "s3"]);
-		// A chunk that arrives meanwhile finds its places free.
-		chunks.request("f1").catch(() => {});
-		chunks.request("f2").catch(() => {});
-		expect(started(calls)).toEqual(["s1", "s2", "s3", "f1", "f2"]);
+		expect(started(calls)).toEqual(["s1", "s2", "s3", "s4", "f1", "s5"]);
 	});
 
 	it("gives a slow place up at once when the server answers busy, to the next slow chunk", async () => {
 		const { calls, load } = controlled();
 		const chunks = store(load);
-		ask(chunks, ["s1", "s2", "s3", "s4"]);
+		// f3 waits for a place throughout, so the places stay held.
+		ask(chunks, ["s1", "s2", "s3", "s4", "f1", "f2", "f3"]);
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2"]);
 		calls[0]?.fail(new Busy(1000));
-		calls[1]?.fail(new Busy(1000));
 		await settle();
-		expect(started(calls)).toEqual(["s1", "s2", "s3", "s4"]);
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2", "s3"]);
 	});
 
-	it("asks again for a slow chunk only when a slow place is free", async () => {
+	it("asks again for a slow chunk only when a slow place is free, while a chunk that isn't slow waits", async () => {
 		const { calls, load } = controlled();
 		const chunks = store(load);
-		ask(chunks, ["s1", "s2", "s3"]);
+		ask(chunks, ["s1", "s2", "s3", "f1", "f2", "f3"]);
 		calls[0]?.fail(new Busy(1000));
 		await settle();
-		// s3 took the place s1 left; s2 and s3 hold both.
-		expect(started(calls)).toEqual(["s1", "s2", "s3"]);
+		// s3 took the place s1 left; s2 and s3 hold both slow places, and f1, f2 the others.
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2", "s3"]);
 		await vi.advanceTimersByTimeAsync(5000);
-		expect(started(calls)).toEqual(["s1", "s2", "s3"]);
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2", "s3"]);
 		calls[2]?.finish();
 		await settle();
-		expect(started(calls)).toEqual(["s1", "s2", "s3", "s1"]);
+		// A place is free, but f3 is waiting for it.
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2", "s3", "f3"]);
+		calls[1]?.finish();
+		await settle();
+		// A slow place is free and nothing that isn't slow waits any more: s1 is asked again.
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2", "s3", "f3", "s1"]);
 	});
 
 	it("doesn't count a load it cancelled against the places once it has ended", async () => {
 		const { calls, load } = controlled();
 		const chunks = store(load);
-		ask(chunks, ["s1", "s2", "s3"]);
-		chunks.want("xy", ["s3"]);
+		ask(chunks, ["s1", "s2", "s3", "f1", "f2", "f3"]);
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2"]);
+		// s1 and s2 are no longer wanted: with their places given back, s3 and f3 take the two that free.
+		chunks.want("xy", ["s3", "f1", "f2", "f3"]);
 		for (const call of calls.slice(0, 2)) call.fail(new DOMException("No longer needed", "AbortError"));
 		await settle();
-		expect(started(calls)).toEqual(["s1", "s2", "s3"]);
+		expect(started(calls)).toEqual(["s1", "s2", "f1", "f2", "s3", "f3"]);
 	});
 
 	it("puts no limit on a store without one", async () => {

@@ -42,12 +42,15 @@ export class Busy extends Error {
 
 /**
  * A limit on the loads of chunks a server takes long to make, so that
- * whatever it only has to read never waits for them.
+ * whatever it only has to read never waits for them: while a chunk that isn't
+ * slow is queued, or shown (see `want`) and not loaded yet, the slow ones
+ * take no more than `places` of the store's places, which leaves the rest for
+ * it. With none waiting they may take them all.
  */
 export interface SlowLimit {
 	/** Whether the server takes long to make a chunk. */
 	slow: (id: string) => boolean;
-	/** The most places the loads of such chunks take at once; the rest are for the other chunks. */
+	/** The most places the loads of such chunks take at once while others wait. */
 	places: number;
 }
 
@@ -218,6 +221,8 @@ export class ChunkStore {
 		for (let i = list.length - 1; i >= 0; i--) this.get(list[i]!);
 		this.#sorted = false;
 		this.keepOnly(new Set(this.#rank.keys()));
+		// A view that no longer shows a chunk it waits for frees the places held for it.
+		this.#pump();
 	}
 
 	#isShown(id: string): boolean {
@@ -283,8 +288,9 @@ export class ChunkStore {
 	/**
 	 * The queued load to start next: the most wanted, and any never started
 	 * before those asked again (in the order they came due), which wait
-	 * until they are due, a few at a time. A slow chunk's load that would
-	 * take more of the places than it may is passed over.
+	 * until they are due, a few at a time. A slow chunk's load that would take
+	 * more of the places than it may, with a chunk that isn't slow waiting for
+	 * one, is passed over.
 	 */
 	#next(): Pending | undefined {
 		if (!this.#sorted) {
@@ -297,8 +303,13 @@ export class ChunkStore {
 			this.#sorted = true;
 		}
 		const now = Date.now();
+		// Whether places are held for chunks that aren't slow, looked into only if it matters.
+		let held: boolean | undefined;
 		for (const [index, entry] of this.#queue.entries()) {
-			if (entry.slow && this.#runningSlow >= (this.limit?.places ?? Number.POSITIVE_INFINITY)) continue;
+			if (entry.slow && this.limit && this.#runningSlow >= this.limit.places) {
+				held ??= this.#wantsFast();
+				if (held) continue;
+			}
 			if (entry.retryAt !== undefined) {
 				const at = Math.max(entry.retryAt, this.#retryFrom);
 				// The ones after it come due later still.
@@ -309,6 +320,20 @@ export class ChunkStore {
 			return entry;
 		}
 		return undefined;
+	}
+
+	/**
+	 * Whether a chunk that isn't slow is waiting for a place: queued, or shown
+	 * by a view (which asks for it next) and neither loaded nor loading.
+	 */
+	#wantsFast(): boolean {
+		if (this.#queue.some((entry) => !entry.slow)) return true;
+		for (const shown of this.#protected.values()) {
+			for (const id of shown) {
+				if (!this.#cache.has(id) && !this.#pending.has(id) && !this.limit?.slow(id)) return true;
+			}
+		}
+		return false;
 	}
 
 	/** Start the queue again in `ms`, unless it is to be woken sooner anyway. */
