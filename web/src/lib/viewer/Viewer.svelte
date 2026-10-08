@@ -112,15 +112,16 @@
 	// The form for a new class: open on request, and from the start while the project has none.
 	let addingClass = $state(false);
 	let className = $state("");
-	let classColor = $state("");
+	// The color the person picked, if they did; until then the form offers the next one not in use.
+	let pickedColor = $state("");
+	const classColor = $derived(pickedColor || nextColor(classes.map((c) => c.color)));
 	let classError = $state("");
 	let savingClass = $state(false);
 	let classInput: HTMLInputElement | null = $state(null);
+	let addClassButton: HTMLButtonElement | null = $state(null);
+	// Said to screen readers when a class is added.
+	let classAdded = $state("");
 	const classFormOpen = $derived(addingClass || (labels !== null && classes.length === 0));
-	// Whenever the form opens, it offers the next unused color.
-	$effect(() => {
-		if (classFormOpen && !classColor) classColor = nextColor(classes.map((c) => c.color));
-	});
 	// On narrow screens the dock floats over the views until closed.
 	let dockOpen = $state(false);
 	const me = session.current?.user.id ?? "";
@@ -180,6 +181,8 @@
 			layer.onStopped = () => (error = "Live label updates stopped. Reload the page to see others' edits.");
 			labels = layer;
 			classes = layer.classes;
+			// Classes added here or elsewhere reach the list, and the palette.
+			layer.onClasses(() => (classes = layer.classes));
 			viewer.activeClass ??= classes[0]?.value ?? null;
 			queue.onOutcome((outcome) => {
 				if ("cancelled" in outcome) {
@@ -209,7 +212,10 @@
 	const stopRefreshing = rois.keepFresh();
 	// Models trained or deleted, and predictions and proposals made, since.
 	// A reload that fails keeps what's shown, quietly, and the next one tries again.
-	const stopReloading = whileVisible(() => void loadPrediction(controller.signal).catch(() => {}));
+	const stopReloading = whileVisible(() => {
+		void loadPrediction(controller.signal).catch(() => {});
+		void labels?.refreshClasses().catch(() => {});
+	});
 
 	onDestroy(() => {
 		controller.abort();
@@ -860,31 +866,63 @@
 
 	const activeClass = $derived(classes.find((c) => c.value === viewer.activeClass));
 
-	/** Open the new-class form, its name ready to type. */
+	/** Open the new-class form, its name ready to type (what's typed already stays). */
 	async function startClass() {
+		if (!labels) return;
 		classesOpen = true;
 		dockOpen = true;
-		className = "";
-		classError = "";
+		if (!classFormOpen) {
+			className = "";
+			pickedColor = "";
+			classError = "";
+			classAdded = "";
+		}
 		addingClass = true;
+		// Someone may have added classes since this page loaded; the color offered is a fresh one.
+		await labels.refreshClasses().catch(() => {});
 		await tick();
 		classInput?.focus();
+	}
+
+	/** Escape, from anywhere in the form, closes it (while there are classes to go back to) and does nothing else. */
+	function closesOnEscape(form: HTMLFormElement) {
+		const onKey = (event: KeyboardEvent) => {
+			if (event.key !== "Escape" || event.isComposing || classes.length === 0) return;
+			event.stopPropagation();
+			void closeClassForm();
+		};
+		form.addEventListener("keydown", onKey);
+		return () => form.removeEventListener("keydown", onKey);
+	}
+
+	/** Close the form, leaving keyboard focus on the button that opens it. */
+	async function closeClassForm() {
+		if (savingClass) return;
+		addingClass = false;
+		className = "";
+		pickedColor = "";
+		classError = "";
+		await tick();
+		addClassButton?.focus();
 	}
 
 	async function saveClass(event: SubmitEvent) {
 		event.preventDefault();
 		const name = className.trim();
 		if (!labels || !name || savingClass) return;
+		if (classes.some((c) => c.name.trim().toLowerCase() === name.toLowerCase())) {
+			classError = `There's a class called ${name} already.`;
+			return;
+		}
 		savingClass = true;
 		classError = "";
 		try {
 			const made = await labels.addClass(name, classColor);
-			classes = labels.classes;
 			// Ready to paint with it, which is why anyone adds one.
 			viewer.activeClass = made.value;
-			addingClass = false;
-			className = "";
-			classColor = "";
+			classAdded = `Added ${made.name}.`;
+			savingClass = false;
+			await closeClassForm();
 		} catch (e) {
 			classError = message(e);
 		} finally {
@@ -1019,8 +1057,8 @@
 			<button
 				class="size-7 rounded-sm border-2 border-ink/80 shadow-[0_0_0_1px_black]"
 				style:background={activeClass?.color ?? "transparent"}
-				title={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "No class to paint"}
-				aria-label={activeClass ? `Active class: ${activeClass.name}` : "No active class"}
+				title={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "Add a class to start labeling"}
+				aria-label={activeClass ? `Active class: ${activeClass.name}` : "Add a class"}
 				onclick={() => (activeClass ? ((classesOpen = true), (dockOpen = true)) : startClass())}
 			></button>
 			<span class="my-1.5 h-px w-6 bg-line"></span>
@@ -1164,7 +1202,7 @@
 			<Panel title="Classes" bind:open={classesOpen}>
 				{#snippet actions()}
 					{#if labels && !classFormOpen}
-						<button class="btn btn-ghost h-5 gap-1 px-1.5" title="Add a class to label with" onclick={startClass}>
+						<button class="btn btn-ghost gap-1" bind:this={addClassButton} title="Add a class to label with" onclick={startClass}>
 							<Plus size={12} /> Add class
 						</button>
 					{/if}
@@ -1188,8 +1226,9 @@
 				{:else if labels}
 					<p class="text-ink-dim">No classes yet. Add one to start labeling.</p>
 				{/if}
+				<p class="sr-only" role="status">{classAdded}</p>
 				{#if classFormOpen}
-					<form class="flex flex-col gap-2" onsubmit={saveClass}>
+					<form class="flex flex-col gap-2" onsubmit={saveClass} {@attach closesOnEscape}>
 						<div class="flex items-center gap-2">
 							<input
 								class="field"
@@ -1200,26 +1239,21 @@
 								aria-label="Class name"
 								autocomplete="off"
 								required
-								onkeydown={(event) => {
-									if (event.key === "Escape" && classes.length > 0) {
-										event.stopPropagation();
-										addingClass = false;
-									}
-								}}
 							/>
 							<input
 								type="color"
 								class="h-6 w-8 shrink-0 cursor-pointer rounded-sm border border-edge bg-field p-0.5"
-								bind:value={classColor}
+								value={classColor}
+								oninput={(event) => (pickedColor = event.currentTarget.value)}
 								aria-label="Class color"
 								title="Class color"
 							/>
 						</div>
 						{#if classError}<p class="error" role="alert">{classError}</p>{/if}
 						<div class="flex items-center gap-2">
-							<button class="btn btn-primary" disabled={savingClass || !className.trim()}>Add</button>
+							<button class="btn btn-primary" disabled={!className.trim()} aria-disabled={savingClass}>Add</button>
 							{#if classes.length > 0}
-								<button type="button" class="btn btn-ghost" onclick={() => (addingClass = false)}>Cancel</button>
+								<button type="button" class="btn btn-ghost" disabled={savingClass} onclick={closeClassForm}>Cancel</button>
 							{/if}
 						</div>
 					</form>

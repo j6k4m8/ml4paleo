@@ -175,10 +175,33 @@ export class LabelLayer {
 	 */
 	async addClass(name: string, color: string): Promise<LabelClass> {
 		const made = await api<LabelClass>(`/api/projects/${this.projectId}/labels/classes`, { body: { name, color } });
-		// A new class's value is the highest ever used, so it goes last.
-		this.classes = [...this.classes, made];
-		for (const listener of this.#classListeners) listener();
+		// Along with whatever others added meanwhile; but the new one is ours either way.
+		await this.refreshClasses().catch(() => {});
+		if (!this.classes.some((c) => c.value === made.value)) {
+			// A new class's value is the highest ever used, so it goes last.
+			this.classes = [...this.classes, made];
+			this.#classesChanged();
+		}
 		return made;
+	}
+
+	/** Read the project's classes again, in case someone added some. Views hear of any change. */
+	async refreshClasses(): Promise<void> {
+		const found = await api<LabelClass[]>(`/api/projects/${this.projectId}/labels/classes`);
+		if (JSON.stringify(found) === JSON.stringify(this.classes)) return;
+		this.classes = found;
+		this.#classesChanged();
+	}
+
+	#classesChanged(): void {
+		for (const listener of this.#classListeners) {
+			// One view's trouble mustn't keep the rest from hearing.
+			try {
+				listener();
+			} catch (e) {
+				console.error(e);
+			}
+		}
 	}
 
 	/** Call `listener` when a class is added here (its color needs drawing). */
