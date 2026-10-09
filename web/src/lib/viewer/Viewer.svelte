@@ -30,6 +30,7 @@
 	import Histogram from "#lib/ui/Histogram.svelte";
 	import Panel from "#lib/ui/Panel.svelte";
 	import Segmented from "#lib/ui/Segmented.svelte";
+	import SliderField from "#lib/ui/SliderField.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
 	import { ApiError, api, message } from "#lib/api.ts";
 	import { unfinished } from "#lib/pipelines.ts";
@@ -978,16 +979,21 @@
 	] as const).filter((entry) => SHOW_ROIS || entry.tool !== "roi");
 
 	const LAYOUT_NAMES = { four: "Four views", xy: "XY", xz: "XZ", yz: "YZ" } as const;
+	const LAYOUT_OPTIONS = LAYOUTS.map((layout) => ({
+		value: layout,
+		label: LAYOUT_NAMES[layout],
+		icon: layout === "four" ? LayoutGrid : undefined,
+	}));
 
-	const POLYGON_MODES: { mode: PolygonMode; label: string; icon: typeof SquaresUnite; title: string }[] = [
+	const POLYGON_MODES: { value: PolygonMode; label: string; icon: typeof SquaresUnite; title: string }[] = [
 		{
-			mode: "add",
+			value: "add",
 			label: "Add",
 			icon: SquaresUnite,
 			title: "Closing fills the shape with the active class, where the paint mode allows (hold Shift to fill in either mode)",
 		},
 		{
-			mode: "subtract",
+			value: "subtract",
 			label: "Subtract",
 			icon: SquaresSubtract,
 			title: "Closing cuts the shape out of the active class, leaving other classes: it has its own rule, whatever the paint mode says (hold Alt to cut out in either mode)",
@@ -1098,37 +1104,20 @@
 {/snippet}
 
 <div class="flex h-full flex-col bg-chrome text-ink">
-	<!-- Options bar: the active tool's settings, scrolling sideways when they don't fit. -->
-	<div class="flex h-9 shrink-0 items-center border-b border-edge bg-panel" {@attach keepFocus}>
-		<div class="flex min-w-0 flex-1 items-center gap-3 self-stretch overflow-x-auto px-3 whitespace-nowrap">
-			<span class="flex shrink-0 items-center gap-1.5 font-medium">
+	<!-- Options bar: the active tool's settings, wrapping onto more lines when the window is narrow. -->
+	<div class="flex min-h-9 shrink-0 items-start bg-panel shadow-[inset_0_-1px_0_var(--color-edge)]" {@attach keepFocus}>
+		<div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1.5 px-3 py-1.5">
+			<span class="flex h-6 shrink-0 items-center gap-1.5 font-medium">
 				{#each TOOLS as entry (entry.tool)}
 					{#if entry.tool === viewer.tool}<entry.icon size={14} class="text-ink-dim" />{entry.label}{/if}
 				{/each}
 			</span>
-			<span class="h-4 w-px shrink-0 bg-line"></span>
+			<span class="h-4 w-px shrink-0 bg-line" aria-hidden="true"></span>
 			{#if viewer.tool === "brush" || viewer.tool === "eraser"}
-				<label class="flex shrink-0 items-center gap-2 text-ink-dim">
-					Size
-					<input class="w-28" type="range" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} />
-					<input class="field w-14 font-mono" type="number" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} aria-label="Brush radius" />
-				</label>
+				<SliderField label="Size" numberLabel="Brush radius" min={0.5} max={64} step={0.5} bind:value={viewer.brushRadius} />
 			{/if}
 			{#if viewer.tool === "polygon"}
-				<div class="flex shrink-0 rounded-sm border border-edge" role="group" aria-label="Polygon mode">
-					{#each POLYGON_MODES as entry (entry.mode)}
-						<button
-							aria-pressed={viewer.polygonMode === entry.mode}
-							class="relative flex h-6 items-center gap-1 px-2 first:rounded-l-[3px] last:rounded-r-[3px] focus-visible:z-10
-								{viewer.polygonMode === entry.mode ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
-							title={entry.title}
-							onclick={() => (viewer.polygonMode = entry.mode)}
-						>
-							<entry.icon size={12} />
-							{entry.label}
-						</button>
-					{/each}
-				</div>
+				<Segmented label="Polygon mode" value={viewer.polygonMode} options={POLYGON_MODES} onchange={(mode) => (viewer.polygonMode = mode)} />
 			{/if}
 			{#if viewer.tool === "brush" || viewer.tool === "polygon"}
 				{@const cuts = viewer.tool === "polygon" && viewer.polygonMode === "subtract"}
@@ -1158,26 +1147,13 @@
 				</label>
 			{/if}
 			{#if viewer.tool === "navigate"}
-				<div class="flex shrink-0 rounded-sm border border-edge" role="group" aria-label="Layout">
-					{#each LAYOUTS as layout (layout)}
-						<button
-							aria-pressed={viewer.layout === layout}
-							class="relative flex h-6 items-center gap-1 px-2 first:rounded-l-[3px] last:rounded-r-[3px] focus-visible:z-10
-								{viewer.layout === layout ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
-							onclick={() => (viewer.layout = layout)}
-						>
-							{#if layout === "four"}<LayoutGrid size={12} />{/if}
-							{LAYOUT_NAMES[layout]}
-						</button>
-					{/each}
-				</div>
+				<Segmented label="Layout" value={viewer.layout} options={LAYOUT_OPTIONS} onchange={(layout) => (viewer.layout = layout)} />
 				<button class="btn shrink-0" onclick={fit} title="Fit the image (0)"><Maximize2 size={12} /> Fit</button>
 			{/if}
-			<span class="ml-auto hidden truncate text-2xs text-ink-faint lg:inline">{hint}</span>
+			<span class="hidden min-w-48 flex-1 basis-48 truncate text-right text-2xs text-ink-faint xl:block" title={hint}>{hint}</span>
 		</div>
-		<!-- Outside the scrolling part, so it's always in reach. -->
 		<button
-			class="btn btn-ghost mx-1.5 shrink-0 md:hidden"
+			class="btn btn-ghost mx-1.5 mt-1.5 shrink-0 md:hidden"
 			aria-label="Panels"
 			aria-expanded={dockOpen}
 			onclick={() => (dockOpen = !dockOpen)}
@@ -1306,9 +1282,10 @@
 				{#if histogram}
 					<Histogram counts={histogram.counts} edges={histogram.edges} bind:window={viewer.window} />
 				{/if}
-				<div class="grid grid-cols-2 gap-2">
-					<label class="label">Black <input class="field font-mono" type="number" step="any" bind:value={viewer.window[0]} /></label>
-					<label class="label">White <input class="field font-mono" type="number" step="any" bind:value={viewer.window[1]} /></label>
+				<!-- Side by side, or one over the other when what they show needs the room. -->
+				<div class="flex flex-wrap gap-2">
+					<label class="label flex-1">Black <input class="field font-mono" type="number" step="any" bind:value={viewer.window[0]} /></label>
+					<label class="label flex-1">White <input class="field font-mono" type="number" step="any" bind:value={viewer.window[1]} /></label>
 				</div>
 			</Panel>
 

@@ -82,6 +82,23 @@
 		@apply accent-accent;
 	}
 
+	/*
+	 * A number box is never narrower than what it shows plus its spinner's
+	 * arrows, at any zoom or font, whatever width it is given. Where a browser
+	 * can size a box to its value (field-sizing) that is the least it gets;
+	 * elsewhere it keeps room for six digits.
+	 */
+	input[type="number"] {
+		min-width: calc(6ch + 2.75rem);
+	}
+
+	@supports (field-sizing: content) {
+		input[type="number"] {
+			field-sizing: content;
+			min-width: min-content;
+		}
+	}
+
 	/* Drawn from the theme: some platforms ignore accent-color here (Chrome on macOS paints it green). */
 	progress {
 		@apply appearance-none overflow-hidden rounded-full border-0 bg-field;
