@@ -4,7 +4,7 @@
 	import { PlaneMask } from "../labels/raster";
 	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
-	import { withBackground } from "./background";
+	import { BACKGROUND_VALUE, withBackground } from "./background";
 	import { Busy, type ChunkStore } from "./chunks";
 	import { isRightClick } from "./keymap";
 	import type { LabelLayer } from "./labels";
@@ -492,6 +492,9 @@
 		return [viewer.brushRadius / viewer.aspect[plane.u], viewer.brushRadius / viewer.aspect[plane.v]];
 	}
 
+	/** The label values the project can label with: background (1) and its classes. */
+	const labelValues = () => [BACKGROUND_VALUE, ...(labels?.classes ?? []).map((c) => c.value)];
+
 	function canEdit(): boolean {
 		return viewer.tool === "eraser" || viewer.tool === "roi" || viewer.activeClass !== null;
 	}
@@ -518,7 +521,7 @@
 				mask,
 				erase: viewer.tool === "eraser",
 				value: viewer.tool === "eraser" ? 0 : (viewer.activeClass ?? 0),
-				onlyIf: viewer.tool === "eraser" || !viewer.protectLabels ? "any" : "unlabeled",
+				onlyIf: viewer.tool === "eraser" ? viewer.eraseCondition(labelValues()) : viewer.paintCondition(labelValues()),
 				radius: viewer.brushRadius,
 				last: point,
 			};

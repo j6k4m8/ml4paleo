@@ -26,8 +26,10 @@
 	import X from "@lucide/svelte/icons/x";
 	import { onDestroy, onMount, tick, untrack } from "svelte";
 	import { SvelteMap } from "svelte/reactivity";
+	import ClassMenu from "#lib/ui/ClassMenu.svelte";
 	import Histogram from "#lib/ui/Histogram.svelte";
 	import Panel from "#lib/ui/Panel.svelte";
+	import Segmented from "#lib/ui/Segmented.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
 	import { ApiError, api, message } from "#lib/api.ts";
 	import { unfinished } from "#lib/pipelines.ts";
@@ -38,6 +40,7 @@
 	import { acceptParts, MAX_ACCEPT_VOXELS, planeToAccept, readBox, unlabeledOnly, viewExtent, whyNotInView } from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit, saveState } from "../labels/opqueue.svelte";
+	import { describeWhere, ERASE_MODES, type EraseMode, PAINT_MODES, type PaintMode } from "../labels/modes";
 	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
 	import type { PlaneMask } from "../labels/raster";
 	import {
@@ -103,6 +106,11 @@
 	let classes: LabelClass[] = $state([]);
 	// The classes plus Background, which the person picks from and paints with.
 	const pickable = $derived(withBackground(classes));
+	// The label values the project has, which the modes that go by classes choose among.
+	const labelValues = $derived(pickable.map((c) => c.value));
+	// The classes those modes go by now: the ones chosen that the project has, else the active class.
+	const paintSet = $derived(viewer.classesFor("paint", labelValues));
+	const eraseSet = $derived(viewer.classesFor("erase", labelValues));
 	// Whether any background has been painted (by anyone, or here); assumed until the server says not, so the hint doesn't flash.
 	let hasBackground = $state(true);
 	let paintedBackground = false;
@@ -252,7 +260,10 @@
 			viewer.opacity,
 			viewer.layout,
 			viewer.brushRadius,
-			viewer.protectLabels,
+			viewer.paintMode,
+			viewer.paintClasses,
+			viewer.eraseMode,
+			viewer.eraseClasses,
 			viewer.roiDepth,
 			viewer.showPrediction,
 			viewer.predictionOpacity,
@@ -316,7 +327,7 @@
 		if (!polygon || viewer.activeClass === null) return;
 		const plane = PLANES[polygon.plane];
 		const limits: [number, number] = [viewer.shape[plane.u], viewer.shape[plane.v]];
-		const edit = polygonEdit(polygon, cut ? "subtract" : "add", viewer.activeClass, viewer.protectLabels, limits);
+		const edit = polygonEdit(polygon, cut ? "subtract" : "add", viewer.activeClass, viewer.paintCondition(labelValues), limits);
 		if (edit) commit(plane, polygon.slice, edit.mask, edit.value, edit.onlyIf, edit.tool, true);
 	}
 
@@ -770,6 +781,18 @@
 		if (tool !== "polygon") viewer.polygon = null;
 	}
 
+	// Going by classes, the ones the menu shows are the ones used from then on,
+	// not whichever the active class is when it changes.
+	function setPaintMode(mode: PaintMode) {
+		if (mode === "classes") viewer.paintClasses = paintSet;
+		viewer.paintMode = mode;
+	}
+
+	function setEraseMode(mode: EraseMode) {
+		if (mode === "classes") viewer.eraseClasses = eraseSet;
+		viewer.eraseMode = mode;
+	}
+
 	const status = $derived(
 		{
 			offline: `Offline · ${queue.pending} waiting`,
@@ -961,13 +984,13 @@
 			mode: "add",
 			label: "Add",
 			icon: SquaresUnite,
-			title: "Closing fills the shape with the active class (hold Shift to fill in either mode)",
+			title: "Closing fills the shape with the active class, where the paint mode allows (hold Shift to fill in either mode)",
 		},
 		{
 			mode: "subtract",
 			label: "Subtract",
 			icon: SquaresSubtract,
-			title: "Closing cuts the shape out of the active class, leaving other classes (hold Alt to cut out in either mode)",
+			title: "Closing cuts the shape out of the active class, leaving other classes: it has its own rule, whatever the paint mode says (hold Alt to cut out in either mode)",
 		},
 	];
 
@@ -1043,15 +1066,20 @@
 	const histogram = manifest.histogram && !Array.isArray(manifest.histogram) ? manifest.histogram : null;
 	const chip = $derived(saveState(queue));
 
+	const nameOf = (values: number[]) => pickable.filter((c) => values.includes(c.value)).map((c) => c.name);
+	/** Where painting or erasing goes under the mode, as a phrase to put after what the tool does ("" for anywhere). */
+	const paintWhere = $derived(describeWhere(viewer.paintMode, nameOf(paintSet)));
+	const eraseWhere = $derived(describeWhere(viewer.eraseMode, nameOf(eraseSet)));
+
 	const hint = $derived(
 		{
 			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · right-click moves the crosshair",
-			brush: "Drag to paint the active class · [ ] change the size · right-click moves the crosshair",
-			eraser: "Drag to erase labels · [ ] change the size · right-click moves the crosshair",
+			brush: `Drag to paint the active class${paintWhere ? ` ${paintWhere}` : ""} · [ ] change the size · right-click moves the crosshair`,
+			eraser: `Drag to erase labels${eraseWhere ? ` ${eraseWhere}` : ""} · [ ] change the size · right-click moves the crosshair`,
 			polygon:
 				viewer.polygonMode === "add"
-					? "Click points or drag freehand · click the first point, double-click, or Enter fills · hold Alt to cut out · Esc cancels · right-click moves the crosshair"
-					: "Click points or drag freehand · click the first point, double-click, or Enter cuts out · hold Shift to fill · Esc cancels · right-click moves the crosshair",
+					? `Click points or drag freehand · click the first point, double-click, or Enter fills${paintWhere ? ` ${paintWhere}` : ""} · hold Alt to cut out · Esc cancels · right-click moves the crosshair`
+					: "Click points or drag freehand · click the first point, double-click, or Enter cuts out the active class · hold Shift to fill · Esc cancels · right-click moves the crosshair",
 			roi: "Drag a box on a slice · G goes to the next open ROI · C marks it complete · right-click moves the crosshair",
 		}[viewer.tool],
 	);
@@ -1103,9 +1131,24 @@
 				</div>
 			{/if}
 			{#if viewer.tool === "brush" || viewer.tool === "polygon"}
-				<label class="flex shrink-0 items-center gap-1.5 text-ink-dim">
-					<input type="checkbox" bind:checked={viewer.protectLabels} /> Only unlabeled voxels
-				</label>
+				{@const cuts = viewer.tool === "polygon" && viewer.polygonMode === "subtract"}
+				<Segmented
+					label="Where to paint"
+					value={viewer.paintMode}
+					options={PAINT_MODES}
+					onchange={setPaintMode}
+					class={cuts ? "opacity-60" : ""}
+					title={cuts ? "These say where Add (and closing with Shift) fills. Subtract cuts only the active class out, whatever they say." : undefined}
+				/>
+				{#if viewer.paintMode === "classes"}
+					<ClassMenu classes={pickable} selected={paintSet} label="Paint only over" onchange={(values) => (viewer.paintClasses = values)} />
+				{/if}
+			{/if}
+			{#if viewer.tool === "eraser"}
+				<Segmented label="What to erase" value={viewer.eraseMode} options={ERASE_MODES} onchange={setEraseMode} />
+				{#if viewer.eraseMode === "classes"}
+					<ClassMenu classes={pickable} selected={eraseSet} label="Erase only" onchange={(values) => (viewer.eraseClasses = values)} />
+				{/if}
 			{/if}
 			{#if viewer.tool === "roi"}
 				<label class="flex shrink-0 items-center gap-2 text-ink-dim">
