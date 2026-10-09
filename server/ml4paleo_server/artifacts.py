@@ -34,6 +34,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ml4paleo.labels import Source
+from ml4paleo.protocol import json_text
 from ml4paleo.storage import MANIFEST_KEY, object_store
 
 from . import quotas
@@ -182,6 +183,12 @@ async def _read_manifest(store) -> dict[str, Any] | None:
         manifest = None
     if not isinstance(manifest, dict):
         raise Rejected(f"{MANIFEST_KEY} is not a JSON object.", retryable=False)
+    try:
+        # Python's parser takes NaN and the infinities, which the database
+        # can't store: the job's output is wrong, so trying again won't help.
+        json_text(manifest, MANIFEST_KEY)
+    except ValueError as exc:
+        raise Rejected(f"{exc}.", retryable=False) from None
     return manifest
 
 

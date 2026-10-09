@@ -13,7 +13,7 @@ import uuid
 import numpy as np
 import obstore
 import pytest
-from helpers import SECRET_KEY, add_worker, run_db, signup, strict_json
+from helpers import NOT_JSON, SECRET_KEY, add_worker, run_db, signup, strict_json
 from ml4paleo_server import artifacts, jobs, labels, pipelines
 from ml4paleo_server.db import (
     Artifact,
@@ -100,21 +100,27 @@ def add_class(browser, project):
     ).json()["value"]
 
 
-@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("literal", NOT_JSON)
 def test_a_parameter_json_cannot_hold_is_a_422(ada, literal):
     project = make_project(ada)
     base = f"/api/projects/{project}/models"
-    for name in ("n_estimators", "sigma_max"):
+    # Whichever parameter it is (a plugin takes only what its fields allow, but
+    # keeps them as JSON, which can't hold it), or one it doesn't know.
+    for name in ("n_estimators", "sigma_max", "other"):
         response = ada.post(
             base,
             content=f'{{"params": {{"{name}": {literal}}}}}',
             headers={"content-type": "application/json"},
         )
         assert response.status_code == 422, (name, response.text)
-        # Which parameter, as the web app reads it, in a body a browser can parse.
         [error] = strict_json(response.text)["detail"]
-        assert error["loc"] == ["body", "params", name]
-        assert error["msg"]
+        assert error["loc"] == ["body", "params"]
+        assert error["msg"] == "Value error, params can't hold NaN or infinity"
+        assert error["input"] == {name: NOT_JSON[literal]}
+    # Other parameters it refuses say which, as before.
+    refused = ada.post(base, json={"params": {"n_estimators": 0}})
+    assert refused.status_code == 422
+    assert refused.json()["detail"][0]["loc"] == ["body", "params", "n_estimators"]
 
 
 def test_training_sets_pin_labels_and_rois(ada, settings, migrated_database_url):

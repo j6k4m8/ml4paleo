@@ -9,6 +9,7 @@ to the account it belongs to.
 import asyncio
 import base64
 import datetime
+import json
 import math
 import shutil
 import threading
@@ -19,7 +20,16 @@ import numpy as np
 import pytest
 import v1_volume
 import zarr
-from helpers import SECRET_KEY, add_worker, bearer, make_admin, run_db, signup
+from helpers import (
+    NOT_JSON,
+    SECRET_KEY,
+    add_worker,
+    bearer,
+    make_admin,
+    run_db,
+    signup,
+    strict_json,
+)
 from ml4paleo_server import artifacts, jobs, pipelines
 from ml4paleo_server.db import (
     AuditEvent,
@@ -1038,13 +1048,26 @@ def labels_job(new_browser, database_url):
     ]
     url = f"/api/worker/v1/jobs/{lease['job_id']}/label-ops"
 
-    def send(client_op_id: str):
+    def send(client_op_id: str, tool=None, literal=None, deltas=None):
+        """
+        Send the edit, with a `tool` if given (and `deltas` in place of its
+        own). With a `literal`, each "@n@" in it is written as that, which may
+        be NaN or infinity.
+        """
         op = {
             "lease_token": lease["lease_token"],
             "client_op_id": client_op_id,
-            "deltas": wire,
+            "deltas": wire if deltas is None else deltas,
         }
-        return worker.post(url, json=op, headers=bearer(token))
+        if tool is not None:
+            op["tool"] = tool
+        if literal is None:
+            return worker.post(url, json=op, headers=bearer(token))
+        return worker.post(
+            url,
+            content=json.dumps(op).replace('"@n@"', literal),
+            headers={**bearer(token), "content-type": "application/json"},
+        )
 
     return ada, project, value, lease["job_id"], send
 
@@ -1061,6 +1084,29 @@ def test_a_repeated_label_op_gets_its_first_result(
     assert ada.request("DELETE", f"{classes}/{value}").status_code == 204
     again = send(op_id)
     assert (again.status_code, again.json()) == (201, first.json())
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_a_tool_holding_nan_or_infinity_is_refused_from_a_job(
+    new_browser, settings, migrated_database_url, literal
+):
+    ada, project, value, _, send = labels_job(new_browser, migrated_database_url)
+    # A tool is stored as JSON, which can't hold them.
+    refused = send(str(uuid.uuid4()), {"radius": "@n@", "at": [1, 2]}, literal)
+    assert refused.status_code == 422, refused.text
+    [error] = strict_json(refused.text)["detail"]
+    assert error["loc"] == ["body", "tool"]
+    assert error["msg"] == "Value error, tool can't hold NaN or infinity"
+    assert error["input"] == {"radius": NOT_JSON[literal], "at": [1, 2]}
+    # Nor can a delta (each is checked as the annotator's are), in any field.
+    for field in ("base_version", "value"):
+        delta = {"key": [0, 0, 0], "box": [0, 0, 0, 1, 1, 1], "mask": "", field: "@n@"}
+        refused = send(str(uuid.uuid4()), deltas=[delta], literal=literal)
+        assert refused.status_code == 422, (field, refused.text)
+        assert field in refused.json()["detail"]
+    counts = ada.get(f"/api/projects/{project}/labels/counts").json()
+    assert counts[str(value)] == 0
+    assert send(str(uuid.uuid4()), {"radius": 3.5, "at": [1, 2]}).status_code == 201
 
 
 def test_a_cancelled_job_writes_no_more_labels(

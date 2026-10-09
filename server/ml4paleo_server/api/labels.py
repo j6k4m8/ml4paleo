@@ -74,6 +74,7 @@ from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, S
 from ml4paleo.labels.codec import ZARR_CODECS, blob_key
 from ml4paleo.labels.deltas import ChunkDelta, unpack_mask, unpack_values
 from ml4paleo.ome import LevelSpec
+from ml4paleo.protocol import json_text
 from ml4paleo.segmentation.predict import open_prediction
 from ml4paleo.storage import StorageGrant, get_bytes, object_store
 
@@ -327,13 +328,7 @@ class OpIn(BaseModel):
     @field_validator("tool")
     @classmethod
     def _small(cls, tool: dict[str, Any]) -> dict[str, Any]:
-        # It is stored as JSON, which can't hold NaN or the infinities (Python's
-        # parser takes them, and the database refuses them).
-        try:
-            text = json.dumps(tool, allow_nan=False)
-        except ValueError:
-            raise ValueError("tool can't hold NaN or infinity") from None
-        if len(text) > MAX_TOOL_BYTES:
+        if len(json_text(tool, "tool")) > MAX_TOOL_BYTES:
             raise ValueError("tool is too large")
         return tool
 

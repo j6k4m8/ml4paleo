@@ -200,3 +200,106 @@ def test_a_number_json_cannot_hold_gets_its_422_over_a_real_connection(
         assert connection.getresponse().status == 200
     finally:
         connection.close()
+
+
+def can_hold_nan(spec: dict) -> set[tuple[str, str, str]]:
+    """
+    The request fields (method, path, field) in an OpenAPI spec that could be
+    sent a number JSON can't hold, or something with one in it: a number that is
+    not bounded on both sides, and anything free-form (an object or list of no
+    particular shape).
+    """
+    schemas = spec["components"]["schemas"]
+    found: set[tuple[str, str, str]] = set()
+
+    def walk(schema: dict, where: tuple[str, str], name: str, seen: frozenset) -> None:
+        if "$ref" in schema:
+            ref = schema["$ref"].split("/")[-1]
+            if ref not in seen:
+                walk(schemas[ref], where, name, seen | {ref})
+            return
+        for key in ("anyOf", "oneOf", "allOf"):
+            for option in schema.get(key, []):
+                walk(option, where, name, seen)
+        if any(key in schema for key in ("anyOf", "oneOf", "allOf")):
+            return
+        kind = schema.get("type")
+        if kind == "number":
+            bounded = "minimum" in schema and "maximum" in schema
+            if not bounded:
+                found.add((*where, name))
+        elif kind == "object" or "properties" in schema:
+            for field, sub in schema.get("properties", {}).items():
+                walk(sub, where, f"{name}.{field}", seen)
+            extra = schema.get("additionalProperties")
+            if not schema.get("properties") and extra in (None, True, {}):
+                found.add((*where, name))
+            elif isinstance(extra, dict) and extra:
+                walk(extra, where, name + "{}", seen)
+        elif kind == "array":
+            options = [
+                *schema.get("prefixItems", []),
+                *([schema["items"]] if "items" in schema else []),
+            ]
+            if not options:
+                found.add((*where, name))
+            for option in options:
+                walk(option, where, name + "[]", seen)
+        elif kind is None and not schema.get("enum") and "const" not in schema:
+            found.add((*where, name))
+
+    for path, operations in spec["paths"].items():
+        for method, operation in operations.items():
+            where = (method.upper(), path)
+            for parameter in operation.get("parameters", []):
+                walk(parameter.get("schema", {}), where, parameter["name"], frozenset())
+            for content in operation.get("requestBody", {}).get("content", {}).values():
+                walk(content.get("schema", {}), where, "body", frozenset())
+    return found
+
+
+# Each of these is checked by a test of its own, which sends it NaN and the
+# infinities and expects a 422. Free-form fields hold JSON, which the database
+# stores and can't hold them (`ml4paleo.protocol.json_text` refuses them); a
+# number with no upper bound would take infinity (so they say `allow_inf_nan=False`).
+FREE_FORM_FIELDS = {
+    ("POST", "/api/projects/{project_id}/labels/ops", "body.tool"),
+    ("POST", "/api/projects/{project_id}/models", "body.params"),
+    ("POST", "/api/worker/v1/jobs/{job_id}/complete", "body.result"),
+    ("POST", "/api/worker/v1/jobs/{job_id}/label-ops", "body.tool"),
+    ("POST", "/api/worker/v1/jobs/{job_id}/label-ops", "body.deltas[]"),
+}
+UNBOUNDED_NUMBERS = (
+    {
+        ("PUT", "/api/admin/users/{user_id}/quota", f"body.{limit}")
+        for limit in ("storage_gb", "cpu_hours_per_day", "gpu_hours_per_day")
+    }
+    | {
+        (
+            "POST",
+            "/api/admin/quota-requests/{request_id}",
+            f"body.quota_override.{limit}",
+        )
+        for limit in ("storage_gb", "cpu_hours_per_day", "gpu_hours_per_day")
+    }
+    | {
+        (method, path, name)
+        for method, path in (
+            ("POST", "/api/worker/v1/hello"),
+            ("POST", "/api/worker/v1/claim"),
+        )
+        for name in ("body.caps.vram_gb", "body.caps.memory_gb")
+    }
+    | {("POST", "/api/worker/v1/claim", "body.wait_seconds")}
+)
+
+
+def test_a_new_request_field_that_could_hold_nan_is_one_that_is_checked(app):
+    found = can_hold_nan(app.openapi())
+    new = found - FREE_FORM_FIELDS - UNBOUNDED_NUMBERS
+    assert not new, (
+        f"{sorted(new)} could be sent NaN or infinity, which the database can't "
+        "store (a 500). Refuse them (`json_text` for JSON, `allow_inf_nan=False` "
+        "or bounds for a number), test it, and add the field to the lists here."
+    )
+    assert found == FREE_FORM_FIELDS | UNBOUNDED_NUMBERS

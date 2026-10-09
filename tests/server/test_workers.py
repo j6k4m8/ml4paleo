@@ -7,11 +7,21 @@ tests exercise the real client, server, and queue together.
 """
 
 import datetime
+import json
 import threading
 import time
 
 import pytest
-from helpers import CAPS, add_worker, bearer, make_admin, run_db, signup
+from helpers import (
+    CAPS,
+    NOT_JSON,
+    add_worker,
+    bearer,
+    make_admin,
+    run_db,
+    signup,
+    strict_json,
+)
 from ml4paleo_server import housekeeper, jobs
 from ml4paleo_server.db import Job, JobAttempt, create_sessionmaker
 from ml4paleo_server.db import Worker as WorkerRow
@@ -19,7 +29,7 @@ from ml4paleo_server.jobs.workers import ensure_local_worker, new_worker_token
 from ml4paleo_worker import caps as worker_caps
 from ml4paleo_worker import cli as worker_cli
 from ml4paleo_worker import main as worker_main
-from ml4paleo_worker.client import LeaseLost, ServerClient, Unauthorized
+from ml4paleo_worker.client import API_PREFIX, LeaseLost, ServerClient, Unauthorized
 from ml4paleo_worker.context import PermanentError
 from ml4paleo_worker.handlers import HANDLERS
 from ml4paleo_worker.main import Worker
@@ -247,6 +257,136 @@ def test_a_result_that_cannot_be_sent_fails_at_once(
     job = job_row(migrated_database_url, job_id)
     assert (job.status, job.attempts) == ("failed", 1)
     assert "can't be sent" in job.error
+
+
+def post_with_number(worker, token, url, body, literal):
+    """
+    Send `body` to a worker route with each "@n@" in it written as `literal`
+    (NaN, an infinity, or a number too big for a float: Python's JSON parser
+    takes them, a browser's doesn't).
+    """
+    return worker.post(
+        url,
+        content=json.dumps(body).replace('"@n@"', literal),
+        headers={**bearer(token), "content-type": "application/json"},
+    )
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_numbers_json_cannot_hold_are_a_422_in_what_workers_send(
+    new_browser, token, migrated_database_url, literal
+):
+    worker = new_browser()
+    base = "/api/worker/v1"
+    shown = NOT_JSON[literal]
+    caps = CAPS.model_dump()
+    # What a worker can do: its memory and video memory are limits, not NaN or infinity.
+    for field in ("vram_gb", "memory_gb"):
+        for route, body in (
+            ("hello", {"caps": {**caps, field: "@n@"}}),
+            ("claim", {"caps": {**caps, field: "@n@"}, "wait_seconds": 0}),
+        ):
+            refused = post_with_number(worker, token, f"{base}/{route}", body, literal)
+            assert refused.status_code == 422, (route, field, refused.text)
+            [error] = strict_json(refused.text)["detail"]
+            assert error["loc"] == ["body", "caps", field] and error["input"] == shown
+    wait = {"caps": caps, "wait_seconds": "@n@"}
+    refused = post_with_number(worker, token, f"{base}/claim", wait, literal)
+    assert refused.status_code == 422, refused.text
+    # None of it was taken for what the worker can do.
+    assert (
+        worker.post(
+            f"{base}/hello", json={"caps": caps}, headers=bearer(token)
+        ).status_code
+        == 200
+    )
+
+    # A job it has leased: a result with one in it is refused, and the lease is as it was.
+    job_id = enqueue(migrated_database_url)
+    client = ServerClient(token, http=worker.client)
+    lease = client.claim(CAPS, wait_seconds=0)
+    assert lease is not None and lease.job_id == job_id
+    result = {"lease_token": lease.lease_token, "result": {"scores": [{"dice": "@n@"}]}}
+    refused = post_with_number(
+        worker, token, f"{base}/jobs/{job_id}/complete", result, literal
+    )
+    assert refused.status_code == 422, refused.text
+    [error] = strict_json(refused.text)["detail"]
+    assert error["loc"] == ["body", "result"]
+    assert error["msg"] == "Value error, result can't hold NaN or infinity"
+    assert error["input"] == {"scores": [{"dice": shown}]}
+    assert job_row(migrated_database_url, job_id).status == "leased"
+    client.complete(job_id, lease.lease_token, {"scores": [{"dice": 0.5}]})
+    job = job_row(migrated_database_url, job_id)
+    assert (job.status, job.result) == ("succeeded", {"scores": [{"dice": 0.5}]})
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_numbers_with_bounds_refuse_nan_and_infinity_by_them(
+    new_browser, token, migrated_database_url, literal
+):
+    json_type = {"content-type": "application/json"}
+    # A heartbeat's progress, on a lease...
+    worker = new_browser()
+    job_id = enqueue(migrated_database_url)
+    lease = ServerClient(token, http=worker.client).claim(CAPS, wait_seconds=0)
+    assert lease is not None and lease.job_id == job_id
+    beat = {"lease_token": lease.lease_token, "progress": "@n@"}
+    refused = post_with_number(
+        worker, token, f"/api/worker/v1/jobs/{job_id}/heartbeat", beat, literal
+    )
+    assert refused.status_code == 422, refused.text
+    [error] = strict_json(refused.text)["detail"]
+    assert error["loc"] == ["body", "progress"]
+    # ...a diagnostic job's seconds, an admin's...
+    admin, _ = make_admin(new_browser, migrated_database_url)
+    noop = admin.post(
+        "/api/admin/jobs/noop", content=f'{{"seconds": {literal}}}', headers=json_type
+    )
+    assert noop.status_code == 422, noop.text
+    # ...and how far a mesh is simplified, a member's.
+    ada = new_browser()
+    signup(ada)
+    project = ada.post("/api/projects", json={"name": "Skull"}).json()["id"]
+    meshes = ada.post(
+        f"/api/projects/{project}/meshes",
+        content=f'{{"simplify": {literal}}}',
+        headers=json_type,
+    )
+    assert meshes.status_code == 422, meshes.text
+    assert "simplify" in meshes.text
+
+
+def test_a_result_the_server_refuses_fails_the_job_for_good(
+    new_browser, token, migrated_database_url
+):
+    class WritesNaN(ServerClient):
+        """Reports a result as a worker that doesn't check it first might."""
+
+        def complete(self, job_id, lease_token, result):
+            body = {"lease_token": lease_token, "result": {"dice": float("nan")}}
+            response = self._http.post(
+                f"{API_PREFIX}/jobs/{job_id}/complete",
+                content=json.dumps(body),
+                headers={**self._headers, "Content-Type": "application/json"},
+            )
+            response.raise_for_status()
+
+    client = WritesNaN(token, http=new_browser().client)
+    worker = Worker(
+        client,
+        CAPS,
+        handlers={"noop": lambda ctx: {"fine": True}},
+        claim_wait_seconds=0.5,
+        heartbeat_seconds=0.1,
+    )
+    job_id = enqueue(migrated_database_url)
+    start(worker).join(timeout=20)
+    job = job_row(migrated_database_url, job_id)
+    # A 422 isn't tried again: it is reported as a failure, which isn't either.
+    assert (job.status, job.attempts) == ("failed", 1)
+    assert job.error.startswith("The server rejected the job's result: 422")
+    assert "result can't hold NaN or infinity" in job.error
 
 
 def test_a_revoked_worker_waiting_for_work_gets_none(

@@ -29,6 +29,20 @@ MAX_RESULT_BYTES = 64 * 1024
 MAX_ERROR_CHARS = 4000
 
 
+def json_text(value: Any, name: str) -> str:
+    """
+    `value` as JSON text, for a field that is stored as JSON. Python's JSON
+    parser takes NaN, the infinities, and numbers too big for a float (which
+    become infinity), but JSON can't hold them and the database refuses them.
+    A field that holds one raises ValueError("<name> can't hold NaN or
+    infinity"), which pydantic makes a validation error (a 422, for a request).
+    """
+    try:
+        return json.dumps(value, allow_nan=False)
+    except ValueError:
+        raise ValueError(f"{name} can't hold NaN or infinity") from None
+
+
 class Tier(enum.IntEnum):
     """
     Job priority. Lower runs first; jobs in one tier run in the order their
@@ -51,9 +65,9 @@ class WorkerCaps(BaseModel):
     version: str = Field(max_length=32)
     kinds: list[str] = Field(max_length=100)
     labels: list[str] = Field(default=[], max_length=100)
-    vram_gb: float = Field(default=0, ge=0)
+    vram_gb: float = Field(default=0, ge=0, allow_inf_nan=False)
     cpus: int = Field(default=1, ge=1)
-    memory_gb: float = Field(default=0, ge=0)
+    memory_gb: float = Field(default=0, ge=0, allow_inf_nan=False)
     slots: int = Field(default=1, ge=1)
 
 
@@ -71,7 +85,9 @@ class HelloOut(BaseModel):
 
 class ClaimIn(BaseModel):
     caps: WorkerCaps
-    wait_seconds: float = Field(default=MAX_CLAIM_WAIT_SECONDS, ge=0)
+    wait_seconds: float = Field(
+        default=MAX_CLAIM_WAIT_SECONDS, ge=0, allow_inf_nan=False
+    )
 
 
 class JobLease(BaseModel):
@@ -111,7 +127,7 @@ class CompleteIn(BaseModel):
     @field_validator("result")
     @classmethod
     def _small(cls, result: dict[str, Any]) -> dict[str, Any]:
-        if len(json.dumps(result)) > MAX_RESULT_BYTES:
+        if len(json_text(result, "result")) > MAX_RESULT_BYTES:
             raise ValueError(f"result is over {MAX_RESULT_BYTES} bytes")
         return result
 
@@ -145,3 +161,9 @@ class LabelOpIn(BaseModel):
     # As the labels API takes them: masks and values base64-encoded.
     deltas: list[dict[str, Any]] = Field(min_length=1, max_length=512)
     tool: dict[str, Any] = {}
+
+    @field_validator("tool")
+    @classmethod
+    def _finite(cls, tool: dict[str, Any]) -> dict[str, Any]:
+        json_text(tool, "tool")
+        return tool

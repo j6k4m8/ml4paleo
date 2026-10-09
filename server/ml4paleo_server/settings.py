@@ -96,10 +96,12 @@ class QuotaSettings(BaseModel):
     how much runs at once.
     """
 
-    storage_gb: float | None = Field(default=10, ge=0)
+    # A limit is a number or None: infinity isn't unlimited, and an admin's
+    # override is stored as JSON, which can't hold it.
+    storage_gb: float | None = Field(default=10, ge=0, allow_inf_nan=False)
     trained_models: int | None = Field(default=20, ge=0)
-    cpu_hours_per_day: float | None = Field(default=None, ge=0)
-    gpu_hours_per_day: float | None = Field(default=None, ge=0)
+    cpu_hours_per_day: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    gpu_hours_per_day: float | None = Field(default=None, ge=0, allow_inf_nan=False)
 
 
 class UnconfirmedQuotaSettings(QuotaSettings):
@@ -110,7 +112,7 @@ class UnconfirmedQuotaSettings(QuotaSettings):
     override for the account still wins.
     """
 
-    storage_gb: float | None = Field(default=1, ge=0)
+    storage_gb: float | None = Field(default=1, ge=0, allow_inf_nan=False)
     trained_models: int | None = Field(default=1, ge=0)
 
 

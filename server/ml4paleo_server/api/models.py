@@ -24,9 +24,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 
+from ml4paleo.protocol import json_text
 from ml4paleo.segmentation.plugin import get_plugin, plugins
 
 from .. import artifacts, audit, jobs, pipelines, quotas, training
@@ -63,6 +64,14 @@ class TrainIn(BaseModel):
     plugin: str = "rf"
     params: dict[str, Any] = {}
     name: str | None = Field(default=None, max_length=100)
+
+    @field_validator("params")
+    @classmethod
+    def _finite(cls, params: dict[str, Any]) -> dict[str, Any]:
+        # A plugin's own fields bound what it takes, but what it keeps of them
+        # is stored as JSON, which can't hold NaN or infinity.
+        json_text(params, "params")
+        return params
 
 
 class ModelOut(BaseModel):
