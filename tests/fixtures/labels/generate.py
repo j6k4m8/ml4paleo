@@ -57,6 +57,9 @@ def _base_chunk(name: str) -> tuple[np.ndarray, np.ndarray]:
     if name == "quadrants":
         chunk[:32, :32] = 1
         chunk[32:, 32:] = 3
+    if name == "mixed":
+        z, y, _ = np.indices(LABEL_CHUNK_ZYX)
+        chunk[:] = (z // 8 + y // 8) % 5
     source = np.where(chunk > 0, Source.IMPORTED, Source.NONE).astype(np.uint8)
     return chunk, source
 
@@ -80,6 +83,19 @@ def _apply_cases() -> list[dict]:
         ("paint_only_unlabeled", "quadrants", 2, None, "unlabeled"),
         ("erase_class_3_only", "quadrants", 0, None, "class:3"),
         ("multiclass_values", "quadrants", None, "gradient", "any"),
+        # The "mixed" base holds unlabeled voxels, background (1), and classes 2 to 4.
+        ("mixed_paint_anywhere", "mixed", 6, None, "any"),
+        ("mixed_paint_only_unlabeled", "mixed", 6, None, "unlabeled"),
+        ("mixed_paint_only_labeled", "mixed", 6, None, "labeled"),
+        ("mixed_paint_over_class_2", "mixed", 6, None, "class:2"),
+        # Background and one class.
+        ("mixed_paint_over_background_and_class_3", "mixed", 6, None, "class:1,3"),
+        # The values may come in any order; the server puts them in order.
+        ("mixed_paint_over_classes_unordered", "mixed", 6, None, "class:4,1,2"),
+        # Values the base doesn't hold select nothing.
+        ("mixed_paint_over_absent_classes", "mixed", 6, None, "class:5,200"),
+        ("mixed_erase_two_classes", "mixed", 0, None, "class:2,4"),
+        ("mixed_multiclass_values_only_labeled", "mixed", None, "gradient", "labeled"),
     ]
     for name, base, value, values_kind, only_if in specs:
         box = (16, 20, 24, 48, 44, 56)
@@ -159,6 +175,7 @@ def _history_cases() -> list[dict]:
     """
     full = (0, 0, 0, 8, 8, 8)
     left = (0, 0, 0, 8, 8, 4)
+    right = (0, 0, 4, 8, 8, 8)
     histories = {
         # B repaints A's voxels with the same class; undoing A keeps B's paint.
         "same_value_overwrite": [
@@ -185,6 +202,26 @@ def _history_cases() -> list[dict]:
             {"op": {"box": left, "value": 2}},
             {"op": {"box": full, "value": 4, "only_if": "unlabeled"}},
             {"undo": 0},
+        ],
+        # A repaint of labeled voxels claims only those; undoing it brings back
+        # what was there, and redoing the first op keeps the repaint on top.
+        "only_labeled_then_undo_and_redo": [
+            {"op": {"box": left, "value": 2}},
+            {"op": {"box": full, "value": 4, "only_if": "labeled"}},
+            {"undo": 1},
+            {"undo": 0},
+            {"redo": 1},
+        ],
+        # Painting over two of three classes claims just those voxels; the
+        # third stays through the op, its undo, and its redo.
+        "only_some_classes_then_undo_and_redo": [
+            {"op": {"box": left, "value": 2}},
+            {"op": {"box": right, "value": 3}},
+            {"op": {"box": (0, 0, 2, 8, 8, 6), "value": 4}},
+            {"op": {"box": full, "value": 5, "only_if": "class:3,4"}},
+            {"undo": 3},
+            {"redo": 3},
+            {"undo": 2},
         ],
     }
     cases = []
@@ -250,6 +287,8 @@ def generate() -> dict:
             "zeros": "all voxels 0",
             "quadrants": "[:32, :32] = 1 and [32:, 32:] = 3; source is IMPORTED (5) "
             "wherever class > 0",
+            "mixed": "(z // 8 + y // 8) % 5, so every value 0 to 4 in blocks; "
+            "source is IMPORTED (5) wherever class > 0",
         },
         "apply": _apply_cases(),
         "split": _split_cases(),

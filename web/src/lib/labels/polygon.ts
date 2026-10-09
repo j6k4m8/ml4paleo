@@ -83,17 +83,18 @@ export interface PolygonEdit {
 
 /**
  * The edit closing `polygon` makes, or null if it covers no voxel centers.
- * Filling writes the class `value` (only into unlabeled voxels if
- * `protect`). Cutting out clears `value` inside and leaves other classes'
- * voxels alone, so a hole cut in one class never takes a neighbour's labels
- * with it (the eraser clears everything). `limits` is the image's size
- * along u and v.
+ * Filling writes the class `value` into the voxels `paintIf` (an `only_if`,
+ * see `modes.ts`) lets change. Cutting out clears `value` inside and
+ * leaves other classes' voxels alone, so a hole cut in one class never takes
+ * a neighbour's labels with it (the eraser clears everything); that is its
+ * own rule, whatever `paintIf` says. `limits` is the image's size along u
+ * and v.
  */
 export function polygonEdit(
 	polygon: Polygon,
 	mode: PolygonMode,
 	value: number,
-	protect: boolean,
+	paintIf: string,
 	limits: [number, number],
 ): PolygonEdit | null {
 	const mask = new PlaneMask(...limits);
@@ -104,7 +105,7 @@ export function polygonEdit(
 	return {
 		mask,
 		value: cut ? 0 : value,
-		onlyIf: cut ? `class:${value}` : protect ? "unlabeled" : "any",
+		onlyIf: cut ? `class:${value}` : paintIf,
 		tool: {
 			name: cut ? "polygon-erase" : "polygon",
 			plane: polygon.plane,

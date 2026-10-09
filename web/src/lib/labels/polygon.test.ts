@@ -121,7 +121,7 @@ describe("lassoPoints", () => {
 
 	it("rasterizes a lasso drawn round a circle as that circle", () => {
 		const polygon: Polygon = { plane: "xy", slice: 0, points: lassoPoints(undefined, circle(20, 0.1), [1, 1]) };
-		const edit = polygonEdit(polygon, "add", 2, false, [100, 100]);
+		const edit = polygonEdit(polygon, "add", 2, "any", [100, 100]);
 		expect(edit?.mask.count).toBeGreaterThan(Math.PI * 400 * 0.97);
 		expect(edit?.mask.count).toBeLessThan(Math.PI * 400 * 1.03);
 	});
@@ -153,8 +153,8 @@ describe("polygonEdit", () => {
 	}
 
 	/** Apply an edit to the slice, as the label overlay does before the server answers. */
-	function apply(labels: Uint8Array, polygon: Polygon, mode: "add" | "subtract", value: number, protect = false) {
-		const edit = polygonEdit(polygon, mode, value, protect, [SIZE, SIZE]);
+	function apply(labels: Uint8Array, polygon: Polygon, mode: "add" | "subtract", value: number, paintIf = "any") {
+		const edit = polygonEdit(polygon, mode, value, paintIf, [SIZE, SIZE]);
 		if (!edit) throw new Error("The polygon covers nothing");
 		const volume = edit.mask.toVolume(PLANES.xy, polygon.slice);
 		for (const delta of splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value: edit.value, onlyIf: edit.onlyIf })) {
@@ -203,25 +203,68 @@ describe("polygonEdit", () => {
 	it("fills with the class, only into unlabeled voxels when asked", () => {
 		const labels = slice();
 		labels[5 * SIZE + 5] = 3;
-		const edit = apply(labels, { plane: "xy", slice: 0, points: square(2, 2, 8, 8) }, "add", 2, true);
+		const edit = apply(labels, { plane: "xy", slice: 0, points: square(2, 2, 8, 8) }, "add", 2, "unlabeled");
 		expect(edit).toMatchObject({ value: 2, onlyIf: "unlabeled", tool: { name: "polygon", plane: "xy", slice: 0 } });
 		expect(at(labels, 5, 5)).toBe(3);
 		expect(at(labels, 4, 4)).toBe(2);
-		expect(polygonEdit({ plane: "xy", slice: 0, points: square(2, 2, 8, 8) }, "add", 2, false, [SIZE, SIZE])?.onlyIf).toBe("any");
+		expect(polygonEdit({ plane: "xy", slice: 0, points: square(2, 2, 8, 8) }, "add", 2, "any", [SIZE, SIZE])?.onlyIf).toBe("any");
+	});
+
+	/** A slice with a column of each: unlabeled, background (1), and classes 2 to 4, every 6 voxels. */
+	function striped(): Uint8Array {
+		const labels = slice();
+		for (let v = 0; v < SIZE; v++) for (let u = 0; u < SIZE; u++) labels[v * SIZE + u] = Math.floor(u / 6) % 5;
+		return labels;
+	}
+
+	it("fills only over labeled voxels, background among them", () => {
+		const labels = striped();
+		const edit = apply(labels, { plane: "xy", slice: 0, points: square(0, 0, 30, 30) }, "add", 9, "labeled");
+		expect(edit.onlyIf).toBe("labeled");
+		// Column 0 (u 0 to 5) is unlabeled and stays so; the rest, background included, is filled.
+		expect(at(labels, 2, 10)).toBe(0);
+		expect(at(labels, 8, 10)).toBe(9);
+		expect(at(labels, 14, 10)).toBe(9);
+		expect(at(labels, 20, 10)).toBe(9);
+		expect(at(labels, 26, 10)).toBe(9);
+		// Past the polygon, as it was.
+		expect(at(labels, 31, 10)).toBe(Math.floor(31 / 6) % 5);
+	});
+
+	it("fills only over the classes listed", () => {
+		const labels = striped();
+		// Background (1, u 6 to 11) and class 3 (u 18 to 23).
+		const edit = apply(labels, { plane: "xy", slice: 0, points: square(0, 0, 30, 30) }, "add", 9, "class:1,3");
+		expect(edit.onlyIf).toBe("class:1,3");
+		const columns = [2, 8, 14, 20, 26].map((u) => at(labels, u, 10));
+		expect(columns).toEqual([0, 9, 2, 9, 4]);
+	});
+
+	it("cuts out by its own rule, whatever the paint mode says", () => {
+		for (const paintIf of ["any", "unlabeled", "labeled", "class:1,3"]) {
+			const labels = striped();
+			// Cutting class 2 (u 12 to 17) out of a polygon across every column.
+			const edit = apply(labels, { plane: "xy", slice: 0, points: square(0, 0, 30, 30) }, "subtract", 2, paintIf);
+			expect(edit.onlyIf).toBe("class:2");
+			expect(edit.value).toBe(0);
+			expect(at(labels, 14, 10)).toBe(0);
+			expect(at(labels, 8, 10)).toBe(1);
+			expect(at(labels, 20, 10)).toBe(3);
+		}
 	});
 
 	it("records the outline, rounded, unless it's very long", () => {
-		const edit = polygonEdit({ plane: "yz", slice: 3, points: [[1.234, 2], [9.87, 2], [5, 7.06]] }, "add", 2, false, [SIZE, SIZE]);
+		const edit = polygonEdit({ plane: "yz", slice: 3, points: [[1.234, 2], [9.87, 2], [5, 7.06]] }, "add", 2, "any", [SIZE, SIZE]);
 		expect(edit?.tool).toEqual({ name: "polygon", plane: "yz", slice: 3, points: [[1.2, 2], [9.9, 2], [5, 7.1]] });
 		const long = Array.from({ length: 600 }, (_, i): Point => {
 			const angle = (2 * Math.PI * i) / 600;
 			return [16 + 10 * Math.cos(angle), 16 + 10 * Math.sin(angle)];
 		});
-		expect(polygonEdit({ plane: "xy", slice: 0, points: long }, "add", 2, false, [SIZE, SIZE])?.tool.points).toBeUndefined();
+		expect(polygonEdit({ plane: "xy", slice: 0, points: long }, "add", 2, "any", [SIZE, SIZE])?.tool.points).toBeUndefined();
 	});
 
 	it("makes nothing of a polygon with no voxel centers inside", () => {
-		expect(polygonEdit({ plane: "xy", slice: 0, points: [[1, 1], [5, 1]] }, "add", 2, false, [SIZE, SIZE])).toBeNull();
-		expect(polygonEdit({ plane: "xy", slice: 0, points: [[1, 1], [5, 1], [9, 1]] }, "subtract", 2, false, [SIZE, SIZE])).toBeNull();
+		expect(polygonEdit({ plane: "xy", slice: 0, points: [[1, 1], [5, 1]] }, "add", 2, "any", [SIZE, SIZE])).toBeNull();
+		expect(polygonEdit({ plane: "xy", slice: 0, points: [[1, 1], [5, 1], [9, 1]] }, "subtract", 2, "any", [SIZE, SIZE])).toBeNull();
 	});
 });

@@ -218,6 +218,32 @@ export function decodeDelta(delta: DeltaIn): { mask: Uint8Array; written: Uint8A
 }
 
 /**
+ * Which values a voxel may hold for an `only_if` condition to let a delta
+ * change it, as `ml4paleo.labels.deltas` judges it: 1 at each such value.
+ * "any" allows every value; "unlabeled" only 0; "labeled" every value but 0
+ * (background, 1, included); "class:2,3" the values it lists. A condition
+ * this doesn't know allows every value, as it did before there were lists.
+ */
+export function allowedValues(onlyIf: string): Uint8Array {
+	const allowed = new Uint8Array(256);
+	if (onlyIf === "unlabeled") {
+		allowed[0] = 1;
+	} else if (onlyIf === "labeled") {
+		allowed.fill(1, 1);
+	} else if (onlyIf.startsWith("class:")) {
+		const listed = onlyIf.slice("class:".length).split(",");
+		if (listed.every((value) => /^\d{1,3}$/.test(value) && Number(value) < 256)) {
+			for (const value of listed) allowed[Number(value)] = 1;
+		} else {
+			allowed.fill(1);
+		}
+	} else {
+		allowed.fill(1);
+	}
+	return allowed;
+}
+
+/**
  * Apply a delta to a chunk's class values in place, as the server will
  * (`apply_delta`), so an edit shows before the server confirms it.
  * `chunkShape` may be smaller than 64³ at the volume's edges.
@@ -231,7 +257,7 @@ export function applyLocally(
 	onlyIf = "any",
 ): number {
 	const [, cy = 0, cx = 0] = chunkShape;
-	const only = onlyIf.startsWith("class:") ? Number(onlyIf.slice(6)) : onlyIf === "unlabeled" ? 0 : -1;
+	const allowed = allowedValues(onlyIf);
 	let changed = 0;
 	let i = 0;
 	for (let z = box[0]; z < box[3]; z++) {
@@ -239,7 +265,7 @@ export function applyLocally(
 			for (let x = box[2]; x < box[5]; x++, i++) {
 				if (!mask[i] || z >= (chunkShape[0] ?? 0) || y >= cy || x >= cx) continue;
 				const at = (z * cy + y) * cx + x;
-				if (only >= 0 && chunk[at] !== only) continue;
+				if (!allowed[chunk[at]!]) continue;
 				const value = typeof written === "number" ? written : written[i]!;
 				if (chunk[at] !== value) changed++;
 				chunk[at] = value;

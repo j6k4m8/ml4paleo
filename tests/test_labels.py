@@ -4,6 +4,7 @@ Label conventions, the label chunk codec, and label edits (deltas, undo, redo).
 
 import importlib.util
 import pathlib
+import random
 
 import numpy as np
 import pytest
@@ -30,6 +31,7 @@ from ml4paleo.labels.codec import (
 from ml4paleo.labels.deltas import (
     ChunkDelta,
     apply_delta,
+    normalize_only_if,
     pack_mask,
     recompute,
     split_into_deltas,
@@ -145,6 +147,220 @@ def test_only_if_limits_which_voxels_change():
     assert class_only.class_chunk.max() == 0
 
 
+# One row of voxels: unlabeled (0), background (1), and classes 2 to 4, some twice.
+ROW = [0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 2, 0]
+EVERY_VALUE = set(range(256))
+
+
+def _row_chunk():
+    chunk = _zeros()
+    chunk[0, 0, : len(ROW)] = ROW
+    return chunk
+
+
+def _row_delta(value, only_if):
+    box = (0, 0, 0, 1, 1, len(ROW))
+    return _delta(value, only_if, box)
+
+
+@pytest.mark.parametrize(
+    ("only_if", "allowed"),
+    [
+        ("any", EVERY_VALUE),
+        ("unlabeled", {0}),
+        ("labeled", EVERY_VALUE - {0}),
+        ("class:2", {2}),
+        ("class:1", {1}),
+        ("class:1,3", {1, 3}),
+        ("class:3,1", {1, 3}),
+        ("class:2,3,4", {2, 3, 4}),
+        ("class:1,2,3,4", {1, 2, 3, 4}),
+        # Values the row doesn't hold select nothing.
+        ("class:5,200", {5, 200}),
+        ("class:254", {254}),
+    ],
+)
+def test_only_if_selects_the_voxels_whose_values_it_allows(only_if, allowed):
+    applied = apply_delta(_row_chunk(), _zeros(), _row_delta(9, only_if), Source.HUMAN)
+    selected = [value in allowed for value in ROW]
+    expected = [
+        9 if chosen else value for value, chosen in zip(ROW, selected, strict=True)
+    ]
+    assert applied.class_chunk[0, 0, : len(ROW)].tolist() == expected
+    # The claim is exactly the voxels that were written, and nothing else moved.
+    claimed = unpack_mask(applied.claim.mask, applied.claim.box_shape)[0, 0]
+    assert claimed.tolist() == selected
+    assert applied.changed == sum(selected)
+    assert applied.class_chunk[0, 0, len(ROW) :].max() == 0
+    assert (applied.source_chunk[0, 0, : len(ROW)][claimed] == Source.HUMAN).all()
+    assert (applied.source_chunk[0, 0, : len(ROW)][~claimed] == Source.NONE).all()
+
+
+def test_erasing_only_some_classes_leaves_the_rest():
+    applied = apply_delta(
+        _row_chunk(), _zeros(), _row_delta(0, "class:1,4"), Source.HUMAN
+    )
+    assert applied.class_chunk[0, 0, : len(ROW)].tolist() == [
+        0 if value in (1, 4) else value for value in ROW
+    ]
+    assert applied.changed == ROW.count(1) + ROW.count(4)
+
+
+def test_a_condition_applies_to_per_voxel_values_too():
+    values = np.arange(20, 20 + len(ROW), dtype=np.uint8).reshape(1, 1, -1)
+    mask = np.ones((1, 1, len(ROW)), dtype=bool)
+    (delta,) = split_into_deltas(mask, (0, 0, 0), values=values, only_if="class:3,1")
+    applied = apply_delta(_row_chunk(), _zeros(), delta, Source.HUMAN)
+    expected = [20 + i if value in (1, 3) else value for i, value in enumerate(ROW)]
+    assert applied.class_chunk[0, 0, : len(ROW)].tolist() == expected
+
+
+@pytest.mark.parametrize(
+    ("given", "canonical"),
+    [
+        ("any", "any"),
+        ("unlabeled", "unlabeled"),
+        ("labeled", "labeled"),
+        ("class:2", "class:2"),
+        ("class:1", "class:1"),
+        ("class:254", "class:254"),
+        ("class:2,3,5", "class:2,3,5"),
+        ("class:5,2,3", "class:2,3,5"),
+        ("class:254,1", "class:1,254"),
+        # Leading zeros were fine for one value, and still are.
+        ("class:007", "class:7"),
+        ("class:010,002", "class:2,10"),
+    ],
+)
+def test_only_if_is_put_in_canonical_form(given, canonical):
+    assert normalize_only_if(given) == canonical
+    delta = ChunkDelta(
+        key=(0, 0, 0), box=(0, 0, 0, 1, 1, 1), mask=b"", value=2, only_if=given
+    )
+    assert delta.only_if == canonical
+
+
+def test_every_class_value_can_be_listed_in_any_order():
+    every = list(range(1, 255))
+    shuffled = random.Random(0).sample(every, len(every))
+    listed = "class:" + ",".join(str(value) for value in shuffled)
+    assert normalize_only_if(listed) == "class:" + ",".join(str(v) for v in every)
+    # Over a plane holding every value from 0 to 254 (and one more 0), it
+    # selects every voxel but the two unlabeled ones.
+    chunk = _zeros()
+    held = np.append(np.arange(255), 0).astype(np.uint8)
+    chunk[0, :4, :] = held.reshape(4, 64)
+    applied = apply_delta(
+        chunk, _zeros(), _delta(254, listed, (0, 0, 0, 1, 4, 64)), Source.HUMAN
+    )
+    claimed = unpack_mask(applied.claim.mask, applied.claim.box_shape).ravel()
+    assert claimed.tolist() == [value != 0 for value in held]
+    # The voxel already holding 254 changes its source, so all 254 count.
+    assert applied.changed == 254
+    written = applied.class_chunk[0, :4, :].ravel()
+    assert written.tolist() == [0 if value == 0 else 254 for value in held]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "none",
+        "Any",
+        "labelled",
+        "unlabeled,labeled",
+        "any,class:2",
+        "class",
+        "class:",
+        "class:any",
+        "class:labeled",
+        "class:2,labeled",
+        # 0 is unlabeled, which has its own condition; 255 is reserved.
+        "class:0",
+        "class:0,2",
+        "class:2,0",
+        "class:255",
+        "class:2,255",
+        "class:999",
+        "class:1000",
+        # Each value once.
+        "class:2,2",
+        "class:3,2,3",
+        "class:002,2",
+        # Plain whole numbers, joined by commas and nothing else.
+        "class:2,",
+        "class:,2",
+        "class:2,,3",
+        "class: 2",
+        "class:2 ,3",
+        "class:2, 3",
+        "class:-2",
+        "class:+2",
+        "class:2.0",
+        "class:1e2",
+        "class:a",
+        "class:2;3",
+        "class:2-4",
+        "class:٣",
+        # More values than there are classes.
+        "class:" + ",".join(str(value) for value in range(1, 256)),
+        "class:" + ",".join(["2"] * 255),
+        "class:" + "1" * 5000,
+        "class:2" + ",3" * 5000,
+    ],
+)
+def test_invalid_conditions_are_refused(bad):
+    with pytest.raises(ValueError):
+        normalize_only_if(bad)
+    with pytest.raises(ValidationError):
+        ChunkDelta(
+            key=(0, 0, 0), box=(0, 0, 0, 1, 1, 1), mask=b"", value=2, only_if=bad
+        )
+
+
+def test_a_repaint_of_some_classes_undoes_and_redoes_without_touching_the_others():
+    row = lambda box: (0, 0, box[0], 1, 1, box[1])  # noqa: E731
+    class_chunk, source_chunk, claims = _apply_all(
+        [
+            (row((0, 4)), 2, "any"),
+            (row((4, 8)), 3, "any"),
+            (row((8, 12)), 4, "any"),
+            # Classes 2 and 4, not 3, whatever is there.
+            (row((0, 12)), 9, "class:4,2"),
+        ]
+    )
+
+    def show():
+        return class_chunk[0, 0, :12].tolist()
+
+    assert show() == [9] * 4 + [3] * 4 + [9] * 4
+    live = [True] * 4
+
+    def toggle(index):
+        nonlocal class_chunk, source_chunk
+        live[index] = not live[index]
+        result = recompute(
+            class_chunk,
+            source_chunk,
+            claims[index],
+            [c for c, alive in zip(claims, live, strict=True) if alive],
+        )
+        class_chunk, source_chunk = result.class_chunk, result.source_chunk
+
+    # Undone, the classes it covered are back, and class 3 never moved.
+    toggle(3)
+    assert show() == [2] * 4 + [3] * 4 + [4] * 4
+    toggle(3)
+    assert show() == [9] * 4 + [3] * 4 + [9] * 4
+    # Class 3 undone and redone underneath it: the repaint claimed none of it.
+    toggle(1)
+    assert show() == [9] * 4 + [0] * 4 + [9] * 4
+    toggle(1)
+    assert show() == [9] * 4 + [3] * 4 + [9] * 4
+    expected = _overlay(claims)
+    np.testing.assert_array_equal(class_chunk, expected.class_chunk)
+
+
 def test_source_tracks_writes_and_erases():
     applied = apply_delta(_zeros(), _zeros(), _delta(value=2), Source.INTERACTIVE)
     assert (applied.source_chunk[:4, :4, :4] == Source.INTERACTIVE).all()
@@ -221,7 +437,16 @@ def test_undoing_overlapping_ops_in_any_order_clears_them():
                 st.integers(1, 6),
             ),
             st.integers(0, 4),
-            st.sampled_from(["any", "unlabeled", "class:2"]),
+            st.sampled_from(
+                [
+                    "any",
+                    "unlabeled",
+                    "labeled",
+                    "class:2",
+                    "class:1,2",
+                    "class:4,2,3",
+                ]
+            ),
         ),
         min_size=1,
         max_size=8,

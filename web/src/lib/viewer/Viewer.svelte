@@ -26,8 +26,11 @@
 	import X from "@lucide/svelte/icons/x";
 	import { onDestroy, onMount, tick, untrack } from "svelte";
 	import { SvelteMap } from "svelte/reactivity";
+	import ClassMenu from "#lib/ui/ClassMenu.svelte";
 	import Histogram from "#lib/ui/Histogram.svelte";
 	import Panel from "#lib/ui/Panel.svelte";
+	import Segmented from "#lib/ui/Segmented.svelte";
+	import SliderField from "#lib/ui/SliderField.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
 	import { ApiError, api, message } from "#lib/api.ts";
 	import { unfinished } from "#lib/pipelines.ts";
@@ -48,6 +51,7 @@
 	} from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
 	import { indexedDbStorage, OpQueue, type QueuedEdit, saveState } from "../labels/opqueue.svelte";
+	import { describeWhere, ERASE_MODES, type EraseMode, PAINT_MODES, type PaintMode } from "../labels/modes";
 	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
 	import type { PlaneMask } from "../labels/raster";
 	import {
@@ -113,6 +117,11 @@
 	let classes: LabelClass[] = $state([]);
 	// The classes plus Background, which the person picks from and paints with.
 	const pickable = $derived(withBackground(classes));
+	// The label values the project has, which the modes that go by classes choose among.
+	const labelValues = $derived(pickable.map((c) => c.value));
+	// The classes those modes go by now: the ones chosen that the project has, else the active class.
+	const paintSet = $derived(viewer.classesFor("paint", labelValues));
+	const eraseSet = $derived(viewer.classesFor("erase", labelValues));
 	// Whether any background has been painted (by anyone, or here); assumed until the server says not, so the hint doesn't flash.
 	let hasBackground = $state(true);
 	let paintedBackground = false;
@@ -262,7 +271,10 @@
 			viewer.opacity,
 			viewer.layout,
 			viewer.brushRadius,
-			viewer.protectLabels,
+			viewer.paintMode,
+			viewer.paintClasses,
+			viewer.eraseMode,
+			viewer.eraseClasses,
 			viewer.roiDepth,
 			viewer.showPrediction,
 			viewer.predictionOpacity,
@@ -326,7 +338,7 @@
 		if (!polygon || viewer.activeClass === null) return;
 		const plane = PLANES[polygon.plane];
 		const limits: [number, number] = [viewer.shape[plane.u], viewer.shape[plane.v]];
-		const edit = polygonEdit(polygon, cut ? "subtract" : "add", viewer.activeClass, viewer.protectLabels, limits);
+		const edit = polygonEdit(polygon, cut ? "subtract" : "add", viewer.activeClass, viewer.paintCondition(labelValues), limits);
 		if (edit) commit(plane, polygon.slice, edit.mask, edit.value, edit.onlyIf, edit.tool, true);
 	}
 
@@ -780,6 +792,18 @@
 		if (tool !== "polygon") viewer.polygon = null;
 	}
 
+	// Going by classes, the ones the menu shows are the ones used from then on,
+	// not whichever the active class is when it changes.
+	function setPaintMode(mode: PaintMode) {
+		if (mode === "classes") viewer.paintClasses = paintSet;
+		viewer.paintMode = mode;
+	}
+
+	function setEraseMode(mode: EraseMode) {
+		if (mode === "classes") viewer.eraseClasses = eraseSet;
+		viewer.eraseMode = mode;
+	}
+
 	const status = $derived(
 		{
 			offline: `Offline · ${queue.pending} waiting`,
@@ -966,19 +990,24 @@
 	] as const).filter((entry) => SHOW_ROIS || entry.tool !== "roi");
 
 	const LAYOUT_NAMES = { four: "Four views", xy: "XY", xz: "XZ", yz: "YZ" } as const;
+	const LAYOUT_OPTIONS = LAYOUTS.map((layout) => ({
+		value: layout,
+		label: LAYOUT_NAMES[layout],
+		icon: layout === "four" ? LayoutGrid : undefined,
+	}));
 
-	const POLYGON_MODES: { mode: PolygonMode; label: string; icon: typeof SquaresUnite; title: string }[] = [
+	const POLYGON_MODES: { value: PolygonMode; label: string; icon: typeof SquaresUnite; title: string }[] = [
 		{
-			mode: "add",
+			value: "add",
 			label: "Add",
 			icon: SquaresUnite,
-			title: "Closing fills the shape with the active class (hold Shift to fill in either mode)",
+			title: "Closing fills the shape with the active class, where the paint mode allows (hold Shift to fill in either mode)",
 		},
 		{
-			mode: "subtract",
+			value: "subtract",
 			label: "Subtract",
 			icon: SquaresSubtract,
-			title: "Closing cuts the shape out of the active class, leaving other classes (hold Alt to cut out in either mode)",
+			title: "Closing cuts the shape out of the active class, leaving other classes: it has its own rule, whatever the paint mode says (hold Alt to cut out in either mode)",
 		},
 	];
 
@@ -1054,15 +1083,20 @@
 	const histogram = manifest.histogram && !Array.isArray(manifest.histogram) ? manifest.histogram : null;
 	const chip = $derived(saveState(queue));
 
+	const nameOf = (values: number[]) => pickable.filter((c) => values.includes(c.value)).map((c) => c.name);
+	/** Where painting or erasing goes under the mode, as a phrase to put after what the tool does ("" for anywhere). */
+	const paintWhere = $derived(describeWhere(viewer.paintMode, nameOf(paintSet)));
+	const eraseWhere = $derived(describeWhere(viewer.eraseMode, nameOf(eraseSet)));
+
 	const hint = $derived(
 		{
 			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · right-click moves the crosshair",
-			brush: "Drag to paint the active class · [ ] change the size · right-click moves the crosshair",
-			eraser: "Drag to erase labels · [ ] change the size · right-click moves the crosshair",
+			brush: `Drag to paint the active class${paintWhere ? ` ${paintWhere}` : ""} · [ ] change the size · right-click moves the crosshair`,
+			eraser: `Drag to erase labels${eraseWhere ? ` ${eraseWhere}` : ""} · [ ] change the size · right-click moves the crosshair`,
 			polygon:
 				viewer.polygonMode === "add"
-					? "Click points or drag freehand · click the first point, double-click, or Enter fills · hold Alt to cut out · Esc cancels · right-click moves the crosshair"
-					: "Click points or drag freehand · click the first point, double-click, or Enter cuts out · hold Shift to fill · Esc cancels · right-click moves the crosshair",
+					? `Click points or drag freehand · click the first point, double-click, or Enter fills${paintWhere ? ` ${paintWhere}` : ""} · hold Alt to cut out · Esc cancels · right-click moves the crosshair`
+					: "Click points or drag freehand · click the first point, double-click, or Enter cuts out the active class · hold Shift to fill · Esc cancels · right-click moves the crosshair",
 			roi: "Drag a box on a slice · G goes to the next open ROI · C marks it complete · right-click moves the crosshair",
 		}[viewer.tool],
 	);
@@ -1081,42 +1115,40 @@
 {/snippet}
 
 <div class="flex h-full flex-col bg-chrome text-ink">
-	<!-- Options bar: the active tool's settings, scrolling sideways when they don't fit. -->
-	<div class="flex h-9 shrink-0 items-center border-b border-edge bg-panel" {@attach keepFocus}>
-		<div class="flex min-w-0 flex-1 items-center gap-3 self-stretch overflow-x-auto px-3 whitespace-nowrap">
-			<span class="flex shrink-0 items-center gap-1.5 font-medium">
+	<!-- Options bar: the active tool's settings, wrapping onto more lines when the window is narrow. -->
+	<div class="flex min-h-9 shrink-0 items-start bg-panel shadow-[inset_0_-1px_0_var(--color-edge)]" {@attach keepFocus}>
+		<div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-4 gap-y-1.5 px-3 py-1.5">
+			<span class="flex h-6 shrink-0 items-center gap-1.5 font-medium">
 				{#each TOOLS as entry (entry.tool)}
 					{#if entry.tool === viewer.tool}<entry.icon size={14} class="text-ink-dim" />{entry.label}{/if}
 				{/each}
 			</span>
-			<span class="h-4 w-px shrink-0 bg-line"></span>
+			<span class="h-4 w-px shrink-0 bg-line" aria-hidden="true"></span>
 			{#if viewer.tool === "brush" || viewer.tool === "eraser"}
-				<label class="flex shrink-0 items-center gap-2 text-ink-dim">
-					Size
-					<input class="w-28" type="range" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} />
-					<input class="field w-14 font-mono" type="number" min="0.5" max="64" step="0.5" bind:value={viewer.brushRadius} aria-label="Brush radius" />
-				</label>
+				<SliderField label="Size" numberLabel="Brush radius" min={0.5} max={64} step={0.5} bind:value={viewer.brushRadius} />
 			{/if}
 			{#if viewer.tool === "polygon"}
-				<div class="flex shrink-0 rounded-sm border border-edge" role="group" aria-label="Polygon mode">
-					{#each POLYGON_MODES as entry (entry.mode)}
-						<button
-							aria-pressed={viewer.polygonMode === entry.mode}
-							class="relative flex h-6 items-center gap-1 px-2 first:rounded-l-[3px] last:rounded-r-[3px] focus-visible:z-10
-								{viewer.polygonMode === entry.mode ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
-							title={entry.title}
-							onclick={() => (viewer.polygonMode = entry.mode)}
-						>
-							<entry.icon size={12} />
-							{entry.label}
-						</button>
-					{/each}
-				</div>
+				<Segmented label="Polygon mode" value={viewer.polygonMode} options={POLYGON_MODES} onchange={(mode) => (viewer.polygonMode = mode)} />
 			{/if}
 			{#if viewer.tool === "brush" || viewer.tool === "polygon"}
-				<label class="flex shrink-0 items-center gap-1.5 text-ink-dim">
-					<input type="checkbox" bind:checked={viewer.protectLabels} /> Only unlabeled voxels
-				</label>
+				{@const cuts = viewer.tool === "polygon" && viewer.polygonMode === "subtract"}
+				<Segmented
+					label="Where to paint"
+					value={viewer.paintMode}
+					options={PAINT_MODES}
+					onchange={setPaintMode}
+					class={cuts ? "opacity-60" : ""}
+					title={cuts ? "These say where Add (and closing with Shift) fills. Subtract cuts only the active class out, whatever they say." : undefined}
+				/>
+				{#if viewer.paintMode === "classes"}
+					<ClassMenu classes={pickable} selected={paintSet} label="Paint only over" onchange={(values) => (viewer.paintClasses = values)} />
+				{/if}
+			{/if}
+			{#if viewer.tool === "eraser"}
+				<Segmented label="What to erase" value={viewer.eraseMode} options={ERASE_MODES} onchange={setEraseMode} />
+				{#if viewer.eraseMode === "classes"}
+					<ClassMenu classes={pickable} selected={eraseSet} label="Erase only" onchange={(values) => (viewer.eraseClasses = values)} />
+				{/if}
 			{/if}
 			{#if viewer.tool === "roi"}
 				<label class="flex shrink-0 items-center gap-2 text-ink-dim">
@@ -1126,26 +1158,13 @@
 				</label>
 			{/if}
 			{#if viewer.tool === "navigate"}
-				<div class="flex shrink-0 rounded-sm border border-edge" role="group" aria-label="Layout">
-					{#each LAYOUTS as layout (layout)}
-						<button
-							aria-pressed={viewer.layout === layout}
-							class="relative flex h-6 items-center gap-1 px-2 first:rounded-l-[3px] last:rounded-r-[3px] focus-visible:z-10
-								{viewer.layout === layout ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
-							onclick={() => (viewer.layout = layout)}
-						>
-							{#if layout === "four"}<LayoutGrid size={12} />{/if}
-							{LAYOUT_NAMES[layout]}
-						</button>
-					{/each}
-				</div>
+				<Segmented label="Layout" value={viewer.layout} options={LAYOUT_OPTIONS} onchange={(layout) => (viewer.layout = layout)} />
 				<button class="btn shrink-0" onclick={fit} title="Fit the image (0)"><Maximize2 size={12} /> Fit</button>
 			{/if}
-			<span class="ml-auto hidden truncate text-2xs text-ink-faint lg:inline">{hint}</span>
+			<span class="hidden min-w-48 flex-1 basis-48 truncate text-right text-2xs text-ink-faint xl:block" title={hint}>{hint}</span>
 		</div>
-		<!-- Outside the scrolling part, so it's always in reach. -->
 		<button
-			class="btn btn-ghost mx-1.5 shrink-0 md:hidden"
+			class="btn btn-ghost mx-1.5 mt-1.5 shrink-0 md:hidden"
 			aria-label="Panels"
 			aria-expanded={dockOpen}
 			onclick={() => (dockOpen = !dockOpen)}
@@ -1274,9 +1293,10 @@
 				{#if histogram}
 					<Histogram counts={histogram.counts} edges={histogram.edges} bind:window={viewer.window} />
 				{/if}
-				<div class="grid grid-cols-2 gap-2">
-					<label class="label">Black <input class="field font-mono" type="number" step="any" bind:value={viewer.window[0]} /></label>
-					<label class="label">White <input class="field font-mono" type="number" step="any" bind:value={viewer.window[1]} /></label>
+				<!-- Side by side, or one over the other when what they show needs the room. -->
+				<div class="flex flex-wrap gap-2">
+					<label class="label flex-1">Black <input class="field font-mono" type="number" step="any" bind:value={viewer.window[0]} /></label>
+					<label class="label flex-1">White <input class="field font-mono" type="number" step="any" bind:value={viewer.window[1]} /></label>
 				</div>
 			</Panel>
 
