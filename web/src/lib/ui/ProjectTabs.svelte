@@ -3,6 +3,7 @@
 	import Brush from "@lucide/svelte/icons/brush";
 	import Shapes from "@lucide/svelte/icons/shapes";
 	import House from "@lucide/svelte/icons/house";
+	import Orbit from "@lucide/svelte/icons/orbit";
 	import RotateCcwClock from "@lucide/svelte/icons/rotate-ccw-clock";
 	import Settings from "@lucide/svelte/icons/settings";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
@@ -19,6 +20,7 @@
 		...(SHOW_ROIS ? [{ href: `/p/${pid}/rois`, label: "ROIs", icon: SquareDashed }] : []),
 		{ href: `/p/${pid}/models`, label: "Models", icon: Brain },
 		{ href: `/p/${pid}/results`, label: "Results", icon: Shapes },
+		{ href: `/p/${pid}/neuroglancer`, label: "Neuroglancer", icon: Orbit },
 		{ href: `/p/${pid}/history`, label: "History", icon: RotateCcwClock },
 		{ href: `/p/${pid}/settings`, label: "Settings", icon: Settings },
 	]);
