@@ -44,6 +44,13 @@ one pass over the label rows under the chunk, which for the top chunk is every
 row of the project. Their ETags are only unique to the URL: two chunks can have
 the same one, so don't tell chunks apart by it.
 
+The group's `zarr.json` lists these arrays twice. `attributes.ome.multiscales`
+is standard OME-Zarr 0.5 (axes z, y, x, and a dataset per level with the image's
+voxel size times the level's factors as its scale), which is what makes
+Neuroglancer open the group as one volume and pick a level by zoom, in the
+image's coordinates. `attributes.ml4paleo.label_levels` is the web viewer's: each
+array's name, shape, and `factor_zyx`.
+
 A chunk too big to make in one request is a 503 with `Retry-After`, and what
 was done is kept, so asking again gets further. A client must ask again, as
 zarr readers don't (they take a 503 for an error and show nothing): wait
@@ -60,7 +67,7 @@ import math
 import re
 import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Annotated, Any, Literal
 
@@ -1017,6 +1024,7 @@ async def events(
 
 # --- the labels as zarr ----------------------------------------------------
 
+
 _ARRAY_KEY = re.compile(r"^(class|source|class_([1-9]\d?))/zarr\.json$")
 _CHUNK_KEY = re.compile(
     r"^(class|source|class_([1-9]\d?))/c/(\d{1,9})/(\d{1,9})/(\d{1,9})$"
@@ -1041,8 +1049,11 @@ def _array_metadata(shape: tuple[int, int, int]) -> dict:
     }
 
 
-def _group_metadata(levels: Sequence[LevelSpec]) -> dict:
-    # The arrays of the labels' pyramid, which is the image's.
+def _group_metadata(manifest: Mapping, levels: Sequence[LevelSpec]) -> dict:
+    # The arrays of the labels' pyramid, which is the image's, listed in
+    # OME-Zarr's way (`ome`, for viewers that read it, such as Neuroglancer,
+    # which draws the arrays as one volume with the image's voxel size, and
+    # picks a level by zoom) and in ours (`ml4paleo`, which the web viewer reads).
     listed = [
         {
             "array": label_pyramid.array_name(level),
@@ -1054,7 +1065,10 @@ def _group_metadata(levels: Sequence[LevelSpec]) -> dict:
     return {
         "zarr_format": 3,
         "node_type": "group",
-        "attributes": {"ml4paleo": {"label_levels": listed}},
+        "attributes": {
+            "ome": label_pyramid.multiscales(manifest, levels),
+            "ml4paleo": {"label_levels": listed},
+        },
     }
 
 
@@ -1069,14 +1083,15 @@ async def label_zarr(
     revalidate = {"Cache-Control": "private, no-cache"}
     project_id = project.id
     try:
-        image_id, levels = await labels.volume_levels(db, project_id)
+        image_id, manifest = await labels.volume_image(db, project_id)
     except labels.NoImage:
         raise HTTPException(
             status_code=404, detail="This project has no image yet."
         ) from None
+    levels = label_pyramid.levels_of(manifest)
     if key == "zarr.json":
         return Response(
-            json.dumps(_group_metadata(levels)),
+            json.dumps(_group_metadata(manifest, levels)),
             media_type="application/json",
             headers=revalidate,
         )

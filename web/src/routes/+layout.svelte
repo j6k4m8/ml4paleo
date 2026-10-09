@@ -14,8 +14,8 @@
 	const PUBLIC = ["/login", "/signup", "/verify-email", "/reset-password"];
 	// Pages that help finish the required account steps.
 	const SETUP = ["/account", "/verify-email"];
-	// The annotator fills the window; other pages scroll.
-	const workspace = $derived(page.url.pathname.endsWith("/annotate"));
+	// The annotator and the Neuroglancer tab fill the window; other pages scroll.
+	const workspace = $derived(page.url.pathname.endsWith("/annotate") || page.url.pathname.endsWith("/neuroglancer"));
 	let menu = $state(false);
 	let account: HTMLElement | undefined = $state();
 	let accountButton: HTMLButtonElement | undefined = $state();
