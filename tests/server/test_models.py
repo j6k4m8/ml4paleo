@@ -13,7 +13,7 @@ import uuid
 import numpy as np
 import obstore
 import pytest
-from helpers import SECRET_KEY, add_worker, run_db, signup
+from helpers import NOT_JSON, SECRET_KEY, add_worker, run_db, signup, strict_json
 from ml4paleo_server import artifacts, jobs, labels, pipelines
 from ml4paleo_server.db import (
     Artifact,
@@ -35,8 +35,8 @@ from sqlalchemy import select, update
 
 from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.ome import OmeImage
-from ml4paleo.protocol import WorkerCaps
-from ml4paleo.storage import get_bytes, object_store
+from ml4paleo.protocol import WorkerCaps, json_text
+from ml4paleo.storage import MANIFEST_KEY, get_bytes, object_store
 
 SHAPE = (40, 48, 56)
 BONE = 2
@@ -98,6 +98,29 @@ def add_class(browser, project):
         f"/api/projects/{project}/labels/classes",
         json={"name": "bone", "color": "#ffffff"},
     ).json()["value"]
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_a_parameter_json_cannot_hold_is_a_422(ada, literal):
+    project = make_project(ada)
+    base = f"/api/projects/{project}/models"
+    # Whichever parameter it is (a plugin takes only what its fields allow, but
+    # keeps them as JSON, which can't hold it), or one it doesn't know.
+    for name in ("n_estimators", "sigma_max", "other"):
+        response = ada.post(
+            base,
+            content=f'{{"params": {{"{name}": {literal}}}}}',
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 422, (name, response.text)
+        [error] = strict_json(response.text)["detail"]
+        assert error["loc"] == ["body", "params"]
+        assert error["msg"] == "Value error, params can't hold NaN or infinity"
+        assert error["input"] == {name: NOT_JSON[literal]}
+    # Other parameters it refuses say which, as before.
+    refused = ada.post(base, json={"params": {"n_estimators": 0}})
+    assert refused.status_code == 422
+    assert refused.json()["detail"][0]["loc"] == ["body", "params", "n_estimators"]
 
 
 def test_training_sets_pin_labels_and_rois(ada, settings, migrated_database_url):
@@ -872,3 +895,162 @@ def test_a_worker_trains_a_random_forest(
     # and its prediction normalized the image with it too.
     assert run_db(migrated_database_url, model_manifest)["window"] == [200.0, 800.0]
     assert run_db(migrated_database_url, prediction_window) == [200.0, 800.0]
+
+
+def train_through_a_worker(
+    new_browser, settings, database_url, live_server, paint_labels
+):
+    """
+    Train a random forest on the ball image through a real worker, on the
+    labels `paint_labels(ada, project)` makes (and the ROIs it adds). Gives
+    the model as the API shows it, its training job's result, and the text of
+    its `_MANIFEST.json`.
+    """
+    ada = new_browser()
+    signup(ada)
+    project = make_project(ada)
+    add_image(settings, database_url, project, with_data=True)
+    add_class(ada, project)
+    paint_labels(ada, project)
+    params = {"n_estimators": 10, "max_depth": 8, "samples_per_class": 2000}
+    model = ada.post(
+        f"/api/projects/{project}/models", json={"params": {**params, "sigma_max": 1.0}}
+    ).json()
+    token = add_worker(database_url)
+    client = ServerClient(token, base_url=live_server)
+    caps = WorkerCaps(version="test", kinds=sorted(HANDLERS))
+    worker = Worker(client, caps, claim_wait_seconds=0.5, heartbeat_seconds=0.2)
+    thread = threading.Thread(target=worker.run, kwargs={"max_jobs": None})
+    thread.start()
+    try:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            status = ada.get(f"/api/projects/{project}/models/{model['id']}").json()
+            if status["status"] != "training":
+                break
+            time.sleep(0.3)
+        else:
+            raise AssertionError("the model never finished training")
+    finally:
+        worker.stop()
+        thread.join(timeout=30)
+        client.close()
+
+    async def kept(db):
+        trained = await db.get(TrainedModel, uuid.UUID(model["id"]))
+        job = await db.get(Job, trained.job_id)
+        artifact = await db.get(Artifact, trained.artifact_id)
+        return job.result, artifacts.artifact_path(artifact)
+
+    result, path = run_db(database_url, kept)
+    manifest = get_bytes(project_storage(settings).child(path), MANIFEST_KEY)
+    assert manifest is not None
+    return status, result, manifest.decode()
+
+
+def only_numbers_json_can_hold(text: str) -> dict:
+    """
+    The JSON in `text`, which must hold no NaN, no infinity, and no number too
+    big for a float.
+    """
+    parsed = strict_json(text)
+    json_text(parsed, "manifest")
+    return parsed
+
+
+def trained_without_nan(new_browser, settings, database_url, live_server, labels):
+    """
+    Train through a worker (see `train_through_a_worker`): the model must be
+    ready, with the same metrics in the job's result and the manifest, neither
+    holding NaN or infinity. Gives those metrics.
+    """
+    status, result, manifest = train_through_a_worker(
+        new_browser, settings, database_url, live_server, labels
+    )
+    assert status["status"] == "ready", status
+    only_numbers_json_can_hold(json.dumps(result))
+    held = only_numbers_json_can_hold(manifest)
+    assert result["metrics"] == status["metrics"] == held["metrics"]
+    return status["metrics"]
+
+
+SCORES = {"accuracy", "mean_dice", "mean_iou", "classes", "voxels"}
+AROUND_THE_BALLS_MIDDLE = (14, 18, 22, 26, 30, 34)
+A_CORNER_THE_BALL_IS_FAR_FROM = (30, 36, 44, 38, 46, 54)
+
+
+def strokes(settings, database_url, project):
+    """Sparse labels to train on, outside every ROI: bone, and background."""
+    paint(settings, database_url, project, (27, 22, 26), np.ones((1, 4, 4)), BONE)
+    paint(settings, database_url, project, (2, 2, 2), np.ones((1, 6, 6)), 1)
+
+
+def complete_validation_roi(ada, project, box):
+    roi = ada.post(
+        f"/api/projects/{project}/rois",
+        json={"bbox": list(box), "kind": "cube", "split": "val"},
+    ).json()
+    done = ada.patch(
+        f"/api/projects/{project}/rois/{roi['id']}", json={"status": "complete"}
+    )
+    assert done.status_code == 200, done.text
+
+
+def test_training_with_no_validation_scores_nothing_and_still_succeeds(
+    new_browser, settings, migrated_database_url, live_server
+):
+    # No validation ROIs, so no score is defined: none is given, not a NaN one.
+    def labels(ada, project):
+        strokes(settings, migrated_database_url, project)
+
+    metrics = trained_without_nan(
+        new_browser, settings, migrated_database_url, live_server, labels
+    )
+    assert metrics["validation_crops"] == 0
+    assert SCORES.isdisjoint(metrics), metrics
+
+
+def test_training_with_a_class_nothing_of_is_validated_leaves_it_unscored(
+    new_browser, settings, migrated_database_url, live_server
+):
+    # Two classes are trained, and the validation crop has one of them in it.
+    def labels(ada, project):
+        tooth = ada.post(
+            f"/api/projects/{project}/labels/classes",
+            json={"name": "tooth", "color": "#ffeeaa"},
+        ).json()["value"]
+        strokes(settings, migrated_database_url, project)
+        around = AROUND_THE_BALLS_MIDDLE
+        region = tuple(slice(around[a], around[a + 3]) for a in range(3))
+        for origin, mask, value in (
+            ((30, 40, 44), np.ones((1, 4, 4)), tooth),
+            (around[:3], ball_image()[1][region], BONE),
+        ):
+            paint(settings, migrated_database_url, project, origin, mask, value)
+        complete_validation_roi(ada, project, around)
+
+    metrics = trained_without_nan(
+        new_browser, settings, migrated_database_url, live_server, labels
+    )
+    assert metrics["validation_crops"] == 1
+    # The class with no voxel in the crop has no score at all.
+    assert set(metrics["classes"]) == {str(BONE)}
+    assert metrics["mean_dice"] == metrics["classes"][str(BONE)]["dice"]
+
+
+def test_training_validated_on_nothing_but_background_scores_no_class(
+    new_browser, settings, migrated_database_url, live_server
+):
+    # A complete validation ROI with no labels in it is all background: the
+    # classes have no voxels there, so there is no mean of their scores.
+    def labels(ada, project):
+        strokes(settings, migrated_database_url, project)
+        complete_validation_roi(ada, project, A_CORNER_THE_BALL_IS_FAR_FROM)
+
+    metrics = trained_without_nan(
+        new_browser, settings, migrated_database_url, live_server, labels
+    )
+    assert metrics["validation_crops"] == 1
+    assert metrics["classes"] == {}
+    assert (metrics["mean_dice"], metrics["mean_iou"]) == (None, None)
+    assert 0 <= metrics["accuracy"] <= 1

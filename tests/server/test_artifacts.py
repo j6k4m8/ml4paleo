@@ -124,10 +124,11 @@ def files_of(settings, artifact) -> StorageGrant:
     return project_storage(settings).child(artifacts.artifact_path(artifact))
 
 
-def finish(settings, database_url, job_id, *, write=True):
+def finish(settings, database_url, job_id, *, write=True, manifest=None):
     """
     Claim a job as a local worker, optionally write an artifact's files and
-    manifest straight to storage, and report success with the commit check.
+    manifest (the bytes of `manifest`, if given) straight to storage, and
+    report success with the commit check.
     """
 
     async def run(db):
@@ -145,7 +146,10 @@ def finish(settings, database_url, job_id, *, write=True):
         for artifact in produced if write else []:
             grant = files_of(settings, artifact)
             put_bytes(grant, "data/0", b"x" * 1000)
-            write_manifest(grant, {"kind": "test"})
+            if manifest is None:
+                write_manifest(grant, {"kind": "test"})
+            else:
+                put_bytes(grant, storage.MANIFEST_KEY, manifest)
 
         async def check(job):
             await artifacts.commit_outputs(db, settings, job)
@@ -277,6 +281,26 @@ def test_a_completion_without_a_manifest_is_retried(settings, migrated_database_
     assert artifact_row(migrated_database_url, artifact_id).state == "staging"
     assert finish(settings, migrated_database_url, job_id) is None
     assert artifact_row(migrated_database_url, artifact_id).state == "committed"
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_a_manifest_holding_nan_or_infinity_fails_the_job(
+    settings, migrated_database_url, literal
+):
+    # Python's JSON parser takes them (and writes them, as a worker's might),
+    # but the database can't store them.
+    project_id = make_project(migrated_database_url)
+    artifact_id, job_id = stage(migrated_database_url, project_id)
+    manifest = f'{{"kind": "test", "window": [0, {literal}]}}'.encode()
+    error = finish(settings, migrated_database_url, job_id, manifest=manifest)
+    assert error == "_MANIFEST.json can't hold NaN or infinity."
+
+    async def status(db):
+        return await db.scalar(select(Job.status).where(Job.id == job_id))
+
+    # Not retried: the same job would write the same thing.
+    assert run_db(migrated_database_url, status) == "failed"
+    assert artifact_row(migrated_database_url, artifact_id).state == "staging"
 
 
 def test_results_over_quota_fail_the_job(settings, migrated_database_url):

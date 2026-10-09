@@ -3,6 +3,7 @@ Helpers shared by the server tests.
 """
 
 import asyncio
+import json
 import re
 import time
 from types import SimpleNamespace
@@ -20,6 +21,29 @@ from ml4paleo.protocol import WorkerCaps
 PASSWORD = "correct horse battery staple"
 ADMIN_PASSWORD = "fossil dig site 1923"
 SECRET_KEY = "test-secret-key-that-is-long-enough-0123456789"
+
+
+# What Python's JSON parser takes and a browser's doesn't: NaN and the infinities, and
+# any number too big for a float, which becomes one. Each is shown with how the server
+# writes it back, as text, since JSON can't hold the number.
+NOT_JSON = {
+    "NaN": "nan",
+    "Infinity": "inf",
+    "-Infinity": "-inf",
+    "1e999": "inf",
+    "-1e999": "-inf",
+}
+
+
+def strict_json(text: str):
+    """
+    `text` as JSON the way a browser parses it, which refuses NaN and the infinities.
+    """
+
+    def refuse(constant):
+        raise ValueError(f"{constant} in {text[:100]}")
+
+    return json.loads(text, parse_constant=refuse)
 
 
 def run_db(database_url, fn):

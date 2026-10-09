@@ -5,6 +5,7 @@ predicting with it block by block.
 """
 
 import json
+import math
 import subprocess
 import sys
 
@@ -14,6 +15,7 @@ import pytest
 
 from ml4paleo.labels import LABEL_CHUNK_ZYX, PLUGIN_IGNORE
 from ml4paleo.segmentation.dataset import RoiSpec, TrainingSet, tile_for, tiles
+from ml4paleo.segmentation.metrics import ScoreSheet
 from ml4paleo.segmentation.plugin import CropCost, get_plugin, plugins
 
 SHAPE = (80, 70, 90)  # (z, y, x): edge chunks are partial on every axis
@@ -566,3 +568,50 @@ def test_predicting_an_image_with_several_channels(tmp_path):
             side = MIN_BLOCK + 2 * predictor.halo
             assert len(reads.shapes) > 1
             assert all(max(shape[1:]) <= side for shape in reads.shapes)
+
+
+def test_a_score_sheet_gives_numbers_or_none_never_nan():
+    """
+    Metrics go to the server as JSON, which can't hold NaN: where there is
+    nothing to score (no voxels, no class in the targets) they are None.
+    """
+
+    def numbers(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from numbers(item)
+        elif value is not None:
+            yield value
+
+    def check(summary):
+        for number in numbers(summary):
+            assert math.isfinite(number), summary
+        for name in ("accuracy", "mean_dice", "mean_iou"):
+            assert summary[name] is None or 0 <= summary[name] <= 1, summary
+
+    values = [BONE, 3]
+    empty = ScoreSheet(3).summary(values)
+    assert (empty["accuracy"], empty["mean_dice"], empty["mean_iou"]) == (None,) * 3
+    assert empty["classes"] == {} and empty["voxels"] == 0
+    # Only voxels without a target.
+    sheet = ScoreSheet(3)
+    sheet.add(np.ones((4, 4), dtype=np.uint8), np.full((4, 4), PLUGIN_IGNORE, np.uint8))
+    assert sheet.summary(values) == empty
+    # Classes that are never in the targets (but are predicted) aren't scored.
+    sheet.add(np.full((4, 4), 2, np.uint8), np.zeros((4, 4), dtype=np.uint8))
+    scored = sheet.summary(values)
+    check(scored)
+    assert scored["classes"] == {} and scored["mean_dice"] is None
+    assert scored["accuracy"] == 0
+    # Never a division by nothing, however the voxels fall.
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        sheet = ScoreSheet(3)
+        for _ in range(rng.integers(0, 4)):
+            shape = (int(rng.integers(1, 5)), int(rng.integers(1, 5)))
+            known = rng.random(shape) < rng.random()
+            targets = np.where(known, rng.integers(0, 3, shape), PLUGIN_IGNORE)
+            sheet.add(
+                rng.integers(0, 3, shape).astype(np.uint8), targets.astype(np.uint8)
+            )
+        check(sheet.summary(values))

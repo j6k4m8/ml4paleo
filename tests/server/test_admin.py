@@ -6,11 +6,13 @@ signed out at once) or enable it again.
 import uuid
 
 import pytest
-from helpers import PASSWORD, make_admin, outbox, run_db, signup
+from helpers import NOT_JSON, PASSWORD, make_admin, outbox, run_db, signup, strict_json
 from ml4paleo_server import jobs
 from ml4paleo_server.app import content_security_policy
 from ml4paleo_server.cli import main
 from ml4paleo_server.db import Job, User
+from ml4paleo_server.settings import QuotaSettings
+from pydantic import ValidationError
 from sqlalchemy import select
 
 
@@ -110,6 +112,48 @@ def test_granting_adds_to_the_limits_someone_has(new_browser, migrated_database_
     assert quota["trained_models_limit"] == 25
     [listed] = admin.get("/api/admin/users?q=ada").json()
     assert listed["storage_bytes_limit"] == 100 * 1024**3
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_a_limit_of_nan_or_infinity_is_a_422_not_a_500(
+    new_browser, migrated_database_url, literal
+):
+    # An override is stored as JSON, which can't hold them (and infinity isn't
+    # how to say unlimited: null is).
+    admin, _ = make_admin(new_browser, migrated_database_url)
+    ada = new_browser()
+    signup(ada)
+    ada.post("/api/me/quota-requests", json={"message": "More, please."})
+    [pending] = admin.get("/api/admin/quota-requests").json()
+    before = ada.get("/api/me/quota").json()
+    quota = f"/api/admin/users/{user_id(ada)}/quota"
+    json_type = {"content-type": "application/json"}
+    for field in ("storage_gb", "cpu_hours_per_day", "gpu_hours_per_day"):
+        refused = admin.put(
+            quota, content=f'{{"{field}": {literal}}}', headers=json_type
+        )
+        assert refused.status_code == 422, (field, refused.text)
+        [error] = strict_json(refused.text)["detail"]
+        assert error["loc"] == ["body", field] and error["input"] == NOT_JSON[literal]
+    grant = f'{{"decision": "grant", "quota_override": {{"storage_gb": {literal}}}}}'
+    refused = admin.post(
+        f"/api/admin/quota-requests/{pending['id']}", content=grant, headers=json_type
+    )
+    assert refused.status_code == 422, refused.text
+    [error] = strict_json(refused.text)["detail"]
+    assert error["loc"] == ["body", "quota_override", "storage_gb"]
+    # Nothing changed, and the request is still open.
+    assert ada.get("/api/me/quota").json() == before
+    assert [r["id"] for r in admin.get("/api/admin/quota-requests").json()] == [
+        pending["id"]
+    ]
+
+
+def test_a_deploys_limits_cannot_be_infinity_either():
+    for field in ("storage_gb", "cpu_hours_per_day", "gpu_hours_per_day"):
+        with pytest.raises(ValidationError):
+            QuotaSettings(**{field: float("inf")})
+    assert QuotaSettings(storage_gb=None).storage_gb is None
 
 
 def test_enabling_keeps_an_unconfirmed_email_unconfirmed(

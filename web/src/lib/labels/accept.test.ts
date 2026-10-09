@@ -9,8 +9,10 @@ import {
 	MAX_ACCEPT_VOXELS,
 	MAX_VIEW_CHUNKS,
 	type ViewAccept,
+	acceptKeyTarget,
 	acceptParts,
 	chunksIn,
+	leavesLabeledOut,
 	planeToAccept,
 	readBox,
 	tooBigForView,
@@ -19,6 +21,7 @@ import {
 	whyNotInView,
 } from "./accept";
 import { CHUNK, type DeltaIn, decodeDelta, fromBase64, unpackBits } from "./deltas";
+import { OpQueue, type OpOut } from "./opqueue.svelte";
 
 /** A 100 × 70 × 130 volume whose value at (z, y, x) is (z + y + x) % 4. */
 const SHAPE = [100, 70, 130];
@@ -360,5 +363,46 @@ describe("accepting what a view shows", () => {
 			expect(off).toBeGreaterThan(500);
 			expect(boxAloneWouldHaveBeenWrong).toBeGreaterThan(0);
 		});
+	});
+});
+
+describe("the decisions behind accepting", () => {
+	it("takes a key held down as one press, in the selected ROI if there is one, else the view", () => {
+		expect(acceptKeyTarget(false, false)).toBe("view");
+		expect(acceptKeyTarget(false, true)).toBe("roi");
+		// Its repeats do nothing, whichever it would accept in.
+		expect(acceptKeyTarget(true, false)).toBe("nothing");
+		expect(acceptKeyTarget(true, true)).toBe("nothing");
+	});
+
+	it("leaves labeled voxels out only when asked, where something is predicted, and no undo or redo is on its way", () => {
+		expect(leavesLabeledOut(true, true, false)).toBe(true);
+		// Not asked to (an ROI's accept sends it all, and the server leaves labeled voxels alone).
+		expect(leavesLabeledOut(false, true, false)).toBe(false);
+		// Nothing predicted: nothing to leave out of.
+		expect(leavesLabeledOut(true, false, false)).toBe(false);
+		// An undo or redo on its way: the page's copies of the labels don't show it yet.
+		expect(leavesLabeledOut(true, true, true)).toBe(false);
+	});
+
+	it("stops leaving labeled voxels out from when an undo or redo is queued until it is answered", async () => {
+		const answer = async (): Promise<OpOut> => ({ seq: 1, chunks: [] });
+		const queue = new OpQueue("p", null, answer);
+		const settle = async () => {
+			for (let waited = 0; queue.pending > 0 && waited < 3000; waited += 5) await new Promise((r) => setTimeout(r, 5));
+		};
+		const leaves = () => leavesLabeledOut(true, true, queue.toggling);
+		expect(leaves()).toBe(true);
+		queue.edit([{ key: [0, 0, 0], base_version: 0, box: [0, 0, 0, 1, 1, 1], mask: "", value: 2, only_if: "any" }]);
+		await settle();
+		expect(leaves()).toBe(true);
+		queue.undo();
+		expect(leaves()).toBe(false);
+		await settle();
+		expect(leaves()).toBe(true);
+		queue.redo();
+		expect(leaves()).toBe(false);
+		await settle();
+		expect(leaves()).toBe(true);
 	});
 });

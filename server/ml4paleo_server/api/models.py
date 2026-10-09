@@ -23,9 +23,11 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, ValidationError
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 
+from ml4paleo.protocol import json_text
 from ml4paleo.segmentation.plugin import get_plugin, plugins
 
 from .. import artifacts, audit, jobs, pipelines, quotas, training
@@ -62,6 +64,14 @@ class TrainIn(BaseModel):
     plugin: str = "rf"
     params: dict[str, Any] = {}
     name: str | None = Field(default=None, max_length=100)
+
+    @field_validator("params")
+    @classmethod
+    def _finite(cls, params: dict[str, Any]) -> dict[str, Any]:
+        # A plugin's own fields bound what it takes, but what it keeps of them
+        # is stored as JSON, which can't hold NaN or infinity.
+        json_text(params, "params")
+        return params
 
 
 class ModelOut(BaseModel):
@@ -163,8 +173,13 @@ async def train_model(
     try:
         params = plugin.Params(**body.params)
     except ValidationError as exc:
-        raise HTTPException(
-            status_code=422, detail=exc.errors(include_url=False)
+        # Answered as the rest of the body's errors are, which are safe to send
+        # whatever the request held (see `app.invalid_request`).
+        raise RequestValidationError(
+            [
+                {**error, "loc": ("body", "params", *error["loc"])}
+                for error in exc.errors(include_url=False)
+            ]
         ) from None
     # Look for a free model slot before pinning a training set, so a refused
     # training stores nothing; `train.start` reserves the slot. Commit the

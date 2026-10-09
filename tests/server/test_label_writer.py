@@ -6,16 +6,20 @@ the history and change feed, the labels as zarr, and ROIs.
 import asyncio
 import base64
 import datetime
+import itertools
 import json
 import random
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
+import httpx2
 import numpy as np
 import pytest
-from helpers import run_db, signup
+from helpers import NOT_JSON, run_db, signup, strict_json
 from ml4paleo_server import artifacts, jobs, labels
+from ml4paleo_server.api import labels as api_labels
 from ml4paleo_server.db import (
     Artifact,
     LabelOp,
@@ -25,7 +29,7 @@ from ml4paleo_server.db import (
     create_sessionmaker,
 )
 from ml4paleo_server.storage import project_storage
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 
 from ml4paleo.labels import LABEL_CHUNK_ZYX, Source
 from ml4paleo.labels.codec import decode_chunk
@@ -431,6 +435,132 @@ def add_prediction(
     return run_db(database_url, create)
 
 
+def add_sparse_prediction(settings, database_url, project: str, shape, fills) -> str:
+    """
+    A committed prediction of `shape` that holds each value in the box (z0, y0,
+    x0, z1, y1, x1) given for it and 0 elsewhere, storing only the chunks those
+    boxes reach (so it can be as big as an image is).
+    """
+
+    async def create(db):
+        artifact = await artifacts.create_staging(
+            db,
+            project_id=uuid.UUID(project),
+            kind="prediction",
+            inputs={"model_id": None},
+            head_slot=None,
+        )
+        group = create_prediction(
+            project_storage(settings).child(artifacts.artifact_path(artifact)), shape
+        )
+        for box, value in fills:
+            region = tuple(slice(box[a], box[a + 3]) for a in range(3))
+            group["class"][region] = value  # type: ignore[index]
+        artifact.state = "committed"
+        artifact.manifest = {"kind": "prediction", "shape_zyx": list(shape)}
+        return str(artifact.id)
+
+    return run_db(database_url, create)
+
+
+class Reads:
+    """
+    What accepts read of a prediction's classes, noted as they go: the regions
+    asked for, and the (64 voxel) chunks of the prediction those reach into.
+    With a `latency` each read takes that long, as one from a store a way off
+    does, and the reads under way at once (in all, and for each `owner` of a
+    region, if a function of the region names one), the threads that read, and
+    the time they took are noted too. With `meet`, no read goes on until that
+    many are under way at once, so a number of accepts' reads all overlap.
+    With `gives`, a function of the region, that is what a read gives, instead of
+    what the prediction holds.
+    """
+
+    def __init__(
+        self, monkeypatch, latency: float = 0, owner=None, meet: int = 0, gives=None
+    ):
+        self.regions: list[tuple[slice, ...]] = []
+        self.latency = latency
+        self.owner = owner
+        self.meet = meet
+        self.gives = gives
+        self.met = False
+        self.under_way = 0
+        self.most_at_once = 0
+        self.under_way_of: dict = {}
+        self.most_at_once_of: dict = {}
+        self.threads: set[int] = set()
+        self.began: float | None = None
+        self.ended: float | None = None
+        self.lock = threading.Condition()
+        real = api_labels.open_prediction
+
+        def open_noting(grant):
+            group = real(grant)
+            return {"class": NotingArray(group["class"], self)}
+
+        monkeypatch.setattr(api_labels, "open_prediction", open_noting)
+
+    @property
+    def chunks(self) -> set[tuple[int, ...]]:
+        reached = set()
+        for region in self.regions:
+            reached.update(
+                itertools.product(
+                    *(range(r.start // 64, (r.stop - 1) // 64 + 1) for r in region)
+                )
+            )
+        return reached
+
+    @property
+    def took(self) -> float:
+        """From the first read beginning to the last one ending."""
+        assert self.began is not None and self.ended is not None
+        return self.ended - self.began
+
+
+class NotingArray:
+    """A zarr array that notes the regions read from it, which may be from several threads."""
+
+    def __init__(self, array, reads: Reads):
+        self._array = array
+        self._reads = reads
+
+    def __getattr__(self, name):
+        return getattr(self._array, name)
+
+    def __getitem__(self, region):
+        reads = self._reads
+        owner = reads.owner(region) if reads.owner else None
+        with reads.lock:
+            reads.regions.append(region)
+            reads.threads.add(threading.get_ident())
+            reads.under_way += 1
+            reads.most_at_once = max(reads.most_at_once, reads.under_way)
+            if reads.owner:
+                now = reads.under_way_of[owner] = reads.under_way_of.get(owner, 0) + 1
+                reads.most_at_once_of[owner] = max(
+                    reads.most_at_once_of.get(owner, 0), now
+                )
+            if reads.began is None:
+                reads.began = time.monotonic()
+            if reads.meet:
+                reads.met = reads.met or reads.under_way >= reads.meet
+                reads.lock.notify_all()
+                # Never for long: if they never are, the test says so after.
+                reads.lock.wait_for(lambda: reads.met, timeout=10)
+        try:
+            if reads.latency:
+                time.sleep(reads.latency)
+            return reads.gives(region) if reads.gives else self._array[region]
+        finally:
+            with reads.lock:
+                reads.under_way -= 1
+                if reads.owner:
+                    reads.under_way_of[owner] -= 1
+                reads.ended = time.monotonic()
+
+
 def test_accepting_a_prediction_is_checked_against_it(
     ada, project, settings, migrated_database_url
 ):
@@ -565,24 +695,43 @@ def test_predictions_labels_were_accepted_from_are_kept(
         assert (np.asarray(group["class"][:8, :8, :8]) == 2).all()  # type: ignore[index]
 
 
-def test_collection_waits_for_an_accept_in_progress(
-    project, settings, migrated_database_url
-):
-    # A replaced prediction, past every grace period...
-    replaced = add_prediction(settings, migrated_database_url, project, "prediction")
-    add_prediction(settings, migrated_database_url, project, "prediction")
+def replaced_and_aged(settings, database_url, project: str):
+    """
+    A prediction that another has replaced, past every grace period, and the
+    settings to collect it with.
+    """
+    replaced = add_prediction(settings, database_url, project, "prediction")
+    add_prediction(settings, database_url, project, "prediction")
     no_wait = settings.model_copy(
         update={
             "storage": settings.storage.model_copy(update={"keep_superseded_days": 0})
         }
     )
 
+    async def age(db):
+        long_ago = datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
+        await db.execute(update(Artifact).values(state_changed_at=long_ago))
+
+    run_db(database_url, age)
+    return replaced, no_wait
+
+
+async def prediction_state(db, prediction: str) -> str:
+    artifact = await db.get(Artifact, uuid.UUID(prediction))
+    return artifact.state
+
+
+def test_collection_waits_for_an_accept_in_progress(
+    project, settings, migrated_database_url
+):
+    replaced, no_wait = replaced_and_aged(settings, migrated_database_url, project)
+
     async def race():
         engine = create_engine(migrated_database_url)
         sessionmaker = create_sessionmaker(engine)
         try:
             async with sessionmaker() as accepting:
-                # ...that an accept has locked, as the API does, and is
+                # An accept has locked it, as the API does, and is
                 # recording labels from...
                 await accepting.scalar(
                     select(Artifact.id)
@@ -610,17 +759,85 @@ def test_collection_waits_for_an_accept_in_progress(
         finally:
             await engine.dispose()
 
-    async def age(db):
-        long_ago = datetime.datetime(2000, 1, 1, tzinfo=datetime.UTC)
-        await db.execute(update(Artifact).values(state_changed_at=long_ago))
-
-    run_db(migrated_database_url, age)
     assert asyncio.run(race()) == 0
+    assert run_db(migrated_database_url, lambda db: prediction_state(db, replaced)) == (
+        "superseded"
+    )
 
-    async def state(db):
-        return (await db.get(Artifact, uuid.UUID(replaced))).state
 
-    assert run_db(migrated_database_url, state) == "superseded"
+def test_the_accept_endpoint_holds_collection_back_while_it_runs(
+    ada, project, settings, migrated_database_url, monkeypatch
+):
+    # The test above takes the accept's lock itself, so it holds whether or
+    # not the endpoint does. Here a real accept is held part way, reading the
+    # prediction, while collection starts on that prediction.
+    replaced, no_wait = replaced_and_aged(settings, migrated_database_url, project)
+    reading, release = threading.Event(), threading.Event()
+    real = api_labels.open_prediction
+
+    def hold(grant):
+        reading.set()
+        assert release.wait(30), "the accept was never let go"
+        return real(grant)
+
+    monkeypatch.setattr(api_labels, "open_prediction", hold)
+    accepted = {}
+    accepting = threading.Thread(
+        target=lambda: accepted.update(
+            response=accept_box(
+                ada,
+                project,
+                replaced,
+                [0, 0, 0, 10, 10, 10],
+                np.ones((8, 8, 8), dtype=bool),
+                (0, 0, 0),
+                2,
+            )
+        )
+    )
+
+    async def collect():
+        engine = create_engine(migrated_database_url)
+        try:
+            return await artifacts.collect_garbage(create_sessionmaker(engine), no_wait)
+        finally:
+            await engine.dispose()
+
+    collected = {}
+    collecting = threading.Thread(
+        target=lambda: collected.update(count=asyncio.run(collect()))
+    )
+
+    async def waiting_for_a_lock(db) -> int:
+        return await db.scalar(
+            text(
+                "select count(*) from pg_stat_activity "
+                "where datname = current_database() and wait_event_type = 'Lock'"
+            )
+        )
+
+    accepting.start()
+    try:
+        assert reading.wait(10), "the accept never got to reading the prediction"
+        collecting.start()
+        # Collection must be left waiting on the accept (not collect, nor finish).
+        deadline = time.monotonic() + 10
+        while collecting.is_alive() and not run_db(
+            migrated_database_url, waiting_for_a_lock
+        ):
+            assert time.monotonic() < deadline, "collection neither waited nor ended"
+            time.sleep(0.05)
+        assert collecting.is_alive(), "collection didn't wait for the accept"
+    finally:
+        release.set()
+    accepting.join(30)
+    collecting.join(30)
+    assert accepted["response"].status_code == 201, accepted["response"].text
+    # The accept's op is there for it to find, so it keeps the prediction.
+    assert collected["count"] == 0
+    assert run_db(migrated_database_url, lambda db: prediction_state(db, replaced)) == (
+        "superseded"
+    )
 
 
 def add_model(database_url, project: str, name: str) -> str:
@@ -863,8 +1080,9 @@ def test_a_box_accept_across_chunks_takes_a_predicted_value_at_a_time(
 
 
 def test_a_box_to_accept_at_once_holds_at_most_256_cubed(
-    ada, settings, migrated_database_url
+    ada, settings, migrated_database_url, monkeypatch
 ):
+    reads = Reads(monkeypatch)
     big = make_project(ada, settings, migrated_database_url, "Big", (300, 300, 300))
     prediction = add_prediction(
         settings, migrated_database_url, big, shape=(300, 300, 300)
@@ -887,8 +1105,284 @@ def test_a_box_to_accept_at_once_holds_at_most_256_cubed(
         refused = accept(over)
         assert refused.status_code == 422, over
         assert refused.json()["detail"] == too_much
+    assert not reads.regions
+    # Only the chunk the one label is in is read, not the box's 64 of them.
     assert accept([0, 0, 0, 256, 256, 256]).status_code == 201
+    assert reads.chunks == {(0, 0, 0)}
     assert accept([0, 0, 0, 1, 300, 300]).status_code == 201
+
+
+@pytest.mark.parametrize("into", ["box", "roi"])
+def test_an_accept_reads_only_the_chunks_its_labels_are_in(
+    ada, settings, migrated_database_url, monkeypatch, into
+):
+    # A slab of the most voxels a box may hold, which has 4,096 chunks of the
+    # prediction in it, with a label in each of two corner ones.
+    shape = (64, 4096, 4096)
+    slab = [0, 0, 0, 1, 4096, 4096]
+    big = make_project(ada, settings, migrated_database_url, "Slab", shape)
+    prediction = add_sparse_prediction(
+        settings,
+        migrated_database_url,
+        big,
+        shape,
+        [([0, 0, 0, 1, 64, 64], 1), ([0, 4032, 4032, 1, 4096, 4096], 1)],
+    )
+    one = np.ones((1, 1, 1), dtype=bool)
+    deltas = deltas_for(one, (0, 0, 0), value=1, only_if="unlabeled")
+    deltas += deltas_for(one, (0, 4095, 4095), value=1, only_if="unlabeled")
+    if into == "roi":
+        roi = ada.post(
+            f"/api/projects/{big}/rois", json={"bbox": slab, "kind": "slice"}
+        )
+        where = {"roi_id": roi.json()["id"]}
+    else:
+        where = {"box": slab}
+    reads = Reads(monkeypatch)
+    response = ada.post(
+        f"/api/projects/{big}/labels/accept",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "prediction_artifact_id": prediction,
+            "deltas": deltas,
+            **where,
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert reads.chunks == {(0, 0, 0), (0, 63, 63)}
+    assert chunk(ada, big, (0, 0, 0))[0, 0, 0] == 1
+    assert chunk(ada, big, (0, 63, 63))[0, 63, 63] == 1
+
+
+def test_an_accept_of_as_many_labels_as_a_request_holds_reads_just_their_chunks(
+    ada, settings, migrated_database_url, monkeypatch
+):
+    # 512 labels, the most one request holds, that start and end part way along
+    # a row of the slab's chunks: the box around them has 576 chunks in it.
+    shape = (64, 4096, 4096)
+    box = [0, 0, 0, 1, 576, 4096]
+    big = make_project(ada, settings, migrated_database_url, "Slab", shape)
+    prediction = add_sparse_prediction(
+        settings, migrated_database_url, big, shape, [(box, 1)]
+    )
+    labels_in = [
+        ((1, 64, 2048), (0, 0, 2048)),
+        ((1, 448, 4096), (0, 64, 0)),
+        ((1, 64, 2048), (0, 512, 0)),
+    ]
+    chunks_of = (
+        {(0, 0, x) for x in range(32, 64)}
+        | {(0, y, x) for y in range(1, 8) for x in range(64)}
+        | {(0, 8, x) for x in range(32)}
+    )
+    assert len(chunks_of) == api_labels.MAX_DELTAS
+
+    def accept(parts):
+        deltas = []
+        for size, origin in parts:
+            mask = np.ones(size, dtype=bool)
+            deltas += deltas_for(mask, origin, value=1, only_if="unlabeled")
+        return ada.post(
+            f"/api/projects/{big}/labels/accept",
+            json={
+                "client_op_id": str(uuid.uuid4()),
+                "prediction_artifact_id": prediction,
+                "box": box,
+                "deltas": deltas,
+            },
+        )
+
+    reads = Reads(monkeypatch)
+    # One more is more than a request may hold, and nothing is read for it.
+    refused = accept([*labels_in, ((1, 64, 64), (0, 512, 2048))])
+    assert refused.status_code == 422, refused.text
+    assert "at most 512 items" in str(refused.json()["detail"])
+    assert not reads.regions
+    accepted = accept(labels_in)
+    assert accepted.status_code == 201, accepted.text
+    assert len(accepted.json()["chunks"]) == api_labels.MAX_DELTAS
+    assert reads.chunks == chunks_of
+
+
+SLAB = (64, 4096, 4096)
+
+
+def accept_slab(ada, project, prediction, box, deltas):
+    return ada.post(
+        f"/api/projects/{project}/labels/accept",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "prediction_artifact_id": prediction,
+            "box": box,
+            "deltas": deltas,
+        },
+    )
+
+
+def test_an_accept_reads_its_chunks_at_once_not_one_after_another(
+    ada, settings, migrated_database_url, monkeypatch
+):
+    # 512 labels in 512 chunks, the most a request holds, with each read taking as
+    # long as one from a store a way off does.
+    rows = [0, 0, 0, 1, 512, 4096]
+    big = make_project(ada, settings, migrated_database_url, "Slab", SLAB)
+    prediction = add_sparse_prediction(
+        settings, migrated_database_url, big, SLAB, [(rows, 1)]
+    )
+    mask = np.ones((1, 512, 4096), dtype=bool)
+    deltas = deltas_for(mask, (0, 0, 0), value=1, only_if="unlabeled")
+    assert len(deltas) == api_labels.MAX_DELTAS
+    latency = 0.03
+    readers = api_labels.ACCEPT_READS_AT_ONCE
+    # No read goes on until `readers` of them are under way at once, so that
+    # they are is certain, not a matter of how quickly threads start.
+    reads = Reads(monkeypatch, latency, meet=readers)
+    accepted = accept_slab(ada, big, prediction, rows, deltas)
+    assert accepted.status_code == 201, accepted.text
+    assert len(reads.regions) == len(reads.chunks) == api_labels.MAX_DELTAS
+    # All the accept's readers are busy at once, and no more than they...
+    assert reads.most_at_once == readers
+    # ...so it is not all the reads in turn (512 × 30 ms), as far from it as
+    # this is: a bound for a loaded machine, not a measure.
+    assert reads.took < api_labels.MAX_DELTAS * latency / 2
+
+
+def test_the_deltas_of_a_chunk_share_a_read(
+    ada, project, settings, migrated_database_url, monkeypatch
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    reads = Reads(monkeypatch)
+    # Two values in one chunk, each as the prediction has it (bone in the corner,
+    # background elsewhere). A request may hold one delta for a chunk, as it is
+    # refused when applied, but the prediction is read once for both.
+    one = np.ones((2, 2, 2), dtype=bool)
+    deltas = deltas_for(one, (0, 0, 0), value=2, only_if="unlabeled")
+    deltas += deltas_for(one, (20, 20, 20), value=1, only_if="unlabeled")
+    assert deltas[0]["key"] == deltas[1]["key"]
+    refused = ada.post(
+        f"/api/projects/{project}/labels/accept",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "prediction_artifact_id": prediction,
+            "box": [0, 0, 0, 30, 30, 30],
+            "deltas": deltas,
+        },
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == "Send one delta per chunk"
+    assert len(reads.regions) == 1
+    assert reads.chunks == {(0, 0, 0)}
+
+
+def test_a_label_that_does_not_match_stops_the_other_reads(
+    ada, settings, migrated_database_url, monkeypatch
+):
+    # The prediction says 2 where every one of the 512 labels says 1.
+    rows = [0, 0, 0, 1, 512, 4096]
+    big = make_project(ada, settings, migrated_database_url, "Slab", SLAB)
+    prediction = add_sparse_prediction(
+        settings, migrated_database_url, big, SLAB, [(rows, 2)]
+    )
+    mask = np.ones((1, 512, 4096), dtype=bool)
+    deltas = deltas_for(mask, (0, 0, 0), value=1, only_if="unlabeled")
+    latency = 0.05
+    reads = Reads(monkeypatch, latency)
+    # A pool of two, so most of the accept's reads wait their turn in its queue,
+    # as they do when other accepts are using the process's threads.
+    pool = ThreadPoolExecutor(2)
+    monkeypatch.setattr(api_labels, "_readers", pool)
+    try:
+        refused = accept_slab(ada, big, prediction, rows, deltas)
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["detail"] == "Those labels don't match the prediction"
+        # The reads that had begun finished, those still waiting never began, and
+        # when the request has its answer none is left running.
+        began = len(reads.regions)
+        assert 0 < began < api_labels.ACCEPT_READS_AT_ONCE
+        assert reads.under_way == 0
+        time.sleep(3 * latency)
+        assert len(reads.regions) == began
+    finally:
+        pool.shutdown()
+
+
+def test_accepts_at_once_share_the_processs_reader_threads(
+    ada, settings, migrated_database_url, monkeypatch
+):
+    # 20 accepts of 40 chunks each, at once, each read taking as long as one from
+    # a store a way off does: 800 reads, from one row of 40 chunks of the slab
+    # for each. One of them (7) is wrong, saying 1 where the prediction says 2.
+    accepts, chunks_each, wrong = 20, 40, 7
+    columns = chunks_each * 64
+    big = make_project(ada, settings, migrated_database_url, "Slab", SLAB)
+    prediction = add_sparse_prediction(settings, migrated_database_url, big, SLAB, [])
+
+    def says(region):
+        """What the prediction holds: 1, but 2 in the wrong one's row."""
+        size = tuple(r.stop - r.start for r in region)
+        return np.full(size, 2 if region[1].start // 64 == wrong else 1, np.uint8)
+
+    # It is the reads that are measured, so they are made up (the prediction is
+    # empty) and the label writer is left out (its tests are above), and nothing
+    # else the process does is in the way of the timing.
+    async def writes_nothing(*args, **kwargs):
+        return labels.OpResult(seq=1, chunks=[])
+
+    monkeypatch.setattr(labels, "apply_edit", writes_nothing)
+
+    def accept(row):
+        mask = np.ones((1, 64, columns), dtype=bool)
+        deltas = deltas_for(mask, (0, row * 64, 0), value=1, only_if="unlabeled")
+        assert len(deltas) == chunks_each
+        box = [0, row * 64, 0, 1, (row + 1) * 64, columns]
+        return accept_slab(ada, big, prediction, box, deltas)
+
+    latency = 0.05
+    # A region's row of chunks tells which accept it is for.
+    reads = Reads(
+        monkeypatch,
+        latency,
+        owner=lambda region: region[1].start // 64,
+        meet=api_labels.PREDICTION_READERS,
+        gives=says,
+    )
+    answers = {}
+    threads = [
+        threading.Thread(target=lambda row=row: answers.update({row: accept(row)}))
+        for row in range(accepts)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(120)
+    assert sorted(answers) == list(range(accepts))
+
+    # The wrong one is refused as it would be on its own, and no other is.
+    refused = answers[wrong]
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == "Those labels don't match the prediction"
+    for row in set(range(accepts)) - {wrong}:
+        assert answers[row].status_code == 201, (row, answers[row].text)
+
+    # In all, no more reads were under way than the process has threads for, and
+    # it used all of them, and no more threads than those (not a pool for each
+    # accept, which would be 20 times 16): the total is bounded in the process.
+    assert reads.most_at_once == api_labels.PREDICTION_READERS
+    assert len(reads.threads) <= api_labels.PREDICTION_READERS
+    assert reads.under_way == 0
+    # No accept had more than its share of them under way.
+    assert max(reads.most_at_once_of.values()) <= api_labels.ACCEPT_READS_AT_ONCE
+    # Each accept's chunks, every one and no others, were read once.
+    columns_read: dict[int, list[int]] = {row: [] for row in range(accepts)}
+    for region in reads.regions:
+        columns_read[region[1].start // 64].append(region[2].start // 64)
+    for row in set(range(accepts)) - {wrong}:
+        assert sorted(columns_read[row]) == list(range(chunks_each)), row
+    # The wrong one stopped its own reads that had not begun (and only its own).
+    assert 0 < len(columns_read[wrong]) <= api_labels.ACCEPT_READS_AT_ONCE
+    # Not all the reads in turn (800 × 50 ms), as far from it as this is: a bound
+    # for a loaded machine, not a measure.
+    assert reads.took < accepts * chunks_each * latency / 2
 
 
 def test_accepting_refuses_a_prediction_of_an_image_that_was_replaced(
@@ -929,8 +1423,9 @@ def test_accepting_refuses_a_prediction_of_an_image_that_was_replaced(
 
 
 def test_a_prediction_that_does_not_cover_the_labels_is_refused(
-    ada, project, settings, migrated_database_url
+    ada, project, settings, migrated_database_url, monkeypatch
 ):
+    reads = Reads(monkeypatch)
     # Made for a smaller image, and not saying which.
     small = add_prediction(settings, migrated_database_url, project, shape=(10, 10, 10))
     big = {"bbox": [0, 0, 0, 20, 20, 20], "kind": "cube"}
@@ -951,6 +1446,8 @@ def test_a_prediction_that_does_not_cover_the_labels_is_refused(
     for refused in (into_box, into_roi):
         assert refused.status_code == 422, refused.text
         assert refused.json()["detail"] == "That prediction doesn't cover those labels"
+    # It's seen from its shape, without reading any of it.
+    assert not reads.regions
 
 
 def test_predictions_labels_were_accepted_into_a_box_from_are_kept(
@@ -1037,6 +1534,132 @@ def test_the_history_lists_a_box_accept_without_an_roi(
         "v1_job_id": None,
         "roi_id": None,
     }
+
+
+def with_number(body: dict, literal: str) -> str:
+    """
+    `body` as JSON text, with each "@number@" in it written as `literal`: NaN, an
+    infinity, or a number too big for a float, which Python's JSON parser takes.
+    """
+    return json.dumps(body).replace('"@number@"', literal)
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_numbers_json_cannot_hold_are_a_422_in_the_labels_api(
+    ada, project, settings, migrated_database_url, literal
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    base = f"/api/projects/{project}/labels"
+    delta = deltas_for(np.ones((1, 1, 1), dtype=bool), (0, 0, 0), value=2)[0]
+    accept = {
+        "client_op_id": str(uuid.uuid4()),
+        "prediction_artifact_id": prediction,
+        "box": [0, 0, 0, 10, 10, 10],
+        "deltas": [delta],
+    }
+    ops = {"client_op_id": str(uuid.uuid4()), "deltas": [delta]}
+    shown = NOT_JSON[literal]
+    # Each: where it is, the request, the error's place, and the input it shows.
+    cases = {
+        "the accept's box": (
+            f"{base}/accept",
+            {**accept, "box": [0, 0, 0, "@number@", 10, 10]},
+            ["body", "box", 3],
+            shown,
+        ),
+        "an edit's base version": (
+            f"{base}/ops",
+            {**ops, "deltas": [{**delta, "base_version": "@number@"}]},
+            ["body", "deltas", 0, "base_version"],
+            shown,
+        ),
+        "a delta's box": (
+            f"{base}/ops",
+            {**ops, "deltas": [{**delta, "box": [0, 0, 0, 1, 1, "@number@"]}]},
+            ["body", "deltas", 0, "box", 5],
+            shown,
+        ),
+        "a delta's value": (
+            f"{base}/accept",
+            {**accept, "deltas": [{**delta, "value": "@number@"}]},
+            ["body", "deltas", 0, "value"],
+            shown,
+        ),
+        "a class's color": (
+            f"{base}/classes",
+            {"name": "tooth", "color": "@number@"},
+            ["body", "color"],
+            shown,
+        ),
+        "an edit's strict flag": (
+            f"{base}/ops",
+            {**ops, "strict": "@number@"},
+            ["body", "strict"],
+            shown,
+        ),
+        # Free-form, so it passes as a model field and reaches the database unless
+        # it is checked: here the input is the whole tool, with the number as text.
+        "an edit's tool": (
+            f"{base}/ops",
+            {**ops, "tool": {"x": "@number@"}},
+            ["body", "tool"],
+            {"x": shown},
+        ),
+    }
+    before = ada.get(f"{base}/counts").json()
+    for name, (url, body, place, seen) in cases.items():
+        response = ada.post(
+            url,
+            content=with_number(body, literal),
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 422, (name, response.status_code, response.text)
+        errors = strict_json(response.text)["detail"]
+        [error] = [e for e in errors if e["loc"] == place]
+        assert error["input"] == seen, name
+        assert error["msg"], name
+    # Nothing was written or made.
+    assert ada.get(f"{base}/counts").json() == before
+    assert len(ada.get(f"{base}/classes").json()) == 2
+    assert ada.get(f"{base}/ops").json() == []
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_numbers_json_cannot_hold_get_their_422_over_a_real_connection(
+    ada, project, settings, migrated_database_url, live_server, literal
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    base = f"/api/projects/{project}/labels"
+    delta = deltas_for(np.ones((1, 1, 1), dtype=bool), (0, 0, 0), value=2)[0]
+    ops = {
+        "client_op_id": str(uuid.uuid4()),
+        "deltas": [{**delta, "base_version": "@n@"}],
+    }
+    accept = {
+        "client_op_id": str(uuid.uuid4()),
+        "prediction_artifact_id": prediction,
+        "box": [0, 0, 0, "@n@", 10, 10],
+        "deltas": [delta],
+    }
+    # The same session, on a real connection, where a request the server can't answer
+    # drops the connection instead of getting a 500.
+    cookies = {cookie.name: cookie.value for cookie in ada.client.cookies.jar}
+    headers = {"content-type": "application/json", "x-csrf-token": ada.csrf_token}
+    with httpx2.Client(base_url=live_server, cookies=cookies, timeout=10) as raw:
+        for url, body, place in (
+            (f"{base}/ops", ops, ["body", "deltas", 0, "base_version"]),
+            (f"{base}/accept", accept, ["body", "box", 3]),
+        ):
+            text = json.dumps(body).replace('"@n@"', literal)
+            response = raw.post(url, content=text, headers=headers)
+            assert response.status_code == 422, (
+                url,
+                response.status_code,
+                response.text,
+            )
+            [error] = strict_json(response.text)["detail"]
+            assert error["loc"] == place and error["input"] == NOT_JSON[literal]
+        assert raw.get(f"{base}/classes").status_code == 200
 
 
 def test_the_history_names_people_and_models(

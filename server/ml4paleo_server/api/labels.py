@@ -58,8 +58,10 @@ import datetime
 import json
 import math
 import re
+import threading
 import uuid
 from collections.abc import Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Annotated, Any, Literal
 
 import numpy as np
@@ -73,8 +75,9 @@ from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, S
 from ml4paleo.labels.codec import ZARR_CODECS, blob_key
 from ml4paleo.labels.deltas import ChunkDelta, unpack_mask, unpack_values
 from ml4paleo.ome import LevelSpec
+from ml4paleo.protocol import json_text
 from ml4paleo.segmentation.predict import open_prediction
-from ml4paleo.storage import get_bytes, object_store
+from ml4paleo.storage import StorageGrant, get_bytes, object_store
 
 from .. import artifacts, audit, label_pyramid, labels, streams
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
@@ -98,6 +101,16 @@ router = APIRouter(prefix="/api/projects/{project_id}/labels", tags=["labels"])
 
 MAX_DELTAS = 512
 MAX_TOOL_BYTES = 16 * 1024
+# Prediction chunks are read on one pool of threads for the whole process, this
+# many: reading one takes a round trip or two to the object store (a sharded
+# array's index, then the chunk), so a store a way off is waited on this many
+# at once, not each in turn, and these are all the process ever has reading,
+# however many accepts are under way.
+PREDICTION_READERS = 32
+# One accept has at most this many reads under way (half the pool), so another
+# gets going at once, and a big one doesn't make the others wait for all its
+# chunks, as it would if it queued them all.
+ACCEPT_READS_AT_ONCE = 16
 FIRST_CLASS = BACKGROUND + 1
 COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 EVENT_INTERVAL_SECONDS = 1.0
@@ -322,7 +335,7 @@ class OpIn(BaseModel):
     @field_validator("tool")
     @classmethod
     def _small(cls, tool: dict[str, Any]) -> dict[str, Any]:
-        if len(json.dumps(tool)) > MAX_TOOL_BYTES:
+        if len(json_text(tool, "tool")) > MAX_TOOL_BYTES:
             raise ValueError("tool is too large")
         return tool
 
@@ -416,7 +429,9 @@ async def apply_op(
     return _op_out(result)
 
 
-# The most of a prediction one accept may read (16 MiB of label values).
+# The most one accept may span, as a box or as the labels it sends (16 MiB of
+# label values): what a page takes in at once. What the server reads doesn't
+# depend on it (see `_check_against_prediction`).
 MAX_ACCEPT_VOXELS = 256**3
 
 
@@ -463,23 +478,113 @@ async def _check_current_image(db, project_id: uuid.UUID, prediction: Artifact) 
         )
 
 
-def _check_against_prediction(
-    deltas: list[ChunkDelta], predicted: np.ndarray, origin: Sequence[int]
-) -> None:
-    """Every voxel a delta selects must hold the value it writes."""
+_readers: ThreadPoolExecutor | None = None
+_readers_made = threading.Lock()
+
+
+def _prediction_readers() -> ThreadPoolExecutor:
+    """
+    The process's pool of `PREDICTION_READERS` threads for reading prediction
+    chunks, made when first needed (not at import, so each process a server
+    forks makes its own). Its threads start as work needs them, are idle
+    between accepts, and are stopped, idle, when the process exits.
+    """
+    global _readers
+    with _readers_made:
+        if _readers is None:
+            _readers = ThreadPoolExecutor(
+                PREDICTION_READERS, thread_name_prefix="accept-read"
+            )
+        return _readers
+
+
+def _check_against_prediction(grant: StorageGrant, deltas: list[ChunkDelta]) -> None:
+    """
+    Every voxel a delta selects must hold the value it writes, in the
+    prediction at `grant`, and the prediction must reach as far as the labels.
+
+    Only the chunks the labels are in are read, each once. A delta lies in one
+    chunk of the labels and so in one of the prediction's (both are 64 voxels
+    a side), so that is a chunk for each delta (`MAX_DELTAS` at most) however
+    far apart they lie, and one read serves the deltas a request holds for a
+    chunk. The reads run on the process's reader threads, `ACCEPT_READS_AT_ONCE`
+    of them at most for this accept and `PREDICTION_READERS` in all for every
+    accept at once (zarr's synchronous reads are safe from several threads).
+    """
+    classes: Any = open_prediction(grant)["class"]
+    in_chunk: dict[tuple[int, ...], list[tuple[ChunkDelta, tuple[slice, ...]]]] = {}
     for delta in deltas:
         start = [
-            k * c + b - o
-            for k, c, b, o in zip(
-                delta.key, LABEL_CHUNK_ZYX, delta.box[:3], origin, strict=True
+            k * c + b
+            for k, c, b in zip(delta.key, LABEL_CHUNK_ZYX, delta.box[:3], strict=True)
+        ]
+        region = tuple(
+            slice(a, a + n) for a, n in zip(start, delta.box_shape, strict=True)
+        )
+        in_chunk.setdefault(delta.key, []).append((delta, region))
+    # Before reading any of it: a read past the end of an array is cut short.
+    if any(
+        part.stop > n
+        for group in in_chunk.values()
+        for _, region in group
+        for part, n in zip(region, classes.shape, strict=True)
+    ):
+        raise ValueError("That prediction doesn't cover those labels")
+    _read_chunks(classes, list(in_chunk.values()))
+
+
+def _read_chunks(
+    classes: Any, groups: list[list[tuple[ChunkDelta, tuple[slice, ...]]]]
+) -> None:
+    """
+    Check each chunk's deltas (`_check_chunk`) on the reader threads, with at
+    most `ACCEPT_READS_AT_ONCE` of this accept's reads queued or running, so
+    its chunks take turns with other accepts' in the pool's queue, one as
+    each of its own finishes.
+
+    The first to fail stops this accept's reads that haven't begun, and this
+    waits for those that have, so none of them is running when it returns.
+    Other accepts' reads are not touched.
+    """
+    readers = _prediction_readers()
+    waiting = iter(groups)
+    running: set[Future[None]] = set()
+    try:
+        while True:
+            while (
+                len(running) < ACCEPT_READS_AT_ONCE
+                and (group := next(waiting, None)) is not None
+            ):
+                running.add(readers.submit(_check_chunk, classes, group))
+            if not running:
+                return
+            done, running = wait(running, return_when=FIRST_COMPLETED)
+            for future in done:
+                future.result()
+    except BaseException:
+        for future in running:
+            future.cancel()
+        wait(running)
+        raise
+
+
+def _check_chunk(
+    classes: Any, group: list[tuple[ChunkDelta, tuple[slice, ...]]]
+) -> None:
+    """Read the part of a chunk that its deltas are in, and check each against it."""
+    low = [min(region[a].start for _, region in group) for a in range(3)]
+    high = [max(region[a].stop for _, region in group) for a in range(3)]
+    read = np.asarray(
+        classes[tuple(slice(lo, hi) for lo, hi in zip(low, high, strict=True))]
+    )
+    for delta, region in group:
+        part = read[
+            tuple(
+                slice(r.start - lo, r.stop - lo)
+                for r, lo in zip(region, low, strict=True)
             )
         ]
-        shape = delta.box_shape
-        region = predicted[
-            tuple(slice(a, a + n) for a, n in zip(start, shape, strict=True))
-        ]
-        mask = unpack_mask(delta.mask, shape)
-        if (region[mask] != delta.value).any():
+        if (part[unpack_mask(delta.mask, delta.box_shape)] != delta.value).any():
             raise ValueError("Those labels don't match the prediction")
 
 
@@ -500,8 +605,12 @@ async def accept_prediction(
     0) into only unlabeled voxels inside the ROI or box, and the stored
     prediction has exactly that value at every voxel it selects. A box is
     checked as an ROI's is (whole voxels, not empty, inside the image). The
-    labels sent may span at most `MAX_ACCEPT_VOXELS` (and so may a box).
-    Undo and redo work as for any edit.
+    labels sent may span at most `MAX_ACCEPT_VOXELS` (and so may a box). Only
+    the chunks of the prediction the labels are in are read: a chunk for each
+    delta, at most `MAX_DELTAS`, whatever the box or ROI is like, on one pool of
+    `PREDICTION_READERS` threads shared by every accept in the process, an
+    accept having `ACCEPT_READS_AT_ONCE` of its reads under way at most. Undo
+    and redo work as for any edit.
     """
     if done := await labels.existing(db, project.id, body.client_op_id):
         return _op_out(done)
@@ -554,13 +663,7 @@ async def accept_prediction(
         _check_size(box, place)
         await _check_current_image(db, project.id, prediction)
         grant = project_storage(settings).child(artifacts.artifact_path(prediction))
-        region = tuple(slice(box[a], box[a + 3]) for a in range(3))
-        predicted = await run_in_threadpool(
-            lambda: np.asarray(open_prediction(grant)["class"][region])  # type: ignore[index]
-        )
-        if predicted.shape != tuple(box[a + 3] - box[a] for a in range(3)):
-            raise ValueError("That prediction doesn't cover those labels")
-        await run_in_threadpool(_check_against_prediction, deltas, predicted, box[:3])
+        await run_in_threadpool(_check_against_prediction, grant, deltas)
         result = await labels.apply_edit(
             db,
             settings,

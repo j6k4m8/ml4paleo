@@ -4,10 +4,13 @@ The API skeleton: health, security headers, SPA serving, and migrations.
 
 import base64
 import hashlib
+import http.client
 import uuid
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
+from helpers import NOT_JSON, strict_json
 from ml4paleo_server import migrations
 from ml4paleo_server.app import create_app
 from ml4paleo_server.db import uuid7
@@ -136,3 +139,167 @@ def test_empty_secret_files_are_ignored(monkeypatch, tmp_path):
     (tmp_path / "empty").write_text("\n")
     monkeypatch.setenv("M4P_STORAGE__SECRET_ACCESS_KEY_FILE", str(tmp_path / "empty"))
     assert Settings().storage.secret_access_key is None
+
+
+def login_with(literal: str) -> str:
+    """A login whose password is `literal`, written into the JSON as it is (NaN, say, unquoted)."""
+    return '{"username": "ada", "password": ' + literal + "}"
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_a_number_json_cannot_hold_is_a_422_a_browser_can_read(client, literal):
+    response = client.post(
+        "/api/auth/login",
+        content=login_with(literal),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    [error] = strict_json(response.text)["detail"]
+    # The usual error, as the web app reads it (where, and what), with the input written as text.
+    assert error["loc"] == ["body", "password"]
+    assert error["type"] == "string_type" and "string" in error["msg"]
+    assert error["input"] == NOT_JSON[literal]
+
+
+def test_other_validation_errors_keep_their_usual_shape(client):
+    response = client.post("/api/auth/login", json={"username": "ada"})
+    assert response.status_code == 422
+    [error] = response.json()["detail"]
+    assert error["loc"] == ["body", "password"]
+    assert (error["type"], error["msg"]) == ("missing", "Field required")
+    assert error["input"] == {"username": "ada"}
+
+
+@pytest.mark.parametrize("literal", NOT_JSON)
+def test_a_number_json_cannot_hold_gets_its_422_over_a_real_connection(
+    live_server, literal
+):
+    where = urlsplit(live_server)
+    connection = http.client.HTTPConnection(where.hostname, where.port, timeout=10)
+    try:
+        connection.request(
+            "POST",
+            "/api/auth/login",
+            body=login_with(literal),
+            headers={"Content-Type": "application/json"},
+        )
+        # A dropped connection raises here instead of answering.
+        response = connection.getresponse()
+        assert response.status == 422
+        [error] = strict_json(response.read().decode())["detail"]
+        assert (
+            error["loc"] == ["body", "password"] and error["input"] == NOT_JSON[literal]
+        )
+    finally:
+        connection.close()
+    # And the server goes on.
+    connection = http.client.HTTPConnection(where.hostname, where.port, timeout=10)
+    try:
+        connection.request("GET", "/api/health")
+        assert connection.getresponse().status == 200
+    finally:
+        connection.close()
+
+
+def can_hold_nan(spec: dict) -> set[tuple[str, str, str]]:
+    """
+    The request fields (method, path, field) in an OpenAPI spec that could be
+    sent a number JSON can't hold, or something with one in it: a number that is
+    not bounded on both sides, and anything free-form (an object or list of no
+    particular shape).
+    """
+    schemas = spec["components"]["schemas"]
+    found: set[tuple[str, str, str]] = set()
+
+    def walk(schema: dict, where: tuple[str, str], name: str, seen: frozenset) -> None:
+        if "$ref" in schema:
+            ref = schema["$ref"].split("/")[-1]
+            if ref not in seen:
+                walk(schemas[ref], where, name, seen | {ref})
+            return
+        for key in ("anyOf", "oneOf", "allOf"):
+            for option in schema.get(key, []):
+                walk(option, where, name, seen)
+        if any(key in schema for key in ("anyOf", "oneOf", "allOf")):
+            return
+        kind = schema.get("type")
+        if kind == "number":
+            bounded = "minimum" in schema and "maximum" in schema
+            if not bounded:
+                found.add((*where, name))
+        elif kind == "object" or "properties" in schema:
+            for field, sub in schema.get("properties", {}).items():
+                walk(sub, where, f"{name}.{field}", seen)
+            extra = schema.get("additionalProperties")
+            if not schema.get("properties") and extra in (None, True, {}):
+                found.add((*where, name))
+            elif isinstance(extra, dict) and extra:
+                walk(extra, where, name + "{}", seen)
+        elif kind == "array":
+            options = [
+                *schema.get("prefixItems", []),
+                *([schema["items"]] if "items" in schema else []),
+            ]
+            if not options:
+                found.add((*where, name))
+            for option in options:
+                walk(option, where, name + "[]", seen)
+        elif kind is None and not schema.get("enum") and "const" not in schema:
+            found.add((*where, name))
+
+    for path, operations in spec["paths"].items():
+        for method, operation in operations.items():
+            where = (method.upper(), path)
+            for parameter in operation.get("parameters", []):
+                walk(parameter.get("schema", {}), where, parameter["name"], frozenset())
+            for content in operation.get("requestBody", {}).get("content", {}).values():
+                walk(content.get("schema", {}), where, "body", frozenset())
+    return found
+
+
+# Each of these is checked by a test of its own, which sends it NaN and the
+# infinities and expects a 422. Free-form fields hold JSON, which the database
+# stores and can't hold them (`ml4paleo.protocol.json_text` refuses them); a
+# number with no upper bound would take infinity (so they say `allow_inf_nan=False`).
+FREE_FORM_FIELDS = {
+    ("POST", "/api/projects/{project_id}/labels/ops", "body.tool"),
+    ("POST", "/api/projects/{project_id}/models", "body.params"),
+    ("POST", "/api/worker/v1/jobs/{job_id}/complete", "body.result"),
+    ("POST", "/api/worker/v1/jobs/{job_id}/label-ops", "body.tool"),
+    ("POST", "/api/worker/v1/jobs/{job_id}/label-ops", "body.deltas[]"),
+}
+UNBOUNDED_NUMBERS = (
+    {
+        ("PUT", "/api/admin/users/{user_id}/quota", f"body.{limit}")
+        for limit in ("storage_gb", "cpu_hours_per_day", "gpu_hours_per_day")
+    }
+    | {
+        (
+            "POST",
+            "/api/admin/quota-requests/{request_id}",
+            f"body.quota_override.{limit}",
+        )
+        for limit in ("storage_gb", "cpu_hours_per_day", "gpu_hours_per_day")
+    }
+    | {
+        (method, path, name)
+        for method, path in (
+            ("POST", "/api/worker/v1/hello"),
+            ("POST", "/api/worker/v1/claim"),
+        )
+        for name in ("body.caps.vram_gb", "body.caps.memory_gb")
+    }
+    | {("POST", "/api/worker/v1/claim", "body.wait_seconds")}
+)
+
+
+def test_a_new_request_field_that_could_hold_nan_is_one_that_is_checked(app):
+    found = can_hold_nan(app.openapi())
+    new = found - FREE_FORM_FIELDS - UNBOUNDED_NUMBERS
+    assert not new, (
+        f"{sorted(new)} could be sent NaN or infinity, which the database can't "
+        "store (a 500). Refuse them (`json_text` for JSON, `allow_inf_nan=False` "
+        "or bounds for a number), test it, and add the field to the lists here."
+    )
+    assert found == FREE_FORM_FIELDS | UNBOUNDED_NUMBERS
