@@ -71,7 +71,12 @@ from starlette.concurrency import run_in_threadpool
 
 from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
 from ml4paleo.labels.codec import ZARR_CODECS, blob_key
-from ml4paleo.labels.deltas import ChunkDelta, unpack_mask, unpack_values
+from ml4paleo.labels.deltas import (
+    ChunkDelta,
+    normalize_only_if,
+    unpack_mask,
+    unpack_values,
+)
 from ml4paleo.ome import LevelSpec
 from ml4paleo.segmentation.predict import open_prediction
 from ml4paleo.storage import get_bytes, object_store
@@ -285,7 +290,11 @@ def _b64(data: str) -> bytes:
 class DeltaIn(BaseModel):
     """
     One chunk's part of an edit (see `ml4paleo.labels.deltas.ChunkDelta`),
-    with `mask` and `values` base64-encoded.
+    with `mask` and `values` base64-encoded. `only_if` says which of the
+    voxels in the mask may change: "any", "unlabeled", "labeled" (anything but
+    unlabeled, background included), or "class:2,3" (those values; one or
+    more, each 1 to 254 and none twice, in any order, which is put in
+    ascending order). Anything else is refused.
     """
 
     key: tuple[int, int, int]
@@ -295,6 +304,11 @@ class DeltaIn(BaseModel):
     value: int | None = None
     values: str | None = None
     only_if: str = "any"
+
+    @field_validator("only_if")
+    @classmethod
+    def _only_if(cls, only_if: str) -> str:
+        return normalize_only_if(only_if)
 
     def to_delta(self) -> ChunkDelta:
         return ChunkDelta(

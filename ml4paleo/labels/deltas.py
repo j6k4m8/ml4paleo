@@ -27,15 +27,17 @@ from dataclasses import dataclass
 
 import numpy as np
 import zstandard
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from . import LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
+from . import BACKGROUND, LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
 from .codec import FRAME_OVERHEAD, decompress_exact
 
 ChunkKey = tuple[int, int, int]
 Box = tuple[int, int, int, int, int, int]
 
-_ONLY_IF = re.compile(r"any|unlabeled|class:(\d{1,3})")
+_ONLY_IF = re.compile(r"any|unlabeled|labeled|class:([0-9]{1,3}(?:,[0-9]{1,3})*)")
+# The longest list `_ONLY_IF` allows is every class value, three digits each.
+_MAX_ONLY_IF = len("class:") + 4 * MAX_CLASS
 _MAX_RAW_BYTES = int(np.prod(LABEL_CHUNK_ZYX))
 
 
@@ -45,6 +47,40 @@ def _compress(raw: bytes) -> bytes:
 
 def _decompress(data: bytes, size: int) -> bytes:
     return decompress_exact(data, size)
+
+
+def normalize_only_if(only_if: str) -> str:
+    """
+    The canonical form of an `only_if` condition: "any", "unlabeled", "labeled",
+    or "class:" and the values it names, once each and ascending ("class:2,3,5").
+    The values may come in any order and with leading zeros; none may be 0
+    (unlabeled, which has its own condition), past `MAX_CLASS`, or repeated.
+    Raises ValueError for anything else.
+    """
+    match = _ONLY_IF.fullmatch(only_if) if len(only_if) <= _MAX_ONLY_IF else None
+    if match is None:
+        raise ValueError(f"Invalid only_if: {only_if!r}")
+    listed = match.group(1)
+    if listed is None:
+        return only_if
+    values = [int(value) for value in listed.split(",")]
+    if len(set(values)) != len(values):
+        raise ValueError(f"Invalid only_if: {only_if!r} names a class twice")
+    if not all(BACKGROUND <= value <= MAX_CLASS for value in values):
+        raise ValueError(
+            f"Invalid only_if: {only_if!r} names a value that is not a class"
+        )
+    return "class:" + ",".join(str(value) for value in sorted(values))
+
+
+def only_if_classes(only_if: str) -> list[int] | None:
+    """
+    The values a normalized "class:..." condition names, or None for the other
+    conditions.
+    """
+    if not only_if.startswith("class:"):
+        return None
+    return [int(value) for value in only_if[len("class:") :].split(",")]
 
 
 def pack_mask(mask: np.ndarray) -> bytes:
@@ -100,8 +136,11 @@ class ChunkDelta(BaseModel):
     `box` is chunk-local (z0, y0, x0, z1, y1, x1), half-open. `mask` selects
     voxels within the box (see `pack_mask`). Selected voxels get `value`, or the
     per-voxel `values` (box-shaped, see `pack_values`) for multi-class edits;
-    value 0 erases. `only_if` limits which voxels may change: "any",
-    "unlabeled", or "class:N".
+    value 0 erases. `only_if` limits which voxels may change (judged on the
+    chunk as it is when the delta is applied): "any" (no limit), "unlabeled"
+    (voxels holding 0), "labeled" (voxels holding anything but 0, background
+    included), or "class:2,3" (voxels holding one of the values listed, as
+    `normalize_only_if` says). Nothing outside the mask changes.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -113,6 +152,11 @@ class ChunkDelta(BaseModel):
     value: int | None = None
     values: bytes | None = None
     only_if: str = "any"
+
+    @field_validator("only_if")
+    @classmethod
+    def _normalized(cls, only_if: str) -> str:
+        return normalize_only_if(only_if)
 
     @model_validator(mode="after")
     def _check(self) -> "ChunkDelta":
@@ -126,9 +170,6 @@ class ChunkDelta(BaseModel):
         for payload in (self.mask, self.values or b""):
             if len(payload) > _MAX_RAW_BYTES + FRAME_OVERHEAD:
                 raise ValueError("Delta payload is too large")
-        match = _ONLY_IF.fullmatch(self.only_if)
-        if match is None or (match.group(1) and int(match.group(1)) > MAX_CLASS):
-            raise ValueError(f"Invalid only_if: {self.only_if!r}")
         return self
 
     @property
@@ -219,8 +260,10 @@ def apply_delta(
     selected = unpack_mask(delta.mask, shape)
     if delta.only_if == "unlabeled":
         selected &= region == UNLABELED
-    elif delta.only_if.startswith("class:"):
-        selected &= region == int(delta.only_if.split(":")[1])
+    elif delta.only_if == "labeled":
+        selected &= region != UNLABELED
+    elif (classes := only_if_classes(delta.only_if)) is not None:
+        selected &= np.isin(region, classes)
 
     if delta.value is not None:
         written = np.full(shape, delta.value, dtype=np.uint8)

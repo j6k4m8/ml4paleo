@@ -246,6 +246,157 @@ def test_undo_and_redo_follow_the_overlay_of_live_edits(ada, project):
     assert [h["kind"] for h in history] == ["redo", "undo", "edit", "edit"]
 
 
+def raw_edit(browser, project, mask, origin, value, only_if):
+    """An edit whose `only_if` is sent exactly as given, which the helpers above would check first."""
+    deltas = deltas_for(mask, origin, value=value)
+    for delta in deltas:
+        delta["only_if"] = only_if
+    return browser.post(
+        f"/api/projects/{project}/labels/ops",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "deltas": deltas,
+            "tool": {"name": "brush"},
+        },
+    )
+
+
+def test_edits_can_be_limited_to_labeled_voxels_or_to_chosen_classes(ada, project):
+    base = f"/api/projects/{project}/labels"
+    for name in ("tooth", "enamel"):  # 4 and 5, beside bone (2) and matrix (3)
+        ada.post(f"{base}/classes", json={"name": name, "color": "#00aa00"})
+    # A row: bone, matrix, tooth, nothing, background, nothing, four voxels each.
+    start = [2] * 4 + [3] * 4 + [4] * 4 + [0] * 4 + [1] * 4 + [0] * 4
+    for at, value in ((0, 2), (4, 3), (8, 4), (16, 1)):
+        four = np.ones((1, 1, 4), dtype=bool)
+        assert edit(ada, project, four, (0, 0, at), value).status_code == 201
+    row = np.ones((1, 1, 24), dtype=bool)
+
+    def show():
+        return chunk(ada, project, (0, 0, 0))[0, 0, :24].tolist()
+
+    def counts():
+        return {int(k): v for k, v in ada.get(f"{base}/counts").json().items()}
+
+    def toggle(seq, way):
+        done = ada.post(
+            f"{base}/ops/{seq}/{way}", json={"client_op_id": str(uuid.uuid4())}
+        )
+        assert done.status_code == 201, done.text
+
+    def tally(values):
+        return {v: values.count(v) for v in (1, 2, 3, 4, 5)}
+
+    assert show() == start and counts() == tally(start)
+
+    def check(only_if, value, changed):
+        """
+        Edit the whole row to `value` under `only_if`, which should change the
+        voxels holding `changed`, then undo and redo it.
+        """
+        edited = edit(ada, project, row, (0, 0, 0), value, only_if=only_if)
+        assert edited.status_code == 201, edited.text
+        seq = edited.json()["seq"]
+        after = [value if v in changed else v for v in start]
+        assert show() == after, only_if
+        assert counts() == tally(after), only_if
+        toggle(seq, "undo")
+        assert show() == start and counts() == tally(start), only_if
+        toggle(seq, "redo")
+        assert show() == after and counts() == tally(after), only_if
+        toggle(seq, "undo")
+        assert show() == start
+
+    # Painting enamel (5) anywhere, only where nothing is labeled, only where
+    # something is (background too), or only over some of the classes.
+    for only_if, changed in [
+        ("any", {0, 1, 2, 3, 4}),
+        ("unlabeled", {0}),
+        ("labeled", {1, 2, 3, 4}),
+        ("class:3", {3}),
+        ("class:1", {1}),
+        ("class:2,4", {2, 4}),
+        ("class:4,1,2", {1, 2, 4}),
+        ("class:1,2,3,4", {1, 2, 3, 4}),
+        ("class:5", set()),
+    ]:
+        check(only_if, 5, changed)
+    # Erasing only some classes.
+    check("class:1,3", 0, {1, 3})
+    check("labeled", 0, {1, 2, 3, 4})
+
+
+def test_a_repaint_of_chosen_classes_undoes_and_redoes_under_later_edits(ada, project):
+    base = f"/api/projects/{project}/labels"
+    four = np.ones((1, 1, 4), dtype=bool)
+    twelve = np.ones((1, 1, 12), dtype=bool)
+
+    def show():
+        return chunk(ada, project, (0, 0, 0))[0, 0, :12].tolist()
+
+    def toggle(seq, way):
+        done = ada.post(
+            f"{base}/ops/{seq}/{way}", json={"client_op_id": str(uuid.uuid4())}
+        )
+        assert done.status_code == 201, done.text
+
+    bone = edit(ada, project, four, (0, 0, 0), 2).json()["seq"]
+    matrix = edit(ada, project, four, (0, 0, 4), 3).json()["seq"]
+    edit(ada, project, four, (0, 0, 8), 1)
+    # Over bone and background, not matrix.
+    over = edit(ada, project, twelve, (0, 0, 0), 3, only_if="class:1,2").json()["seq"]
+    assert show() == [3] * 4 + [3] * 4 + [3] * 4
+    # Matrix was never the repaint's, so undoing it leaves the repaint alone
+    # and redoing it puts matrix back where the repaint wasn't.
+    toggle(matrix, "undo")
+    assert show() == [3] * 4 + [0] * 4 + [3] * 4
+    toggle(matrix, "redo")
+    assert show() == [3] * 12
+    toggle(over, "undo")
+    assert show() == [2] * 4 + [3] * 4 + [1] * 4
+    # Bone undone under a repaint that is itself undone: nothing left of it.
+    toggle(bone, "undo")
+    assert show() == [0] * 4 + [3] * 4 + [1] * 4
+    toggle(over, "redo")
+    assert show() == [3] * 4 + [3] * 4 + [3] * 4
+
+
+def test_a_condition_is_refused_unless_it_is_one_of_the_forms(ada, project):
+    base = f"/api/projects/{project}/labels"
+    mask = np.ones((1, 1, 4), dtype=bool)
+    for bad in (
+        "",
+        "labelled",
+        "class:",
+        "class:0",
+        "class:0,2",
+        "class:255",
+        "class:2,255",
+        "class:2,2",
+        "class:2,",
+        "class:,2",
+        "class: 2",
+        "class:2, 3",
+        "class:-2",
+        "class:a",
+        "class:" + ",".join(str(value) for value in range(1, 256)),
+        "class:1" * 600,
+    ):
+        refused = raw_edit(ada, project, mask, (0, 0, 0), 2, bad)
+        assert refused.status_code == 422, bad
+    assert ada.get(f"{base}/ops").json() == []
+    assert chunk(ada, project, (0, 0, 0)).max() == 0
+    # Values in any order, with no repeats, are fine, and so is one.
+    for good in ("labeled", "class:3", "class:3,2", "class:254,2,3"):
+        assert raw_edit(ada, project, mask, (0, 0, 0), 2, good).status_code == 201
+    assert len(ada.get(f"{base}/ops").json()) == 4
+    # Every value from 1 to 254, in any order.
+    every = list(range(1, 255))
+    random.Random(1).shuffle(every)
+    listed = "class:" + ",".join(str(value) for value in every)
+    assert raw_edit(ada, project, mask, (0, 0, 0), 3, listed).status_code == 201
+
+
 def test_edits_must_use_classes_and_stay_inside(
     ada, project, new_browser, settings, migrated_database_url
 ):
@@ -461,7 +612,8 @@ def test_accepting_a_prediction_is_checked_against_it(
     assert accept(bone, (0, 0, 0), 3).status_code == 422
     assert accept(np.ones((2, 2, 2), dtype=bool), (7, 7, 7), 2).status_code == 422
     # Accepted labels go only into unlabeled voxels, and stay in the ROI.
-    assert accept(bone, (0, 0, 0), 2, only_if="any").status_code == 422
+    for refused in ("any", "labeled", "class:2", "class:1,2", "class:2,3,4"):
+        assert accept(bone, (0, 0, 0), 2, only_if=refused).status_code == 422
     assert accept(np.ones((1, 1, 1), dtype=bool), (10, 0, 0), 1).status_code == 422
     # Nobody can claim the result is anything but the server's call.
     assert accept(bone, (0, 0, 0), 2, tool={"name": "mine"}).status_code == 422
