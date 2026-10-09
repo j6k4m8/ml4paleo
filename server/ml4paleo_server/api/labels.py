@@ -58,9 +58,10 @@ import datetime
 import json
 import math
 import re
+import threading
 import uuid
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Annotated, Any, Literal
 
 import numpy as np
@@ -100,10 +101,16 @@ router = APIRouter(prefix="/api/projects/{project_id}/labels", tags=["labels"])
 
 MAX_DELTAS = 512
 MAX_TOOL_BYTES = 16 * 1024
-# How many chunks of a prediction one accept reads at a time. Reading one takes
-# a round trip or two to the object store (a sharded array's index, then the
-# chunk), so a store a way off is waited on this many at once, not each in turn.
-PREDICTION_READERS = 16
+# Prediction chunks are read on one pool of threads for the whole process, this
+# many: reading one takes a round trip or two to the object store (a sharded
+# array's index, then the chunk), so a store a way off is waited on this many
+# at once, not each in turn, and these are all the process ever has reading,
+# however many accepts are under way.
+PREDICTION_READERS = 32
+# One accept has at most this many reads under way (half the pool), so another
+# gets going at once, and a big one doesn't make the others wait for all its
+# chunks, as it would if it queued them all.
+ACCEPT_READS_AT_ONCE = 16
 FIRST_CLASS = BACKGROUND + 1
 COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 EVENT_INTERVAL_SECONDS = 1.0
@@ -471,6 +478,26 @@ async def _check_current_image(db, project_id: uuid.UUID, prediction: Artifact) 
         )
 
 
+_readers: ThreadPoolExecutor | None = None
+_readers_made = threading.Lock()
+
+
+def _prediction_readers() -> ThreadPoolExecutor:
+    """
+    The process's pool of `PREDICTION_READERS` threads for reading prediction
+    chunks, made when first needed (not at import, so each process a server
+    forks makes its own). Its threads start as work needs them, are idle
+    between accepts, and are stopped, idle, when the process exits.
+    """
+    global _readers
+    with _readers_made:
+        if _readers is None:
+            _readers = ThreadPoolExecutor(
+                PREDICTION_READERS, thread_name_prefix="accept-read"
+            )
+        return _readers
+
+
 def _check_against_prediction(grant: StorageGrant, deltas: list[ChunkDelta]) -> None:
     """
     Every voxel a delta selects must hold the value it writes, in the
@@ -480,9 +507,9 @@ def _check_against_prediction(grant: StorageGrant, deltas: list[ChunkDelta]) -> 
     chunk of the labels and so in one of the prediction's (both are 64 voxels
     a side), so that is a chunk for each delta (`MAX_DELTAS` at most) however
     far apart they lie, and one read serves the deltas a request holds for a
-    chunk. The reads run `PREDICTION_READERS` at a time, on threads (zarr's
-    synchronous reads are safe from several), and the first to fail stops the
-    rest, which are waited for before this returns.
+    chunk. The reads run on the process's reader threads, `ACCEPT_READS_AT_ONCE`
+    of them at most for this accept and `PREDICTION_READERS` in all for every
+    accept at once (zarr's synchronous reads are safe from several threads).
     """
     classes: Any = open_prediction(grant)["class"]
     in_chunk: dict[tuple[int, ...], list[tuple[ChunkDelta, tuple[slice, ...]]]] = {}
@@ -503,19 +530,42 @@ def _check_against_prediction(grant: StorageGrant, deltas: list[ChunkDelta]) -> 
         for part, n in zip(region, classes.shape, strict=True)
     ):
         raise ValueError("That prediction doesn't cover those labels")
-    workers = min(PREDICTION_READERS, len(in_chunk))
-    with ThreadPoolExecutor(workers, thread_name_prefix="accept-read") as pool:
-        reading = [
-            pool.submit(_check_chunk, classes, group) for group in in_chunk.values()
-        ]
-        try:
-            for done in as_completed(reading):
-                done.result()
-        except BaseException:
-            # Reads not begun never will; leaving the block waits for those begun.
-            for future in reading:
-                future.cancel()
-            raise
+    _read_chunks(classes, list(in_chunk.values()))
+
+
+def _read_chunks(
+    classes: Any, groups: list[list[tuple[ChunkDelta, tuple[slice, ...]]]]
+) -> None:
+    """
+    Check each chunk's deltas (`_check_chunk`) on the reader threads, with at
+    most `ACCEPT_READS_AT_ONCE` of this accept's reads queued or running, so
+    its chunks take turns with other accepts' in the pool's queue, one as
+    each of its own finishes.
+
+    The first to fail stops this accept's reads that haven't begun, and this
+    waits for those that have, so none of them is running when it returns.
+    Other accepts' reads are not touched.
+    """
+    readers = _prediction_readers()
+    waiting = iter(groups)
+    running: set[Future[None]] = set()
+    try:
+        while True:
+            while (
+                len(running) < ACCEPT_READS_AT_ONCE
+                and (group := next(waiting, None)) is not None
+            ):
+                running.add(readers.submit(_check_chunk, classes, group))
+            if not running:
+                return
+            done, running = wait(running, return_when=FIRST_COMPLETED)
+            for future in done:
+                future.result()
+    except BaseException:
+        for future in running:
+            future.cancel()
+        wait(running)
+        raise
 
 
 def _check_chunk(
@@ -556,9 +606,11 @@ async def accept_prediction(
     prediction has exactly that value at every voxel it selects. A box is
     checked as an ROI's is (whole voxels, not empty, inside the image). The
     labels sent may span at most `MAX_ACCEPT_VOXELS` (and so may a box). Only
-    the chunks of the prediction the labels are in are read, `PREDICTION_READERS`
-    at a time: a chunk for each delta, at most `MAX_DELTAS`, whatever the box or
-    ROI is like. Undo and redo work as for any edit.
+    the chunks of the prediction the labels are in are read: a chunk for each
+    delta, at most `MAX_DELTAS`, whatever the box or ROI is like, on one pool of
+    `PREDICTION_READERS` threads shared by every accept in the process, an
+    accept having `ACCEPT_READS_AT_ONCE` of its reads under way at most. Undo
+    and redo work as for any edit.
     """
     if done := await labels.existing(db, project.id, body.client_op_id):
         return _op_out(done)
