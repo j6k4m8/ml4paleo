@@ -60,6 +60,7 @@ import math
 import re
 import uuid
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Annotated, Any, Literal
 
 import numpy as np
@@ -98,6 +99,10 @@ router = APIRouter(prefix="/api/projects/{project_id}/labels", tags=["labels"])
 
 MAX_DELTAS = 512
 MAX_TOOL_BYTES = 16 * 1024
+# How many chunks of a prediction one accept reads at a time. Reading one takes
+# a round trip or two to the object store (a sharded array's index, then the
+# chunk), so a store a way off is waited on this many at once, not each in turn.
+PREDICTION_READERS = 16
 FIRST_CLASS = BACKGROUND + 1
 COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 EVENT_INTERVAL_SECONDS = 1.0
@@ -476,32 +481,65 @@ def _check_against_prediction(grant: StorageGrant, deltas: list[ChunkDelta]) -> 
     Every voxel a delta selects must hold the value it writes, in the
     prediction at `grant`, and the prediction must reach as far as the labels.
 
-    Each delta is read from its own region, which lies in one chunk of the
-    labels and so in one of the prediction's (both are 64 voxels a side). So
-    what is read is the chunks the labels are in, a chunk for each delta (at
-    most `MAX_DELTAS`) however far apart they lie, not every chunk between
-    them, as the box around them would be.
+    Only the chunks the labels are in are read, each once. A delta lies in one
+    chunk of the labels and so in one of the prediction's (both are 64 voxels
+    a side), so that is a chunk for each delta (`MAX_DELTAS` at most) however
+    far apart they lie, and one read serves the deltas a request holds for a
+    chunk. The reads run `PREDICTION_READERS` at a time, on threads (zarr's
+    synchronous reads are safe from several), and the first to fail stops the
+    rest, which are waited for before this returns.
     """
     classes: Any = open_prediction(grant)["class"]
-    regions = []
+    in_chunk: dict[tuple[int, ...], list[tuple[ChunkDelta, tuple[slice, ...]]]] = {}
     for delta in deltas:
         start = [
             k * c + b
             for k, c, b in zip(delta.key, LABEL_CHUNK_ZYX, delta.box[:3], strict=True)
         ]
-        regions.append(
-            tuple(slice(a, a + n) for a, n in zip(start, delta.box_shape, strict=True))
+        region = tuple(
+            slice(a, a + n) for a, n in zip(start, delta.box_shape, strict=True)
         )
+        in_chunk.setdefault(delta.key, []).append((delta, region))
     # Before reading any of it: a read past the end of an array is cut short.
     if any(
         part.stop > n
-        for region in regions
+        for group in in_chunk.values()
+        for _, region in group
         for part, n in zip(region, classes.shape, strict=True)
     ):
         raise ValueError("That prediction doesn't cover those labels")
-    for delta, region in zip(deltas, regions, strict=True):
-        mask = unpack_mask(delta.mask, delta.box_shape)
-        if (np.asarray(classes[region])[mask] != delta.value).any():
+    workers = min(PREDICTION_READERS, len(in_chunk))
+    with ThreadPoolExecutor(workers, thread_name_prefix="accept-read") as pool:
+        reading = [
+            pool.submit(_check_chunk, classes, group) for group in in_chunk.values()
+        ]
+        try:
+            for done in as_completed(reading):
+                done.result()
+        except BaseException:
+            # Reads not begun never will; leaving the block waits for those begun.
+            for future in reading:
+                future.cancel()
+            raise
+
+
+def _check_chunk(
+    classes: Any, group: list[tuple[ChunkDelta, tuple[slice, ...]]]
+) -> None:
+    """Read the part of a chunk that its deltas are in, and check each against it."""
+    low = [min(region[a].start for _, region in group) for a in range(3)]
+    high = [max(region[a].stop for _, region in group) for a in range(3)]
+    read = np.asarray(
+        classes[tuple(slice(lo, hi) for lo, hi in zip(low, high, strict=True))]
+    )
+    for delta, region in group:
+        part = read[
+            tuple(
+                slice(r.start - lo, r.stop - lo)
+                for r, lo in zip(region, low, strict=True)
+            )
+        ]
+        if (part[unpack_mask(delta.mask, delta.box_shape)] != delta.value).any():
             raise ValueError("Those labels don't match the prediction")
 
 
@@ -523,9 +561,9 @@ async def accept_prediction(
     prediction has exactly that value at every voxel it selects. A box is
     checked as an ROI's is (whole voxels, not empty, inside the image). The
     labels sent may span at most `MAX_ACCEPT_VOXELS` (and so may a box). Only
-    the chunks of the prediction the labels are in are read: a chunk for each
-    delta, at most `MAX_DELTAS`, whatever the box or ROI is like. Undo and
-    redo work as for any edit.
+    the chunks of the prediction the labels are in are read, `PREDICTION_READERS`
+    at a time: a chunk for each delta, at most `MAX_DELTAS`, whatever the box or
+    ROI is like. Undo and redo work as for any edit.
     """
     if done := await labels.existing(db, project.id, body.client_op_id):
         return _op_out(done)

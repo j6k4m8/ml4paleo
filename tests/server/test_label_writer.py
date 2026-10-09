@@ -466,15 +466,23 @@ class Reads:
     """
     What accepts read of a prediction's classes, noted as they go: the regions
     asked for, and the (64 voxel) chunks of the prediction those reach into.
+    With a `latency` each read takes that long, as one from a store a way off
+    does, and the reads under way at once and the time they took are noted too.
     """
 
-    def __init__(self, monkeypatch):
+    def __init__(self, monkeypatch, latency: float = 0):
         self.regions: list[tuple[slice, ...]] = []
+        self.latency = latency
+        self.under_way = 0
+        self.most_at_once = 0
+        self.began: float | None = None
+        self.ended: float | None = None
+        self.lock = threading.Lock()
         real = api_labels.open_prediction
 
         def open_noting(grant):
             group = real(grant)
-            return {"class": NotingArray(group["class"], self.regions)}
+            return {"class": NotingArray(group["class"], self)}
 
         monkeypatch.setattr(api_labels, "open_prediction", open_noting)
 
@@ -489,20 +497,39 @@ class Reads:
             )
         return reached
 
+    @property
+    def took(self) -> float:
+        """From the first read beginning to the last one ending."""
+        assert self.began is not None and self.ended is not None
+        return self.ended - self.began
+
 
 class NotingArray:
-    """A zarr array that notes the regions read from it."""
+    """A zarr array that notes the regions read from it, which may be from several threads."""
 
-    def __init__(self, array, regions):
+    def __init__(self, array, reads: Reads):
         self._array = array
-        self._regions = regions
+        self._reads = reads
 
     def __getattr__(self, name):
         return getattr(self._array, name)
 
     def __getitem__(self, region):
-        self._regions.append(region)
-        return self._array[region]
+        reads = self._reads
+        with reads.lock:
+            reads.regions.append(region)
+            reads.under_way += 1
+            reads.most_at_once = max(reads.most_at_once, reads.under_way)
+            if reads.began is None:
+                reads.began = time.monotonic()
+        try:
+            if reads.latency:
+                time.sleep(reads.latency)
+            return self._array[region]
+        finally:
+            with reads.lock:
+                reads.under_way -= 1
+                reads.ended = time.monotonic()
 
 
 def test_accepting_a_prediction_is_checked_against_it(
@@ -1146,6 +1173,101 @@ def test_an_accept_of_as_many_labels_as_a_request_holds_reads_just_their_chunks(
     assert accepted.status_code == 201, accepted.text
     assert len(accepted.json()["chunks"]) == api_labels.MAX_DELTAS
     assert reads.chunks == chunks_of
+
+
+SLAB = (64, 4096, 4096)
+
+
+def accept_slab(ada, project, prediction, box, deltas):
+    return ada.post(
+        f"/api/projects/{project}/labels/accept",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "prediction_artifact_id": prediction,
+            "box": box,
+            "deltas": deltas,
+        },
+    )
+
+
+def test_an_accept_reads_its_chunks_at_once_not_one_after_another(
+    ada, settings, migrated_database_url, monkeypatch
+):
+    # 512 labels in 512 chunks, the most a request holds, with each read taking as
+    # long as one from a store a way off does.
+    rows = [0, 0, 0, 1, 512, 4096]
+    big = make_project(ada, settings, migrated_database_url, "Slab", SLAB)
+    prediction = add_sparse_prediction(
+        settings, migrated_database_url, big, SLAB, [(rows, 1)]
+    )
+    mask = np.ones((1, 512, 4096), dtype=bool)
+    deltas = deltas_for(mask, (0, 0, 0), value=1, only_if="unlabeled")
+    assert len(deltas) == api_labels.MAX_DELTAS
+    latency = 0.03
+    reads = Reads(monkeypatch, latency)
+    accepted = accept_slab(ada, big, prediction, rows, deltas)
+    assert accepted.status_code == 201, accepted.text
+    readers = api_labels.PREDICTION_READERS
+    assert len(reads.regions) == len(reads.chunks) == api_labels.MAX_DELTAS
+    # All the readers are busy at once, and no more than them...
+    assert reads.most_at_once == readers
+    # ...so it takes a share of the time reads one after another would (512 × 30 ms).
+    in_turns = api_labels.MAX_DELTAS * latency
+    ideal = in_turns / readers
+    assert ideal * 0.95 <= reads.took <= ideal * 2.5, (reads.took, ideal, in_turns)
+    assert reads.took < in_turns / 4
+
+
+def test_the_deltas_of_a_chunk_share_a_read(
+    ada, project, settings, migrated_database_url, monkeypatch
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    reads = Reads(monkeypatch)
+    # Two values in one chunk, each as the prediction has it (bone in the corner,
+    # background elsewhere). A request may hold one delta for a chunk, as it is
+    # refused when applied, but the prediction is read once for both.
+    one = np.ones((2, 2, 2), dtype=bool)
+    deltas = deltas_for(one, (0, 0, 0), value=2, only_if="unlabeled")
+    deltas += deltas_for(one, (20, 20, 20), value=1, only_if="unlabeled")
+    assert deltas[0]["key"] == deltas[1]["key"]
+    refused = ada.post(
+        f"/api/projects/{project}/labels/accept",
+        json={
+            "client_op_id": str(uuid.uuid4()),
+            "prediction_artifact_id": prediction,
+            "box": [0, 0, 0, 30, 30, 30],
+            "deltas": deltas,
+        },
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == "Send one delta per chunk"
+    assert len(reads.regions) == 1
+    assert reads.chunks == {(0, 0, 0)}
+
+
+def test_a_label_that_does_not_match_stops_the_other_reads(
+    ada, settings, migrated_database_url, monkeypatch
+):
+    # The prediction says 2 where every one of the 512 labels says 1.
+    rows = [0, 0, 0, 1, 512, 4096]
+    big = make_project(ada, settings, migrated_database_url, "Slab", SLAB)
+    prediction = add_sparse_prediction(
+        settings, migrated_database_url, big, SLAB, [(rows, 2)]
+    )
+    mask = np.ones((1, 512, 4096), dtype=bool)
+    deltas = deltas_for(mask, (0, 0, 0), value=1, only_if="unlabeled")
+    latency = 0.05
+    reads = Reads(monkeypatch, latency)
+    refused = accept_slab(ada, big, prediction, rows, deltas)
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == "Those labels don't match the prediction"
+    # The readers that had begun finished, the others never began, and when the
+    # request has its answer none is left running.
+    began = len(reads.regions)
+    assert began <= 3 * api_labels.PREDICTION_READERS < api_labels.MAX_DELTAS
+    assert reads.under_way == 0
+    time.sleep(3 * latency)
+    assert len(reads.regions) == began
 
 
 def test_accepting_refuses_a_prediction_of_an_image_that_was_replaced(
