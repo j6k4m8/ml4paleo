@@ -27,7 +27,7 @@ from ml4paleo.labels import LABEL_CHUNK_ZYX
 from ml4paleo.labels.codec import ZARR_CODECS, decode_chunk, encode_chunk
 from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.labels.pyramid import downsample_labels
-from ml4paleo.ome import OmeImage, plan_levels
+from ml4paleo.ome import LevelSpec, OmeImage, plan_levels
 from ml4paleo.storage import StorageGrant, object_store
 
 # (z, y, x): levels of 4, with several chunks at the first two.
@@ -253,6 +253,176 @@ def test_a_project_without_an_image_has_no_label_zarr(ada):
         response = ada.get(f"/api/projects/{project}/labels/zarr/{key}")
         assert response.status_code == 404, key
         assert "no image" in response.json()["detail"]
+
+
+def group_of(browser, project) -> dict:
+    response = browser.get(f"/api/projects/{project}/labels/zarr/zarr.json")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def multiscale_of(browser, project) -> dict:
+    [multiscale] = group_of(browser, project)["attributes"]["ome"]["multiscales"]
+    return multiscale
+
+
+def scales_of(multiscale) -> list[list[float]]:
+    return [
+        dataset["coordinateTransformations"][0]["scale"]
+        for dataset in multiscale["datasets"]
+    ]
+
+
+def assert_neuroglancer_reads(multiscale) -> None:
+    """The parts of OME-Zarr 0.5 that Neuroglancer needs, which refuses any scale that isn't a positive number."""
+    assert multiscale["axes"]
+    for axis in multiscale["axes"]:
+        assert axis["type"] == "space"
+        assert axis.get("unit") != ""
+    for dataset in multiscale["datasets"]:
+        assert isinstance(dataset["path"], str)
+        [transform] = dataset["coordinateTransformations"]
+        assert transform["type"] == "scale"
+        assert len(transform["scale"]) == len(multiscale["axes"])
+        assert all(
+            isinstance(s, float | int) and 0 < s < float("inf")
+            for s in transform["scale"]
+        )
+
+
+def test_the_zarr_group_is_an_ome_zarr_multiscale_of_the_arrays_it_lists(ada, project):
+    group = group_of(ada, project)
+    ome = group["attributes"]["ome"]
+    assert ome["version"] == "0.5"
+    [multiscale] = ome["multiscales"]
+    assert_neuroglancer_reads(multiscale)
+    assert [axis["name"] for axis in multiscale["axes"]] == ["z", "y", "x"]
+    # This image has no voxel size: no unit, and a voxel of a level is its factors.
+    assert all("unit" not in axis for axis in multiscale["axes"])
+    # The listing the web viewer reads is still there, with the same arrays in
+    # the same order, and each array is as that listing says.
+    listed = group["attributes"]["ml4paleo"]["label_levels"]
+    assert [dataset["path"] for dataset in multiscale["datasets"]] == [
+        entry["array"] for entry in listed
+    ]
+    assert len(listed) == 4
+    for dataset, entry in zip(multiscale["datasets"], listed, strict=True):
+        assert dataset["coordinateTransformations"] == [
+            {"type": "scale", "scale": [float(f) for f in entry["factor_zyx"]]}
+        ]
+        response = ada.get(
+            f"/api/projects/{project}/labels/zarr/{dataset['path']}/zarr.json"
+        )
+        assert response.status_code == 200
+        array = response.json()
+        assert array["shape"] == entry["shape"]
+        assert array["dimension_names"] == [axis["name"] for axis in multiscale["axes"]]
+
+
+def test_scales_are_the_images_voxel_size_times_the_factors_of_each_level(
+    ada, migrated_database_url
+):
+    shape = (70, 200, 260)
+    project = make_project(ada, migrated_database_url, shape=shape, **ANISOTROPIC)
+    group = group_of(ada, project)
+    [multiscale] = group["attributes"]["ome"]["multiscales"]
+    assert_neuroglancer_reads(multiscale)
+    assert [axis["unit"] for axis in multiscale["axes"]] == ["millimeter"] * 3
+    factors = [
+        entry["factor_zyx"] for entry in group["attributes"]["ml4paleo"]["label_levels"]
+    ]
+    assert factors == [[1, 1, 1], [1, 2, 2], [1, 4, 4], [2, 8, 8]]
+    # Voxels of 4 mm in z, and 1 mm in y and x, so only y and x are halved at first.
+    assert scales_of(multiscale) == [[4, 1, 1], [4, 2, 2], [4, 4, 4], [8, 8, 8]]
+
+
+def test_the_multiscales_are_those_of_the_image_they_are_the_levels_of(tmp_path):
+    for shape, voxel, unit in [
+        ((70, 130, 100), None, None),
+        ((140, 150, 270), None, None),
+        ((70, 200, 260), (4.0, 1.0, 1.0), "millimeter"),
+        ((300, 40, 40), (0.5, 1.5, 1.5), "millimeter"),
+        ((200, 150, 120), (0.7, 0.7, 0.3), "micrometer"),
+        ((1, 300, 40), None, None),
+        ((64, 64, 64), (0.1, 0.1, 0.1), "millimeter"),
+        ((65, 64, 64), None, None),
+    ]:
+        grant = StorageGrant(url=f"file://{tmp_path}/{shape}{voxel}", access="rw")
+        image = OmeImage.create(
+            grant,
+            shape_czyx=(1, *shape),
+            dtype="uint8",
+            voxel_size_zyx=voxel,
+            **({"unit": unit} if unit else {}),
+        )
+        manifest = {
+            "shape_czyx": list(image.shape_czyx),
+            "levels": image.num_levels,
+            "voxel_size_zyx": list(image.voxel_size_zyx) if voxel else None,
+            "unit": image.unit,
+        }
+        levels = label_pyramid.levels_of(manifest)
+        [mine] = label_pyramid.multiscales(manifest, levels)["multiscales"]
+        [theirs] = image.group.attrs["ome"]["multiscales"]
+        assert_neuroglancer_reads(mine)
+        # The image's own metadata with the channel taken out: the same axes
+        # (and unit), and the same scale at each level, so that Neuroglancer
+        # puts the labels where the image is, level by level.
+        assert mine["axes"] == theirs["axes"][1:], (shape, voxel)
+        assert len(mine["datasets"]) == len(theirs["datasets"]) == len(levels)
+        for ours, other in zip(mine["datasets"], theirs["datasets"], strict=True):
+            assert (
+                ours["coordinateTransformations"][0]["scale"]
+                == (other["coordinateTransformations"][0]["scale"][1:])
+            ), (shape, voxel)
+
+
+def test_an_image_of_one_level_is_a_multiscale_of_one(ada, migrated_database_url):
+    # It fits in a chunk, so it has no coarser level.
+    project = make_project(ada, migrated_database_url, shape=(40, 50, 60))
+    group = group_of(ada, project)
+    [multiscale] = group["attributes"]["ome"]["multiscales"]
+    assert_neuroglancer_reads(multiscale)
+    assert [d["path"] for d in multiscale["datasets"]] == ["class"]
+    assert scales_of(multiscale) == [[1, 1, 1]]
+    assert len(group["attributes"]["ml4paleo"]["label_levels"]) == 1
+    # So is one whose levels the server can't tell (see above): level 0 only.
+    project = make_project(ada, migrated_database_url, levels=9, **ANISOTROPIC)
+    multiscale = multiscale_of(ada, project)
+    assert [d["path"] for d in multiscale["datasets"]] == ["class"]
+    assert scales_of(multiscale) == [[4, 1, 1]]
+
+
+@pytest.mark.parametrize("odd", [[1, 0, 1], [1, -2, 1], [1, 1], 5, "big"])
+def test_an_images_odd_voxel_sizes_leave_the_scales_in_voxels(
+    ada, migrated_database_url, odd
+):
+    project = make_project(
+        ada, migrated_database_url, voxel_size_zyx=odd, unit="millimeter"
+    )
+    group = group_of(ada, project)
+    [multiscale] = group["attributes"]["ome"]["multiscales"]
+    assert_neuroglancer_reads(multiscale)
+    # No unit (it names the size that isn't there), and a voxel of a level is
+    # its factors: whatever levels there are, they line up.
+    assert all("unit" not in axis for axis in multiscale["axes"])
+    factors = [
+        [float(f) for f in entry["factor_zyx"]]
+        for entry in group["attributes"]["ml4paleo"]["label_levels"]
+    ]
+    assert scales_of(multiscale) == factors
+
+
+def test_a_voxel_size_too_big_to_scale_is_left_in_voxels():
+    levels = [
+        LevelSpec("0", (64, 64, 64), (1, 1, 1)),
+        LevelSpec("1", (32, 32, 32), (2, 2, 2)),
+    ]
+    manifest = {"voxel_size_zyx": [1e308, 1e308, 1e308], "unit": "millimeter"}
+    [multiscale] = label_pyramid.multiscales(manifest, levels)["multiscales"]
+    assert_neuroglancer_reads(multiscale)
+    assert all("unit" not in axis for axis in multiscale["axes"])
+    assert scales_of(multiscale) == [[1, 1, 1], [2, 2, 2]]
 
 
 def test_every_level_is_the_labels_shrunk(ada, project):

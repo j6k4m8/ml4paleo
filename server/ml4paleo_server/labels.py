@@ -106,6 +106,19 @@ async def volume_shape(db: AsyncSession, project_id: uuid.UUID) -> tuple[int, in
     return (z, y, x)
 
 
+async def volume_image(
+    db: AsyncSession, project_id: uuid.UUID
+) -> tuple[uuid.UUID, dict[str, Any]]:
+    """
+    The project image's id and manifest, which the labels as zarr follow: its
+    levels, and its voxel size.
+    """
+    image = await artifacts.head(db, project_id, "image")
+    if image is None or not image.manifest:
+        raise NoImage
+    return image.id, image.manifest
+
+
 async def volume_levels(
     db: AsyncSession, project_id: uuid.UUID
 ) -> tuple[uuid.UUID, list[LevelSpec]]:
@@ -113,10 +126,8 @@ async def volume_levels(
     The levels of the labels as zarr: the project image's, whose level 0 is
     the label volume itself. Also the image's id, since levels follow it.
     """
-    image = await artifacts.head(db, project_id, "image")
-    if image is None or not image.manifest:
-        raise NoImage
-    return image.id, label_pyramid.levels_of(image.manifest)
+    image_id, manifest = await volume_image(db, project_id)
+    return image_id, label_pyramid.levels_of(manifest)
 
 
 async def _read_chunk(grant: StorageGrant, sha: str | None) -> np.ndarray:
@@ -498,6 +509,7 @@ __all__ = [
     "labels_root",
     "result_of",
     "set_live",
+    "volume_image",
     "volume_levels",
     "volume_shape",
 ]

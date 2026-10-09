@@ -82,6 +82,7 @@ import contextlib
 import functools
 import hashlib
 import logging
+import math
 import struct
 import time
 import uuid
@@ -100,7 +101,13 @@ from starlette.concurrency import run_in_threadpool
 from ml4paleo.labels import LABEL_CHUNK_ZYX, UNLABELED
 from ml4paleo.labels.codec import blob_key, decode_chunk, encode_chunk
 from ml4paleo.labels.pyramid import downsample_labels
-from ml4paleo.ome import DEFAULT_CHUNK_ZYX, LevelSpec, plan_levels
+from ml4paleo.ome import (
+    DEFAULT_CHUNK_ZYX,
+    OME_VERSION,
+    SPATIAL_AXES,
+    LevelSpec,
+    plan_levels,
+)
 
 from .db import LabelChunk, LabelClass
 
@@ -263,6 +270,56 @@ def levels_of(manifest: Mapping) -> list[LevelSpec]:
         _warn(f"An image has {declared} levels, not the {len(levels)} planned")
         return levels[:1]
     return levels
+
+
+def multiscales(manifest: Mapping, levels: Sequence[LevelSpec]) -> dict:
+    """
+    The `ome` attribute that makes the label zarr's arrays one multiscale
+    volume for viewers that read OME-Zarr 0.5 (Neuroglancer opens a group of
+    arrays as a pyramid only when its metadata lists them this way): axes
+    z, y, x, and a dataset for each of `levels`, named as the arrays are, with
+    the scale of a voxel there, which is the image's voxel size times the
+    level's factors. A voxel size that is missing, or isn't three positive
+    numbers, is taken as one along each axis with no unit, as images are made
+    without one.
+    """
+    size, unit = _voxel_size(manifest)
+    scales = [
+        [s * f for s, f in zip(size, spec.factor_zyx, strict=True)] for spec in levels
+    ]
+    if not all(math.isfinite(s) for scale in scales for s in scale):
+        unit = None
+        scales = [[float(f) for f in spec.factor_zyx] for spec in levels]
+    axes = [
+        {"name": axis, "type": "space", **({"unit": unit} if unit else {})}
+        for axis in SPATIAL_AXES
+    ]
+    datasets = [
+        {
+            "path": array_name(level),
+            "coordinateTransformations": [{"type": "scale", "scale": scale}],
+        }
+        for level, scale in enumerate(scales)
+    ]
+    return {
+        "version": OME_VERSION,
+        "multiscales": [{"name": "labels", "axes": axes, "datasets": datasets}],
+    }
+
+
+def _voxel_size(manifest: Mapping) -> tuple[tuple[float, float, float], str | None]:
+    """
+    An image's voxel size (z, y, x) and its unit, as its OME-Zarr records
+    them: one voxel along each axis, and no unit, when the size isn't known.
+    """
+    raw, unit = manifest.get("voxel_size_zyx"), manifest.get("unit")
+    try:
+        z, y, x = (float(v) for v in raw or ())
+    except (TypeError, ValueError):
+        return (1.0, 1.0, 1.0), None
+    if not all(math.isfinite(v) and v > 0 for v in (z, y, x)):
+        return (1.0, 1.0, 1.0), None
+    return (z, y, x), unit if isinstance(unit, str) and unit else None
 
 
 @functools.cache
