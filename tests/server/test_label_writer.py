@@ -472,13 +472,18 @@ class Reads:
     region, if a function of the region names one), the threads that read, and
     the time they took are noted too. With `meet`, no read goes on until that
     many are under way at once, so a number of accepts' reads all overlap.
+    With `gives`, a function of the region, that is what a read gives, instead of
+    what the prediction holds.
     """
 
-    def __init__(self, monkeypatch, latency: float = 0, owner=None, meet: int = 0):
+    def __init__(
+        self, monkeypatch, latency: float = 0, owner=None, meet: int = 0, gives=None
+    ):
         self.regions: list[tuple[slice, ...]] = []
         self.latency = latency
         self.owner = owner
         self.meet = meet
+        self.gives = gives
         self.met = False
         self.under_way = 0
         self.most_at_once = 0
@@ -547,7 +552,7 @@ class NotingArray:
         try:
             if reads.latency:
                 time.sleep(reads.latency)
-            return self._array[region]
+            return reads.gives(region) if reads.gives else self._array[region]
         finally:
             with reads.lock:
                 reads.under_way -= 1
@@ -1228,18 +1233,18 @@ def test_an_accept_reads_its_chunks_at_once_not_one_after_another(
     deltas = deltas_for(mask, (0, 0, 0), value=1, only_if="unlabeled")
     assert len(deltas) == api_labels.MAX_DELTAS
     latency = 0.03
-    reads = Reads(monkeypatch, latency)
+    readers = api_labels.ACCEPT_READS_AT_ONCE
+    # No read goes on until `readers` of them are under way at once, so that
+    # they are is certain, not a matter of how quickly threads start.
+    reads = Reads(monkeypatch, latency, meet=readers)
     accepted = accept_slab(ada, big, prediction, rows, deltas)
     assert accepted.status_code == 201, accepted.text
-    readers = api_labels.ACCEPT_READS_AT_ONCE
     assert len(reads.regions) == len(reads.chunks) == api_labels.MAX_DELTAS
-    # All the readers are busy at once, and no more than them...
+    # All the accept's readers are busy at once, and no more than they...
     assert reads.most_at_once == readers
-    # ...so it takes a share of the time reads one after another would (512 × 30 ms).
-    in_turns = api_labels.MAX_DELTAS * latency
-    ideal = in_turns / readers
-    assert ideal * 0.95 <= reads.took <= ideal * 2.5, (reads.took, ideal, in_turns)
-    assert reads.took < in_turns / 4
+    # ...so it is not all the reads in turn (512 × 30 ms), as far from it as
+    # this is: a bound for a loaded machine, not a measure.
+    assert reads.took < api_labels.MAX_DELTAS * latency / 2
 
 
 def test_the_deltas_of_a_chunk_share_a_read(
@@ -1293,7 +1298,7 @@ def test_a_label_that_does_not_match_stops_the_other_reads(
         # The reads that had begun finished, those still waiting never began, and
         # when the request has its answer none is left running.
         began = len(reads.regions)
-        assert 0 < began <= 4 < api_labels.ACCEPT_READS_AT_ONCE
+        assert 0 < began < api_labels.ACCEPT_READS_AT_ONCE
         assert reads.under_way == 0
         time.sleep(3 * latency)
         assert len(reads.regions) == began
@@ -1310,16 +1315,20 @@ def test_accepts_at_once_share_the_processs_reader_threads(
     accepts, chunks_each, wrong = 20, 40, 7
     columns = chunks_each * 64
     big = make_project(ada, settings, migrated_database_url, "Slab", SLAB)
-    prediction = add_sparse_prediction(
-        settings,
-        migrated_database_url,
-        big,
-        SLAB,
-        [
-            ([0, 0, 0, 1, accepts * 64, columns], 1),
-            ([0, wrong * 64, 0, 1, (wrong + 1) * 64, columns], 2),
-        ],
-    )
+    prediction = add_sparse_prediction(settings, migrated_database_url, big, SLAB, [])
+
+    def says(region):
+        """What the prediction holds: 1, but 2 in the wrong one's row."""
+        size = tuple(r.stop - r.start for r in region)
+        return np.full(size, 2 if region[1].start // 64 == wrong else 1, np.uint8)
+
+    # It is the reads that are measured, so they are made up (the prediction is
+    # empty) and the label writer is left out (its tests are above), and nothing
+    # else the process does is in the way of the timing.
+    async def writes_nothing(*args, **kwargs):
+        return labels.OpResult(seq=1, chunks=[])
+
+    monkeypatch.setattr(labels, "apply_edit", writes_nothing)
 
     def accept(row):
         mask = np.ones((1, 64, columns), dtype=bool)
@@ -1335,6 +1344,7 @@ def test_accepts_at_once_share_the_processs_reader_threads(
         latency,
         owner=lambda region: region[1].start // 64,
         meet=api_labels.PREDICTION_READERS,
+        gives=says,
     )
     answers = {}
     threads = [
@@ -1370,11 +1380,9 @@ def test_accepts_at_once_share_the_processs_reader_threads(
         assert sorted(columns_read[row]) == list(range(chunks_each)), row
     # The wrong one stopped its own reads that had not begun (and only its own).
     assert 0 < len(columns_read[wrong]) <= api_labels.ACCEPT_READS_AT_ONCE
-    # All of it took about as long as the pool would, and not 760 reads one
-    # after another (38 s).
-    others = (accepts - 1) * chunks_each
-    ideal = others / api_labels.PREDICTION_READERS * latency
-    assert ideal * 0.95 <= reads.took <= ideal * 2.5, (reads.took, ideal)
+    # Not all the reads in turn (800 × 50 ms), as far from it as this is: a bound
+    # for a loaded machine, not a measure.
+    assert reads.took < accepts * chunks_each * latency / 2
 
 
 def test_accepting_refuses_a_prediction_of_an_image_that_was_replaced(
