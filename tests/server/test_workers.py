@@ -321,6 +321,23 @@ def test_numbers_json_cannot_hold_are_a_422_in_what_workers_send(
     assert (job.status, job.result) == ("succeeded", {"scores": [{"dice": 0.5}]})
 
 
+@pytest.mark.parametrize("what", [float("nan"), float("inf"), -float("inf")])
+def test_a_result_holding_nan_or_infinity_fails_the_job_at_once(
+    new_browser, token, migrated_database_url, what
+):
+    def finds(ctx):
+        # Sent as pydantic writes them, as null, this would pass for a result
+        # without a number in it.
+        return {"scores": {"dice": [0.5, what]}}
+
+    job_id = enqueue(migrated_database_url)
+    start(make_worker(new_browser, token, {"noop": finds})).join(timeout=20)
+    job = job_row(migrated_database_url, job_id)
+    assert (job.status, job.attempts) == ("failed", 1)
+    assert job.error.splitlines()[0] == "The job's result holds NaN or infinity."
+    assert outcomes(migrated_database_url, job_id) == ["failed"]
+
+
 @pytest.mark.parametrize("literal", NOT_JSON)
 def test_numbers_with_bounds_refuse_nan_and_infinity_by_them(
     new_browser, token, migrated_database_url, literal

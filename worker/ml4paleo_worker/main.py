@@ -22,6 +22,7 @@ import traceback
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import httpx2
 
@@ -31,6 +32,7 @@ from ml4paleo.protocol import (
     CompleteIn,
     JobLease,
     WorkerCaps,
+    json_text,
 )
 
 from .client import LeaseLost, ServerClient, Unauthorized, with_retries
@@ -43,6 +45,26 @@ CANCELLED = "cancelled"
 LEASE_LOST = "lease_lost"
 SHUTDOWN = "shutdown"
 MAX_CLAIM_BACKOFF_SECONDS = 60
+
+
+def _check_result(lease: JobLease, result: dict[str, Any]) -> None:
+    """
+    Check a job's result here, so a bad one fails the job at once instead of
+    leaving it to time out. Raises `PermanentError` if it can't be sent.
+    """
+    try:
+        json_text(result, "result")
+    except ValueError:
+        # JSON can't hold them, and sent as pydantic would write them, as null,
+        # they would change what the job found without saying so.
+        raise PermanentError("The job's result holds NaN or infinity.") from None
+    except TypeError:
+        # Not JSON for another reason (a numpy number, say): said below.
+        pass
+    try:
+        CompleteIn(lease_token=lease.lease_token, result=result).model_dump_json()
+    except Exception as exc:  # noqa: BLE001 - any invalid result
+        raise PermanentError(f"The job's result can't be sent: {exc}") from exc
 
 
 class Worker:
@@ -195,14 +217,7 @@ class Worker:
                 raise PermanentError(f"This worker has no handler for {lease.kind!r}.")
             ctx.check()
             result = handler(ctx)
-            try:
-                # Check the result here, so a bad one fails the job at once
-                # instead of leaving it to time out.
-                CompleteIn(
-                    lease_token=lease.lease_token, result=result
-                ).model_dump_json()
-            except Exception as exc:  # noqa: BLE001 - any invalid result
-                raise PermanentError(f"The job's result can't be sent: {exc}") from exc
+            _check_result(lease, result)
         except Cancelled:
             if ctx.stop_reason == SHUTDOWN:
                 self._report(
