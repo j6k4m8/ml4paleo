@@ -13,8 +13,6 @@ export type NeuroglancerView =
 	| { kind: "loading" }
 	/** The link to show in the frame. */
 	| { kind: "ready"; url: string }
-	/** This server has no Neuroglancer. */
-	| { kind: "unavailable" }
 	/** The project has no image to show yet. */
 	| { kind: "no-image" }
 	| { kind: "error"; message: string };
@@ -32,13 +30,13 @@ export function isNeuroglancerLink(url: unknown): url is string {
 }
 
 /**
- * What the server's answer comes to: a link to show, or no Neuroglancer on
- * this server (`url` is null). A link that doesn't go to this site's
+ * What the server's answer comes to: a link to show. A missing or invalid
+ * link is a loading error, not an optional feature. A link outside this site's
  * Neuroglancer isn't framed, whatever the answer says.
  */
 export function answerView(answer: { url?: unknown } | null | undefined): NeuroglancerView {
 	const url = answer?.url;
-	if (url === null || url === undefined) return { kind: "unavailable" };
+	if (url === null || url === undefined) return { kind: "error", message: "Couldn't load Neuroglancer. Please reload the page." };
 	if (isNeuroglancerLink(url)) return { kind: "ready", url };
 	return { kind: "error", message: "The server's link to Neuroglancer isn't one this page can show." };
 }

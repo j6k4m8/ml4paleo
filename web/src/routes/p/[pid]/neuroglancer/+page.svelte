@@ -28,7 +28,7 @@
 	async function load(project: string, signal: AbortSignal) {
 		try {
 			projectName = (await api<{ name: string }>(`/api/projects/${project}`, { signal })).name;
-			view = answerView(await api<{ url: string | null }>(`/api/projects/${project}/neuroglancer`, { signal }));
+			view = answerView(await api<{ url: string }>(`/api/projects/${project}/neuroglancer`, { signal }));
 		} catch (e) {
 			if (signal.aborted) return;
 			// The project answered, so a 404 now is its image that isn't there.
@@ -57,7 +57,7 @@
 	{#if view.kind === "ready"}
 		{@const began = view.url}
 		<div class="flex h-7 shrink-0 items-center gap-3 border-b border-edge bg-panel px-3 text-2xs text-ink-dim">
-			<span class="truncate">The image, labels, prediction and final segmentation, to look at in Neuroglancer. Paint in the annotator.</span>
+			<span class="truncate">Image, labels, results and meshes. Paint in the annotator.</span>
 			<a
 				class="ml-auto flex shrink-0 items-center gap-1"
 				href={began}
@@ -77,15 +77,6 @@
 		<div class="grid min-h-0 flex-1 place-items-center overflow-auto bg-pasteboard p-6">
 			{#if view.kind === "loading"}
 				<p class="muted">Loading…</p>
-			{:else if view.kind === "unavailable"}
-				<div class="panel grid max-w-md place-items-center gap-2 p-8 text-center">
-					<Orbit size={28} class="text-ink-faint" />
-					<p>This server doesn't have Neuroglancer.</p>
-					<p class="muted text-2xs">
-						Whoever runs it can set it up: the server image has a build of Neuroglancer, and <span class="font-mono">M4P_NEUROGLANCER_DIR</span> says where
-						the server finds it.
-					</p>
-				</div>
 			{:else if view.kind === "no-image"}
 				<div class="panel grid max-w-md place-items-center gap-2 p-8 text-center">
 					<Orbit size={28} class="text-ink-faint" />

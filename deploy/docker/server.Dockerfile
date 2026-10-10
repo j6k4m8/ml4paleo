@@ -19,6 +19,9 @@ RUN git init -q \
     && git remote add origin https://github.com/google/neuroglancer.git \
     && git fetch -q --depth 1 origin "$NEUROGLANCER_COMMIT" \
     && git checkout -q FETCH_HEAD
+# v2.41.2's OBJ parser fails in its decoding worker without this correction.
+COPY deploy/neuroglancer-obj.patch /tmp/neuroglancer-obj.patch
+RUN git apply /tmp/neuroglancer-obj.patch
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --no-audit --no-fund \
     && npm run build -- --no-typecheck --no-lint \

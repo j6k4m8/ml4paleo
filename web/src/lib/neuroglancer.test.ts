@@ -39,11 +39,10 @@ describe("answerView", () => {
 		expect(answerView({ url: LINK })).toEqual({ kind: "ready", url: LINK });
 	});
 
-	it("says there is no Neuroglancer when the server has none", () => {
-		expect(answerView({ url: null })).toEqual({ kind: "unavailable" });
-		expect(answerView({})).toEqual({ kind: "unavailable" });
-		expect(answerView(null)).toEqual({ kind: "unavailable" });
-		expect(answerView(undefined)).toEqual({ kind: "unavailable" });
+	it("treats missing links as errors, never an optional feature", () => {
+		for (const answer of [{ url: null }, {}, null, undefined]) {
+			expect(answerView(answer)).toEqual({ kind: "error", message: "Couldn't load Neuroglancer. Please reload the page." });
+		}
 	});
 
 	it("doesn't frame a link that goes anywhere else", () => {

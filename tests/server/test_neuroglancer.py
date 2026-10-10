@@ -9,8 +9,9 @@ import uuid
 from urllib.parse import unquote
 
 import pytest
-from helpers import PASSWORD, run_db, signup
+from helpers import run_db, signup
 from ml4paleo_server import artifacts
+from ml4paleo_server.app import create_app
 from ml4paleo_server.viewer import neuroglancer_link
 
 PUBLIC = "https://ml4paleo.example.org"
@@ -19,6 +20,17 @@ LABELS = "/api/projects/p/labels/zarr/"
 PREDICTION = "/api/projects/p/artifacts/q/zarr/"
 SEGMENTATION = "/api/projects/p/artifacts/s/zarr/"
 CLASSES = [(2, "#E8A33D"), (3, "#3d9be8")]
+MESHES = "/api/projects/p/artifacts/m/files/"
+MESH_INFO = {
+    "axis_order": "xyz",
+    "units": "millimeter",
+    "voxel_size_xyz": [0.02, 0.02, 0.04],
+    "downsample": 4,
+    "classes": [
+        {"value": 2, "name": "bone", "triangles": 12, "files": {"obj": "2.obj"}},
+        {"value": 3, "name": "matrix", "triangles": 24, "files": {"obj": "3.obj"}},
+    ],
+}
 # 80 x 60 x 40 voxels (x, y, z) of 0.02 x 0.02 x 0.04 mm.
 MANIFEST = {
     "shape_czyx": [1, 40, 60, 80],
@@ -30,8 +42,8 @@ MANIFEST = {
 
 def state_of(link: str) -> dict:
     """The state in a link's fragment, as Neuroglancer reads it."""
-    assert link.startswith("/neuroglancer/#!")
-    return json.loads(unquote(link.removeprefix("/neuroglancer/#!")))
+    assert link.startswith("/neuroglancer/?v=obj1#!")
+    return json.loads(unquote(link.split("#!", 1)[1]))
 
 
 def everything(manifest=MANIFEST, **changes) -> str:
@@ -171,6 +183,84 @@ def test_the_image_alone_is_a_link_to_the_image():
     }
     state = state_of(neuroglancer_link(PUBLIC, IMAGE, MANIFEST))
     assert state["layers"][0]["shaderControls"] == {"normalized": {"range": [10, 200]}}
+
+
+def test_existing_meshes_are_visible_colored_obj_layers_with_opacity_controls():
+    state = state_of(everything(meshes_url=MESHES, meshes_manifest=MESH_INFO))
+    meshes = [layer for layer in state["layers"] if layer["type"] == "mesh"]
+    assert [layer["name"] for layer in meshes] == ["mesh: bone", "mesh: matrix"]
+    assert [source_url(layer) for layer in meshes] == [
+        f"obj://{PUBLIC}{MESHES}2.obj",
+        f"obj://{PUBLIC}{MESHES}3.obj",
+    ]
+    for layer, (_, color) in zip(meshes, CLASSES, strict=True):
+        assert layer.get("visible", True)
+        assert color.lower() in layer["shader"]
+        assert "opacity slider" in layer["shader"]
+        assert "emitRGBA" in layer["shader"]
+
+
+@pytest.mark.parametrize("unit", ["millimeter", "micrometer", None, "unknown"])
+def test_mesh_coordinates_align_in_anisotropic_physical_or_unitless_images(unit):
+    manifest = {**MANIFEST, "unit": unit}
+    state = state_of(everything(manifest, meshes_url=MESHES, meshes_manifest=MESH_INFO))
+    transform = state["layers"][-1]["source"]["transform"]
+    assert (
+        transform["inputDimensions"]
+        == transform["outputDimensions"]
+        == state["dimensions"]
+    )
+    # A vertex at (10,20,30) full-res voxels was exported as (.2,.4,1.2).
+    # Neither the 4x meshing downsample nor physical spacing is applied twice.
+    vertex = [0.2, 0.4, 1.2, 1]
+    assert [
+        sum(a * b for a, b in zip(row, vertex, strict=True))
+        for row in transform["matrix"]
+    ] == pytest.approx([10, 20, 30])
+
+
+def test_meshes_ignore_deleted_empty_or_missing_obj_classes():
+    info = {
+        **MESH_INFO,
+        "classes": [
+            MESH_INFO["classes"][0],
+            {"value": 3, "triangles": 0, "files": {"obj": "3.obj"}},
+            {"value": 4, "triangles": 12, "files": {"obj": "4.obj"}},
+            {"value": 3, "triangles": 12, "files": {"glb": "3.glb"}},
+        ],
+    }
+    state = state_of(everything(meshes_url=MESHES, meshes_manifest=info))
+    assert [layer["name"] for layer in state["layers"] if layer["type"] == "mesh"] == [
+        "mesh: bone"
+    ]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"axis_order": "zyx"},
+        {"voxel_size_xyz": [0, 1, 1]},
+        {"voxel_size_xyz": [1, 2]},
+        {"voxel_size_xyz": None},
+        {"voxel_size_xyz": [float("inf"), 1, 1]},
+    ],
+)
+def test_meshes_with_unknown_coordinates_are_not_overlaid(bad):
+    state = state_of(
+        everything(meshes_url=MESHES, meshes_manifest={**MESH_INFO, **bad})
+    )
+    assert all(layer["type"] != "mesh" for layer in state["layers"])
+
+
+@pytest.mark.parametrize(
+    "filename", ["../2.obj", "https://elsewhere/2.obj", "2.obj#fragment", "2.obj?query"]
+)
+def test_mesh_manifest_cannot_redirect_the_browser(filename):
+    entry = {**MESH_INFO["classes"][0], "files": {"obj": filename}}
+    state = state_of(
+        everything(meshes_url=MESHES, meshes_manifest={**MESH_INFO, "classes": [entry]})
+    )
+    assert all(layer["type"] != "mesh" for layer in state["layers"])
 
 
 @pytest.mark.parametrize(
@@ -436,7 +526,7 @@ def test_members_get_a_link_to_all_of_their_projects_data(
     assert (
         ada.get(f"/api/projects/{project}/neuroglancer")
         .json()["url"]
-        .startswith("/neuroglancer/#!")
+        .startswith("/neuroglancer/?v=obj1#!")
     )
 
 
@@ -453,6 +543,81 @@ def test_a_project_with_only_an_image_gets_the_image_and_its_labels(
     labels = state["layers"][1]
     assert labels["segments"] == []
     assert labels["ignoreNullVisibleSet"] is False
+
+
+@pytest.mark.parametrize("direct_reference", [False, True])
+def test_mesh_exports_load_without_regeneration_and_not_on_a_replacement_scan(
+    new_browser, migrated_database_url, direct_reference
+):
+    ada = new_browser()
+    signup(ada)
+    project = make_project(ada)
+    image = add_artifact(migrated_database_url, project, "image", MANIFEST)
+    add_class(ada, project, "bone", "#e8a33d")
+    prediction = add_artifact(
+        migrated_database_url,
+        project,
+        "prediction",
+        {"shape_zyx": [40, 60, 80]},
+        {"image_artifact_id": image},
+    )
+    segmentation = add_artifact(
+        migrated_database_url,
+        project,
+        "segmentation",
+        {"shape_zyx": [40, 60, 80]},
+        {"prediction_artifact_id": prediction},
+    )
+    inputs = {"segmentation_artifact_id": segmentation}
+    if direct_reference:
+        inputs["image_artifact_id"] = image
+    meshes = add_artifact(migrated_database_url, project, "meshes", MESH_INFO, inputs)
+    # Still load the saved mesh when a newer segmentation is made for this scan.
+    add_artifact(
+        migrated_database_url,
+        project,
+        "segmentation",
+        {"shape_zyx": [40, 60, 80]},
+        {"prediction_artifact_id": prediction},
+    )
+    pipelines_before = ada.get(f"/api/projects/{project}/pipelines").json()
+    layer = next(
+        layer for layer in link_of(ada, project)["layers"] if layer["type"] == "mesh"
+    )
+    assert f"/artifacts/{meshes}/files/2.obj" in source_url(layer)
+    assert ada.get(f"/api/projects/{project}/pipelines").json() == pipelines_before
+    # Shape and spacing are identical: only provenance reveals the mismatch.
+    add_artifact(migrated_database_url, project, "image", MANIFEST)
+    assert all(layer["type"] != "mesh" for layer in link_of(ada, project)["layers"])
+
+
+def test_meshes_with_missing_or_foreign_provenance_are_left_out(
+    new_browser, migrated_database_url
+):
+    ada = new_browser()
+    signup(ada)
+    project = make_project(ada)
+    image = add_artifact(migrated_database_url, project, "image", MANIFEST)
+    add_class(ada, project, "bone", "#e8a33d")
+    other = make_project(ada, "Other scan")
+    prediction = add_artifact(
+        migrated_database_url, other, "prediction", {}, {"image_artifact_id": image}
+    )
+    segmentation = add_artifact(
+        migrated_database_url,
+        other,
+        "segmentation",
+        {},
+        {"prediction_artifact_id": prediction},
+    )
+    for inputs in (
+        {},
+        {"segmentation_artifact_id": "invalid"},
+        {"segmentation_artifact_id": str(uuid.uuid4())},
+        {"segmentation_artifact_id": segmentation},
+    ):
+        add_artifact(migrated_database_url, project, "meshes", MESH_INFO, inputs)
+        assert all(layer["type"] != "mesh" for layer in link_of(ada, project)["layers"])
 
 
 def test_a_class_that_was_deleted_is_not_selected(
@@ -527,25 +692,42 @@ def test_a_project_without_an_image_has_nothing_to_show(new_browser, with_neurog
     assert "no image" in response.json()["detail"]
 
 
-def test_without_a_neuroglancer_build_the_url_is_null(
-    new_browser, settings, migrated_database_url, tmp_path
-):
+def test_every_server_has_a_neuroglancer_link(new_browser, migrated_database_url):
     ada = new_browser()
     signup(ada)
     project = make_project(ada)
-    assert ada.get(f"/api/projects/{project}/neuroglancer").json() == {"url": None}
+    assert ada.get(f"/api/projects/{project}/neuroglancer").status_code == 404
     add_artifact(migrated_database_url, project, "image", MANIFEST)
-    assert ada.get(f"/api/projects/{project}/neuroglancer").json() == {"url": None}
-    # A folder that holds no build is no build.
-    empty = tmp_path / "nothing-built"
-    empty.mkdir()
-    browser = new_browser(settings.model_copy(update={"neuroglancer_dir": empty}))
-    browser.post("/api/auth/login", json={"username": "ada", "password": PASSWORD})
-    assert browser.get(f"/api/projects/{project}/neuroglancer").json() == {"url": None}
+    assert (
+        ada.get(f"/api/projects/{project}/neuroglancer")
+        .json()["url"]
+        .startswith("/neuroglancer/?v=obj1#!")
+    )
+    assert ada.get("/neuroglancer/").status_code == 200
     # Other people's projects are still not theirs to ask about.
     bob = new_browser()
     signup(bob, username="bob")
     assert bob.get(f"/api/projects/{project}/neuroglancer").status_code == 404
+
+
+def test_server_refuses_a_missing_or_unconfigured_neuroglancer(settings, tmp_path):
+    empty = tmp_path / "nothing-built"
+    empty.mkdir()
+    for directory in (None, empty, tmp_path / "missing"):
+        with pytest.raises(RuntimeError, match="Neuroglancer is required"):
+            create_app(settings.model_copy(update={"neuroglancer_dir": directory}))
+
+
+def test_serve_checks_neuroglancer_before_starting_workers(settings, monkeypatch):
+    from ml4paleo_server.cli import main
+
+    monkeypatch.setattr(
+        "ml4paleo_server.settings.Settings",
+        lambda: settings.model_copy(update={"neuroglancer_dir": None}),
+    )
+    monkeypatch.setattr("uvicorn.run", lambda *a, **kw: pytest.fail("Started workers"))
+    with pytest.raises(RuntimeError, match="Neuroglancer is required"):
+        main(["serve"])
 
 
 # --- framing ---------------------------------------------------------------
@@ -610,6 +792,21 @@ def test_neuroglancer_may_be_framed_by_this_site_and_nothing_else_may_be_framed(
         assert "x-frame-options" not in browser.get(path).headers, path
 
 
+@pytest.mark.parametrize(
+    "path", ["/neuroglancer/", "/neuroglancer/index.html", "/neuroglancer/?v=obj1"]
+)
+def test_neuroglancer_entry_point_revalidates_after_an_upgrade(
+    new_browser, with_neuroglancer, path
+):
+    browser = new_browser(with_neuroglancer)
+    response = browser.get(path)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"
+    cached = browser.get(path, headers={"If-None-Match": response.headers["etag"]})
+    assert cached.status_code == 304
+    assert cached.headers["cache-control"] == "no-cache"
+
+
 def test_the_web_app_may_frame_the_neuroglancer_it_serves(
     new_browser, with_neuroglancer
 ):
@@ -622,8 +819,7 @@ def test_the_web_app_may_frame_the_neuroglancer_it_serves(
     assert browser.get("/p/1/neuroglancer").headers["content-security-policy"] == app
 
 
-def test_without_a_neuroglancer_build_nothing_is_framable(new_browser):
+def test_the_bundled_viewer_never_falls_through_to_the_spa(new_browser):
     browser = new_browser()
-    for path in ["/neuroglancer/", "/neuroglancer/main.bundle.js"]:
-        policy = directives(browser.get(path).headers["content-security-policy"])
-        assert policy["frame-ancestors"] == ["'none'"], path
+    assert browser.get("/neuroglancer/").text == "<html>neuroglancer</html>"
+    assert browser.get("/neuroglancer/missing.js").status_code == 404

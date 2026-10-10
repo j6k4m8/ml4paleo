@@ -100,6 +100,15 @@ def migrated_database_url(database_url):
 
 
 @pytest.fixture(autouse=True)
+def bundled_neuroglancer(monkeypatch, tmp_path):
+    """All server installs include the viewer; tests only need its static shell."""
+    directory = tmp_path / "bundled-neuroglancer"
+    directory.mkdir()
+    (directory / "index.html").write_text("<html>neuroglancer</html>")
+    monkeypatch.setenv("M4P_NEUROGLANCER_DIR", str(directory))
+
+
+@pytest.fixture(autouse=True)
 def optional_email(monkeypatch):
     """
     Most tests sign up without an email address, so they run with sign-up not

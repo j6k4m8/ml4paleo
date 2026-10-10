@@ -25,7 +25,7 @@ from .. import artifacts, audit, jobs, pipelines, streams
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import Job, Project, ProjectMember, Upload, UserSession
 from ..jobs.queue import FINISHED
-from ..viewer import neuroglancer_available, neuroglancer_link
+from ..viewer import neuroglancer_link
 from .gateway import zarr_path
 from .projects import MemberProject
 
@@ -241,8 +241,8 @@ class ImageOut(BaseModel):
     manifest: dict[str, Any]
     # The OME-Zarr image, through the data gateway.
     zarr_url: str
-    # The image in Neuroglancer, if this server has it.
-    neuroglancer_url: str | None
+    # The image in the bundled Neuroglancer.
+    neuroglancer_url: str
 
 
 @router.get("/image")
@@ -259,7 +259,5 @@ async def current_image(
         committed_at=image.state_changed_at,
         manifest=manifest,
         zarr_url=zarr_url,
-        neuroglancer_url=neuroglancer_link(settings.public_url, zarr_url, manifest)
-        if neuroglancer_available(settings)
-        else None,
+        neuroglancer_url=neuroglancer_link(settings.public_url, zarr_url, manifest),
     )

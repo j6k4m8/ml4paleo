@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from helpers import SECRET_KEY, add_worker, run_db, signup
 from ml4paleo_server import artifacts
-from ml4paleo_server.db import Project, User
+from ml4paleo_server.db import Artifact, Project, User
 from ml4paleo_server.pipelines import mesh as mesh_pipeline
 from ml4paleo_server.settings import Settings
 from ml4paleo_server.storage import project_storage
@@ -215,6 +215,16 @@ def test_a_worker_meshes_each_class(
     # The image the segmentation came from, not the newer one.
     assert info["units"] == "millimeter"
     assert info["voxel_size_xyz"] == list(reversed(VOXEL_SIZE_ZYX))
+
+    async def check_image_provenance(db):
+        exported = await db.get(Artifact, uuid.UUID(meshes["artifact_id"]))
+        source = await db.get(Artifact, uuid.UUID(segmentation["artifact_id"]))
+        image = await mesh_pipeline.source_image(db, source)
+        current = await artifacts.head(db, uuid.UUID(project), "image")
+        assert exported.inputs["image_artifact_id"] == str(image.id)
+        assert image.id != current.id
+
+    run_db(migrated_database_url, check_image_provenance)
     # Claw has no voxels, so no mesh.
     assert [(c["value"], c["name"]) for c in info["classes"]] == [
         (BONE, "bone"),
