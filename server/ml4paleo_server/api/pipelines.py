@@ -123,15 +123,15 @@ async def start_ingest(
 
 
 @router.get("/pipelines")
-async def list_pipelines(project: MemberProject, db: DbSession) -> list[PipelineOut]:
-    roots = (
-        await db.scalars(
-            select(Job)
-            .where(Job.project_id == project.id, Job.id == Job.root_id)
-            .order_by(Job.created_at.desc())
-            .limit(50)
-        )
-    ).all()
+async def list_pipelines(
+    project: MemberProject, db: DbSession, include_live_previews: bool = True
+) -> list[PipelineOut]:
+    query = select(Job).where(Job.project_id == project.id, Job.id == Job.root_id)
+    if not include_live_previews:
+        # Filter before the limit: frequent previews must not push deliberate
+        # project actions out of Activity. Individual status reads still work.
+        query = query.where(Job.kind != "predict.live")
+    roots = (await db.scalars(query.order_by(Job.created_at.desc()).limit(50))).all()
     return [await pipeline_out(db, root) for root in roots]
 
 

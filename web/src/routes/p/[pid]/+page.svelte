@@ -2,6 +2,7 @@
 	import { untrack } from "svelte";
 	import { page } from "$app/state";
 	import { ApiError, api, message } from "#lib/api.ts";
+	import { activityModelHref, groupActivity } from "#lib/pipelines.ts";
 	import type { Pipeline, Project, ProjectImage, Upload as UploadInfo } from "#lib/types.ts";
 	import { drawImageSlice } from "#lib/thumbnail.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
@@ -19,6 +20,7 @@
 	let project: Project | null = $state(null);
 	let image: ProjectImage | null = $state(null);
 	let pipelines: Pipeline[] = $state([]);
+	const activity = $derived(groupActivity(pipelines));
 	let error = $state("");
 	let file: File | null = $state(null);
 	let uploading = $state(false);
@@ -93,7 +95,7 @@
 	async function refresh() {
 		try {
 			project = await api<Project>(`/api/projects/${pid}`);
-			pipelines = await api<Pipeline[]>(`/api/projects/${pid}/pipelines`);
+			pipelines = await api<Pipeline[]>(`/api/projects/${pid}/pipelines?include_live_previews=false`);
 			const found = await api<ProjectImage>(`/api/projects/${pid}/image`).catch((e: unknown) => {
 				if (e instanceof ApiError && e.status === 404) return null;
 				throw e;
@@ -362,11 +364,9 @@
 							<p class="text-2xs text-ink-dim [overflow-wrap:anywhere]">{note}</p>
 						{/each}
 						<div class="flex items-center gap-3">
-							{#if image.neuroglancer_url}
-								<a class="flex items-center gap-1" href={image.neuroglancer_url} target="_blank" rel="noopener">
-									Open in Neuroglancer <ExternalLink size={12} />
-								</a>
-							{/if}
+							<a class="flex items-center gap-1" href={image.neuroglancer_url} target="_blank" rel="noopener">
+								Open in Neuroglancer <ExternalLink size={12} />
+							</a>
 							{#if !replacing && !ingesting && !uploading}
 								<button class="btn btn-ghost ml-auto" onclick={() => (replacing = true)}>Replace the scan…</button>
 							{/if}
@@ -404,7 +404,9 @@
 				<p class="muted p-3">Nothing has run yet.</p>
 			{:else}
 				<ul class="divide-y divide-edge">
-					{#each pipelines as pipeline (pipeline.id)}
+					{#each activity as group (group.latest.id)}
+						{@const pipeline = group.latest}
+						{@const modelHref = activityModelHref(pid, group)}
 						<li class="flex flex-col gap-1 px-3 py-2">
 							<div class="flex items-center gap-2">
 								<span
@@ -416,8 +418,8 @@
 												? 'bg-ink-faint'
 												: 'animate-pulse bg-warn'}"
 								></span>
-								<span class="font-medium capitalize">{pipeline.kind}</span>
-								<span class="ml-auto text-2xs text-ink-faint">{new Date(pipeline.created_at).toLocaleString()}</span>
+								<span class="shrink-0 font-medium capitalize">{pipeline.kind}{#if group.count > 1} (×{group.count}){/if}</span>
+								<time class="ml-auto text-right text-2xs text-ink-faint" datetime={pipeline.created_at} title={group.count > 1 ? "Latest run" : undefined}>{new Date(pipeline.created_at).toLocaleString()}</time>
 							</div>
 							{#if pipeline.status === "waiting" || pipeline.status === "running"}
 								<div class="flex items-center gap-2">
@@ -425,8 +427,12 @@
 									<span class="font-mono text-2xs text-ink-dim">{percent(pipeline.progress)}</span>
 								</div>
 							{:else}
-								<span class="text-2xs text-ink-dim">{pipeline.status}</span>
+								<div class="flex items-center justify-between gap-2 text-2xs">
+									<span class="text-ink-dim">{pipeline.status}</span>
+									{#if modelHref}<a href={modelHref}>{group.count > 1 ? "Latest model" : "View model"}</a>{/if}
+								</div>
 							{/if}
+							{#if active(pipeline) && modelHref}<a class="text-2xs" href={modelHref}>View model</a>{/if}
 							{#if pipeline.error}<span class="text-2xs text-danger">{pipeline.error}</span>{/if}
 						</li>
 					{/each}
