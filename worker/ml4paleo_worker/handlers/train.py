@@ -42,9 +42,17 @@ def run(ctx: JobContext) -> dict[str, Any]:
         params = plugin_class.Params(**ctx.payload.get("params", {}))
     except ValueError as exc:
         raise PermanentError(str(exc)) from exc
-    labels = BlobLabels(
-        labels_grant, {(cz, cy, cx): sha for cz, cy, cx, sha in manifest["chunks"]}
+    class_shas = {(row[0], row[1], row[2]): row[3] for row in manifest["chunks"]}
+    source_shas = (
+        {
+            (row[0], row[1], row[2]): row[4]
+            for row in manifest["chunks"]
+            if len(row) >= 5 and row[4] is not None
+        }
+        if int(manifest.get("version", 1)) >= 2
+        else None
     )
+    labels = BlobLabels(labels_grant, class_shas, source_shas)
     plugin = plugin_class()
     image = OmeImage.open(image_grant).array(0)
     cost = plugin.crop_cost(params, int(image.shape[0]), ctx.threads)

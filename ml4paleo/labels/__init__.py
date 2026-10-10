@@ -16,7 +16,9 @@ Value conventions for `class`:
 - 1 (`BACKGROUND`): explicitly labeled as background.
 - 2-254: the project's classes. Values are never reused after a class is
   deleted, so old labels and models keep their meaning.
-- 255: reserved.
+- 255 (`DECLINED`): a model suggestion explicitly declined by a person. It
+  suppresses that suggestion, is ignored by training, and never appears as a
+  segmentation class.
 
 Segmentation plugins see a compact space instead: 0 is background, 1..K are
 the project's classes in order, and 255 (`PLUGIN_IGNORE`) marks voxels to
@@ -33,6 +35,8 @@ BACKGROUND = 1
 FIRST_CLASS = 2
 MAX_CLASS = 254
 RESERVED = 255
+# Kept as an alias because older callers describe 255 only as reserved.
+DECLINED = RESERVED
 
 PLUGIN_BACKGROUND = 0
 PLUGIN_IGNORE = 255
@@ -51,6 +55,7 @@ class Source(IntEnum):
     INTERACTIVE = 3
     PROPAGATED = 4
     IMPORTED = 5
+    DECLINED = 6
 
 
 def check_class_values(class_values: Sequence[int]) -> None:

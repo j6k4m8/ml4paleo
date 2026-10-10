@@ -211,6 +211,7 @@ def test_a_worker_composes_the_final_segmentation(
     segmentation = ada.get(base).json()
     assert segmentation["min_voxels"] == 10
     assert datetime.datetime.fromisoformat(segmentation["labels_as_of"]) == pinned
+    assert segmentation["label_changes_since"] == 1
     final = made(settings, project, segmentation["artifact_id"])
     # Labels overrule the prediction.
     assert (final[2:4, 2:4, 2:4] == TOOTH).all()
@@ -358,6 +359,7 @@ def test_the_final_segmentation_is_described_by_what_the_server_recorded(
     assert out.json()["model_name"] is None
     assert out.json()["min_voxels"] == 7
     assert out.json()["labels_as_of"] is None
+    assert out.json()["label_changes_since"] == 0
 
 
 def test_one_final_segmentation_at_a_time(new_browser, settings, migrated_database_url):

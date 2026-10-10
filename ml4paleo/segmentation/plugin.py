@@ -34,6 +34,14 @@ class PluginCaps:
     block: tuple[int, int, int] = (64, 64, 64)
     # Whether it can take prompts (clicks) for interactive segmentation.
     prompt: bool = False
+    # UI and scheduling semantics, not inferred from a plugin's name/device.
+    display_name: str = "Segmentation model"
+    family: Literal["classical", "neural", "other"] = "other"
+    # Unknown/expensive plugins require explicit training by default. Periodic
+    # plugins train in the background; inference keeps the last ready checkpoint.
+    learning: Literal["manual", "debounced", "periodic"] = "manual"
+    debounce_ms: int = 1000
+    min_train_interval_ms: int = 30_000
 
 
 @dataclasses.dataclass(frozen=True)
@@ -62,9 +70,18 @@ class Crop:
     image: np.ndarray
     # (Z, Y, X) uint8 targets in the plugin label space.
     targets: np.ndarray
+    # Which targets came directly from a person (drawn or imported). Metrics
+    # use only these; model-accepted labels and implicit ROI background may
+    # still train a model but can never grade it. Older/custom TrainingData
+    # may leave this unset, in which case known targets are treated as human.
+    human: np.ndarray | None = None
     # Where `targets` sits within `image`'s spatial axes.
-    interior: tuple[slice, slice, slice]
-    split: Split
+    interior: tuple[slice, slice, slice] = (
+        slice(None),
+        slice(None),
+        slice(None),
+    )
+    split: Split = "train"
 
 
 class TrainingData(Protocol):
@@ -115,7 +132,7 @@ class TrainContext(Protocol):
 
 @dataclasses.dataclass
 class TrainResult:
-    # Per-class and overall scores on validation crops (empty without any).
+    # Per-class and overall scores on held-out human annotations.
     metrics: dict[str, Any]
     # Training voxels used, by plugin class index.
     samples: dict[int, int]

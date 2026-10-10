@@ -29,13 +29,15 @@ import numpy as np
 import zstandard
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from . import BACKGROUND, LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
+from . import BACKGROUND, DECLINED, LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
 from .codec import FRAME_OVERHEAD, decompress_exact
 
 ChunkKey = tuple[int, int, int]
 Box = tuple[int, int, int, int, int, int]
 
-_ONLY_IF = re.compile(r"any|unlabeled|labeled|class:([0-9]{1,3}(?:,[0-9]{1,3})*)")
+_ONLY_IF = re.compile(
+    r"any|unlabeled|labeled|declined|class:([0-9]{1,3}(?:,[0-9]{1,3})*)"
+)
 # The longest list `_ONLY_IF` allows is every class value, three digits each.
 _MAX_ONLY_IF = len("class:") + 4 * MAX_CLASS
 _MAX_RAW_BYTES = int(np.prod(LABEL_CHUNK_ZYX))
@@ -52,7 +54,8 @@ def _decompress(data: bytes, size: int) -> bytes:
 def normalize_only_if(only_if: str) -> str:
     """
     The canonical form of an `only_if` condition: "any", "unlabeled", "labeled",
-    or "class:" and the values it names, once each and ascending ("class:2,3,5").
+    "declined", or "class:" and the values it names, once each and ascending
+    ("class:2,3,5").
     The values may come in any order and with leading zeros; none may be 0
     (unlabeled, which has its own condition), past `MAX_CLASS`, or repeated.
     Raises ValueError for anything else.
@@ -139,7 +142,8 @@ class ChunkDelta(BaseModel):
     value 0 erases. `only_if` limits which voxels may change (judged on the
     chunk as it is when the delta is applied): "any" (no limit), "unlabeled"
     (voxels holding 0), "labeled" (voxels holding anything but 0, background
-    included), or "class:2,3" (voxels holding one of the values listed, as
+    included), "declined" (voxels holding the reserved decline tombstone), or
+    "class:2,3" (voxels holding one of the values listed, as
     `normalize_only_if` says). Nothing outside the mask changes.
     """
 
@@ -165,7 +169,7 @@ class ChunkDelta(BaseModel):
         _check_box(self.box)
         if (self.value is None) == (self.values is None):
             raise ValueError("Set exactly one of value or values")
-        if self.value is not None and not 0 <= self.value <= MAX_CLASS:
+        if self.value is not None and not 0 <= self.value <= DECLINED:
             raise ValueError(f"Label value {self.value} is out of range")
         for payload in (self.mask, self.values or b""):
             if len(payload) > _MAX_RAW_BYTES + FRAME_OVERHEAD:
@@ -262,6 +266,8 @@ def apply_delta(
         selected &= region == UNLABELED
     elif delta.only_if == "labeled":
         selected &= region != UNLABELED
+    elif delta.only_if == "declined":
+        selected &= region == DECLINED
     elif (classes := only_if_classes(delta.only_if)) is not None:
         selected &= np.isin(region, classes)
 
@@ -269,7 +275,7 @@ def apply_delta(
         written = np.full(shape, delta.value, dtype=np.uint8)
     else:
         written = unpack_values(delta.values or b"", shape)
-        if written[selected].max(initial=0) > MAX_CLASS:
+        if written[selected].max(initial=0) > DECLINED:
             raise ValueError("Delta writes a reserved label value")
     written = np.where(selected, written, 0).astype(np.uint8)
     written_source = _source_for(written, source)
@@ -378,14 +384,14 @@ def split_into_deltas(
     """
     if (value is None) == (values is None):
         raise ValueError("Pass exactly one of value or values")
-    if value is not None and not 0 <= value <= MAX_CLASS:
+    if value is not None and not 0 <= value <= DECLINED:
         raise ValueError(f"Label value {value} is out of range")
     if values is not None:
         if values.shape != mask.shape:
             raise ValueError("values must have the same shape as mask")
         selected_values = values[np.asarray(mask, dtype=bool)]
         if selected_values.size and (
-            selected_values.min() < 0 or selected_values.max() > MAX_CLASS
+            selected_values.min() < 0 or selected_values.max() > DECLINED
         ):
             raise ValueError("values contain label values out of range")
     if any(o < 0 for o in origin_zyx):

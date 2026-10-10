@@ -41,7 +41,14 @@ from typing import Any, NamedTuple, cast
 import numpy as np
 import zarr
 
-from ml4paleo.labels import BACKGROUND, FIRST_CLASS, LABEL_CHUNK_ZYX, UNLABELED
+from ml4paleo.labels import (
+    BACKGROUND,
+    DECLINED,
+    FIRST_CLASS,
+    LABEL_CHUNK_ZYX,
+    MAX_CLASS,
+    UNLABELED,
+)
 
 from .dataset import Box, LabelSource
 from .predict import SHARD_ZYX, shard_boxes
@@ -146,7 +153,11 @@ def merge(
         if all(a < b for a, b in zip(lo, hi, strict=True)):
             inside = tuple(slice(lo[a] - box[a], hi[a] - box[a]) for a in range(3))
             prediction[inside] = BACKGROUND
-    np.copyto(prediction, labels, where=labels != UNLABELED)
+    # A decline is a tombstone over the model, not a segmentation class and
+    # not a background training label. It suppresses the suggestion in the
+    # result while remaining ignored by training.
+    prediction[labels == DECLINED] = BACKGROUND
+    np.copyto(prediction, labels, where=(labels != UNLABELED) & (labels != DECLINED))
     return prediction
 
 
@@ -155,7 +166,11 @@ def class_values(merged: np.ndarray, slab: int = SLAB) -> list[int]:
     present = np.zeros(256, dtype=bool)
     for z in _slabs(len(merged), slab):
         present[np.unique(merged[z])] = True
-    return [int(value) for value in np.flatnonzero(present) if value >= FIRST_CLASS]
+    return [
+        int(value)
+        for value in np.flatnonzero(present)
+        if FIRST_CLASS <= value <= MAX_CLASS
+    ]
 
 
 def label_class(
@@ -206,7 +221,7 @@ def shard_inputs(
     merged = merge(
         np.asarray(prediction[region], dtype=np.uint8), values, box, complete_rois
     )
-    return merged, values != UNLABELED
+    return merged, (values != UNLABELED) & (values != DECLINED)
 
 
 def seams(box: Box, shape_zyx: Sequence[int]) -> tuple[bool, ...]:

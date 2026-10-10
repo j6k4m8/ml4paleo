@@ -123,6 +123,7 @@ async def start(
     params: BaseModel,
     name: str,
     created_by: uuid.UUID,
+    live: bool = False,
 ) -> tuple[Job, TrainedModel]:
     owner = await db.get(User, project.owner_id)
     assert owner is not None
@@ -135,7 +136,7 @@ async def start(
         db,
         project_id=project.id,
         kind="model",
-        inputs={"training_set": training_set.id, "plugin": plugin.name},
+        inputs={"training_set": training_set.id, "plugin": plugin.name, "live": live},
     )
     model = TrainedModel(
         project_id=project.id,

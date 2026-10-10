@@ -291,13 +291,16 @@ def _in_use():
 
 def _accepted_from():
     """
-    SQL: labels were accepted from the artifact (a prediction or proposal),
-    so their ops name it as where they came from (live or undone, since a
-    redo brings them back).
+    SQL: labels were accepted from or declined against the artifact (a
+    prediction or proposal), so their ops name it as where they came from
+    (live or undone, since a redo brings them back).
     """
     return exists().where(
         LabelOp.project_id == Artifact.project_id,
-        LabelOp.source == int(Source.MODEL_VERIFIED),
+        or_(
+            LabelOp.source == int(Source.MODEL_VERIFIED),
+            LabelOp.source == int(Source.DECLINED),
+        ),
         LabelOp.tool["prediction"].astext == cast(Artifact.id, String),
     )
 

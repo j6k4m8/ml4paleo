@@ -13,7 +13,7 @@ import joblib
 import numpy as np
 import pytest
 
-from ml4paleo.labels import LABEL_CHUNK_ZYX, PLUGIN_IGNORE
+from ml4paleo.labels import LABEL_CHUNK_ZYX, PLUGIN_IGNORE, Source
 from ml4paleo.segmentation.dataset import RoiSpec, TrainingSet, tile_for, tiles
 from ml4paleo.segmentation.metrics import ScoreSheet
 from ml4paleo.segmentation.plugin import CropCost, get_plugin, plugins
@@ -25,8 +25,9 @@ BONE = 2
 class DictLabels:
     """Label chunks held in memory, built from a full label volume."""
 
-    def __init__(self, volume: np.ndarray):
+    def __init__(self, volume: np.ndarray, provenance: np.ndarray | None = None):
         self.chunks: dict[tuple[int, int, int], np.ndarray] = {}
+        self.source_chunks: dict[tuple[int, int, int], np.ndarray] = {}
         cz, cy, cx = LABEL_CHUNK_ZYX
         for z in range(0, volume.shape[0], cz):
             for y in range(0, volume.shape[1], cy):
@@ -36,10 +37,30 @@ class DictLabels:
                         continue
                     chunk = np.zeros(LABEL_CHUNK_ZYX, dtype=np.uint8)
                     chunk[: part.shape[0], : part.shape[1], : part.shape[2]] = part
-                    self.chunks[(z // cz, y // cy, x // cx)] = chunk
+                    key = (z // cz, y // cy, x // cx)
+                    self.chunks[key] = chunk
+                    if provenance is not None:
+                        source_part = provenance[z : z + cz, y : y + cy, x : x + cx]
+                        source_chunk = np.zeros(LABEL_CHUNK_ZYX, dtype=np.uint8)
+                        source_chunk[
+                            : source_part.shape[0],
+                            : source_part.shape[1],
+                            : source_part.shape[2],
+                        ] = source_part
+                        self.source_chunks[key] = source_chunk
 
     def chunk(self, key):
         return self.chunks.get(key)
+
+    def source(self, key):
+        if self.source_chunks:
+            return self.source_chunks.get(key)
+        chunk = self.chunks.get(key)
+        return (
+            None
+            if chunk is None
+            else np.where(chunk, Source.HUMAN, Source.NONE).astype(np.uint8)
+        )
 
 
 def synthetic(seed=0):
@@ -174,6 +195,32 @@ def test_labels_assemble_across_chunks_and_edges():
     data = TrainingSet(image, source, source.chunks, [], [BONE], (0, 1))
     box = (58, 58, 58, 72, 70, 90)
     assert np.array_equal(data.read_labels(box), labels[58:72, 58:70, 58:90])
+
+
+def test_crops_mark_only_direct_annotations_as_human():
+    image, _ = synthetic()
+    labels = np.zeros(SHAPE, dtype=np.uint8)
+    provenance = np.zeros(SHAPE, dtype=np.uint8)
+    for x, value, source in (
+        (10, 1, Source.HUMAN),
+        (11, BONE, Source.IMPORTED),
+        (12, BONE, Source.MODEL_VERIFIED),
+        (13, BONE, Source.INTERACTIVE),
+    ):
+        labels[10, 10, x] = value
+        provenance[10, 10, x] = source
+    source = DictLabels(labels, provenance)
+    data = TrainingSet(image, source, source.chunks, [], [BONE], (0, 1))
+
+    [crop] = data.crops("train", halo=0)
+    known = crop.targets != PLUGIN_IGNORE
+    assert int(known.sum()) == 4
+    assert crop.human is not None
+    assert int(crop.human.sum()) == 2
+    assert crop.human[10, 10, 10]
+    assert crop.human[10, 10, 11]
+    assert not crop.human[10, 10, 12]
+    assert not crop.human[10, 10, 13]
 
 
 def test_missing_label_blobs_say_so(tmp_path):
@@ -338,6 +385,21 @@ def test_random_forest_samples_fit_the_memory_budget(tmp_path):
     Ctx.memory_budget_bytes = 50_000
     with pytest.raises(ValueError, match="memory"):
         plugin.train(data, params, tmp_path, Ctx())
+
+
+def test_random_forest_reservoir_keeps_a_human_grade_per_class():
+    from ml4paleo.segmentation.plugins.rf import Reservoir
+
+    reservoir = Reservoir(1, np.random.default_rng(0))
+    human_row = np.array([[1.0, 2.0]], dtype=np.float32)
+    reservoir.add(BONE, human_row, np.array([True]))
+    # Simulate that later accepted predictions displaced the only direct
+    # annotation during uniform reservoir sampling.
+    reservoir.rows[BONE][0] = [9.0, 9.0]
+    reservoir.human[BONE][0] = False
+    reservoir.ensure_human()
+    np.testing.assert_array_equal(reservoir.rows[BONE], human_row)
+    assert reservoir.human[BONE].tolist() == [True]
 
 
 def test_training_needs_two_classes(tmp_path):

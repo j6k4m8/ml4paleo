@@ -131,17 +131,43 @@ class Reservoir:
         self.size = size
         self.rng = rng
         self.rows: dict[int, np.ndarray] = {}
+        # Whether each kept row is a direct human/imported annotation. The
+        # flags undergo the same reservoir replacements as their rows.
+        self.human: dict[int, np.ndarray] = {}
+        # Preserve one direct annotation per class as a backstop. A very
+        # large stream of accepted model labels should never be able to
+        # evict every human row and make the resulting model ungradable.
+        self.first_human: dict[int, np.ndarray] = {}
         self.seen: dict[int, int] = {}
 
-    def add(self, label: int, rows: np.ndarray) -> None:
+    def add(
+        self, label: int, rows: np.ndarray, human: np.ndarray | None = None
+    ) -> None:
         kept = self.rows.get(label)
+        kept_human = self.human.get(label)
+        flags = (
+            np.ones(len(rows), dtype=bool)
+            if human is None
+            else np.asarray(human, dtype=bool)
+        )
+        if flags.shape != (len(rows),):
+            raise ValueError("Human-label flags must match their feature rows")
+        if label not in self.first_human and flags.any():
+            self.first_human[label] = rows[np.flatnonzero(flags)[0]].copy()
         seen = self.seen.get(label, 0)
         for start in range(0, len(rows), self.size):
             batch = rows[start : start + self.size]
+            batch_human = flags[start : start + self.size]
             if kept is None or len(kept) < self.size:
                 room = self.size - (0 if kept is None else len(kept))
                 take, batch = batch[:room], batch[room:]
+                take_human, batch_human = batch_human[:room], batch_human[room:]
                 kept = take.copy() if kept is None else np.concatenate([kept, take])
+                kept_human = (
+                    take_human.copy()
+                    if kept_human is None
+                    else np.concatenate([kept_human, take_human])
+                )
                 seen += len(take)
             if len(batch) == 0:
                 continue
@@ -150,10 +176,22 @@ class Reservoir:
             slots = (self.rng.random(len(batch)) * positions).astype(np.int64)
             keep = slots < self.size
             kept[slots[keep]] = batch[keep]
+            assert kept_human is not None
+            kept_human[slots[keep]] = batch_human[keep]
             seen += len(batch)
-        assert kept is not None
+        assert kept is not None and kept_human is not None
         self.rows[label] = kept
+        self.human[label] = kept_human
         self.seen[label] = seen
+
+    def ensure_human(self) -> None:
+        """Keep at least one direct annotation for every class that has one."""
+        for label, row in self.first_human.items():
+            flags = self.human.get(label)
+            kept = self.rows.get(label)
+            if flags is not None and kept is not None and not flags.any():
+                kept[0] = row
+                flags[0] = True
 
 
 class RandomForestPredictor:
@@ -197,8 +235,15 @@ class RandomForestPredictor:
 
 class RandomForestPlugin:
     name: ClassVar[str] = "rf"
-    version: ClassVar[str] = "1"
-    caps: ClassVar[PluginCaps] = PluginCaps(devices=("cpu",))
+    version: ClassVar[str] = "2"
+    caps: ClassVar[PluginCaps] = PluginCaps(
+        devices=("cpu",),
+        display_name="Random forest",
+        family="classical",
+        learning="debounced",
+        debounce_ms=1000,
+        min_train_interval_ms=5000,
+    )
     Params: ClassVar[type[BaseModel]] = RandomForestParams
 
     def train(
@@ -234,9 +279,10 @@ class RandomForestPlugin:
         for crop in data.crops("train", halo):
             ctx.check()
             crops += 1
-            rows, labels = self._samples(crop, params.sigma_max, threads)
+            rows, labels, human = self._samples(crop, params.sigma_max, threads)
             for label in np.unique(labels):
-                reservoir.add(int(label), rows[labels == label])
+                selected = labels == label
+                reservoir.add(int(label), rows[selected], human[selected])
             # Reading crops takes most of the time before fitting.
             ctx.progress(min(0.5, 0.5 * (1 - 1 / (1 + crops / 20))))
         if not reservoir.rows:
@@ -253,17 +299,21 @@ class RandomForestPlugin:
                 "Training needs labels of at least two classes (background "
                 f"counts), and only {has} has any. {fix}"
             )
+        reservoir.ensure_human()
         samples = {k: len(v) for k, v in reservoir.rows.items()}
         width = next(iter(reservoir.rows.values())).shape[1]
         # Fill one array to fit on, letting go of each class's samples once
         # copied, so they're never held twice over.
         x = np.empty((sum(samples.values()), width), dtype=np.float32)
         y = np.empty(len(x), dtype=np.uint8)
+        human = np.empty(len(x), dtype=bool)
         start = 0
         for k in sorted(samples):
             rows = reservoir.rows.pop(k)
+            flags = reservoir.human.pop(k)
             x[start : start + len(rows)] = rows
             y[start : start + len(rows)] = k
+            human[start : start + len(rows)] = flags
             start += len(rows)
         ctx.progress(0.55, f"Fitting {params.n_estimators} trees on {len(y)} voxels")
         ctx.check()
@@ -272,9 +322,13 @@ class RandomForestPlugin:
             max_depth=params.max_depth,
             n_jobs=threads,
             random_state=params.seed,
+            # Each training row is predicted only by trees whose bootstrap
+            # sample left it out. This gives an internal held-out grade
+            # without withholding scarce annotations from the final model.
+            oob_score=True,
         )
         forest.fit(x, y)
-        del x, y
+        del x
         out.mkdir(parents=True, exist_ok=True)
         joblib.dump(forest, out / MODEL_FILE, compress=3)
         meta = {
@@ -289,16 +343,39 @@ class RandomForestPlugin:
             "features": int(width),
         }
         (out / META_FILE).write_text(json.dumps(meta, indent=2))
-        ctx.progress(0.8, "Scoring on validation ROIs")
+        ctx.progress(0.8, "Scoring on held-out human annotations")
         predictor = RandomForestPredictor(forest, meta, threads)
         sheet = ScoreSheet(data.num_classes)
         validation_crops = 0
         for crop in data.crops("val", halo):
             ctx.check()
+            human_targets = np.where(
+                crop.human if crop.human is not None else crop.targets != PLUGIN_IGNORE,
+                crop.targets,
+                PLUGIN_IGNORE,
+            ).astype(np.uint8)
+            if not (human_targets != PLUGIN_IGNORE).any():
+                continue
             validation_crops += 1
             # Crops carry the full halo, so they predict like any block.
-            sheet.add(predictor.predict_block(crop.image).argmax(axis=0), crop.targets)
-        metrics = sheet.summary(data.class_values) if validation_crops else {}
+            sheet.add(predictor.predict_block(crop.image).argmax(axis=0), human_targets)
+        evaluation = "human_validation_rois"
+        if sheet.voxels == 0:
+            # No explicit human validation labels: use the forest's standard
+            # out-of-bag predictions on human rows in its balanced reservoir.
+            # Rows with no OOB tree (possible with very few trees) are omitted.
+            decisions = np.asarray(forest.oob_decision_function_)
+            covered = np.isfinite(decisions).all(axis=1) & (decisions.sum(axis=1) > 0)
+            graded = human & covered
+            if graded.any():
+                predicted = np.asarray(forest.classes_)[
+                    decisions[graded].argmax(axis=1)
+                ]
+                sheet.add(predicted.astype(np.uint8), y[graded])
+            evaluation = "human_out_of_bag"
+        metrics = sheet.summary(data.class_values) if sheet.voxels else {}
+        metrics["evaluation"] = evaluation
+        metrics["evaluation_voxels"] = sheet.voxels
         metrics["validation_crops"] = validation_crops
         metrics["training_crops"] = crops
         # Less than asked for when the memory budget is tight.
@@ -325,10 +402,11 @@ class RandomForestPlugin:
 
     def _samples(
         self, crop: Crop, sigma_max: float, threads: int
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         feats = features(crop.image, sigma_max, threads)[crop.interior]
         known = crop.targets != PLUGIN_IGNORE
-        return feats[known], crop.targets[known]
+        human = crop.human if crop.human is not None else known
+        return feats[known], crop.targets[known], np.asarray(human, dtype=bool)[known]
 
     def load(
         self, directory: pathlib.Path, device: str = "cpu"

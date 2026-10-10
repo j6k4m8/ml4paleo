@@ -11,6 +11,7 @@ feed collaborators follow, and the labels as a zarr group for viewers.
     POST   /api/projects/{id}/labels/ops/{seq}/undo      {client_op_id}
     POST   /api/projects/{id}/labels/ops/{seq}/redo      {client_op_id}
     POST   /api/projects/{id}/labels/accept              accept part of a prediction
+    POST   /api/projects/{id}/labels/decline             decline part of a prediction
     GET    /api/projects/{id}/labels/ops                 history, newest first
     GET    /api/projects/{id}/labels/changes?after=seq   what changed since
     GET    /api/projects/{id}/labels/events?after=seq    the same, as SSE
@@ -78,7 +79,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import func, select, text
 from starlette.concurrency import run_in_threadpool
 
-from ml4paleo.labels import BACKGROUND, LABEL_CHUNK_ZYX, MAX_CLASS, UNLABELED, Source
+from ml4paleo.labels import (
+    BACKGROUND,
+    DECLINED,
+    LABEL_CHUNK_ZYX,
+    MAX_CLASS,
+    UNLABELED,
+    Source,
+)
 from ml4paleo.labels.codec import ZARR_CODECS, blob_key
 from ml4paleo.labels.deltas import (
     ChunkDelta,
@@ -312,9 +320,10 @@ class DeltaIn(BaseModel):
     One chunk's part of an edit (see `ml4paleo.labels.deltas.ChunkDelta`),
     with `mask` and `values` base64-encoded. `only_if` says which of the
     voxels in the mask may change: "any", "unlabeled", "labeled" (anything but
-    unlabeled, background included), or "class:2,3" (those values; one or
-    more, each 1 to 254 and none twice, in any order, which is put in
-    ascending order). Anything else is refused.
+    unlabeled, background included), "declined" (the reserved tombstone, which
+    may only be restored to unlabeled), or "class:2,3" (those values; one or
+    more, each 1 to 254 and none twice, in any order, which is put in ascending
+    order). Anything else is refused.
     """
 
     key: tuple[int, int, int]
@@ -403,6 +412,8 @@ def check_values(deltas: list[ChunkDelta], allowed: set[int]) -> None:
             raise ValueError(
                 f"label values {sorted(used - allowed)} are not classes here"
             )
+        if delta.only_if == "declined" and used != {UNLABELED}:
+            raise ValueError("Declined suggestions may only be restored to unlabeled")
 
 
 @router.post("/ops", status_code=201)
@@ -471,6 +482,32 @@ class AcceptIn(BaseModel):
 
     @model_validator(mode="after")
     def _one_place(self) -> "AcceptIn":
+        if (self.roi_id is None) == (self.box is None):
+            raise ValueError("Give exactly one of roi_id and box")
+        return self
+
+
+class DeclineDeltaIn(DeltaIn):
+    """A decline tombstone and the prediction value it is claimed to hide."""
+
+    prediction_value: int = Field(ge=FIRST_CLASS, le=MAX_CLASS)
+
+    def predicted_delta(self) -> ChunkDelta:
+        """The same selected voxels, writing the value the prediction must hold."""
+        return self.to_delta().model_copy(update={"value": self.prediction_value})
+
+
+class DeclineIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client_op_id: uuid.UUID
+    prediction_artifact_id: uuid.UUID
+    roi_id: uuid.UUID | None = None
+    box: tuple[int, int, int, int, int, int] | None = None
+    deltas: list[DeclineDeltaIn] = Field(min_length=1, max_length=MAX_DELTAS)
+
+    @model_validator(mode="after")
+    def _one_place(self) -> "DeclineIn":
         if (self.roi_id is None) == (self.box is None):
             raise ValueError("Give exactly one of roi_id and box")
         return self
@@ -710,6 +747,92 @@ async def accept_prediction(
     return _op_out(result)
 
 
+@router.post("/decline", status_code=201)
+async def decline_prediction(
+    body: DeclineIn,
+    project: MemberProject,
+    auth: CurrentAuth,
+    db: DbSession,
+    settings: SettingsDep,
+) -> OpOut:
+    """
+    Decline predicted foreground classes into unlabeled voxels. The stored
+    value is the reserved decline tombstone (255), which hides that model
+    suggestion, trains as ignore, and composes as background. Each delta also
+    names the foreground value the prediction must actually hold, so a client
+    cannot use this endpoint as an unchecked way to paint tombstones.
+    """
+    if done := await labels.existing(db, project.id, body.client_op_id):
+        return _op_out(done)
+    prediction = await db.scalar(
+        select(Artifact)
+        .where(
+            Artifact.id == body.prediction_artifact_id,
+            Artifact.project_id == project.id,
+            Artifact.kind == "prediction",
+            Artifact.state.in_(("committed", "superseded")),
+        )
+        .with_for_update(read=True)
+    )
+    roi = None
+    if body.roi_id is not None:
+        roi = await db.scalar(
+            select(Roi).where(Roi.id == body.roi_id, Roi.project_id == project.id)
+        )
+    if prediction is None or (body.roi_id is not None and roi is None):
+        what = "prediction or ROI" if body.roi_id is not None else "prediction"
+        raise HTTPException(status_code=404, detail=f"No such {what}.")
+    try:
+        deltas = [delta.to_delta() for delta in body.deltas]
+        predicted = [delta.predicted_delta() for delta in body.deltas]
+        for delta in deltas:
+            if (
+                delta.values is not None
+                or delta.value != DECLINED
+                or delta.only_if != "unlabeled"
+            ):
+                raise ValueError(
+                    "A declined prediction writes decline markers, only into unlabeled voxels"
+                )
+        if roi is not None:
+            place, limit, named_for = "ROI", list(roi.bbox), {"roi": str(roi.id)}
+        else:
+            assert body.box is not None
+            place, limit, named_for = "box", list(body.box), {"box": list(body.box)}
+            labels.check_box(limit, await labels.volume_shape(db, project.id))
+            _check_size(limit, place)
+        box = labels.global_box(deltas)
+        if any(box[a] < limit[a] or box[a + 3] > limit[a + 3] for a in range(3)):
+            raise ValueError(f"Those labels reach outside the {place}")
+        _check_size(box, place)
+        await _check_current_image(db, project.id, prediction)
+        grant = project_storage(settings).child(artifacts.artifact_path(prediction))
+        await run_in_threadpool(_check_against_prediction, grant, predicted)
+        result = await labels.apply_edit(
+            db,
+            settings,
+            project.id,
+            client_op_id=body.client_op_id,
+            deltas=deltas,
+            source=Source.DECLINED,
+            tool={
+                "name": "decline-prediction",
+                "prediction": str(prediction.id),
+                "model": prediction.inputs.get("model_id"),
+                **named_for,
+            },
+            user_id=auth.user.id,
+        )
+    except labels.NoImage:
+        raise HTTPException(
+            status_code=409, detail="This project has no image yet."
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    await db.commit()
+    return _op_out(result)
+
+
 class ToggleIn(BaseModel):
     client_op_id: uuid.UUID
 
@@ -838,12 +961,14 @@ async def _accepted(
     db, project_id: uuid.UUID, ops: Sequence[LabelOp]
 ) -> dict[int, AcceptedOut]:
     """
-    Where the accepted labels among `ops` came from, by seq. Only the server
-    makes model-verified edits, with the tool record `accept_prediction`
-    writes; anyone's own edits can say anything there, so they don't count.
+    Where accepted or declined suggestions among `ops` came from, by seq.
+    Only the server makes either source, so user-supplied tool records cannot
+    claim a model provenance.
     """
     accepted = [
-        op for op in ops if op.kind == "edit" and op.source == Source.MODEL_VERIFIED
+        op
+        for op in ops
+        if op.kind == "edit" and op.source in (Source.MODEL_VERIFIED, Source.DECLINED)
     ]
     if not accepted:
         return {}

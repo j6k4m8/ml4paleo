@@ -11,10 +11,11 @@ Each level is made from the one below it, one block at a time. A block is two
 voxels along each axis that the image halves going down a level, and one along
 the others. The block's voxel is:
 
-1. the most common class (value 2 or more) in the block, the lowest value
+1. the most common class (value 2 through 254) in the block, the lowest value
    among classes that tie, if the block has any class;
-2. otherwise background (1), if the block has any background;
-3. otherwise unlabeled (0).
+2. otherwise declined (255), if the block has any decline tombstone;
+3. otherwise background (1), if the block has any background;
+4. otherwise unlabeled (0).
 
 A class beats background however few of its voxels there are, and background
 beats unlabeled, so thin labeled structures stay visible: a one-voxel line or
@@ -33,7 +34,7 @@ from itertools import product
 
 import numpy as np
 
-from . import BACKGROUND, FIRST_CLASS
+from . import BACKGROUND, DECLINED, FIRST_CLASS, MAX_CLASS
 
 _NO_CLASS = np.uint8(255)
 # A vote counts voxels in a byte.
@@ -80,13 +81,20 @@ def _vote(views: np.ndarray) -> np.ndarray:
     """
     The voxel of each block, from `views` (the block's voxels along axis 0).
     """
-    top = views.max(axis=0)
+    real_class = (views >= FIRST_CLASS) & (views <= MAX_CLASS)
+    top = np.where(real_class, views, 0).max(axis=0)
     has_class = top >= FIRST_CLASS
     # Most blocks that have a class have only one kind of class, which wins
     # without counting; only mixed blocks need a vote.
-    lowest = np.where(views >= FIRST_CLASS, views, _NO_CLASS).min(axis=0)
+    lowest = np.where(real_class, views, _NO_CLASS).min(axis=0)
     mixed = has_class & (lowest != top)
-    result = np.where(has_class, top, (views == BACKGROUND).any(axis=0))
+    result = np.where(
+        has_class,
+        top,
+        np.where(
+            (views == DECLINED).any(axis=0), DECLINED, (views == BACKGROUND).any(axis=0)
+        ),
+    )
     result = result.astype(np.uint8)
     if mixed.any():
         where = np.flatnonzero(mixed)
@@ -110,5 +118,5 @@ def _most_common_class(blocks: np.ndarray) -> np.ndarray:
     score = votes.astype(np.uint16)
     score <<= 8
     score |= 255 - blocks
-    score *= blocks >= FIRST_CLASS
+    score *= (blocks >= FIRST_CLASS) & (blocks <= MAX_CLASS)
     return (255 - (score.max(axis=0) & 255)).astype(np.uint8)
