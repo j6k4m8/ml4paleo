@@ -27,7 +27,7 @@
 </script>
 
 <!-- A project's pages as document-style tabs, scrolling sideways when they don't fit. -->
-<nav class="flex h-8 items-end gap-px overflow-x-auto border-b border-edge bg-chrome px-3" aria-label="Project">
+<nav class="flex min-h-8 items-end gap-px overflow-x-auto border-b border-edge bg-chrome px-3 pt-0.5" aria-label="Project">
 	{#each tabs as tab (tab.href)}
 		{@const current = page.url.pathname === tab.href}
 		<a

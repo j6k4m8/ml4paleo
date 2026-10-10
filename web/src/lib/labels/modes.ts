@@ -4,7 +4,8 @@
  *
  * Painting can go anywhere, or only where nothing is labeled yet, only where
  * something is (background counts), or only over the classes picked. Erasing
- * goes anywhere or only over the classes picked.
+ * goes anywhere, only over stored solid labels, only over visible model
+ * suggestions, or only over the classes picked.
  */
 
 /** The values an edit can name, which are the label values 1 to 254 (0 is unlabeled). */
@@ -12,7 +13,9 @@ export const LOWEST_CLASS = 1;
 export const HIGHEST_CLASS = 254;
 
 export type PaintMode = "any" | "unlabeled" | "labeled" | "classes";
-export type EraseMode = "any" | "classes";
+export type EraseMode = "any" | "paint" | "predictions" | "classes";
+/** Accept always preserves saved labels; this selects the predicted classes. */
+export type AcceptMode = "any" | "classes";
 
 export interface ModeInfo<M extends string> {
 	value: M;
@@ -31,11 +34,19 @@ export const PAINT_MODES: ModeInfo<PaintMode>[] = [
 
 export const ERASE_MODES: ModeInfo<EraseMode>[] = [
 	{ value: "any", label: "Anything", title: "Erase every label under the brush" },
+	{ value: "paint", label: "Only my paint", title: "Erase solid labels while leaving model suggestions available underneath" },
+	{ value: "predictions", label: "Only predictions", title: "Decline model suggestions without changing solid labels" },
 	{ value: "classes", label: "Only classes", title: "Erase only voxels of the classes you pick" },
+];
+
+export const ACCEPT_MODES: ModeInfo<AcceptMode>[] = [
+	{ value: "any", label: "All classes", title: "Accept visible foreground predictions of any class, leaving existing annotations unchanged" },
+	{ value: "classes", label: "Only classes", title: "Accept only predictions of the classes you pick, leaving existing annotations unchanged" },
 ];
 
 export const PAINT_MODE_NAMES = PAINT_MODES.map((info) => info.value);
 export const ERASE_MODE_NAMES = ERASE_MODES.map((info) => info.value);
+export const ACCEPT_MODE_NAMES = ACCEPT_MODES.map((info) => info.value);
 
 /**
  * The `only_if` for a mode: "any", "unlabeled", or "labeled" as they are,
@@ -44,6 +55,8 @@ export const ERASE_MODE_NAMES = ERASE_MODES.map((info) => info.value);
  * (`chosenClasses` always gives one).
  */
 export function onlyIf(mode: PaintMode | EraseMode, classes: readonly number[]): string {
+	if (mode === "paint") return "labeled";
+	if (mode === "predictions") return "unlabeled";
 	if (mode !== "classes") return mode;
 	return `class:${[...new Set(classes)].sort((a, b) => a - b).join(",")}`;
 }
@@ -110,6 +123,10 @@ export function describeWhere(mode: PaintMode | EraseMode, names: readonly strin
 			return "only where nothing is labeled yet";
 		case "labeled":
 			return "only over labeled voxels, background too";
+		case "paint":
+			return "only over solid labels, leaving suggestions available";
+		case "predictions":
+			return "only over model suggestions, leaving solid labels unchanged";
 		case "classes":
 			return names.length > 3 ? `only over ${names.length} classes` : `only over ${list.format(names)}`;
 	}

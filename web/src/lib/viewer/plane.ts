@@ -9,6 +9,7 @@
  */
 
 import { BACKGROUND_ALPHA, BACKGROUND_CLASS, BACKGROUND_VALUE } from "./background";
+import { classOpacity, type ClassStyles } from "./class-display";
 import type { Chunk } from "./chunks";
 import { CHUNK, type Level, type Plane, type Rect, type TileKey, type Vec3, type View, pixelsPerVoxel, tileId } from "./tiles";
 
@@ -47,9 +48,12 @@ in vec2 voxel;
 uniform vec4 rect;          // tile u, v, width, height in level-0 voxels
 uniform vec2 perTexel;      // level-0 voxels per texel along u and v
 uniform usampler2D tile;
+uniform usampler2D declineTile; // the project's full-resolution labels
+uniform bool maskDeclined;
 uniform sampler2D palette;  // 256 × 2, RGBA by label value: classes, then classes and background
 uniform int paletteRow;
 uniform float opacity;
+uniform bool hatched;
 uniform vec4 hole;          // u0, v0, u1, v1 in level-0 voxels, left undrawn
 out vec4 color;
 void main() {
@@ -58,7 +62,16 @@ void main() {
 	// the hole, so the two agree at its edges.
 	ivec2 size = textureSize(tile, 0);
 	ivec2 texel = clamp(ivec2(floor((voxel - rect.xy) / perTexel)), ivec2(0), size - 1);
+	if (maskDeclined) {
+		uint saved = texelFetch(declineTile, texel, 0).r;
+		// Saved paint (including Background) wins outright. Alpha-blending
+		// hatches underneath would make a human annotation look provisional.
+		if (saved == 255u || (hatched && saved != 0u)) discard;
+	}
 	uint value = texelFetch(tile, texel, 0).r;
+	// Suggestions are visibly provisional: fixed-screen 45-degree hatching,
+	// rather than a weaker solid fill that can be mistaken for human paint.
+	if (hatched && value > 1u && mod(gl_FragCoord.x + gl_FragCoord.y, 8.0) >= 3.0) discard;
 	vec4 swatch = texelFetch(palette, ivec2(int(value), paletteRow), 0);
 	color = vec4(swatch.rgb, swatch.a * opacity);
 }`;
@@ -98,13 +111,13 @@ export function planeSlice<T extends Float32Array | Uint8Array>(
 }
 
 /** A 256-entry RGBA palette from label colors (#rrggbb) by value. */
-export function paletteBytes(colors: Map<number, string>): Uint8Array {
+export function paletteBytes(colors: Map<number, string>, styles: ClassStyles = {}): Uint8Array {
 	const bytes = new Uint8Array(256 * 4);
 	for (const [value, color] of colors) {
 		const match = /^#([0-9a-f]{6})$/i.exec(color);
-		if (!match || value < 1 || value > 255) continue;
+		if (!match || value < 1 || value >= 255) continue;
 		const rgb = Number.parseInt(match[1] ?? "0", 16);
-		bytes.set([rgb >> 16, (rgb >> 8) & 255, rgb & 255, 255], value * 4);
+		bytes.set([rgb >> 16, (rgb >> 8) & 255, rgb & 255, Math.round(255 * classOpacity(value, styles))], value * 4);
 	}
 	return bytes;
 }
@@ -114,12 +127,13 @@ export function paletteBytes(colors: Map<number, string>): Uint8Array {
  * the like draw with, where background stays clear), and the same with
  * painted background shown as a haze (which the labels draw with).
  */
-export function paletteRows(colors: Map<number, string>): Uint8Array {
-	const classes = paletteBytes(colors);
+export function paletteRows(colors: Map<number, string>, styles: ClassStyles = {}): Uint8Array {
+	const classes = paletteBytes(colors, styles);
+	classes.fill(0, BACKGROUND_VALUE * 4, (BACKGROUND_VALUE + 1) * 4);
 	const withBackground = classes.slice();
-	const match = /^#([0-9a-f]{6})$/i.exec(BACKGROUND_CLASS.color);
+	const match = /^#([0-9a-f]{6})$/i.exec(styles[BACKGROUND_VALUE]?.color ?? BACKGROUND_CLASS.color);
 	const rgb = Number.parseInt(match?.[1] ?? "0", 16);
-	withBackground.set([rgb >> 16, (rgb >> 8) & 255, rgb & 255, BACKGROUND_ALPHA], BACKGROUND_VALUE * 4);
+	withBackground.set([rgb >> 16, (rgb >> 8) & 255, rgb & 255, Math.round(BACKGROUND_ALPHA * classOpacity(BACKGROUND_VALUE, styles))], BACKGROUND_VALUE * 4);
 	const bytes = new Uint8Array(classes.length * 2);
 	bytes.set(classes, 0);
 	bytes.set(withBackground, classes.length);
@@ -193,10 +207,14 @@ export interface Overlay {
 	slice: number;
 	tiles: LabelTile[];
 	opacity: number;
+	/** Only stale prediction chunks use this alpha multiplier. */
+	staleOpacity?: number;
 	/** A part of the plane left undrawn, for another layer to show. */
 	hole?: Rect;
 	/** Whether painted background shows (for the labels; a model's background stays clear). */
 	background?: boolean;
+	/** Draw foreground classes as provisional model hatching. */
+	hatched?: boolean;
 	/** The level whose tiles are all that is drawn on a canvas without a stencil buffer (every level's, if not said). */
 	level?: number;
 }
@@ -209,6 +227,9 @@ export interface LabelTile {
 	slice?: number;
 	/** Level-0 voxels per voxel of the tile's level, (z, y, x); one, for full resolution, if not said. */
 	scale?: Vec3;
+	/** Full-resolution label texture whose 255 voxels hide this model tile. */
+	declineMask?: string;
+	stale?: boolean;
 }
 
 export class PlaneRenderer {
@@ -243,7 +264,21 @@ export class PlaneRenderer {
 		for (const name of ["rect", "uvMax", "center", "toClip", "tile", "window"]) {
 			this.#imageUniforms[name] = gl.getUniformLocation(this.#image, name);
 		}
-		for (const name of ["rect", "perTexel", "uvMax", "center", "toClip", "tile", "palette", "paletteRow", "opacity", "hole"]) {
+		for (const name of [
+			"rect",
+			"perTexel",
+			"uvMax",
+			"center",
+			"toClip",
+			"tile",
+			"declineTile",
+			"maskDeclined",
+			"palette",
+			"paletteRow",
+			"opacity",
+			"hatched",
+			"hole",
+		]) {
 			this.#labelUniforms[name] = gl.getUniformLocation(this.#labels, name);
 		}
 		const buffer = gl.createBuffer();
@@ -305,10 +340,10 @@ export class PlaneRenderer {
 		this.#labelTextures.limit = Math.max(1024, 2 * labels);
 	}
 
-	setPalette(colors: Map<number, string>): void {
+	setPalette(colors: Map<number, string>, styles: ClassStyles = {}): void {
 		const gl = this.#gl;
 		gl.bindTexture(gl.TEXTURE_2D, this.#palette);
-		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteRows(colors));
+		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 256, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteRows(colors, styles));
 	}
 
 	/** Whether the image slice of `key` that the view cuts is on the GPU (and, if so, just used). */
@@ -413,6 +448,7 @@ export class PlaneRenderer {
 		place(this.#labelUniforms);
 		gl.uniform1i(this.#labelUniforms.tile ?? null, 0);
 		gl.uniform1i(this.#labelUniforms.palette ?? null, 1);
+		gl.uniform1i(this.#labelUniforms.declineTile ?? null, 2);
 		gl.activeTexture(gl.TEXTURE1);
 		gl.bindTexture(gl.TEXTURE_2D, this.#palette);
 		gl.activeTexture(gl.TEXTURE0);
@@ -420,14 +456,27 @@ export class PlaneRenderer {
 			if (overlay.opacity <= 0) continue;
 			gl.uniform1f(this.#labelUniforms.opacity ?? null, overlay.opacity);
 			gl.uniform1i(this.#labelUniforms.paletteRow ?? null, overlay.background ? 1 : 0);
+			gl.uniform1i(this.#labelUniforms.hatched ?? null, overlay.hatched ? 1 : 0);
 			// An empty rectangle by default, so every voxel draws.
 			const [u0, v0, u1, v1] = overlay.hole ?? [0, 0, 0, 0];
 			gl.uniform4f(this.#labelUniforms.hole ?? null, u0, v0, u1, v1);
 			gl.clear(gl.STENCIL_BUFFER_BIT);
 			for (const tile of overlay.tiles) {
+				gl.uniform1f(this.#labelUniforms.opacity ?? null, overlay.opacity * (tile.stale ? overlay.staleOpacity ?? 0.65 : 1));
 				if (!this.#stencil && overlay.level !== undefined && tile.key.level !== overlay.level) continue;
 				const entry = this.#labelTextures.get(`${tile.id}@${tile.slice ?? overlay.slice}`);
 				if (!entry) continue;
+				const decline = tile.declineMask
+					? this.#labelTextures.get(`${tile.declineMask}@${tile.slice ?? overlay.slice}`)
+					: undefined;
+				// Never flash a suggestion through a decline while its mask loads.
+				if (tile.declineMask && !decline) continue;
+				gl.uniform1i(this.#labelUniforms.maskDeclined ?? null, decline ? 1 : 0);
+				if (decline) {
+					gl.activeTexture(gl.TEXTURE2);
+					gl.bindTexture(gl.TEXTURE_2D, decline.texture);
+					gl.activeTexture(gl.TEXTURE0);
+				}
 				gl.bindTexture(gl.TEXTURE_2D, entry.texture);
 				rect(this.#labelUniforms, tile.key, tile.scale ?? [1, 1, 1], entry);
 				gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);

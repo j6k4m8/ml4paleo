@@ -29,9 +29,13 @@ export interface QueuedEdit {
 	clientOpId: string;
 	deltas: DeltaIn[];
 	strict: boolean;
+	/** The deltas already carry the versions read to construct their masks. */
+	strictPrepared?: boolean;
 	tool: Record<string, unknown>;
 	/** Set when the edit accepts a model's prediction inside an ROI or a box; the server checks it. */
 	accept?: Accept;
+	/** Set when the edit declines a model's prediction inside an ROI or a box; the server checks it. */
+	decline?: Accept;
 }
 
 /** Where a prediction is accepted: in an ROI (`roi`), or in a box (z0, y0, x0, z1, y1, x1) of the image (`box`). */
@@ -71,8 +75,15 @@ type Send = (path: string, body: unknown) => Promise<OpOut>;
 
 export interface EditOptions {
 	strict?: boolean;
+	strictPrepared?: boolean;
 	tool?: Record<string, unknown>;
 	accept?: Accept;
+	decline?: Accept;
+}
+
+export interface GroupedEdit {
+	parts: DeltaIn[][];
+	options?: EditOptions;
 }
 
 /** Split deltas into op-sized batches, by count and by encoded size. */
@@ -193,18 +204,31 @@ export class OpQueue {
 	 * value when accepting a prediction (an op may only touch a chunk once).
 	 */
 	editMany(parts: DeltaIn[][], options: EditOptions = {}): QueuedEdit[] {
+		return this.editTogether([{ parts, options }]);
+	}
+
+	/**
+	 * Queue edits with different server checks as one undo step. This is used
+	 * when one eraser gesture removes human paint and declines the model paint
+	 * underneath it: the plain edit must land before the checked decline.
+	 */
+	editTogether(edits: GroupedEdit[]): QueuedEdit[] {
 		const ops: QueuedEdit[] = [];
-		for (const deltas of parts) {
-			for (const batch of batches(deltas)) {
-				ops.push({
-					kind: "edit",
-					local: newId(),
-					clientOpId: newId(),
-					deltas: batch,
-					strict: options.strict ?? false,
-					tool: options.tool ?? {},
-					...(options.accept ? { accept: options.accept } : {}),
-				});
+		for (const { parts, options = {} } of edits) {
+			for (const deltas of parts) {
+				for (const batch of batches(deltas)) {
+					ops.push({
+						kind: "edit",
+						local: newId(),
+						clientOpId: newId(),
+						deltas: batch,
+						strict: options.strict ?? false,
+						...(options.strictPrepared ? { strictPrepared: true } : {}),
+						tool: options.tool ?? {},
+						...(options.accept ? { accept: options.accept } : {}),
+						...(options.decline ? { decline: options.decline } : {}),
+					});
+				}
 			}
 		}
 		if (ops.length === 0) return ops;
@@ -330,11 +354,12 @@ export class OpQueue {
 			let result: OpOut;
 			if (op.kind === "edit") {
 				const ready = this.beforeSend ? this.beforeSend(op) : op;
-				result = ready.accept
-					? await this.send(`${base}/accept`, {
+				const prediction = ready.accept ?? ready.decline;
+				result = prediction
+					? await this.send(`${base}/${ready.decline ? "decline" : "accept"}`, {
 							client_op_id: ready.clientOpId,
-							prediction_artifact_id: ready.accept.prediction,
-							...("roi" in ready.accept && ready.accept.roi ? { roi_id: ready.accept.roi } : { box: ready.accept.box }),
+							prediction_artifact_id: prediction.prediction,
+							...("roi" in prediction && prediction.roi ? { roi_id: prediction.roi } : { box: prediction.box }),
 							deltas: ready.deltas,
 						})
 					: await this.send(`${base}/ops`, {

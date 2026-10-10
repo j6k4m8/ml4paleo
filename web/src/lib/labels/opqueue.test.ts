@@ -205,6 +205,31 @@ describe("OpQueue", () => {
 		expect(calls.slice(4).map((c) => c.path.split("/labels/")[1])).toEqual(["ops/1/redo", "ops/2/redo"]);
 	});
 
+	it("sends declined predictions to the checked decline endpoint", async () => {
+		const { calls, send } = server();
+		const queue = new OpQueue("p", null, send);
+		const declined = { ...delta(0), value: 255, prediction_value: 2 };
+		queue.edit([declined], { decline: { prediction: "pred", roi: "roi" } });
+		await settle(queue);
+		expect(calls[0]?.path).toBe("/api/projects/p/labels/decline");
+		expect(calls[0]?.body).toMatchObject({ prediction_artifact_id: "pred", roi_id: "roi", deltas: [declined] });
+	});
+
+	it("groups a plain erase and checked decline into one undo step, in that order", async () => {
+		const { calls, send } = server();
+		const queue = new OpQueue("p", null, send);
+		queue.editTogether([
+			{ parts: [[{ ...delta(0), value: 0 }]], options: { tool: { name: "eraser" } } },
+			{ parts: [[{ ...delta(0), value: 255, prediction_value: 2 }]], options: { decline: { prediction: "pred", box: [0, 0, 0, 1, 1, 1] } } },
+		]);
+		await settle(queue);
+		expect(calls.slice(0, 2).map((call) => call.path.split("/labels/")[1])).toEqual(["ops", "decline"]);
+		expect(queue.undoable).toBe(1);
+		queue.undo();
+		await settle(queue);
+		expect(calls.slice(2).map((call) => call.path.split("/labels/")[1])).toEqual(["ops/2/undo", "ops/1/undo"]);
+	});
+
 	it("still sends an accept an earlier page saved with only its ROI", async () => {
 		const { calls, send } = server();
 		const saved = { kind: "edit" as const, local: "old", clientOpId: "old-op", deltas: [delta(0)], strict: false, tool: {}, accept: { prediction: "pred", roi: "roi" } };

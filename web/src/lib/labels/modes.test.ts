@@ -17,6 +17,7 @@ describe("onlyIf", () => {
 		expect(onlyIf("any", [])).toBe("any");
 		expect(onlyIf("unlabeled", [2, 3])).toBe("unlabeled");
 		expect(onlyIf("labeled", [])).toBe("labeled");
+		expect(onlyIf("predictions", [])).toBe("unlabeled");
 	});
 
 	it("lists the classes, once each and ascending, as the server writes them", () => {
@@ -122,6 +123,8 @@ describe("describeWhere", () => {
 		expect(describeWhere("any", [])).toBe("");
 		expect(describeWhere("unlabeled", [])).toBe("only where nothing is labeled yet");
 		expect(describeWhere("labeled", [])).toBe("only over labeled voxels, background too");
+		expect(describeWhere("paint", [])).toBe("only over solid labels, leaving suggestions available");
+		expect(describeWhere("predictions", [])).toBe("only over model suggestions, leaving solid labels unchanged");
 	});
 
 	it("names the classes, up to three", () => {
@@ -135,7 +138,7 @@ describe("describeWhere", () => {
 describe("the modes people choose from", () => {
 	it("start with the plain one, and each says what it does", () => {
 		expect(PAINT_MODES.map((info) => info.value)).toEqual(["any", "unlabeled", "labeled", "classes"]);
-		expect(ERASE_MODES.map((info) => info.value)).toEqual(["any", "classes"]);
+		expect(ERASE_MODES.map((info) => info.value)).toEqual(["any", "paint", "predictions", "classes"]);
 		for (const info of [...PAINT_MODES, ...ERASE_MODES]) {
 			expect(info.label).not.toBe("");
 			expect(info.title.length).toBeGreaterThan(10);

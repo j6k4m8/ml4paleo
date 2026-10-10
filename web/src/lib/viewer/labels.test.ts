@@ -389,6 +389,13 @@ describe("LabelLayer", () => {
 	});
 
 	describe("strict edits", () => {
+		it("keep versions captured while an async mask was built", () => {
+			const { pool } = fakePool(new Map());
+			const layer = new LabelLayer("p", pool, [2, 2, 2]);
+			const prepared = { strict: true, strictPrepared: true, deltas: [{ ...delta(9), base_version: 0 }] };
+			expect(strictOn(layer, prepared)).toBe(prepared);
+		});
+
 		it("go out on the version your own edit made, even after another edit of yours was refused", async () => {
 			const server = new Map([["0/0/0", { value: 0, version: 2 }]]);
 			const { pool, release } = fakePool(server, true);
@@ -808,6 +815,105 @@ describe("counting labels", () => {
 			[1, 0],
 			[2, 1234],
 		]);
+	});
+});
+
+describe("class colors", () => {
+	afterEach(() => vi.mocked(api).mockReset());
+	const make = () => {
+		const layer = new LabelLayer("project", fakePool(new Map()).pool, [8, 8, 8]);
+		layer.classes = [{ value: 2, name: "Bone", color: "#ff0000" }];
+		return layer;
+	};
+
+	it("previews without editing label data and persists only the color", async () => {
+		const layer = make();
+		const changed = vi.fn();
+		layer.onClasses(changed);
+		layer.previewColor(2, "#00FF00");
+		expect(layer.colors.get(2)).toBe("#00ff00");
+		expect(changed).toHaveBeenCalledOnce();
+		expect(api).not.toHaveBeenCalled();
+		vi.mocked(api).mockResolvedValueOnce({ value: 2, name: "Bone", color: "#00ff00" });
+		await layer.saveColor(2);
+		expect(api).toHaveBeenCalledWith("/api/projects/project/labels/classes/2", { method: "PATCH", body: { color: "#00ff00" } });
+		layer.stop();
+	});
+
+	it("rolls back failed saves to the server color", async () => {
+		const layer = make();
+		layer.previewColor(2, "#00ff00");
+		vi.mocked(api).mockRejectedValueOnce(new Error("no connection"));
+		await expect(layer.saveColor(2)).rejects.toThrow("no connection");
+		expect(layer.colors.get(2)).toBe("#ff0000");
+		layer.stop();
+	});
+
+	it("preserves newer previews during saves and serializes writes", async () => {
+		const layer = make();
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api).mockImplementationOnce(() => new Promise((done) => resolve = done));
+		layer.previewColor(2, "#00ff00");
+		const first = layer.saveColor(2);
+		await settled();
+		layer.previewColor(2, "#0000ff");
+		const second = layer.saveColor(2);
+		await settled();
+		expect(api).toHaveBeenCalledTimes(1);
+		resolve({ value: 2, name: "Bone", color: "#00ff00" });
+		vi.mocked(api).mockResolvedValueOnce({ value: 2, name: "Bone", color: "#0000ff" });
+		await Promise.all([first, second]);
+		expect(api).toHaveBeenLastCalledWith("/api/projects/project/labels/classes/2", { method: "PATCH", body: { color: "#0000ff" } });
+		expect(layer.colors.get(2)).toBe("#0000ff");
+		layer.stop();
+	});
+
+	it("keeps previews through refreshes and rejects refreshes started before a successful write", async () => {
+		const layer = make();
+		layer.previewColor(2, "#00ff00");
+		vi.mocked(api).mockResolvedValueOnce([{ value: 2, name: "Bone", color: "#ff0000" }]);
+		await layer.refreshClasses();
+		expect(layer.colors.get(2)).toBe("#00ff00");
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api).mockImplementationOnce(() => new Promise((done) => resolve = done));
+		const refresh = layer.refreshClasses();
+		vi.mocked(api).mockResolvedValueOnce({ value: 2, name: "Bone", color: "#00ff00" });
+		await layer.saveColor(2);
+		resolve([{ value: 2, name: "Bone", color: "#ff0000" }]);
+		await refresh;
+		expect(layer.colors.get(2)).toBe("#00ff00");
+		layer.stop();
+	});
+
+	it("a failed earlier write does not discard a newer preview or block its save", async () => {
+		const layer = make();
+		let reject!: (error: Error) => void;
+		vi.mocked(api).mockImplementationOnce(() => new Promise((_done, fail) => reject = fail));
+		layer.previewColor(2, "#00ff00");
+		const first = layer.saveColor(2).catch(() => {});
+		await settled();
+		layer.previewColor(2, "#0000ff");
+		const second = layer.saveColor(2);
+		vi.mocked(api).mockResolvedValueOnce({ value: 2, name: "Bone", color: "#0000ff" });
+		reject(new Error("failed"));
+		await Promise.all([first, second]);
+		expect(layer.colors.get(2)).toBe("#0000ff");
+		layer.stop();
+	});
+
+	it("does not write invalid colors, unknown classes, or a second unchanged save", async () => {
+		const layer = make();
+		layer.previewColor(2, "red");
+		layer.previewColor(3, "#00ff00");
+		await layer.saveColor(2);
+		await layer.saveColor(3);
+		expect(api).not.toHaveBeenCalled();
+		layer.previewColor(2, "#00ff00");
+		vi.mocked(api).mockResolvedValueOnce({ value: 2, name: "Bone", color: "#00ff00" });
+		await layer.saveColor(2);
+		await layer.saveColor(2);
+		expect(api).toHaveBeenCalledTimes(1);
+		layer.stop();
 	});
 });
 
@@ -1233,6 +1339,7 @@ describe("label levels", () => {
 	});
 
 	it("aren't given up for a failure that isn't a missing array", async () => {
+		vi.useFakeTimers();
 		const failing = levelPool();
 		const { layer } = await started(group(pyramid), failing);
 		const heard = vi.fn();
@@ -1243,9 +1350,13 @@ describe("label levels", () => {
 			return load.call(failing.pool, request, signal);
 		};
 		layer.store.want("view", ["1/0/0/0"]);
-		await expect(layer.store.request("1/0/0/0")).rejects.toBeInstanceOf(LoadError);
+		const failed = expect(layer.store.request("1/0/0/0")).rejects.toBeInstanceOf(LoadError);
+		await vi.advanceTimersByTimeAsync(120_000);
+		await failed;
 		expect(layer.levels).toHaveLength(3);
 		expect(heard).not.toHaveBeenCalled();
+		layer.stop();
+		vi.useRealTimers();
 	});
 
 	it("aren't given up for a chunk the server is still making, which is asked for again", async () => {

@@ -7,8 +7,10 @@
 	import Pencil from "@lucide/svelte/icons/pencil";
 	import Pentagon from "@lucide/svelte/icons/pentagon";
 	import Redo2 from "@lucide/svelte/icons/redo-2";
+	import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
 	import RotateCcwClock from "@lucide/svelte/icons/rotate-ccw-clock";
 	import Undo2 from "@lucide/svelte/icons/undo-2";
+	import X from "@lucide/svelte/icons/x";
 	import { untrack } from "svelte";
 	import { page } from "$app/state";
 	import { ApiError, api, message } from "#lib/api.ts";
@@ -44,6 +46,8 @@
 		polygon: Pentagon,
 		"polygon-erase": Pentagon,
 		accept: CheckCheck,
+		decline: X,
+		"restore-declined": RotateCcw,
 		import: FileInput,
 		edit: Pencil,
 		undo: Undo2,

@@ -46,9 +46,11 @@ export const SOURCES: [number, string][] = [
 	[3, "Click-to-segment"],
 	[4, "Propagated"],
 	[5, "Imported"],
+	[6, "Declined model suggestion"],
 ];
 
 const MODEL_VERIFIED = 2;
+const DECLINED = 6;
 
 /** The tools people's edits name, in words. */
 const TOOLS = new Map([
@@ -56,6 +58,7 @@ const TOOLS = new Map([
 	["eraser", "Eraser stroke"],
 	["polygon", "Polygon"],
 	["polygon-erase", "Polygon erase"],
+	["restore-declined", "Restored suggestion"],
 ]);
 
 /** Jobs that write labels: who they are, and what each of their edits is. */
@@ -64,11 +67,12 @@ const JOBS = new Map([
 	["labels.import", { who: "Label import", what: "Labels from a file" }],
 ]);
 
-export type Action = "brush" | "eraser" | "polygon" | "polygon-erase" | "accept" | "import" | "edit" | "undo" | "redo";
+export type Action = "brush" | "eraser" | "polygon" | "polygon-erase" | "accept" | "decline" | "restore-declined" | "import" | "edit" | "undo" | "redo";
 
 /** The kind of thing an op did. */
 export function action(entry: Entry): Action {
 	if (entry.kind !== "edit") return entry.kind;
+	if (entry.source === DECLINED) return "decline";
 	// Only the server says labels were accepted, or that a job made them.
 	if (entry.accepted) return "accept";
 	if (entry.job_kind) return JOBS.has(entry.job_kind) ? "import" : "edit";
@@ -82,6 +86,7 @@ export function what(entry: Entry): string {
 	if (done === "undo") return `Undid #${entry.target_seq}`;
 	if (done === "redo") return `Redid #${entry.target_seq}`;
 	if (done === "accept") return `Accepted ${entry.accepted?.kind ?? "prediction"}`;
+	if (done === "decline") return `Declined ${entry.accepted?.kind ?? "prediction"}`;
 	if (done === "import") {
 		// A label import's job names the file the person uploaded.
 		const file = entry.job_kind === "labels.import" ? entry.tool.file : undefined;
@@ -107,6 +112,7 @@ export function origin(entry: Entry): string {
 		if (from?.v1_job_id) return `From v1 job ${from.v1_job_id}`;
 		return "From a model";
 	}
+	if (edit.source === DECLINED && edit.accepted?.model_name) return `From ${edit.accepted.model_name}`;
 	return SOURCES.find(([value]) => value === edit.source)?.[1] ?? "Unknown";
 }
 

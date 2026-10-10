@@ -3,6 +3,7 @@
 	import { api, message } from "#lib/api.ts";
 	import type { Project, ProjectImage } from "#lib/types.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
+	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 	import { parseBox } from "#lib/viewer/link.ts";
 	import Viewer from "#lib/viewer/Viewer.svelte";
 
@@ -37,21 +38,29 @@
 	});
 </script>
 
-{#if shown}
-	{#key `${shown.pid}/${shown.image.artifact_id}`}
-		<Viewer
-			image={shown.image}
-			projectId={shown.pid}
-			title={shown.name}
-			roi={page.url.searchParams.get("roi")}
-			box={parseBox(page.url.searchParams.get("box"))}
-		/>
-	{/key}
-{:else if error}
-	<div class="grid h-full place-items-center bg-pasteboard">
-		<div class="panel flex flex-col items-center gap-2 p-6">
-			<p class="error" role="alert">{error}</p>
-			<a href="/p/{pid}">Back to the project</a>
-		</div>
+<div class="flex h-full min-h-0 flex-col">
+	<div class="shrink-0"><ProjectTabs {pid} /></div>
+	<div class="min-h-0 flex-1">
+		{#if shown}
+			{#key `${shown.pid}/${shown.image.artifact_id}`}
+				<Viewer
+					image={shown.image}
+					projectId={shown.pid}
+					roi={page.url.searchParams.get("roi")}
+					box={parseBox(page.url.searchParams.get("box"))}
+				/>
+			{/key}
+		{:else}
+			<div class="grid h-full place-items-center overflow-auto bg-pasteboard p-6">
+				{#if error}
+					<div class="panel flex flex-col items-center gap-2 p-6">
+						<p class="error" role="alert">{error}</p>
+						<a href="/p/{pid}">Back to the project</a>
+					</div>
+				{:else}
+					<p class="muted" role="status">Loading image…</p>
+				{/if}
+			</div>
+		{/if}
 	</div>
-{/if}
+</div>

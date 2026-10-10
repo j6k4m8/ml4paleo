@@ -1,5 +1,6 @@
 <script lang="ts" generics="T extends string">
 	import type { Component } from "svelte";
+	import { tooltip } from "./tooltip";
 
 	interface Option {
 		value: T;
@@ -29,14 +30,14 @@
 </script>
 
 <!-- A row of buttons, one of them pressed: for choosing among a few things in an options bar. -->
-<div class="inline-flex h-6 shrink-0 divide-x divide-edge rounded-sm border border-edge {extra}" role="group" aria-label={label} {title}>
+<div class="inline-flex h-6 shrink-0 divide-x divide-edge rounded-sm border border-edge {extra}" role="group" aria-label={label} use:tooltip={title}>
 	{#each options as option (option.value)}
 		<button
 			type="button"
 			class="relative flex items-center gap-1 px-2 whitespace-nowrap first:rounded-l-[3px] last:rounded-r-[3px] focus-visible:z-10
 				{value === option.value ? 'bg-accent-fill text-white' : 'bg-raised text-ink-dim hover:bg-hover hover:text-ink'}"
 			aria-pressed={value === option.value}
-			title={option.title}
+			use:tooltip={option.title}
 			onclick={() => onchange(option.value)}
 		>
 			{#if option.icon}<option.icon size={12} />{/if}

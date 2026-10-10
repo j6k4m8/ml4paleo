@@ -22,6 +22,8 @@ export interface Polygon {
 	plane: Plane["name"];
 	slice: number;
 	points: Point[];
+	/** An Accept polygon uses this frozen gesture, never the active paint class. */
+	accept?: number;
 }
 
 /** Closing a polygon fills it with the active class, or cuts it out of that class. */

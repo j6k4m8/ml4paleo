@@ -7,6 +7,8 @@
 import type { LabelClass } from "./labels";
 
 export const BACKGROUND_VALUE = 1;
+/** Stored tombstone for an explicitly declined model suggestion. */
+export const DECLINED_VALUE = 255;
 
 export const BACKGROUND_CLASS: LabelClass = { value: BACKGROUND_VALUE, name: "Background", color: "#7c8aa5" };
 
@@ -14,6 +16,6 @@ export const BACKGROUND_CLASS: LabelClass = { value: BACKGROUND_VALUE, name: "Ba
 export const BACKGROUND_ALPHA = 170;
 
 /** The project's classes with background first, as the person picks from them. */
-export function withBackground(classes: LabelClass[]): LabelClass[] {
-	return [BACKGROUND_CLASS, ...classes];
+export function withBackground(classes: LabelClass[], color = BACKGROUND_CLASS.color): LabelClass[] {
+	return [{ ...BACKGROUND_CLASS, color }, ...classes];
 }

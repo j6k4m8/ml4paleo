@@ -22,6 +22,8 @@ export type Action =
 	| "next-roi"
 	| "complete-roi"
 	| "accept"
+	| "accept-tool"
+	| "decline"
 	| "smaller"
 	| "bigger"
 	| "class"
@@ -54,6 +56,7 @@ const ALL_KEYS: Binding[] = [
 	{ action: "brush", keys: ["b"], label: "Brush" },
 	{ action: "eraser", keys: ["e"], label: "Eraser" },
 	{ action: "polygon", keys: ["p"], label: "Polygon: click points or drag freehand; Add fills, Subtract cuts out" },
+	{ action: "accept-tool", keys: ["i"], label: "Accept tool: brush or polygon over visible foreground predictions" },
 	{ action: "roi", keys: ["r"], label: "Draw an ROI" },
 	{ action: "next-roi", keys: ["g"], label: "Go to the next open ROI" },
 	{ action: "complete-roi", keys: ["c"], label: "Mark the selected ROI complete (with Shift: reopen)" },
@@ -64,10 +67,17 @@ const ALL_KEYS: Binding[] = [
 			? "Accept the prediction in the selected ROI, or in this view if none is selected, as labels (fills unlabeled voxels)"
 			: "Accept the prediction in this view as labels (fills unlabeled voxels)",
 	},
+	{
+		action: "decline",
+		keys: ["x"],
+		label: SHOW_ROIS
+			? "Decline foreground suggestions in the selected ROI, or in this view if none is selected"
+			: "Decline foreground suggestions in this view",
+	},
 	{ action: "smaller", keys: ["["], label: "Smaller brush" },
 	{ action: "bigger", keys: ["]"], label: "Bigger brush" },
 	{ action: "class", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "Choose a class (1 is Background)" },
-	{ action: "close-polygon", keys: ["Enter"], label: "Close the polygon (with Alt: cut it out of the class; with Shift: fill it)" },
+	{ action: "close-polygon", keys: ["Enter"], label: "Close the polygon; Accept keeps predicted classes (paint polygon: Alt cuts, Shift fills)" },
 	{ action: "remove-point", keys: ["Backspace"], label: "Remove the polygon's last point" },
 	{ action: "cancel", keys: ["Escape"], label: "Drop the polygon, then go back to navigating" },
 	{ action: "undo", keys: ["mod+z"], label: "Undo your last edit" },
@@ -86,6 +96,8 @@ const ALL_MOUSE: [string, string][] = [
 	["Right-click (Mac: or Ctrl + click), with any tool", "Move the crosshair there"],
 	["Tap (touch or pen, navigating)", "Move the crosshair there"],
 	["Drag (brush, eraser)", "Paint"],
+	["Drag (Accept brush)", "Accept visible foreground predictions; keep their classes"],
+	["Click or drag (Accept polygon)", "Outline predictions to accept; close with Enter or the first point"],
 	["Click (polygon)", "Add a point; on the first point, close the polygon"],
 	["Drag (polygon)", "Draw freehand; letting go closes the polygon"],
 	["Double-click (polygon)", "Close the polygon"],

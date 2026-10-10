@@ -18,6 +18,7 @@
 	import Pentagon from "@lucide/svelte/icons/pentagon";
 	import Plus from "@lucide/svelte/icons/plus";
 	import Redo2 from "@lucide/svelte/icons/redo-2";
+	import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
 	import Sparkles from "@lucide/svelte/icons/sparkles";
 	import SquareDashed from "@lucide/svelte/icons/square-dashed";
 	import SquaresSubtract from "@lucide/svelte/icons/squares-subtract";
@@ -28,10 +29,12 @@
 	import { SvelteMap } from "svelte/reactivity";
 	import ClassMenu from "#lib/ui/ClassMenu.svelte";
 	import Histogram from "#lib/ui/Histogram.svelte";
+	import { displayLevel, editLevel } from "#lib/ui/histogram.ts";
 	import Panel from "#lib/ui/Panel.svelte";
 	import Segmented from "#lib/ui/Segmented.svelte";
 	import SliderField from "#lib/ui/SliderField.svelte";
 	import ToolButton from "#lib/ui/ToolButton.svelte";
+	import { tooltip } from "#lib/ui/tooltip.ts";
 	import { ApiError, api, message } from "#lib/api.ts";
 	import { unfinished } from "#lib/pipelines.ts";
 	import { whileVisible } from "#lib/refresh.ts";
@@ -40,20 +43,24 @@
 	import type { Pipeline, ProjectImage } from "#lib/types.ts";
 	import {
 		acceptKeyTarget,
+		acceptCounts,
 		acceptParts,
-		leavesLabeledOut,
+		declineParts,
+		declinesUnderErase,
 		MAX_ACCEPT_VOXELS,
 		planeToAccept,
 		readBox,
+		restoreDeclinedParts,
 		unlabeledOnly,
 		viewExtent,
 		whyNotInView,
 	} from "../labels/accept";
 	import { splitIntoDeltas } from "../labels/deltas";
+	import { acceptGestureGroups, gestureBox, type GestureSource } from "../labels/accept-gesture";
 	import { indexedDbStorage, OpQueue, type QueuedEdit, saveState } from "../labels/opqueue.svelte";
-	import { describeWhere, ERASE_MODES, type EraseMode, PAINT_MODES, type PaintMode } from "../labels/modes";
+	import { ACCEPT_MODES, type AcceptMode, describeWhere, ERASE_MODES, type EraseMode, PAINT_MODES, type PaintMode } from "../labels/modes";
 	import { closingMode, type PolygonMode, polygonEdit } from "../labels/polygon";
-	import type { PlaneMask } from "../labels/raster";
+	import { PlaneMask } from "../labels/raster";
 	import {
 		type Box,
 		clipBox,
@@ -68,23 +75,30 @@
 		within,
 	} from "../rois.svelte";
 	import { SHOW_ROIS } from "../features";
-	import { BACKGROUND_VALUE, withBackground } from "./background";
+	import { BACKGROUND_VALUE, DECLINED_VALUE, withBackground } from "./background";
 	import { ChunkStore } from "./chunks";
+	import ClassRow from "./ClassRow.svelte";
+	import { ClassDisplay } from "./class-display.svelte";
+	import { classOpacity, displayedValues, type ClassStyles } from "./class-display";
 	import { absolute, loadLevels } from "./image";
 	import { type Action, actionFor, forFocused, KEYMAP, MOUSE } from "./keymap";
 	import { type LabelClass, LabelLayer, strictOn } from "./labels";
 	import { imageLoader, labelLoader, WorkerPool } from "./loader";
 	import PlaneView from "./PlaneView.svelte";
+	import MiniMap from "./MiniMap.svelte";
+	import { LivePreview } from "./live.svelte";
+	import LivePanel from "./LivePanel.svelte";
+	import { reviewSlice } from "./live-copy";
+	import { intersection, liveKeys, type ModelPlugin } from "./live";
 	import { LAYOUTS, type Stroke, ViewerState } from "./state.svelte";
 	import { aspectOf, type Level, type Plane, PLANES, type Vec3 } from "./tiles";
 
 	let {
 		image,
 		projectId,
-		title = "Image",
 		roi: startRoi = null,
 		box: startBox = null,
-	}: { image: ProjectImage; projectId: string; title?: string; roi?: string | null; box?: Box | null } = $props();
+	}: { image: ProjectImage; projectId: string; roi?: string | null; box?: Box | null } = $props();
 
 	const CACHE_BYTES = 512 * 1024 * 1024;
 	// The most one proposal predicts (the server's limit).
@@ -93,6 +107,7 @@
 	// The page makes a new viewer for each image.
 	const { manifest, zarr_url: zarrUrl, artifact_id: imageId } = untrack(() => image);
 	const project = untrack(() => projectId);
+	const display = new ClassDisplay(project, session.current?.user.id ?? "");
 	const [, nz, ny, nx] = manifest.shape_czyx;
 	const viewer = new ViewerState([nz, ny, nx], aspectOf(manifest.voxel_size_zyx));
 	viewer.window = [...manifest.window];
@@ -102,6 +117,9 @@
 	let images: ChunkStore | null = $state(null);
 	let labels: LabelLayer | null = $state(null);
 	let prediction: Prediction | null = $state.raw(null);
+	let live: LivePreview | null = $state.raw(null);
+	let modelPlugins: ModelPlugin[] = $state([]);
+	let brushFocus: Vec3 | null = $state.raw(null);
 	// Your proposal (one ROI predicted on demand), if asked for after the
 	// prediction, shown in its box in place of the prediction there.
 	let proposal: Prediction | null = $state.raw(null);
@@ -113,15 +131,15 @@
 	// The proposal's pipeline, once known, so it can be cancelled.
 	let proposalPipeline: string | null = $state(null);
 	let cancelling = $state(false);
-	let segmentation: ChunkStore | null = $state(null);
 	let classes: LabelClass[] = $state([]);
 	// The classes plus Background, which the person picks from and paints with.
-	const pickable = $derived(withBackground(classes));
+	const pickable = $derived(withBackground(classes, display.backgroundColor));
 	// The label values the project has, which the modes that go by classes choose among.
 	const labelValues = $derived(pickable.map((c) => c.value));
 	// The classes those modes go by now: the ones chosen that the project has, else the active class.
 	const paintSet = $derived(viewer.classesFor("paint", labelValues));
 	const eraseSet = $derived(viewer.classesFor("erase", labelValues));
+	const acceptSet = $derived(viewer.classesFor("accept", labelValues));
 	// Whether any background has been painted (by anyone, or here); assumed until the server says not, so the hint doesn't flash.
 	let hasBackground = $state(true);
 	let paintedBackground = false;
@@ -186,6 +204,13 @@
 				}
 			});
 			pool = new WorkerPool();
+			live = new LivePreview(project, imageId, viewer.shape, pool, me,
+				() => accepting || declining || erasingComposite || !!pendingAccept || !!acceptGesture || queue.toggling);
+			api<ModelPlugin[]>("/api/plugins", { signal: controller.signal }).then((plugins) => {
+				modelPlugins = plugins;
+				const first = plugins.find((plugin) => plugin.name === "rf") ?? plugins[0];
+				if (first && !controller.signal.aborted) void live?.select(first);
+			}, () => {});
 			images = new ChunkStore(imageLoader(pool, absolute(zarrUrl), levels), CACHE_BYTES);
 			loadPrediction(controller.signal).catch((e: unknown) => {
 				if (!controller.signal.aborted) predictionError = message(e);
@@ -198,16 +223,8 @@
 				},
 				() => {},
 			);
-			api<{ zarr_url: string }>(`/api/projects/${project}/segmentation`).then(
-				(found) => {
-					if (!pool || controller.signal.aborted) return;
-					segmentation = new ChunkStore(labelLoader(pool, absolute(found.zarr_url), viewer.shape), 128 * 1024 * 1024, 4);
-				},
-				(e: unknown) => {
-					if (!(e instanceof ApiError && e.status === 404)) error = e instanceof Error ? e.message : String(e);
-				},
-			);
 			const layer = new LabelLayer(project, pool, viewer.shape);
+			layer.onRevision = (seq) => live?.changed(seq);
 			await layer.start();
 			if (controller.signal.aborted) return layer.stop();
 			layer.onStopped = () => (error = "Live label updates stopped. Reload the page to see others' edits.");
@@ -224,6 +241,7 @@
 				() => {},
 			);
 			queue.onOutcome((outcome) => {
+				if ("result" in outcome) live?.changed(outcome.result.seq);
 				if ("cancelled" in outcome) {
 					layer.settle(outcome.op.local, null);
 				} else if (outcome.op.kind !== "edit") {
@@ -258,6 +276,7 @@
 
 	onDestroy(() => {
 		controller.abort();
+		live?.stop();
 		stopRefreshing();
 		stopReloading();
 		queue.stop();
@@ -275,6 +294,8 @@
 			viewer.paintClasses,
 			viewer.eraseMode,
 			viewer.eraseClasses,
+			viewer.acceptMode,
+			viewer.acceptClasses,
 			viewer.roiDepth,
 			viewer.showPrediction,
 			viewer.predictionOpacity,
@@ -287,6 +308,26 @@
 	const shown = $derived(
 		viewer.layout === "four" ? [PLANES.xy, PLANES.yz, PLANES.xz] : [PLANES[viewer.layout]],
 	);
+
+	$effect(() => {
+		if (!live) return;
+		live.paused = !viewer.showPrediction;
+		const views = shown.flatMap((plane) => {
+			const size = sizes.get(plane.name);
+			const full = levels[0];
+			if (!size || !full) return [];
+			const { box } = viewExtent({ plane, position: viewer.position, zoom: viewer.zoom, aspect: viewer.aspect, width: size[0], height: size[1] }, full);
+			return box ? [box] : [];
+		});
+		live.wanted = liveKeys(viewer.shape, viewer.position, views, brushFocus);
+	});
+
+	function toggleLive() {
+		if (!live) return;
+		live.enabled = !live.enabled;
+		viewer.showPrediction = live.enabled;
+		if (live.enabled && live.plugin) void live.select(live.plugin);
+	}
 
 	function fit() {
 		viewer.autoFit = true;
@@ -317,27 +358,118 @@
 		const deltas = splitIntoDeltas(volume.mask, volume.shape, volume.origin, { value, onlyIf });
 		notice = "";
 		for (const op of queue.edit(deltas, { strict, tool })) labels.applyLocal(op.local, op.deltas);
+		if (value > 0 && deltas.length > 0 && display.reveal(value)) {
+			notice = "Showing the class you just painted.";
+		}
 		if (value === BACKGROUND_VALUE && deltas.length > 0) hasBackground = paintedBackground = true;
 		viewer.revealLabels();
 	}
 
-	function stroke(drawn: Stroke) {
+	let erasingComposite = $state(false);
+
+	async function stroke(drawn: Stroke) {
+		if (drawn.accept !== undefined) {
+			return acceptMask(drawn.accept, drawn.mask, { name: "accept-brush", radius: drawn.radius });
+		}
+		const focus = [...viewer.position] as Vec3;
+		focus[drawn.plane.normal] = drawn.slice;
+		focus[drawn.plane.u] = drawn.mask.u0 + drawn.mask.width / 2;
+		focus[drawn.plane.v] = drawn.mask.v0 + drawn.mask.height / 2;
+		brushFocus = focus;
 		if (!drawn.erase && drawn.value === 0) return;
-		commit(drawn.plane, drawn.slice, drawn.mask, drawn.value, drawn.onlyIf, {
+		const tool = {
 			name: drawn.erase ? "eraser" : "brush",
 			radius: drawn.radius,
 			plane: drawn.plane.name,
 			slice: drawn.slice,
-		});
+		};
+		if (!drawn.erase) return commit(drawn.plane, drawn.slice, drawn.mask, drawn.value, drawn.onlyIf, tool);
+		if (!labels || erasingComposite) {
+			if (erasingComposite) notice = "Wait for the previous erase to finish.";
+			return;
+		}
+		const volume = drawn.mask.toVolume(drawn.plane, drawn.slice);
+		const box: Box = [
+			volume.origin[0],
+			volume.origin[1],
+			volume.origin[2],
+			volume.origin[0] + volume.shape[0],
+			volume.origin[1] + volume.shape[1],
+			volume.origin[2] + volume.shape[2],
+		];
+		const layer = showing(box);
+		const liveStore = live?.enabled && viewer.showPrediction ? live.store : null;
+		const liveRegions = liveStore && live ? [...live.regions.entries()] : [];
+		// `onlyIf` was captured when the stroke began, so changing the control
+		// while dragging cannot change what the finished gesture does.
+		if (!layer && !liveStore && drawn.onlyIf === "unlabeled") return;
+		const styles = display.styles;
+		const hiddenClasses = labelValues.some((value) => classOpacity(value, styles) === 0);
+		if (!layer && !liveStore && drawn.onlyIf !== "labeled" && !hiddenClasses) return commit(drawn.plane, drawn.slice, drawn.mask, 0, drawn.onlyIf, tool);
+		if (layer && mixesProposal(box)) {
+			notice = "That stroke crosses the edge of a proposal; erase on one side at a time.";
+			return;
+		}
+		if (queue.toggling) {
+			notice = "Wait for undo or redo to finish before erasing suggestions.";
+			return;
+		}
+		erasingComposite = true;
+		notice = "";
+		try {
+			const [predictedValues, labeledValues] = await Promise.all([
+				liveStore || layer ? readForDecision(liveStore ?? layer!.store, box) : Promise.resolve(new Uint8Array(volume.mask.length)),
+				readForDecision(labels.store, box),
+			]);
+			const declineValues = declinesUnderErase(displayedValues(predictedValues, styles), labeledValues, volume.mask, drawn.onlyIf);
+			const decline = declineParts(declineValues, box);
+			const chosen = drawn.onlyIf.startsWith("class:") ? new Set(drawn.onlyIf.slice(6).split(",").map(Number)) : null;
+			const eraseMask = Uint8Array.from(volume.mask, (selected, index) => {
+				const value = labeledValues[index]!;
+				return selected &&
+					value > 0 &&
+					value < DECLINED_VALUE &&
+					classOpacity(value, styles) > 0 &&
+					(drawn.onlyIf === "any" || drawn.onlyIf === "labeled" || !!chosen?.has(value))
+					? 1
+					: 0;
+			});
+			const erases = splitIntoDeltas(eraseMask, volume.shape, volume.origin, { value: 0, onlyIf: "any" }).map((delta) => {
+				const version = labels?.versionOf(delta.key.join("/"));
+				if (version === undefined) throw new Error("A label chunk changed while the erase was being prepared; try again.");
+				return { ...delta, base_version: version };
+			});
+			const ops = queue.editTogether([
+				{ parts: [erases], options: { strict: true, strictPrepared: true, tool } },
+				...(liveStore ? liveRegions.flatMap(([id, region]) => {
+					const part = intersection(box, region.box);
+					return part ? [{ parts: decline.map((deltas) => deltas.filter((delta) => delta.key.join("/") === id)),
+						options: { decline: { prediction: region.artifact_id, box: part } } }] : [];
+				}) : layer ? [{ parts: decline, options: { decline: { prediction: layer.artifact_id, box } } }] : []),
+			]);
+			for (const op of ops) labels.applyLocal(op.local, op.deltas);
+			if (ops.length > 0) viewer.revealLabels();
+		} catch (e) {
+			notice = `Couldn't erase the segmentation: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			erasingComposite = false;
+		}
 	}
 
 	/** Fill the polygon being drawn, or with `cut`, clear the active class inside it. */
 	function closePolygon(cut: boolean) {
 		const polygon = viewer.polygon;
 		viewer.polygon = null;
-		if (!polygon || viewer.activeClass === null) return;
+		if (!polygon) return;
 		const plane = PLANES[polygon.plane];
 		const limits: [number, number] = [viewer.shape[plane.u], viewer.shape[plane.v]];
+		if (polygon.accept !== undefined) {
+			const mask = new PlaneMask(...limits);
+			mask.polygon(polygon.points);
+			void acceptMask(polygon.accept, mask, { name: "accept-polygon" });
+			return;
+		}
+		if (viewer.activeClass === null) return;
 		const edit = polygonEdit(polygon, cut ? "subtract" : "add", viewer.activeClass, viewer.paintCondition(labelValues), limits);
 		if (edit) commit(plane, polygon.slice, edit.mask, edit.value, edit.onlyIf, edit.tool, true);
 	}
@@ -436,7 +568,7 @@
 	 * the server couldn't say, leaving the layer as it was.
 	 */
 	async function loadPrediction(signal: AbortSignal) {
-		if (imageReplaced) return;
+		if (imageReplaced || acceptGesture || accepting) return;
 		const load = ++loads;
 		const get = (slot: string) =>
 			api<Predicted>(`/api/projects/${project}/${slot}`, { signal }).catch((e: unknown) => {
@@ -451,7 +583,7 @@
 				() => null,
 			),
 		]);
-		if (signal.aborted || load !== loads || imageReplaced) return;
+		if (signal.aborted || load !== loads || imageReplaced || acceptGesture || accepting) return;
 		// The server gives only predictions of the project's current image, so
 		// one of another image means that image replaced the one shown here.
 		if ([whole, proposed].some((found) => found && found.image_artifact_id !== imageId)) {
@@ -493,6 +625,13 @@
 	 * the proposal if the box is inside its box, else the prediction.
 	 */
 	function showing(box: Box): Prediction | null {
+		if (!viewer.showPrediction) return null;
+		if (live?.enabled) {
+			const region = [...live.regions.values()].find((r) => within(box, r.box));
+			return region ? { ...region, kind: "prediction",
+				image_artifact_id: imageId, shape_zyx: viewer.shape,
+				started_at: "", committed_at: "" } : null;
+		}
 		return [proposal, prediction].find((layer) => layer && within(box, layer.box)) ?? null;
 	}
 
@@ -508,6 +647,7 @@
 	 * (unless the same model made both, so they agree).
 	 */
 	function mixesProposal(box: Box): boolean {
+		if (live?.enabled) return false;
 		if (!proposal || !overlaps(box, proposal.box) || within(box, proposal.box)) return false;
 		return !(prediction && prediction.model_id === proposal.model_id);
 	}
@@ -538,13 +678,13 @@
 		const layer = box ? showing(box) : null;
 		const blocked = whyNotInView({
 			imageReplaced,
-			predicted: !!(prediction || proposal),
+			predicted: live?.enabled ? !!live.regions.size : !!(prediction || proposal),
 			shown: viewer.showPrediction,
-			opacity: viewer.predictionOpacity,
+			opacity: viewer.opacity,
 			box,
 			tiles,
 			mixed: !!box && mixesProposal(box),
-			covered: !!layer,
+			covered: live?.enabled ? !!box && [...live.regions.values()].some((r) => intersection(box, r.box)) : !!layer,
 		});
 		return { plane, box, layer, blocked };
 	});
@@ -669,6 +809,121 @@
 		!proposing ? "Propose here" : proposalProgress === null ? "Proposing…" : `Proposing… ${Math.round(proposalProgress * 100)}%`,
 	);
 	let accepting = $state(false);
+	let declining = $state(false);
+	let restoring = $state(false);
+	let gestureSequence = 0;
+	let acceptedVoxels = $state<number | null>(null);
+	let acceptGesture = $state.raw<{
+		id: number;
+		plane: Plane;
+		slice: number;
+		sources: GestureSource[];
+		proposed: GestureSource | null;
+		styles: ClassStyles;
+		classes: Set<number>;
+	} | null>(null);
+	const decidingSuggestion = $derived(accepting || declining || restoring || !!acceptGesture);
+
+	/** Only already-loaded chunks can contribute to an Accept gesture. */
+	const readLoaded = (store: ChunkStore, box: Box) => readBox((id) => {
+		const chunk = store.peek(id);
+		if (!chunk) return Promise.reject(new Error("Some predictions or labels are still loading; wait and try that gesture again."));
+		return Promise.resolve(chunk);
+	}, box);
+
+	function beginAcceptGesture(plane: Plane, slice: number): number | null {
+		if (!labels || decidingSuggestion || erasingComposite || pendingAccept || queue.toggling) {
+			notice = "Finish the current gesture or wait for the previous action first.";
+			return null;
+		}
+		const size = sizes.get(plane.name), full = levels[0];
+		const extent = size && full ? viewExtent({ plane, position: viewer.position, zoom: viewer.zoom,
+			aspect: viewer.aspect, width: size[0], height: size[1] }, full) : { box: null, tiles: 0 };
+		const available = live?.enabled ? [...live.regions.values()] : [proposal, prediction].filter((p) => p !== null);
+		const blocked = whyNotInView({
+			imageReplaced, predicted: available.length > 0, shown: viewer.showPrediction, opacity: viewer.opacity,
+			...extent, mixed: false, covered: !!extent.box && available.some((p) => intersection(p.box, extent.box!)),
+		});
+		if (blocked) { notice = blocked; return null; }
+		const source = (p: { artifact_id: string; box: Box; store: ChunkStore }): GestureSource | null => {
+			// Pointer capture can carry a brush outside the canvas. Cached data
+			// beyond its visible slice must not become accepted unseen.
+			const box = intersection(p.box, extent.box!);
+			return box ? { artifact: p.artifact_id, box, read: (part) => readLoaded(p.store, part) } : null;
+		};
+		acceptGesture = {
+			id: ++gestureSequence, plane, slice,
+			sources: (live?.enabled ? [...live.regions.values()] : prediction ? [prediction] : [])
+				.map(source).filter((p) => p !== null),
+			proposed: !live?.enabled && proposal ? source(proposal) : null,
+			styles: display.styles, classes: new Set(viewer.acceptValues(labelValues)),
+		};
+		notice = "";
+		acceptedVoxels = null;
+		return acceptGesture.id;
+	}
+
+	function cancelAcceptGesture(id?: number) {
+		if (id !== undefined && acceptGesture?.id !== id) return;
+		acceptGesture = null;
+		if (viewer.polygon?.accept !== undefined) viewer.polygon = null;
+	}
+
+	async function acceptMask(id: number, mask: PlaneMask, tool: Record<string, unknown>) {
+		const frozen = acceptGesture;
+		if (!frozen || frozen.id !== id || !labels || accepting) return;
+		accepting = true;
+		try {
+			if (!viewer.showPrediction || viewer.opacity <= 0 || imageReplaced || queue.toggling) {
+				throw new Error("The prediction is no longer visible or labels are changing; try again.");
+			}
+			const box = gestureBox(frozen.plane, frozen.slice, mask);
+			let sources = frozen.sources;
+			if (mask.count && frozen.proposed && overlaps(box, frozen.proposed.box)) {
+				if (!within(box, frozen.proposed.box)) throw new Error("That gesture crosses the proposal edge; accept on one side at a time.");
+				sources = [frozen.proposed];
+			}
+			const prepared = await acceptGestureGroups(frozen.plane, frozen.slice, mask, sources,
+				(box) => readLoaded(labels!.store, box), frozen.styles, frozen.classes,
+				{ ...tool, plane: frozen.plane.name, slice: frozen.slice });
+			// Esc, a tool switch, or leaving the page can cancel the asynchronous read.
+			if (acceptGesture?.id !== id || controller.signal.aborted) return;
+			if (!viewer.showPrediction || viewer.opacity <= 0 || imageReplaced || queue.toggling) {
+				throw new Error("The prediction is no longer visible or labels are changing; try again.");
+			}
+			for (const op of queue.editTogether(prepared.groups)) labels.applyLocal(op.local, op.deltas);
+			acceptedVoxels = prepared.count;
+			if (prepared.count) viewer.revealLabels();
+		} catch (e) {
+			if (acceptGesture?.id === id && !controller.signal.aborted) notice = message(e);
+		} finally {
+			cancelAcceptGesture(id);
+			accepting = false;
+		}
+	}
+	type AcceptWhere = { roi: string } | { box: Box };
+	interface PendingAccept {
+		pieces?: { artifact: string; box: Box; values: Uint8Array }[];
+		artifact: string;
+		box: Box;
+		where: AcceptWhere;
+		values: Uint8Array;
+		kind: Prediction["kind"];
+		place: string;
+		classes: number;
+		background: number;
+	}
+	// Acceptance is prepared before it is sent so Background is a visible,
+	// counted choice rather than an accidental part of the default action.
+	let pendingAccept: PendingAccept | null = $state.raw(null);
+	let includeAcceptBackground = $state(false);
+
+	/** Read a box without tying its requests to a view's cancellable wants. */
+	const readForDecision = (from: ChunkStore, box: Box) =>
+		readBox((id) => {
+			from.want(`decision:${id}`, new Set([id]));
+			return (from.loading(id) ?? from.request(id)).finally(() => from.want(`decision:${id}`, new Set()));
+		}, box);
 
 	/**
 	 * Copy the model's prediction inside an ROI into the labels, as accepted
@@ -677,7 +932,7 @@
 	 * else the prediction.
 	 */
 	async function acceptPrediction(roi: Roi) {
-		if (!labels || accepting) return;
+		if (!labels || decidingSuggestion) return;
 		// Only the part of the ROI inside the image has anything to accept.
 		const box = inImage(roi);
 		if (!box) {
@@ -700,7 +955,7 @@
 			notice = "That ROI is too big to accept at once; draw a smaller one.";
 			return;
 		}
-		await acceptFrom(layer, box, { roi: roi.id });
+		await prepareAccept(layer, box, { roi: roi.id });
 	}
 
 	/**
@@ -710,50 +965,202 @@
 	 * takes it back in one step. If it can't go ahead, the notice says why.
 	 */
 	async function acceptView() {
-		if (!labels || accepting) return;
-		const { box, layer, blocked } = inView;
+		if (!labels || decidingSuggestion) return;
+		const { plane, box, layer, blocked } = inView;
+		const place = `the ${reviewSlice(plane, Math.floor(viewer.position[plane.normal]))}`;
 		if (blocked) notice = blocked;
-		else if (box && layer) await acceptFrom(layer, box, { box }, true);
+		else if (box && live?.enabled) await prepareLive(box, place);
+		else if (box && layer) await prepareAccept(layer, box, { box }, place);
+	}
+
+	async function prepareLive(box: Box, place: string) {
+		if (!live || !labels || queue.toggling || accepting || pendingAccept) return;
+		accepting = true;
+		notice = "";
+		const regions = [...live.regions.values()];
+		try {
+			const pieces = [];
+			let classes = 0, background = 0;
+			for (const region of regions) {
+				const part = intersection(box, region.box);
+				if (!part) continue;
+				const values = displayedValues(unlabeledOnly(await readForDecision(region.store, part), await readForDecision(labels.store, part)), display.styles);
+				const counts = acceptCounts(values);
+				classes += counts.classes;
+				background += counts.background;
+				pieces.push({ artifact: region.artifact_id, box: part, values });
+			}
+			if (classes + background === 0) { notice = "No unannotated suggestions from visible classes in the ready part of this view."; return; }
+			includeAcceptBackground = false;
+			pendingAccept = { artifact: "", box, where: { box }, values: new Uint8Array(), pieces,
+				kind: "prediction", place, classes, background };
+		} catch (e) { notice = message(e); }
+		finally { accepting = false; }
 	}
 
 	/**
-	 * Read what `layer` holds inside `box` (inside the image, and small enough
-	 * to accept) and send it to be accepted there, showing it at once; `where`
-	 * is the ROI or the box the server is told it goes in. With `skipLabeled`,
-	 * what the page knows is labeled already isn't sent (the server leaves it
-	 * alone either way), so accepting twice says there's nothing left to fill
-	 * rather than making an edit that changes nothing.
+	 * Read the prediction and current labels in `box`, then stage exactly the
+	 * still-unlabeled suggestions for confirmation. This makes the Background
+	 * choice and its count explicit before anything is written.
 	 */
-	async function acceptFrom(layer: Prediction, box: Box, where: { roi: string } | { box: Box }, skipLabeled = false) {
+	async function prepareAccept(layer: Prediction, box: Box, where: AcceptWhere, place = "that ROI") {
 		if (!labels) return;
+		if (queue.toggling) {
+			notice = "Wait for undo or redo to finish before accepting a prediction.";
+			return;
+		}
 		accepting = true;
 		notice = "";
 		const { store, artifact_id: artifact, kind } = layer;
-		/** Read a box of a store's chunks, which no view's own requests cancel; one loading again (after an edit) is waited for. */
-		const read = (from: ChunkStore) =>
-			readBox((id) => {
-				from.want(`accept:${id}`, new Set([id]));
-				return (from.loading(id) ?? from.request(id)).finally(() => from.want(`accept:${id}`, new Set()));
-			}, box);
 		try {
-			let values = await read(store);
+			const predictedValues = await readForDecision(store, box);
+			const values = displayedValues(unlabeledOnly(predictedValues, await readForDecision(labels.store, box)), display.styles);
+			const counts = acceptCounts(values);
 			const predicted = values.some((value) => value > 0);
-			// Not while an undo or redo is on its way: the copies don't show it yet. And if the
-			// labels can't be read, the server still fills only what's unlabeled.
-			if (leavesLabeledOut(skipLabeled, predicted, queue.toggling)) {
-				values = unlabeledOnly(values, await read(labels.store).catch(() => new Uint8Array(values.length)));
-			}
-			const parts = acceptParts(values, box);
-			const ops = queue.editMany(parts, { accept: { prediction: artifact, ...where } });
-			for (const op of ops) labels.applyLocal(op.local, op.deltas);
-			const place = "roi" in where ? "that ROI" : "this view";
-			if (ops.length > 0) viewer.revealLabels();
-			else if (!predicted) notice = `The ${kind} has nothing in ${place}.`;
-			else notice = `What the ${kind} covers in ${place} is labeled already.`;
+			if (counts.classes > 0 || counts.background > 0) {
+				includeAcceptBackground = false;
+				pendingAccept = { artifact, box, where, values, kind, place, ...counts };
+			} else if (!predictedValues.some((value) => value > 0)) notice = `The ${kind} has nothing in ${place}.`;
+			else if (!predicted) notice = `The suggestions in ${place} are already labeled or their classes are hidden.`;
 		} catch (e) {
-			notice = `Couldn't read the ${kind}: ${e instanceof Error ? e.message : String(e)}`;
+			notice = `Couldn't prepare the ${kind}: ${e instanceof Error ? e.message : String(e)}`;
 		} finally {
 			accepting = false;
+		}
+	}
+
+	/** Send the staged foreground, plus Background only when explicitly selected. */
+	function confirmAccept() {
+		if (!labels || !pendingAccept) return;
+		const pending = pendingAccept;
+		if (pending.classes === 0 && !includeAcceptBackground) return;
+		const ops = pending.pieces
+			? queue.editTogether(pending.pieces.map((piece) => ({ parts: acceptParts(piece.values, piece.box, includeAcceptBackground), options: { accept: { prediction: piece.artifact, box: piece.box } } })))
+			: queue.editMany(acceptParts(pending.values, pending.box, includeAcceptBackground), { accept: { prediction: pending.artifact, ...pending.where } });
+		for (const op of ops) labels.applyLocal(op.local, op.deltas);
+		if (ops.length > 0) viewer.revealLabels();
+		pendingAccept = null;
+		includeAcceptBackground = false;
+	}
+
+	function cancelAccept() {
+		pendingAccept = null;
+		includeAcceptBackground = false;
+	}
+
+	/** Decline foreground suggestions in an ROI, after authenticating them against their prediction. */
+	async function declinePrediction(roi: Roi) {
+		if (!labels || decidingSuggestion) return;
+		const box = inImage(roi);
+		if (!box) {
+			notice = "That ROI is outside the image.";
+			return;
+		}
+		const blocked = acceptBlockedIn(roi);
+		if (blocked) {
+			notice = `${blocked}.`;
+			return;
+		}
+		const layer = covering(roi);
+		if (!layer) return;
+		if (voxels(box) > MAX_ACCEPT_VOXELS) {
+			notice = "That ROI is too big to decline at once; draw a smaller one.";
+			return;
+		}
+		await declineFrom(layer, box, { roi: roi.id });
+	}
+
+	/** Decline foreground suggestions in the active view. */
+	async function declineView() {
+		if (!labels || decidingSuggestion) return;
+		const { box, layer, blocked } = inView;
+		if (blocked) notice = blocked;
+		else if (box && live?.enabled && labels) {
+			declining = true;
+			try {
+				const regions = [...live.regions.values()];
+				const groups = [];
+				for (const region of regions) {
+					const part = intersection(box, region.box);
+					if (!part) continue;
+					const values = displayedValues(unlabeledOnly(await readForDecision(region.store, part), await readForDecision(labels.store, part)), display.styles);
+					groups.push({ parts: declineParts(values, part), options: { decline: { prediction: region.artifact_id, box: part } } });
+				}
+				for (const op of queue.editTogether(groups)) labels.applyLocal(op.local, op.deltas);
+			} catch (e) { notice = message(e); }
+			finally { declining = false; }
+		}
+		else if (box && layer) await declineFrom(layer, box, { box });
+	}
+
+	async function declineFrom(layer: Prediction, box: Box, where: AcceptWhere) {
+		if (!labels) return;
+		if (queue.toggling) {
+			notice = "Wait for undo or redo to finish before declining suggestions.";
+			return;
+		}
+		declining = true;
+		notice = "";
+		const { store, artifact_id: artifact, kind } = layer;
+		try {
+			const predictedValues = await readForDecision(store, box);
+			const values = displayedValues(unlabeledOnly(predictedValues, await readForDecision(labels.store, box)), display.styles);
+			const parts = declineParts(values, box);
+			const ops = queue.editMany(parts, { decline: { prediction: artifact, ...where } });
+			for (const op of ops) labels.applyLocal(op.local, op.deltas);
+			const place = "roi" in where ? "that ROI" : "this view";
+			if (ops.length === 0) {
+				if (!predictedValues.some((value) => value > BACKGROUND_VALUE && value < DECLINED_VALUE)) {
+					notice = `The ${kind} has no foreground suggestions in ${place}.`;
+				} else notice = `The foreground suggestions in ${place} are already labeled, declined, or their classes are hidden.`;
+			}
+		} catch (e) {
+			notice = `Couldn't decline the ${kind}: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			declining = false;
+		}
+	}
+
+	/** Restore hidden suggestions in an ROI by removing only its decline tombstones. */
+	async function restorePrediction(roi: Roi) {
+		if (!labels || decidingSuggestion) return;
+		const box = inImage(roi);
+		if (!box) {
+			notice = "That ROI is outside the image.";
+			return;
+		}
+		if (voxels(box) > MAX_ACCEPT_VOXELS) {
+			notice = "That ROI is too big to restore at once; draw a smaller one.";
+			return;
+		}
+		await restoreDeclined(box, "that ROI");
+	}
+
+	/** Restore hidden suggestions in the active view. */
+	async function restoreView() {
+		if (!labels || decidingSuggestion) return;
+		const { box, blocked } = inView;
+		if (blocked) notice = blocked;
+		else if (box) await restoreDeclined(box, "this view");
+	}
+
+	async function restoreDeclined(box: Box, place: string) {
+		if (!labels) return;
+		if (queue.toggling) {
+			notice = "Wait for undo or redo to finish before restoring suggestions.";
+			return;
+		}
+		restoring = true;
+		notice = "";
+		try {
+			const parts = restoreDeclinedParts(await readForDecision(labels.store, box), box);
+			const ops = queue.editMany(parts, { tool: { name: "restore-declined" } });
+			for (const op of ops) labels.applyLocal(op.local, op.deltas);
+			if (ops.length === 0) notice = `There are no declined suggestions in ${place}.`;
+		} catch (e) {
+			notice = `Couldn't restore suggestions: ${e instanceof Error ? e.message : String(e)}`;
+		} finally {
+			restoring = false;
 		}
 	}
 
@@ -788,8 +1195,28 @@
 	}
 
 	function setTool(tool: typeof viewer.tool) {
+		if (viewer.tool !== tool) {
+			cancelAcceptGesture();
+			viewer.polygon = null;
+			acceptedVoxels = null;
+		}
 		viewer.tool = tool;
-		if (tool !== "polygon") viewer.polygon = null;
+		if (!viewer.drawingPolygon) viewer.polygon = null;
+	}
+
+	function setAcceptShape(shape: typeof viewer.acceptShape) {
+		if (shape === viewer.acceptShape) return;
+		cancelAcceptGesture();
+		viewer.polygon = null;
+		viewer.acceptShape = shape;
+		acceptedVoxels = null;
+	}
+
+	function historyStep(redo = false) {
+		cancelAcceptGesture();
+		acceptedVoxels = null;
+		if (redo) void queue.redo();
+		else void queue.undo();
 	}
 
 	// Going by classes, the ones the menu shows are the ones used from then on,
@@ -802,6 +1229,20 @@
 	function setEraseMode(mode: EraseMode) {
 		if (mode === "classes") viewer.eraseClasses = eraseSet;
 		viewer.eraseMode = mode;
+	}
+
+	function setAcceptMode(mode: AcceptMode) {
+		if (mode === viewer.acceptMode) return;
+		cancelAcceptGesture();
+		acceptedVoxels = null;
+		if (mode === "classes") viewer.acceptClasses = acceptSet;
+		viewer.acceptMode = mode;
+	}
+
+	function setAcceptClasses(values: number[]) {
+		cancelAcceptGesture();
+		acceptedVoxels = null;
+		viewer.acceptClasses = values;
 	}
 
 	const status = $derived(
@@ -848,6 +1289,11 @@
 	function key(event: KeyboardEvent) {
 		viewer.noteKeys(event);
 		holdAlt(event);
+		if (pendingAccept && event.key === "Escape") {
+			cancelAccept();
+			event.preventDefault();
+			return;
+		}
 		if (viewer.help && event.key === "Escape") {
 			viewer.help = false;
 			event.preventDefault();
@@ -865,6 +1311,7 @@
 		if ((action === "close-polygon" || action === "remove-point") && !viewer.polygon) return;
 		event.preventDefault();
 		if (viewer.lassoing && MOVES.has(action)) return;
+		if (acceptGesture && (MOVES.has(action) || action === "zoom-in" || action === "zoom-out")) return;
 		const step = event.shiftKey ? 10 : 1;
 		switch (action) {
 			case "navigate":
@@ -875,11 +1322,23 @@
 				return setTool(action);
 			case "next-roi":
 				return nextOpen();
+			case "accept-tool":
+				return setTool("accept");
 			case "accept": {
 				// Holding the key down would go on to accept what's already accepted.
 				const target = acceptKeyTarget(event.repeat, selectedRoi !== null);
+				if (pendingAccept) {
+					if (target !== "nothing") confirmAccept();
+					return;
+				}
 				if (target === "roi" && selectedRoi) void acceptPrediction(selectedRoi);
 				else if (target === "view") void acceptView();
+				return;
+			}
+			case "decline": {
+				const target = acceptKeyTarget(event.repeat, selectedRoi !== null);
+				if (target === "roi" && selectedRoi) void declinePrediction(selectedRoi);
+				else if (target === "view") void declineView();
 				return;
 			}
 			case "complete-roi":
@@ -899,18 +1358,20 @@
 			case "close-polygon":
 				return closePolygon(closingMode(viewer.polygonMode, event) === "subtract");
 			case "remove-point":
-				if (viewer.polygon) viewer.polygon = { ...viewer.polygon, points: viewer.polygon.points.slice(0, -1) };
+				if (viewer.polygon) {
+					if (viewer.polygon.points.length <= 1 && viewer.polygon.accept !== undefined) cancelAcceptGesture();
+					else viewer.polygon = { ...viewer.polygon, points: viewer.polygon.points.slice(0, -1) };
+				}
 				return;
 			case "cancel":
-				if (viewer.polygon) viewer.polygon = null;
+				if (acceptGesture) cancelAcceptGesture();
+				else if (viewer.polygon) viewer.polygon = null;
 				else setTool("navigate");
 				return;
 			case "undo":
-				queue.undo();
-				return;
+				return historyStep();
 			case "redo":
-				queue.redo();
-				return;
+				return historyStep(true);
 			case "slice-next":
 				return viewer.step(activePlane().normal, step);
 			case "slice-previous":
@@ -930,6 +1391,7 @@
 				viewer.showLabels = !viewer.showLabels;
 				return;
 			case "prediction":
+				cancelAcceptGesture();
 				viewer.showPrediction = !viewer.showPrediction;
 				return;
 			case "help":
@@ -986,10 +1448,15 @@
 		{ tool: "brush", label: "Brush", shortcut: "B", icon: Brush },
 		{ tool: "eraser", label: "Eraser", shortcut: "E", icon: Eraser },
 		{ tool: "polygon", label: "Polygon", shortcut: "P", icon: Pentagon },
+		{ tool: "accept", label: "Accept", shortcut: "I", icon: CheckCheck },
 		{ tool: "roi", label: "ROI", shortcut: "R", icon: SquareDashed },
 	] as const).filter((entry) => SHOW_ROIS || entry.tool !== "roi");
 
 	const LAYOUT_NAMES = { four: "Four views", xy: "XY", xz: "XZ", yz: "YZ" } as const;
+	const ACCEPT_SHAPES = [
+		{ value: "brush", label: "Brush", icon: Brush, title: "Brush over visible foreground predictions to accept them" },
+		{ value: "polygon", label: "Polygon", icon: Pentagon, title: "Outline visible foreground predictions to accept them" },
+	] as const;
 	const LAYOUT_OPTIONS = LAYOUTS.map((layout) => ({
 		value: layout,
 		label: LAYOUT_NAMES[layout],
@@ -1012,6 +1479,11 @@
 	];
 
 	const activeClass = $derived(pickable.find((c) => c.value === viewer.activeClass));
+
+	function previewClassColor(value: number, color: string) {
+		if (value === BACKGROUND_VALUE) display.set(value, { color });
+		else labels?.previewColor(value, color);
+	}
 
 	/** Open the new-class form, its name ready to type (what's typed already stays). */
 	async function startClass() {
@@ -1081,6 +1553,9 @@
 	const zoomPercent = $derived(Math.round((viewer.zoom / (globalThis.devicePixelRatio || 1)) * 100));
 	const [, imageZ, imageY, imageX] = manifest.shape_czyx;
 	const histogram = manifest.histogram && !Array.isArray(manifest.histogram) ? manifest.histogram : null;
+	const minimapSuggestions = $derived.by(() => live?.enabled
+		? live.store ? [{ store: live.store, box: [0, 0, 0, ...viewer.shape] as Box, keys: [...live.regions.keys()] }] : []
+		: [proposal, prediction].filter((source) => source !== null));
 	const chip = $derived(saveState(queue));
 
 	const nameOf = (values: number[]) => pickable.filter((c) => values.includes(c.value)).map((c) => c.name);
@@ -1093,6 +1568,9 @@
 			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · right-click moves the crosshair",
 			brush: `Drag to paint the active class${paintWhere ? ` ${paintWhere}` : ""} · [ ] change the size · right-click moves the crosshair`,
 			eraser: `Drag to erase labels${eraseWhere ? ` ${eraseWhere}` : ""} · [ ] change the size · right-click moves the crosshair`,
+			accept: viewer.acceptShape === "brush"
+				? "Drag to accept visible predictions · [ ] change size · Esc cancels · Ctrl+Z undoes the gesture"
+				: "Click points or drag freehand · first point, double-click, or Enter accepts · Esc cancels · Ctrl+Z undoes",
 			polygon:
 				viewer.polygonMode === "add"
 					? `Click points or drag freehand · click the first point, double-click, or Enter fills${paintWhere ? ` ${paintWhere}` : ""} · hold Alt to cut out · Esc cancels · right-click moves the crosshair`
@@ -1124,8 +1602,23 @@
 				{/each}
 			</span>
 			<span class="h-4 w-px shrink-0 bg-line" aria-hidden="true"></span>
-			{#if viewer.tool === "brush" || viewer.tool === "eraser"}
+			{#if viewer.tool === "accept"}
+				<Segmented label="Accept shape" value={viewer.acceptShape} options={ACCEPT_SHAPES} onchange={setAcceptShape} />
+			{/if}
+			{#if viewer.drawingBrush}
 				<SliderField label="Size" numberLabel="Brush radius" min={0.5} max={64} step={0.5} bind:value={viewer.brushRadius} />
+			{/if}
+			{#if viewer.tool === "accept"}
+				<Segmented label="Which predictions to accept" value={viewer.acceptMode} options={ACCEPT_MODES} onchange={setAcceptMode} />
+				{#if viewer.acceptMode === "classes"}
+					<ClassMenu classes={classes} selected={acceptSet} label="Accept predictions of" onchange={setAcceptClasses} />
+				{/if}
+				<span class="text-2xs text-ink-dim" role="status">
+					{#if accepting}Accepting…
+					{:else if acceptedVoxels !== null}{acceptedVoxels ? `Accepted ${acceptedVoxels.toLocaleString()} voxels · Ctrl+Z to undo` : "No matching, unannotated predictions in that selection"}
+					{:else}Only unlabeled predictions · skips Background{/if}
+					{#if acceptGesture && !accepting} · preview frozen{/if}
+				</span>
 			{/if}
 			{#if viewer.tool === "polygon"}
 				<Segmented label="Polygon mode" value={viewer.polygonMode} options={POLYGON_MODES} onchange={(mode) => (viewer.polygonMode = mode)} />
@@ -1159,9 +1652,9 @@
 			{/if}
 			{#if viewer.tool === "navigate"}
 				<Segmented label="Layout" value={viewer.layout} options={LAYOUT_OPTIONS} onchange={(layout) => (viewer.layout = layout)} />
-				<button class="btn shrink-0" onclick={fit} title="Fit the image (0)"><Maximize2 size={12} /> Fit</button>
+				<button class="btn shrink-0" onclick={fit} use:tooltip={"Fit the image (0)"}><Maximize2 size={12} /> Fit</button>
 			{/if}
-			<span class="hidden min-w-48 flex-1 basis-48 truncate text-right text-2xs text-ink-faint xl:block" title={hint}>{hint}</span>
+			<span class="hidden min-w-48 flex-1 basis-48 truncate text-right text-2xs text-ink-faint xl:block" use:tooltip={hint}>{hint}</span>
 		</div>
 		<button
 			class="btn btn-ghost mx-1.5 mt-1.5 shrink-0 md:hidden"
@@ -1196,26 +1689,20 @@
 			<button
 				class="size-7 rounded-sm border-2 border-ink/80 shadow-[0_0_0_1px_black]"
 				style:background={activeClass?.color ?? "transparent"}
-				title={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "Add a class to start labeling"}
+				use:tooltip={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "Add a class to start labeling"}
 				aria-label={activeClass ? `Active class: ${activeClass.name}` : "Add a class"}
 				onclick={() => (activeClass ? ((classesOpen = true), (dockOpen = true)) : startClass())}
 			></button>
 			<span class="my-1.5 h-px w-6 bg-line"></span>
-			<ToolButton icon={Undo2} label="Undo" shortcut="Ctrl+Z" disabled={queue.undoable === 0} onclick={() => queue.undo()} />
-			<ToolButton icon={Redo2} label="Redo" shortcut="Ctrl+Shift+Z" disabled={queue.redoable === 0} onclick={() => queue.redo()} />
+			<ToolButton icon={Undo2} label="Undo" shortcut="Ctrl+Z" disabled={queue.undoable === 0} onclick={() => historyStep()} />
+			<ToolButton icon={Redo2} label="Redo" shortcut="Ctrl+Shift+Z" disabled={queue.redoable === 0} onclick={() => historyStep(true)} />
 			<div class="mt-auto">
 				<ToolButton icon={Keyboard} label="Keys" shortcut="?" active={viewer.help} onclick={() => (viewer.help = !viewer.help)} />
 			</div>
 		</div>
 
-		<!-- Document -->
+		<!-- Image views -->
 		<div class="relative flex min-w-0 flex-1 flex-col">
-			<div class="flex h-7 shrink-0 items-end border-b border-edge bg-chrome px-2">
-				<div class="flex h-6 items-center gap-2 rounded-t-sm bg-pasteboard px-3 shadow-[inset_0_1px_0_var(--color-accent)]">
-					<span class="font-medium">{title}</span>
-					<span class="font-mono text-2xs text-ink-faint">{imageX}×{imageY}×{imageZ} · {manifest.dtype}</span>
-				</div>
-			</div>
 			<!-- What went wrong, over the views, where it shows even with the dock closed. -->
 			{#if error || predictionError || notice || rois.error}
 				<div class="pointer-events-none absolute inset-x-0 top-8 z-30 flex flex-col items-center gap-1 px-2">
@@ -1248,24 +1735,27 @@
 								{levels}
 								{images}
 								{labels}
-								prediction={prediction?.store}
-								{proposal}
-								{segmentation}
+								classStyles={display.styles}
+								paintColor={activeClass?.color}
+								prediction={live?.enabled ? live.store : prediction?.store}
+								predictionVersions={live?.enabled ? live.versions : undefined}
+								stalePredictions={live?.enabled ? live.stale : undefined}
+								animatePredictions={live?.updating ?? false}
+								proposal={live?.enabled ? null : proposal}
 								onhover={(p) => (hovered = p)}
 								onresize={resized}
 								onstroke={stroke}
 								onpolygon={closePolygon}
+								onacceptstart={beginAcceptGesture}
+								onacceptcancel={cancelAcceptGesture}
+								acceptGestureId={acceptGesture?.id ?? null}
 								rois={rois.items}
 								onroi={drawRoi}
 							/>
 						</div>
 					{/each}
 					{#if viewer.layout === "four"}
-						<div class="flex flex-col justify-center gap-1 bg-pasteboard p-4 font-mono text-2xs text-ink-dim">
-							<span><span class="text-axis-x">x</span> {voxel(2)}</span>
-							<span><span class="text-axis-y">y</span> {voxel(1)}</span>
-							<span><span class="text-axis-z">z</span> {voxel(0)}</span>
-						</div>
+						<MiniMap {project} {viewer} {labels} classStyles={display.styles} suggestions={minimapSuggestions} onpanstart={() => cancelAcceptGesture()} />
 					{/if}
 				{:else}
 					<div class="col-span-full row-span-full grid place-items-center bg-pasteboard text-ink-faint">
@@ -1295,75 +1785,87 @@
 				{/if}
 				<!-- Side by side, or one over the other when what they show needs the room. -->
 				<div class="flex flex-wrap gap-2">
-					<label class="label flex-1">Black <input class="field font-mono" type="number" step="any" bind:value={viewer.window[0]} /></label>
-					<label class="label flex-1">White <input class="field font-mono" type="number" step="any" bind:value={viewer.window[1]} /></label>
+					<label class="label min-w-0 flex-1">Black <input class="field w-full font-mono" type="number" step="1" bind:value={() => displayLevel(viewer.window[0]), (value) => viewer.window = editLevel(viewer.window, 0, value)} /></label>
+					<label class="label min-w-0 flex-1">White <input class="field w-full font-mono" type="number" step="1" bind:value={() => displayLevel(viewer.window[1]), (value) => viewer.window = editLevel(viewer.window, 1, value)} /></label>
 				</div>
+			</Panel>
+
+			<Panel title="Label suggestions">
+				<LivePanel {live} plugins={modelPlugins} disabled={decidingSuggestion || !!pendingAccept}
+					modelsHref={`/p/${project}/models`} ontoggle={toggleLive} onshow={() => viewer.showPrediction = true} />
 			</Panel>
 
 			<Panel title="Layers">
 				<ul class="-mx-2.5 -my-2.5 flex flex-col divide-y divide-edge">
 					<li class="flex flex-col gap-1.5 px-2.5 py-2">
 						<div class="flex items-center gap-2">
-							<button class="text-ink-dim hover:text-ink" aria-label="{viewer.showLabels ? 'Hide' : 'Show'} labels" title="Show or hide (V)" onclick={() => (viewer.showLabels = !viewer.showLabels)}>
+							<button class="text-ink-dim hover:text-ink" aria-label="{viewer.showLabels ? 'Hide' : 'Show'} labels" use:tooltip={"Show or hide (V)"} onclick={() => (viewer.showLabels = !viewer.showLabels)}>
 								{#if viewer.showLabels}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
 							</button>
-							<span class="flex-1">Labels</span>
+							<span class="flex-1">Saved labels</span>
 							<span class="font-mono text-2xs text-ink-dim">{Math.round(viewer.opacity * 100)}%</span>
 						</div>
-						<input type="range" min="0" max="1" step="0.05" bind:value={viewer.opacity} aria-label="Label opacity" />
+						<span class="pl-5.5 text-2xs text-ink-dim">Solid · painted or kept with Accept</span>
+						<input type="range" min="0" max="1" step="0.05" bind:value={viewer.opacity} aria-label="Segmentation opacity" />
 					</li>
-					{#if prediction || proposal}
+					{#if prediction || proposal || live?.enabled}
 						<li class="flex flex-col gap-1.5 px-2.5 py-2">
 							<div class="flex items-center gap-2">
-								<button class="text-ink-dim hover:text-ink" aria-label="{viewer.showPrediction ? 'Hide' : 'Show'} prediction" title="Show or hide (M)" onclick={() => (viewer.showPrediction = !viewer.showPrediction)}>
+								<button class="text-ink-dim hover:text-ink" aria-label="{viewer.showPrediction ? 'Hide' : 'Show'} suggestions" use:tooltip={live?.enabled ? `${viewer.showPrediction ? 'Hide suggestions and pause automatic updates' : 'Show suggestions and resume automatic updates'} (M)` : "Show or hide suggestions (M)"} onclick={() => (viewer.showPrediction = !viewer.showPrediction)}>
 									{#if viewer.showPrediction}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
 								</button>
 								<span class="flex-1 truncate">
-									{prediction ? "Prediction" : "Proposal"} <span class="text-ink-faint">· {(prediction ?? proposal)?.model_name ?? "a model"}</span>
+									Suggestions
 								</span>
-								<span class="font-mono text-2xs text-ink-dim">{Math.round(viewer.predictionOpacity * 100)}%</span>
 							</div>
-							{#if prediction && proposal}
+					<p class="pl-5.5 text-2xs text-ink-dim">Predicted for review (striped)</p>
+							{#if prediction && proposal && !live?.enabled}
 								<span class="truncate pl-5.5 text-2xs text-ink-dim">
 									Proposal in one ROI <span class="text-ink-faint">· {proposal.model_name ?? "a model"}</span>
 								</span>
 							{/if}
-							<input type="range" min="0" max="1" step="0.05" bind:value={viewer.predictionOpacity} aria-label="Prediction opacity" />
 							{#if labels}
 								{@const { plane, box, layer, blocked } = inView}
 								{@const kind = (layer ?? prediction ?? proposal)?.kind ?? "prediction"}
 								<!-- A goes to the selected ROI, if one is, so it's this button's key only without one. -->
 								{@const keyHint = selectedRoi ? "" : " (A)"}
+								<div class="flex flex-col gap-1.5">
+									<button
+										class="btn h-auto min-h-6 min-w-0 flex-1 py-1.5"
+										disabled={decidingSuggestion || !!blocked}
+										use:tooltip={blocked ||
+											`Review the unlabeled voxels in the visible part of this slice (${plane.name.toUpperCase()} view, ${"zyx"[plane.normal]} ${box?.[plane.normal]}) before accepting the ${kind}; you can undo it${keyHint}`}
+										aria-describedby={blocked && !decidingSuggestion ? "accept-view-why" : undefined}
+										onclick={acceptView}
+									>
+										<CheckCheck size={13} class="shrink-0" />
+										<span class="min-w-0 flex-1 text-left leading-4">{accepting ? "Preparing review…" : `Accept ${plane.name.toUpperCase()} suggestions for visible slice`}</span>
+										{#if !selectedRoi}<span class="kbd ml-auto">A</span>{/if}
+									</button>
+									<button
+										class="btn min-w-0 flex-1"
+										disabled={decidingSuggestion || !!blocked}
+										use:tooltip={blocked || `Hide the ${kind}'s foreground suggestions in this view without training them as Background; you can undo it`}
+										onclick={declineView}
+									>
+										<X size={13} />
+										{declining ? "Declining…" : `Decline ${plane.name.toUpperCase()} suggestions`}
+										{#if !selectedRoi}<span class="kbd ml-auto">X</span>{/if}
+									</button>
+								</div>
 								<button
 									class="btn w-full"
-									disabled={accepting || !!blocked}
-									title={blocked ||
-										`Fills the unlabeled voxels in the visible part of this slice (${plane.name.toUpperCase()} view, ${"zyx"[plane.normal]} ${box?.[plane.normal]}) with the ${kind}; you can undo it${keyHint}`}
-									aria-describedby={blocked && !accepting ? "accept-view-why" : undefined}
-									onclick={acceptView}
+									disabled={decidingSuggestion || !!blocked}
+									use:tooltip={blocked || "Reveal suggestions explicitly declined in this view; newer labels are left alone"}
+									onclick={restoreView}
 								>
-									<CheckCheck size={13} />
-									{accepting ? "Accepting…" : `Accept ${kind} in this view`}
-									{#if !selectedRoi}<span class="kbd ml-auto">A</span>{/if}
+									<RotateCcw size={13} />
+									{restoring ? "Restoring…" : `Restore declined in ${plane.name.toUpperCase()}`}
 								</button>
-								{#if blocked && !accepting}
+								{#if blocked && !decidingSuggestion}
 									<p id="accept-view-why" class="text-2xs text-ink-dim">{blocked}</p>
-								{:else if viewer.layout === "four" && box}
-									<p class="text-2xs text-ink-dim">In the {plane.name.toUpperCase()} view, at {"zyx"[plane.normal]} {box[plane.normal]}</p>
 								{/if}
 							{/if}
-						</li>
-					{/if}
-					{#if segmentation}
-						<li class="flex flex-col gap-1.5 px-2.5 py-2">
-							<div class="flex items-center gap-2">
-								<button class="text-ink-dim hover:text-ink" aria-label="{viewer.showSegmentation ? 'Hide' : 'Show'} final segmentation" onclick={() => (viewer.showSegmentation = !viewer.showSegmentation)}>
-									{#if viewer.showSegmentation}<Eye size={14} />{:else}<EyeOff size={14} />{/if}
-								</button>
-								<span class="flex-1">Final segmentation</span>
-								<span class="font-mono text-2xs text-ink-dim">{Math.round(viewer.segmentationOpacity * 100)}%</span>
-							</div>
-							<input type="range" min="0" max="1" step="0.05" bind:value={viewer.segmentationOpacity} aria-label="Final segmentation opacity" />
 						</li>
 					{/if}
 					<li class="flex items-center gap-2 px-2.5 py-2 text-ink-dim">
@@ -1396,18 +1898,11 @@
 				{/if}
 				<ul class="-mx-2.5 -my-1 flex flex-col">
 					{#each pickable as label, index (label.value)}
-						<li>
-							<button
-								class="flex w-full items-center gap-2 px-2.5 py-1 text-left {viewer.activeClass === label.value ? 'bg-accent-soft text-ink' : 'hover:bg-raised'}"
-								onclick={() => (viewer.activeClass = label.value)}
-								aria-pressed={viewer.activeClass === label.value}
-								title={label.value === BACKGROUND_VALUE ? "Paint everything that isn't what you're looking for" : undefined}
-							>
-								<span class="size-3 rounded-[2px] shadow-[0_0_0_1px_black]" style:background={label.color}></span>
-								<span class="flex-1">{label.name}</span>
-								{#if index < 9}<span class="kbd">{index + 1}</span>{/if}
-							</button>
-						</li>
+						<ClassRow {label} {index} {display} active={viewer.activeClass === label.value}
+							disabled={!labels || decidingSuggestion || erasingComposite || !!pendingAccept}
+							onselect={() => viewer.activeClass = label.value}
+							oncolor={(color) => previewClassColor(label.value, color)}
+							onsave={async () => { if (label.value !== BACKGROUND_VALUE) await labels?.saveColor(label.value); }} />
 					{/each}
 				</ul>
 				{#if labels && classes.length > 0 && !hasBackground}
@@ -1510,18 +2005,38 @@
 							</button>
 						{/if}
 					</div>
-				{/if}
+					{/if}
 				{#if shownHere && selectedRoi}
-					<button
-						class="btn"
-						disabled={accepting || !!acceptBlocked}
-						title={acceptBlocked || `Fill the selected ROI's unlabeled voxels with the ${shownHere.kind} (A)`}
-						onclick={() => selectedRoi && acceptPrediction(selectedRoi)}
-					>
-						<CheckCheck size={13} />
-						{accepting ? "Accepting…" : `Accept ${shownHere.kind} here`}
-					</button>
-				{/if}
+					<div class="flex gap-1.5">
+						<button
+							class="btn flex-1"
+							disabled={decidingSuggestion || !!acceptBlocked}
+							use:tooltip={acceptBlocked || `Review the selected ROI's unlabeled voxels before accepting the ${shownHere.kind} (A)`}
+							onclick={() => selectedRoi && acceptPrediction(selectedRoi)}
+						>
+							<CheckCheck size={13} />
+							{accepting ? "Reading…" : "Accept"}<span class="kbd ml-auto">A</span>
+						</button>
+						<button
+							class="btn flex-1"
+							disabled={decidingSuggestion || !!acceptBlocked}
+							use:tooltip={acceptBlocked || `Decline the ${shownHere.kind}'s foreground suggestions in the selected ROI (X)`}
+							onclick={() => selectedRoi && declinePrediction(selectedRoi)}
+						>
+							<X size={13} />
+							{declining ? "Declining…" : "Decline"}<span class="kbd ml-auto">X</span>
+						</button>
+						</div>
+						<button
+							class="btn w-full"
+							disabled={decidingSuggestion || !!acceptBlocked}
+							title={acceptBlocked || "Reveal suggestions explicitly declined in the selected ROI; newer labels are left alone"}
+							onclick={() => selectedRoi && restorePrediction(selectedRoi)}
+						>
+							<RotateCcw size={13} />
+							{restoring ? "Restoring…" : "Restore declined"}
+						</button>
+					{/if}
 				<div class="flex items-center gap-2">
 					<button
 						class="btn"
@@ -1540,20 +2055,69 @@
 	</div>
 
 	<!-- Status bar -->
-	<footer class="flex h-6 shrink-0 items-center gap-4 border-t border-edge bg-chrome px-3 font-mono text-2xs text-ink-dim">
+	<footer class="flex min-h-6 shrink-0 flex-wrap items-center gap-x-4 border-t border-edge bg-chrome px-3 py-1 font-mono text-2xs text-ink-dim" aria-label="Image status">
 		<span title="Zoom">{zoomPercent}%</span>
-		<span>
+		<span class="whitespace-nowrap">
 			<span class="text-axis-x">x</span>{Math.floor(viewer.position[2])}
 			<span class="text-axis-y">y</span>{Math.floor(viewer.position[1])}
 			<span class="text-axis-z">z</span>{Math.floor(viewer.position[0])}
 		</span>
 		<span class="hidden sm:inline">{LAYOUT_NAMES[viewer.layout]}</span>
+		<span class="whitespace-nowrap" title="Image dimensions (X × Y × Z) in voxels, and data type">{imageX}×{imageY}×{imageZ} · {manifest.dtype}</span>
 		<span class="ml-auto flex items-center gap-1.5 font-sans {chip === 'error' ? 'text-danger' : chip === 'offline' || chip === 'retrying' ? 'text-warn' : ''}" role="status">
 			{#if chip === "saved"}<Check size={12} class="text-ok" />{:else if chip === "saving"}<LoaderCircle size={12} class="animate-spin" />{:else}<CloudOff size={12} />{/if}
 			{status}
 		</span>
 	</footer>
 </div>
+
+{#if pendingAccept}
+	<!-- svelte-ignore a11y_click_events_have_key_events: Escape is handled by the window key handler. -->
+	<div class="fixed inset-0 z-40 grid place-items-center bg-black/50 p-4" role="presentation" onclick={cancelAccept}>
+		<div
+			class="panel w-full max-w-md shadow-2xl shadow-black/60"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="accept-title"
+			tabindex="-1"
+			{@attach holdFocus}
+			onclick={(event) => event.stopPropagation()}
+		>
+			<div class="panel-title" id="accept-title">Accept suggestions in {pendingAccept.place}?</div>
+			<div class="flex flex-col gap-3 p-3">
+				<p class="text-ink-dim">
+					This saves ready suggestions only where nothing is labeled yet. Your saved labels stay unchanged. Background is excluded unless you check it below.
+				</p>
+				<div class="rounded-sm border border-edge bg-field px-2.5 py-2">
+					<div class="flex items-center justify-between gap-3">
+						<span>Suggested labels (not Background)</span>
+						<span class="font-mono text-2xs">{pendingAccept.classes.toLocaleString()} voxels</span>
+					</div>
+					<label class="mt-2 flex cursor-pointer items-center justify-between gap-3 border-t border-edge pt-2">
+						<span class="flex items-center gap-2">
+							<input type="checkbox" bind:checked={includeAcceptBackground} disabled={pendingAccept.background === 0} />
+							Also Background
+						</span>
+						<span class="font-mono text-2xs">{pendingAccept.background.toLocaleString()} voxels</span>
+					</label>
+				</div>
+				{#if pendingAccept.classes === 0}
+					<p class="text-warn">Only Background suggestions remain here. Check Also Background to save them, or cancel.</p>
+				{/if}
+				<div class="flex justify-end gap-2">
+					<button class="btn" onclick={cancelAccept}>Cancel</button>
+					<button class="btn btn-primary" disabled={pendingAccept.classes === 0 && !includeAcceptBackground} onclick={confirmAccept}>
+						<CheckCheck size={13} />
+						Accept {(
+							pendingAccept.classes + (includeAcceptBackground ? pendingAccept.background : 0)
+						).toLocaleString()} voxels
+						<span class="kbd">A</span>
+					</button>
+				</div>
+			</div>
+		</div>
+	</div>
+{/if}
 
 {#if viewer.help}
 	<div class="fixed inset-0 z-40 grid place-items-center bg-black/50 p-4" role="presentation" onclick={() => (viewer.help = false)}>

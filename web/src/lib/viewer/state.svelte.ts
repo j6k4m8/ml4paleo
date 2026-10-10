@@ -5,6 +5,8 @@
  */
 
 import {
+	ACCEPT_MODE_NAMES,
+	type AcceptMode,
 	chosenClasses,
 	ERASE_MODE_NAMES,
 	type EraseMode,
@@ -21,7 +23,7 @@ import type { Plane, Vec3 } from "./tiles";
 export type Layout = "four" | Plane["name"];
 export const LAYOUTS: Layout[] = ["four", "xy", "xz", "yz"];
 
-export type Tool = "navigate" | "brush" | "eraser" | "polygon" | "roi";
+export type Tool = "navigate" | "brush" | "eraser" | "polygon" | "accept" | "roi";
 
 /** A finished brush or eraser stroke and the settings it was drawn with. */
 export interface Stroke {
@@ -32,6 +34,8 @@ export interface Stroke {
 	value: number;
 	onlyIf: string;
 	radius: number;
+	/** Immutable prediction gesture captured on pointer-down, if this is an Accept brush. */
+	accept?: number;
 }
 
 const PREFERENCES = "m4p.viewer";
@@ -49,6 +53,9 @@ interface Preferences {
 	/** Where the eraser erases, and for "classes" the class values. */
 	eraseMode: EraseMode;
 	eraseClasses: number[];
+	/** Which predicted foreground classes an Accept brush or polygon accepts. */
+	acceptMode: AcceptMode;
+	acceptClasses: number[];
 	roiDepth: number;
 	showPrediction: boolean;
 	predictionOpacity: number;
@@ -81,7 +88,8 @@ export class ViewerState {
 	opacity = $state(LABEL_OPACITY);
 	/** Labels show on every visit, even if they were hidden on the last. */
 	showLabels = $state(true);
-	showPrediction = $state(true);
+	// Every visit begins with saved annotations only. Predictions are opt-in.
+	showPrediction = $state(false);
 	predictionOpacity = $state(0.35);
 	showSegmentation = $state(true);
 	segmentationOpacity = $state(0.45);
@@ -90,6 +98,13 @@ export class ViewerState {
 	/** Refit the image as views resize, until the user pans or zooms. */
 	autoFit = true;
 	tool = $state<Tool>("navigate");
+	acceptShape = $state<"brush" | "polygon">("brush");
+	get drawingBrush(): boolean {
+		return this.tool === "brush" || this.tool === "eraser" || (this.tool === "accept" && this.acceptShape === "brush");
+	}
+	get drawingPolygon(): boolean {
+		return this.tool === "polygon" || (this.tool === "accept" && this.acceptShape === "polygon");
+	}
 	/** The class brushes and polygons paint. */
 	activeClass = $state<number | null>(null);
 	/** Brush radius in voxels of the finest axis. */
@@ -103,9 +118,12 @@ export class ViewerState {
 	 */
 	paintMode = $state<PaintMode>("any");
 	paintClasses = $state<number[]>([]);
-	/** Where the eraser erases: anything, or only the classes in `eraseClasses`. */
+	/** Where the eraser acts: anything, solid paint, predictions, or only the classes in `eraseClasses`. */
 	eraseMode = $state<EraseMode>("any");
 	eraseClasses = $state<number[]>([]);
+	/** Accept filters predicted classes, never the labels underneath (which it always preserves). */
+	acceptMode = $state<AcceptMode>("any");
+	acceptClasses = $state<number[]>([]);
 	/** The polygon being drawn; replaced, never changed in place. */
 	polygon = $state.raw<Polygon | null>(null);
 	/** Closing a polygon fills it with the active class, or cuts it out of that class. */
@@ -132,8 +150,9 @@ export class ViewerState {
 		this.paintClasses = toClassSet(saved.paintClasses ?? saved.paintClass);
 		this.eraseMode = modeFrom(saved.eraseMode, ERASE_MODE_NAMES, "any");
 		this.eraseClasses = toClassSet(saved.eraseClasses ?? saved.eraseClass);
+		this.acceptMode = modeFrom(saved.acceptMode, ACCEPT_MODE_NAMES, "any");
+		this.acceptClasses = toClassSet(saved.acceptClasses).filter((value) => value > 1);
 		if (typeof saved.roiDepth === "number") this.roiDepth = Math.min(512, Math.max(1, Math.round(saved.roiDepth)));
-		if (typeof saved.showPrediction === "boolean") this.showPrediction = saved.showPrediction;
 		if (typeof saved.predictionOpacity === "number") this.predictionOpacity = Math.min(1, Math.max(0, saved.predictionOpacity));
 		if (typeof saved.showSegmentation === "boolean") this.showSegmentation = saved.showSegmentation;
 		if (typeof saved.segmentationOpacity === "number") this.segmentationOpacity = Math.min(1, Math.max(0, saved.segmentationOpacity));
@@ -149,6 +168,8 @@ export class ViewerState {
 				paintClasses: [...this.paintClasses],
 				eraseMode: this.eraseMode,
 				eraseClasses: [...this.eraseClasses],
+				acceptMode: this.acceptMode,
+				acceptClasses: [...this.acceptClasses],
 				roiDepth: this.roiDepth,
 				showPrediction: this.showPrediction,
 				predictionOpacity: this.predictionOpacity,
@@ -163,12 +184,19 @@ export class ViewerState {
 
 	/**
 	 * The classes (label values, background 1 among them) the paint mode goes
-	 * by when it is "classes", or the eraser's: those chosen that are among
-	 * `available`, else the active class, else the first available.
+	 * by when it is "classes", or the eraser's or Accept's: those chosen that
+	 * are among `available`, else the active class, else the first available.
+	 * Accept excludes Background, even as a fallback.
 	 */
-	classesFor(tool: "paint" | "erase", available: readonly number[]): number[] {
-		const chosen = tool === "paint" ? this.paintClasses : this.eraseClasses;
+	classesFor(tool: "paint" | "erase" | "accept", available: readonly number[]): number[] {
+		const chosen = tool === "paint" ? this.paintClasses : tool === "erase" ? this.eraseClasses : this.acceptClasses;
+		if (tool === "accept") available = available.filter((value) => value > 1);
 		return chosenClasses(chosen, available, this.activeClass);
+	}
+
+	/** Freeze this set at gesture start; the label writer still receives only_if="unlabeled". */
+	acceptValues(available: readonly number[]): number[] {
+		return this.acceptMode === "classes" ? this.classesFor("accept", available) : available.filter((value) => value > 1);
 	}
 
 	/** The `only_if` for painting with a brush or filling a polygon, given the label values this project has. */

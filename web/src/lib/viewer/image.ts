@@ -5,6 +5,8 @@
 
 import * as zarr from "zarrita";
 import type { Level } from "./tiles";
+import { timedFetch } from "./fetch";
+import { LoadError } from "./load-errors";
 
 interface Multiscales {
 	datasets: { path: string; coordinateTransformations: { type: string; scale?: number[] }[] }[];
@@ -54,9 +56,17 @@ export function httpStatus(error: unknown): number | undefined {
  * answered 404) says 404, as a missing chunk would if zarrita didn't read it
  * as empty.
  */
-export function failure(error: unknown): { error: string; status?: number } {
+export function failure(error: unknown): { error: string; status?: number; retryAfter?: string; retryable?: boolean } {
 	const missing = error instanceof Error && error.name === "NotFoundError";
-	return { error: String(error), status: httpStatus(error) ?? (missing ? 404 : undefined) };
+	const retryable = error instanceof Error && (
+		["TimeoutError", "NetworkError"].includes(error.name)
+		|| (error instanceof TypeError && /fetch|network|load failed/i.test(error.message))
+	);
+	return {
+		error: String(error), status: error instanceof LoadError ? error.status : httpStatus(error) ?? (missing ? 404 : undefined),
+		...(error instanceof LoadError && error.retryAfter !== undefined ? { retryAfter: error.retryAfter } : {}),
+		...(retryable ? { retryable: true } : {}),
+	};
 }
 
 /** Level-0 voxels per voxel of each level, from the levels' scales. */
@@ -72,7 +82,7 @@ export function levelFactors(multiscales: Multiscales): [number, number, number]
 }
 
 export async function loadLevels(url: string, signal?: AbortSignal): Promise<Level[]> {
-	const store = new zarr.FetchStore(absolute(url), { useSuffixRequest: true });
+	const store = new zarr.FetchStore(absolute(url), { useSuffixRequest: true, fetch: timedFetch() });
 	const group = await zarr.open.v3(zarr.root(store), { kind: "group", signal });
 	const ome = group.attrs.ome as { multiscales?: Multiscales[] } | undefined;
 	const multiscales = ome?.multiscales?.[0];

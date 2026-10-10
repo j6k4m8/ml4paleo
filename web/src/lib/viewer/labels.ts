@@ -142,8 +142,9 @@ export function coarseIds(levels: Level[], keys: Vec3[]): string[] {
  * the page read them, so it carries the versions the page's copies stand
  * for; where any isn't known, it goes out as a plain edit instead.
  */
-export function strictOn<T extends { strict: boolean; deltas: DeltaIn[] }>(layer: Pick<LabelLayer, "versionOf">, op: T): T {
+export function strictOn<T extends { strict: boolean; strictPrepared?: boolean; deltas: DeltaIn[] }>(layer: Pick<LabelLayer, "versionOf">, op: T): T {
 	if (!op.strict) return op;
+	if (op.strictPrepared) return op;
 	const versions = op.deltas.map((d) => layer.versionOf(d.key.join("/")));
 	if (versions.some((v) => v === undefined)) return { ...op, strict: false };
 	return { ...op, deltas: op.deltas.map((d, i) => ({ ...d, base_version: versions[i]! })) };
@@ -152,6 +153,12 @@ export function strictOn<T extends { strict: boolean; deltas: DeltaIn[] }>(layer
 export class LabelLayer {
 	store: ChunkStore;
 	classes: LabelClass[] = [];
+	#serverColors = new Map<number, string>();
+	#previewColors = new Map<number, string>();
+	#colorSaves = new Map<number, Promise<void>>();
+	#classGeneration = 0;
+	/** Saved label revisions only, not local overlays or chunk reloads. */
+	onRevision: ((seq: number) => void) | null = null;
 	/**
 	 * The levels of the labels, finest first: full resolution, then the
 	 * coarser ones (the image's pyramid) the server makes when asked, once
@@ -289,8 +296,9 @@ export class LabelLayer {
 
 	async start(): Promise<void> {
 		const base = `/api/projects/${this.projectId}/labels`;
-		this.classes = await api<LabelClass[]>(`${base}/classes`);
+		this.#setServerClasses(await api<LabelClass[]>(`${base}/classes`));
 		const [[latest]] = await Promise.all([api<{ seq: number }[]>(`${base}/ops?limit=1`), this.#readLevels()]);
+		this.onRevision?.(latest?.seq ?? 0);
 		this.#events = new EventSource(`${base}/events?after=${latest?.seq ?? 0}`);
 		this.#events.onerror = () => {
 			// The browser retries dropped streams itself; a closed one is final,
@@ -302,7 +310,8 @@ export class LabelLayer {
 			}
 		};
 		this.#events.addEventListener("change", (event) => {
-			const change = JSON.parse((event as MessageEvent<string>).data) as { chunks: { key: Vec3; version: number }[] };
+			const change = JSON.parse((event as MessageEvent<string>).data) as { op: { seq: number }; chunks: { key: Vec3; version: number }[] };
+			this.onRevision?.(change.op?.seq ?? 0);
 			this.changed(change.chunks);
 		});
 	}
@@ -563,6 +572,7 @@ export class LabelLayer {
 		if (!this.classes.some((c) => c.value === made.value)) {
 			// A new class's value is the highest ever used, so it goes last.
 			this.classes = [...this.classes, made];
+			this.#serverColors.set(made.value, made.color);
 			this.#classesChanged();
 		}
 		return made;
@@ -570,9 +580,64 @@ export class LabelLayer {
 
 	/** Read the project's classes again, in case someone added some. Views hear of any change. */
 	async refreshClasses(): Promise<void> {
+		const generation = this.#classGeneration;
 		const found = await api<LabelClass[]>(`/api/projects/${this.projectId}/labels/classes`);
-		if (JSON.stringify(found) === JSON.stringify(this.classes)) return;
-		this.classes = found;
+		// A read started before our successful write cannot roll it back.
+		if (generation !== this.#classGeneration) return;
+		this.#setServerClasses(found);
+	}
+
+	previewColor(value: number, color: string): void {
+		const current = this.classes.find((c) => c.value === value);
+		if (!current || !/^#[0-9a-f]{6}$/i.test(color)) return;
+		if (!this.#serverColors.has(value)) this.#serverColors.set(value, current.color);
+		color = color.toLowerCase();
+		this.#previewColors.set(value, color);
+		this.#replaceColor(value, color);
+	}
+
+	/** Serialize each class's writes so a slow earlier save cannot win. */
+	saveColor(value: number): Promise<void> {
+		const previous = this.#colorSaves.get(value) ?? Promise.resolve();
+		const pending = previous.catch(() => {}).then(() => this.#saveColor(value));
+		this.#colorSaves.set(value, pending);
+		return pending.finally(() => {
+			if (this.#colorSaves.get(value) === pending) this.#colorSaves.delete(value);
+		});
+	}
+
+	async #saveColor(value: number): Promise<void> {
+		const color = this.#previewColors.get(value);
+		if (!color) return;
+		try {
+			const saved = await api<LabelClass>(`/api/projects/${this.projectId}/labels/classes/${value}`, { method: "PATCH", body: { color } });
+			this.#classGeneration++;
+			this.#serverColors.set(value, saved.color);
+			if (this.#previewColors.get(value) === color) this.#previewColors.delete(value);
+			this.#replaceColor(value, this.#previewColors.get(value) ?? saved.color);
+		} catch (e) {
+			if (this.#previewColors.get(value) === color) {
+				this.#previewColors.delete(value);
+				this.#replaceColor(value, this.#serverColors.get(value)!);
+			}
+			throw e;
+		}
+	}
+
+	#setServerClasses(found: LabelClass[]): void {
+		for (const value of this.#previewColors.keys()) {
+			if (!found.some((c) => c.value === value)) this.#previewColors.delete(value);
+		}
+		this.#serverColors = new Map(found.map((c) => [c.value, c.color]));
+		const shown = found.map((c) => ({ ...c, color: this.#previewColors.get(c.value) ?? c.color }));
+		if (JSON.stringify(shown) === JSON.stringify(this.classes)) return;
+		this.classes = shown;
+		this.#classesChanged();
+	}
+
+	#replaceColor(value: number, color: string): void {
+		if (!this.classes.some((c) => c.value === value && c.color !== color)) return;
+		this.classes = this.classes.map((c) => c.value === value ? { ...c, color } : c);
 		this.#classesChanged();
 	}
 
