@@ -16,20 +16,57 @@ import datetime
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import aliased
 
+from ml4paleo.meshing.blocks import TooDetailed
+
 from .. import artifacts, audit, quotas
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
+from ..compression import MESH_MEDIA_TYPE, preview_body
 from ..db import Job, LabelClass, Project, User
 from ..jobs.queue import WAITING
+from ..mesh_preview import MAX_INPUT, PreviewBusy
 from ..pipelines import mesh
 from .gateway import files_path
 from .projects import MemberProject
 
 router = APIRouter(prefix="/api/projects/{project_id}/meshes", tags=["meshes"])
+
+
+@router.post("/preview")
+async def preview_mesh(
+    project: MemberProject,
+    request: Request,
+    chunk: str | None = Query(default=None, pattern=r"^\d{1,8},\d{1,8},\d{1,8}$"),
+    downsample: int = Query(default=1, ge=1, le=16),
+) -> Response:
+    """Mesh a bounded viewer snapshot; store nothing and never treat it as labels."""
+    if request.headers.get("content-type") != "application/octet-stream":
+        raise HTTPException(415, "Expected binary preview labels.")
+    body = await preview_body(request, MAX_INPUT)
+    try:
+        target = tuple(int(n) * 64 for n in chunk.split(",")) if chunk else None
+        result = await request.app.state.mesh_preview.build(
+            str(project.id), body, target, downsample
+        )
+    except PreviewBusy:
+        raise HTTPException(
+            503, "3D preview is busy. Try again shortly.", headers={"Retry-After": "1"}
+        ) from None
+    except TooDetailed:
+        raise HTTPException(
+            422, {"code": "mesh_detail", "message": "Use a coarser 3D preview."}
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return Response(
+        result,
+        media_type=MESH_MEDIA_TYPE,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 class MeshIn(BaseModel):

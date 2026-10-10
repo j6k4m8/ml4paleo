@@ -1989,6 +1989,7 @@ dependencies = [
     { name = "pyotp" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "zmesh" },
 ]
 
 [package.metadata]
@@ -2004,6 +2005,7 @@ requires-dist = [
     { name = "pyotp", specifier = ">=2.9" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.44" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.38" },
+    { name = "zmesh", specifier = ">=1.11.0" },
 ]
 
 [[package]]

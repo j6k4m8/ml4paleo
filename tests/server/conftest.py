@@ -171,8 +171,11 @@ class Browser:
         if self.csrf_token and method.upper() not in SAFE_METHODS:
             headers.setdefault("X-CSRF-Token", self.csrf_token)
         response = self.client.request(method, url, headers=headers, **kwargs)
-        if response.content and response.headers.get("content-type", "").startswith(
-            "application/json"
+        # A range of a JSON object is not itself a JSON document/session.
+        if (
+            response.status_code != 206
+            and response.content
+            and response.headers.get("content-type", "").startswith("application/json")
         ):
             body = response.json()
             if isinstance(body, dict) and "csrf_token" in body:

@@ -32,9 +32,11 @@ from . import __version__
 from .api import ROUTERS
 from .auth.sessions import cookie_name
 from .auth.tokens import csrf_token, tokens_match
+from .compression import CompressionMiddleware
 from .db import create_engine, create_sessionmaker
 from .jobs import JobSignal
 from .label_pyramid import LabelPyramid
+from .mesh_preview import MeshPreviewPool
 from .settings import Settings
 from .storage import project_storage
 from .viewer import (
@@ -130,6 +132,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            app.state.mesh_preview.close()
             await job_signal.stop()
             await engine.dispose()
 
@@ -144,6 +147,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.label_pyramid = LabelPyramid(settings.label_cache_mb * 1024 * 1024)
+    app.state.mesh_preview = MeshPreviewPool()
+    app.add_middleware(CompressionMiddleware)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(
