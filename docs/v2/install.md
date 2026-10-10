@@ -4,6 +4,28 @@ Everything runs in Docker Compose from `deploy/compose/`: Caddy (HTTPS, the
 only service with published ports), the API (which also serves the web app),
 the housekeeper, Postgres, SeaweedFS (object storage), and the job workers.
 
+Neuroglancer is a required part of the app. The server image builds and includes
+the pinned client and serves it at `/neuroglancer/`; no extra setup is needed
+with Docker. The server refuses to start if the client is missing.
+
+For a source-based installation, build it once with Git and Node/npm:
+
+```sh
+bash deploy/build-neuroglancer.sh "$PWD/build/neuroglancer"
+export M4P_NEUROGLANCER_DIR="$PWD/build/neuroglancer"
+```
+
+Keep that setting in the server's launch environment, alongside `M4P_WEB_DIR`.
+The script uses the same commit and OBJ-reader fix as the Dockerfile. Rerun it
+after updating the app: unchanged builds are reused without network access;
+a changed pin or patch triggers a rebuild.
+
+The project's Neuroglancer tab includes existing mesh exports as visible,
+class-colored 3D layers, with color and opacity controls. It reuses the OBJ
+files without remeshing and respects voxel spacing. These are whole-class
+mesh downloads, not Neuroglancer multiscale mesh chunks. Meshes from a replaced
+scan are not overlaid on its replacement.
+
 ## What you need
 
 - A Linux machine with Docker and the Compose plugin (2.24 or newer). 16 GB

@@ -36,6 +36,61 @@ v1 (`webapp/` Flask + three polling runner scripts + `volume/jobs.json`, plus th
 3. **One axis boundary.** Storage is `c,z,y,x`. The only XYZ↔ZYX transpose is in `ml4paleo/ome.py`, covered by golden tests (v1 shipped both a transposed PNG export and mirrored meshes).
 4. **Heavy work never runs in a request.** The API only enqueues, streams bytes, or applies small label ops.
 
+### Opt-in Live learning and prediction
+
+The annotator opens with **saved annotations only**, regardless of previous
+prediction visibility. Machine predictions are an explicit, hideable preview;
+accepting is the only way their values become annotations. Declining is not
+background training truth. Labels retain priority over every preview.
+
+`PluginCaps` advertises `display_name`, `family` (classical/neural/other), and
+`learning` (manual/debounced/periodic), plus debounce/minimum learning intervals.
+The UI uses this contract rather than recognizing plugin names. Unknown plugins
+default to manual learning. RF declares debounced learning (one-second pause,
+at least five seconds between starts); neural plugins can declare periodic
+learning. Only RF is installed today; there is no pretend neural option.
+
+Learning and prediction are separate loops. The browser coalesces saved label
+revisions (including other people's edits and undo) into the newest pending
+snapshot. The server serializes live training across tabs, deduplicates pinned
+snapshots and throttles starts. Each user's live models retain a ready checkpoint
+while one new checkpoint trains, using at most two ordinary quota slots. Only
+live-created checkpoints are pruned; manually saved models are untouched.
+Failed snapshots wait for changed annotations or explicit manual training.
+
+Inference uses the last ready checkpoint, never a model being trained. One
+`predict.live` interactive-priority job predicts one 64³ output chunk at a time;
+the model's halo supplies spatial context, just as for whole-volume prediction.
+The browser ranks a bounded neighborhood: latest brush, visible slices from the
+crosshair outward, then nearby chunks. Navigation replaces the pending ranking;
+obsolete completions cannot publish into a newer checkpoint. Cached artifacts
+are keyed by image, immutable model artifact, and chunk. They expire after two
+days unless acceptance/decline provenance retains them. Neither the project
+prediction head nor ROI proposal head is modified by Live.
+
+A new ready checkpoint does not clear displayed regions. Each keeps its own
+model id, label sequence, and immutable prediction artifact until replacement
+bytes are decoded. The routing snapshot swaps one chunk at a time; unchanged
+GPU textures are retained. Older 2D suggestion chunks pulse subtly at 12 fps
+while Live is enabled, with a static dim treatment for reduced motion or a
+paused or blocked update (including quota errors and manual-training backends).
+Saved paint and fresh predictions never pulse. Failed downloads
+leave the previous suggestions available, including their original provenance.
+
+Accept freezes the displayed checkpoint/ready-region set and records each
+region's actual immutable artifact in an ordered undo group. Missing chunks
+are not accepted as background. Background remains an explicit confirmation
+choice. Prediction visibility also gates erasing suggestions.
+
+Neural follow-on: implement a plugin that pads/resamples arbitrary boundary
+blocks, crops its output halo (and internally blends overlaps if needed), and
+reports honest CPU/GPU/memory needs. Periodic learning here means training a new
+immutable checkpoint, not warm-start/fine-tuning support yet. GPU inference
+priority orders queued jobs; it does **not** preempt a long training kernel.
+Reserve inference capacity/separate workers or add cooperative training slices
+before promising responsive simultaneous neural training on one GPU. Benchmark
+seams, latency and memory with real neural weights before enabling that plugin.
+
 ### Layout
 ```
 ml4paleo/  storage/ (StorageGrant, object_store, zarr_store, proxy_store)  ome.py  blocks.py
@@ -104,9 +159,38 @@ Reused from v1: `_extract_zip_archive`, `_should_ignore_source_file`, `_get_volu
 - Built (labels from files and exploring, #28/#31): the ROIs page has a column beside the gallery. "How training works" lays out the loop (label a few places or import labels, train on the Models page, explore somewhere new to see how the model does and fix what it gets wrong, retrain, explore again) with "Explore a new place"; the project overview shows it too, once there's an image. "Import labels" takes a file by drop or picker once the project has an image (uploaded resumably, as scans are, and deleted again if its check is refused), follows the check over the pipeline stream, then lists the values found with their voxels and a menu for each: Unlabeled, Background, a class, or a new class with a name and color. 0 starts unlabeled, a value some class is named after starts as that class, the only other value as the only class, and the rest as new classes named after them ("A new class for each value" puts them all back that way). A switch replaces labels already there; then it follows the import, and lists earlier imports with their state and why they failed. Thumbnails redraw when an import finishes. `POST /api/projects/<id>/rois/explore` makes an open cube ROI (origin "explore") at a random place that shares no voxel with any ROI: 128 voxels a side, fewer along axes whose voxels are longer (a cube in physical terms), cut to the image, or 64 or 32 where ROIs leave no room (409 when even those don't fit). Exploring from the ROIs page or the overview makes one, has the newest ready model propose labels there unless the project's prediction is already that model's, and opens it in the annotator, which follows the proposal as it's made; the annotator's ROIs panel has an Explore button that does the same in place. While ROIs are hidden, the Labels page holds the import and the overview's loop drops Explore.
 
 ### Annotator (web)
+
+The annotator presents one live segmentation: stored human and accepted labels
+are solid, while current prediction/proposal foreground is hatched underneath.
+The immutable final-segmentation artifact is a Results snapshot, not an
+annotator layer. A user accepts foreground suggestions by default; predicted
+Background is a separate counted opt-in. Declining a foreground suggestion is
+model-authenticated by `POST /labels/decline` and stores reserved value 255
+with `Source.DECLINED`. That marker renders as hidden, trains as ignore, and
+composes as Background. The eraser removes stored paint and writes checked
+declines for visible suggestions as one undo group; its masks carry the exact
+chunk versions they were built from. “Only my paint” removes solid stored
+labels without declining the suggestion below. “Restore declined” changes only
+255 back to unlabeled through the `declined` edit condition, so concurrent or
+newer labels are not overwritten. Declines, restores, accepts, undo, and redo
+all remain in label history. The Results page reports edits since its pinned
+label sequence and offers an explicit Update result action.
 - Routes: `/p/[pid]` overview, `/annotate?roi=&box=`, `/labels` (what's labeled, and labels from a file #28), `/rois` (queue, gallery with delete #60, the training loop with Explore #31, and labels from a file too; hidden for now, and sends you to `/labels`; suggestions later), `/models`, `/results`, `/history` (op log, revert), `/settings` (name, collaborators, leave, delete; the label set and a default plugin later); `/import` (v1 jobs, one at a time); `/admin`.
-- WebGL2, one context per plane: CPU extracts 64×64 cross-sections from cached chunks, GPU does uint16 windowing (no 8-bit cast), multichannel additive blend, label palette texture + opacity slider (#51), proposal hatch, uncertainty heatmap. three.js 3D preview.
+- WebGL2, one context per plane: CPU extracts 64×64 cross-sections from cached chunks, GPU does uint16 windowing (no 8-bit cast), multichannel additive blend, label palette texture + opacity slider (#51), proposal hatch, uncertainty heatmap. The fourth quadrant is a plain-WebGL2 3D minimap: the finest bounded coarse label level and nearby masked suggestions become translucent zmesh marching-cubes surfaces, with hatched suggestions. A browser worker packs resident chunks and converts mesh vertices; `POST /api/projects/<id>/meshes/preview` requires membership and CSRF, accepts at most 16 uint8 64³ chunks, and writes no labels, artifacts, or pipelines. The API uses a separate native-meshing process (zmesh holds the GIL), one active and one queued request per API process, a 16 MiB content/project-keyed response cache, and explicit surface/triangle limits. Existing block-meshing halos preserve seams; simplification is bounded to 0.5 coarse voxels. Physical spacing, pyramid scale, and partial edge cells map vertices into the shared world. Saved and suggested triangles sort together back-to-front on orbit; pan and zoom reuse the geometry. Slice planes and crosshair provide context. Drag orbits, Shift-drag pans the shared XYZ center, wheel zooms, and right-click raytraces the closest visible triangle to move all slices to that surface. Hidden/zero-opacity layers are not pickable; empty-space clicks do nothing.
+- Interactive mesh requests name one core chunk plus its positive halo slabs. A browser-worker content cache (64 entries, at most 300 KB each) reuses geometry across redraws, color changes, and unrelated edits. Only changed cores and affected seam neighbors go over the wire and through zmesh. Complex cores subdivide before native calls (60,000 voxel-face maximum per call); output is capped at 7,500 triangles per core, 16 cores per layer. On a detail-budget response, the worker retries at 2×, 4×, 8×, then 16× coarser resolution. Every chunk in a layer uses the same factor to preserve seams; that factor stays stable until its source level changes. Coarsening is a majority preview, can omit tiny structures, and never modifies labels, 2D predictions, or exports. Previous geometry remains until a complete replacement is ready, including on errors; the minimap labels coarsened output as a simplified preview.
 - Chunk loader ported from bossypaints: visible window + 1 chunk padding, nearest-first, coarse levels first, abort out-of-view requests, decode in Web Workers, LRU by bytes (pin chunks with pending ops).
+
+### Model evaluation
+
+Training-set manifests pin label provenance beside label classes. Models may
+learn from accepted/interactively propagated labels and implicit Background in
+complete training ROIs, but grades use only voxels directly drawn by a person
+or imported from a human annotation. Explicit validation-ROI annotations take
+priority; without them, the random forest reports out-of-bag predictions for
+human/imported rows, so normal paint-only projects still get a held-out grade.
+The Models page compares ready models by Dice and accuracy, states the grading
+method and annotated voxel count, and marks a best model only among models
+trained from the newest common label sequence.
 - State with Svelte 5 runes; zoom/pan never persisted (#37); brush size, windows, opacity persisted per user.
 - Tools: brush/eraser (any plane, optional 3D sphere), polygon/lasso (+subtract), threshold brush, flood fill / wand (2D; 3D in a Worker ≤256³), copy to next slice, 2D fill-holes/open/close — client side. Random walker propagation and 3D morphology — CPU worker jobs. Click-to-segment (M3) — `interactive_session` job on a warm GPU worker that opens an outbound WebSocket relayed by the API; previews commit as strict ops.
 - Single keymap table drives handlers and the `?` overlay.
@@ -150,6 +234,40 @@ class SegmentationPlugin(Protocol):
 
 ### Security (nothing is public without strong authentication)
 `__Host-` session cookie (HttpOnly, Secure, SameSite=Lax), CSRF header + Origin check, every project route through one membership dependency (404 for non-members), route-matrix test over `app.routes`, password length ≥12 + offline common-password list, dummy-hash timing, rate limits (login, signup, reset, v1 claim, usernames tried when adding collaborators), bootstrap admin with random password printed once + forced change + TOTP, no API CORS (Neuroglancer self-hosted same-origin), strict CSP, no third-party scripts or analytics, Caddy body cap 8 MB on `/api` (uploads go direct to S3; the worker storage proxy allows 4 GB), untrusted files parsed only in non-root workers with Pillow/zip limits, secrets via `*_FILE`, TOTP/OIDC secrets encrypted with a data key. Validation errors are the usual 422 list (`loc`, `msg`, `type`, `input`), and an `input` JSON can't hold (NaN, an infinity, or a number too big for a float, which Python's JSON parser takes) is shown as text instead of failing to render as a 500 (`invalid_request` in `app.py`). The database can't store them either, so every request field that could be sent one refuses it with a 422, not a 500: each free-form field through one function, `json_text` in `ml4paleo.protocol` ("tool can't hold NaN or infinity"), for an edit's `tool` (from people and from workers), a model's training `params`, and a job's `result` (a worker whose job finds one fails it at once, "The job's result holds NaN or infinity.", where it would have sent null); each number with no upper bound with `allow_inf_nan=False` (quota limits, and a worker's memory, video memory, and wait for work), the bounded ones (progress) refusing them by their bounds; and a worker's label edit's deltas as the annotator's are. The server also parses one thing a job writes to storage, `_MANIFEST.json`, and rejects one that holds them, which fails the job for good. `test_a_new_request_field_that_could_hold_nan_is_one_that_is_checked` finds the fields from the API's OpenAPI schema, so a new one fails until it is checked too. Not covered: numbers the server works out itself (a pipeline's progress, say), and the other files a job writes, which the server doesn't read.
+
+### HTTP compression
+
+Viewer recovery: each HTTP read (including shared metadata/shard indexes and
+response bodies) has a 20-second deadline. Decode workers have a separate
+45-second watchdog; a crash, message failure, or timeout rejects that worker's
+outstanding loads and replaces it lazily, ignoring late replies. ChunkStore
+retries initial loads only for network/timeouts and HTTP 408/429/500/502/503/504:
+three retries with exponential delay/jitter and Retry-After, using the existing
+queue's 250 ms retry spacing and 120-second patience. Waiting retries release
+their concurrency slot and cancel when no view needs them. Exhausted/permanent
+failures remain latched across redraws until Retry, leaving the area, or data
+invalidation; planes and the minimap offer Retry. Existing LabelLayer refresh
+retries remain separate and retain the last good copy rather than stacking
+these new attempts. Sparse 404 chunks remain valid empty data, never retried.
+
+- The API compresses text, JSON (including Zarr metadata), JS/CSS, WASM, SVG,
+  and interactive mesh responses over 1 KiB with negotiated gzip at level 3.
+  This also applies to the direct `:8000` development server; production's
+  existing Caddy encoder does not need to recompress an encoded response.
+  `Vary: Accept-Encoding` separates cached variants and compressed file ETags
+  are weak. Byte ranges, worker traffic, auth responses, event streams,
+  `no-transform`, and already encoded/binary objects bypass API compression.
+- Scan, label, and prediction voxels are already Zstandard-compressed inside
+  Zarr. They remain byte-exact, including shard-index suffix ranges; adding
+  another compression layer would spend CPU without improving these reads.
+- The minimap worker gzips preview label uploads with native CompressionStream
+  when it reduces the size, otherwise sends the original bytes. Only this
+  endpoint accepts compressed request bodies. Wire and inflated size are both
+  capped; malformed/truncated/multi-member gzip is refused before meshing.
+  Native zmesh's triangle reply uses a mesh-specific media type so HTTP gzip
+  compresses it while ordinary binary Zarr responses stay untouched. Fetch
+  decodes responses transparently. Source uploads and label-history formats
+  are unchanged.
 
 ### Deploy
 - Single box: `deploy/compose` with Caddy as the only published service (80/443, HTTPS for `M4P_DOMAIN`, including `localhost` with Caddy's local CA; the API refuses a plain-HTTP public URL), `migrate` one-shot (also creates the first `admin` from `secrets/initial_admin_password`), `seaweedfs-init` one-shot (creates the bucket), `api` (uvicorn, 4 workers, serves SPA), `housekeeper`, `postgres` (17), `backup` (nightly `pg_dump`, 14 days kept), `seaweedfs`, `worker-cpu`, `worker-gpu` (profile), `scaler` (profile). Networks: `public` (Caddy, API, housekeeper; internet access), `private` (internal: Postgres, SeaweedFS, and the server processes), `jobs` (Caddy's worker-only port `:8080` and the workers), and `uploads` (internal: Caddy and SeaweedFS, for signed part uploads). CI checks what each network can reach. `setup.sh DOMAIN` generates every secret. Images non-root, explicit `.dockerignore`; pinning images by digest is still to do.
