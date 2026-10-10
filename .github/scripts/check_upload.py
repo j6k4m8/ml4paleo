@@ -19,12 +19,24 @@ import struct
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 import zlib
 
 # Caddy serves "localhost" with its own certificate authority.
 CONTEXT = ssl._create_unverified_context()
+
+
+def is_neuroglancer_link(value: str | None) -> bool:
+    """Allow the bundled viewer's cache-version query without relaxing its route."""
+    link = urllib.parse.urlsplit(value or "")
+    return (
+        not link.scheme
+        and not link.netloc
+        and link.path == "/neuroglancer/"
+        and link.fragment.startswith("!")
+    )
 
 
 def png(width: int, height: int, value: int) -> bytes:
@@ -185,7 +197,7 @@ def main(origin: str) -> int:
         metadata = api("GET", image["zarr_url"] + "zarr.json")
         if "ome" not in metadata.get("attributes", {}):
             problems.append("the gateway didn't serve the image's OME-Zarr metadata")
-        if not (image.get("neuroglancer_url") or "").startswith("/neuroglancer/#!"):
+        if not is_neuroglancer_link(image.get("neuroglancer_url")):
             problems.append("there is no Neuroglancer link for the image")
     # The web app, on any route, with its start script allowed by hash.
     with opener.open(origin + "/p/" + project + "/annotate") as response:
