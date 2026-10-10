@@ -17,6 +17,65 @@ const viewerWith = (saved: Record<string, unknown>) => {
 };
 
 describe("ViewerState", () => {
+	it("uses Accept's selected shape without needing an active paint class", () => {
+		const viewer = viewerWith({});
+		viewer.tool = "accept";
+		expect(viewer.activeClass).toBeNull();
+		expect([viewer.drawingBrush, viewer.drawingPolygon]).toEqual([true, false]);
+		viewer.acceptShape = "polygon";
+		expect([viewer.drawingBrush, viewer.drawingPolygon]).toEqual([false, true]);
+		viewer.tool = "brush";
+		expect([viewer.drawingBrush, viewer.drawingPolygon]).toEqual([true, false]);
+		viewer.tool = "polygon";
+		expect([viewer.drawingBrush, viewer.drawingPolygon]).toEqual([false, true]);
+	});
+
+	it("starts with predictions hidden even when a previous visit showed them", () => {
+		expect(viewerWith({ showPrediction: true }).showPrediction).toBe(false);
+	});
+
+	it("accepts every foreground class by default, independent of paint and erase filters", () => {
+		const viewer = viewerWith({ paintMode: "classes", paintClasses: [2], eraseMode: "classes", eraseClasses: [3] });
+		expect(viewer.acceptMode).toBe("any");
+		expect(viewer.acceptClasses).toEqual([]);
+		expect(viewer.acceptValues([1, 2, 3, 4])).toEqual([2, 3, 4]);
+		viewer.acceptClasses = [3];
+		// A remembered subset only takes effect in Only classes.
+		expect(viewer.acceptValues([1, 2, 3, 4])).toEqual([2, 3, 4]);
+	});
+
+	it.each(["brush", "polygon"] as const)("uses the selected predicted classes for an Accept %s", (shape) => {
+		const viewer = viewerWith({ acceptMode: "classes", acceptClasses: [4, 2] });
+		viewer.tool = "accept";
+		viewer.acceptShape = shape;
+		viewer.activeClass = 3;
+		expect(viewer.acceptValues([1, 2, 3, 4])).toEqual([2, 4]);
+		const frozen = new Set(viewer.acceptValues([1, 2, 3, 4]));
+		viewer.acceptClasses = [3];
+		expect([...frozen]).toEqual([2, 4]);
+		expect(viewer.acceptValues([1, 2, 3, 4])).toEqual([3]);
+	});
+
+	it("falls back to an available foreground class, never Background, for Accept", () => {
+		const viewer = viewerWith({ acceptMode: "classes", acceptClasses: [8, 9] });
+		viewer.activeClass = 3;
+		expect(viewer.classesFor("accept", [1, 2, 3])).toEqual([3]);
+		viewer.activeClass = 1;
+		expect(viewer.acceptValues([1, 2, 3])).toEqual([2]);
+		expect(viewer.acceptValues([1])).toEqual([]);
+		viewer.acceptClasses = [3, 9];
+		expect(viewer.acceptValues([1, 2, 3])).toEqual([3]);
+	});
+
+	it("sanitizes saved Accept filters and remembers them across visits", () => {
+		const viewer = viewerWith({ acceptMode: "classes", acceptClasses: [4, 2, 2, 1, 0, 255, 2.5, "3", null] });
+		expect(viewer.acceptClasses).toEqual([2, 4]);
+		viewer.savePreferences();
+		const restored = new ViewerState([10, 10, 10], [1, 1, 1]);
+		expect([restored.acceptMode, restored.acceptClasses]).toEqual(["classes", [2, 4]]);
+		expect(viewerWith({ acceptMode: "labeled", acceptClasses: "2" }).acceptMode).toBe("any");
+		expect(viewerWith({ acceptClasses: [1, 255, null] }).acceptClasses).toEqual([]);
+	});
 	afterEach(() => {
 		vi.unstubAllGlobals();
 	});
@@ -59,6 +118,7 @@ describe("ViewerState", () => {
 		expect([viewer.eraseMode, viewer.eraseClasses]).toEqual(["classes", [1, 3]]);
 		expect(viewerWith({ paintMode: "labeled" }).paintMode).toBe("labeled");
 		expect(viewerWith({ paintMode: "unlabeled" }).paintMode).toBe("unlabeled");
+		expect(viewerWith({ eraseMode: "predictions" }).eraseMode).toBe("predictions");
 	});
 
 	it("migrates the old checkbox for painting only unlabeled voxels to that mode", () => {
@@ -119,6 +179,8 @@ describe("ViewerState", () => {
 		expect(viewer.eraseCondition([1, 2, 3])).toBe("class:2");
 		// The eraser's classes are its own.
 		expect(viewer.paintCondition([1, 2, 3])).toBe("class:3");
+		viewer.eraseMode = "predictions";
+		expect(viewer.eraseCondition([1, 2, 3])).toBe("unlabeled");
 	});
 
 	it("doesn't save whether labels show", () => {

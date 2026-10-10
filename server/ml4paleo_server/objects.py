@@ -99,5 +99,7 @@ async def serve(
         body(),
         status_code=206 if range_header else 200,
         headers=response_headers,
-        media_type="application/octet-stream",
+        media_type="application/json"
+        if key.endswith(".json")
+        else "application/octet-stream",
     )

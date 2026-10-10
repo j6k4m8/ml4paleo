@@ -10,11 +10,15 @@ import {
 	MAX_VIEW_CHUNKS,
 	type ViewAccept,
 	acceptKeyTarget,
+	acceptCounts,
 	acceptParts,
 	chunksIn,
+	declineParts,
+	declinesUnderErase,
 	leavesLabeledOut,
 	planeToAccept,
 	readBox,
+	restoreDeclinedParts,
 	tooBigForView,
 	unlabeledOnly,
 	viewExtent,
@@ -46,14 +50,14 @@ describe("accepting a prediction", () => {
 			for (let y = 50; y < 70; y++) for (let x = 120; x < 130; x++) expect(values[i++]).toBe((z + y + x) % 4);
 	});
 
-	it("writes each value only into unlabeled voxels, never 0", async () => {
+	it("writes foreground classes only into unlabeled voxels by default", async () => {
 		const box: Box = [62, 0, 0, 66, 2, 2];
 		const values = await readBox(fakeChunk, box);
 		const parts = acceptParts(values, box);
-		expect(parts).toHaveLength(3);
+		expect(parts).toHaveLength(2);
 		const written = parts.flat();
-		expect(written.every((d) => d.only_if === "unlabeled" && d.value !== 0)).toBe(true);
-		expect(new Set(written.map((d) => d.value))).toEqual(new Set([1, 2, 3]));
+		expect(written.every((d) => d.only_if === "unlabeled" && (d.value ?? 0) > 1)).toBe(true);
+		expect(new Set(written.map((d) => d.value))).toEqual(new Set([2, 3]));
 		// Each part touches a chunk at most once.
 		for (const part of parts) {
 			const keys = part.map((d) => d.key.join("/"));
@@ -63,7 +67,58 @@ describe("accepting a prediction", () => {
 			const n = (d.box[3] - d.box[0]) * (d.box[4] - d.box[1]) * (d.box[5] - d.box[2]);
 			return sum + unpackBits(decompress(fromBase64(d.mask)), n).reduce((a, b) => a + b, 0);
 		}, 0);
-		expect(voxels).toBe(values.filter((v) => v > 0).length);
+		expect(voxels).toBe(values.filter((v) => v > 1).length);
+	});
+
+	it("counts foreground and Background separately and includes Background only when asked", () => {
+		const box: Box = [0, 0, 0, 1, 2, 4];
+		const values = Uint8Array.from([0, 1, 2, 1, 3, 0, 2, 1]);
+		expect(acceptCounts(values)).toEqual({ classes: 3, background: 3 });
+		expect(new Set(acceptParts(values, box).flat().map((d) => d.value))).toEqual(new Set([2, 3]));
+		expect(new Set(acceptParts(values, box, true).flat().map((d) => d.value))).toEqual(new Set([1, 2, 3]));
+	});
+
+	it("declines foreground only, with the prediction value authenticated per part", () => {
+		const box: Box = [0, 0, 0, 1, 2, 4];
+		const values = Uint8Array.from([0, 1, 2, 1, 3, 255, 2, 1]);
+		const parts = declineParts(values, box);
+		expect(parts).toHaveLength(2);
+		expect(parts.map((part) => part[0]?.prediction_value)).toEqual([2, 3]);
+		for (const part of parts) {
+			expect(part.every((delta) => delta.value === 255 && delta.only_if === "unlabeled")).toBe(true);
+		}
+		expect(written(parts)).toEqual(
+			new Map([
+				["0/0/2", 255],
+				["0/1/0", 255],
+				["0/1/2", 255],
+			]),
+		);
+	});
+
+	it("selects eraser declines from stored labels and suggestions, not display state", () => {
+		const predicted = Uint8Array.from([2, 2, 3, 3, 1, 2]);
+		const labeled = Uint8Array.from([0, 3, 0, 2, 0, 255]);
+		const stroke = Uint8Array.from([1, 1, 1, 1, 1, 0]);
+		expect([...declinesUnderErase(predicted, labeled, stroke, "any")]).toEqual([2, 2, 3, 3, 0, 0]);
+		// Only predictions leaves stored labels untouched and declines visible suggestions.
+		expect([...declinesUnderErase(predicted, labeled, stroke, "unlabeled")]).toEqual([2, 0, 3, 0, 0, 0]);
+		// Unlabeled predicted class 2, plus stored class 2 even over a class-3 suggestion.
+		expect([...declinesUnderErase(predicted, labeled, stroke, "class:2")]).toEqual([2, 0, 0, 3, 0, 0]);
+		// Stored class 3 counts even where the underlying suggestion is class 2.
+		expect([...declinesUnderErase(predicted, labeled, stroke, "class:3")]).toEqual([0, 2, 3, 0, 0, 0]);
+	});
+
+	it("restores only decline tombstones to unlabeled", () => {
+		const box: Box = [0, 0, 0, 1, 2, 3];
+		const parts = restoreDeclinedParts(Uint8Array.from([255, 0, 2, 1, 255, 3]), box);
+		expect(parts.flat().every((delta) => delta.value === 0 && delta.only_if === "declined")).toBe(true);
+		expect(written(parts)).toEqual(
+			new Map([
+				["0/0/0", 0],
+				["0/1/1", 0],
+			]),
+		);
 	});
 });
 
@@ -104,13 +159,13 @@ describe("accepting what a view shows", () => {
 		["a YZ slice", [60, 60, 127, 70, 70, 128]],
 	];
 
-	it.each(slabs)("writes what's predicted over %s, background too, never 0", (_name, box) => {
+	it.each(slabs)("writes foreground predictions over %s and never Background or 0 by default", (_name, box) => {
 		const values = slab(box);
 		const parts = acceptParts(values, box);
 		const deltas = parts.flat();
 		expect(deltas.length).toBeGreaterThan(0);
-		expect(deltas.every((d) => d.only_if === "unlabeled" && d.value !== 0 && d.values === undefined)).toBe(true);
-		expect(new Set(deltas.map((d) => d.value))).toEqual(new Set([1, 2, 3]));
+		expect(deltas.every((d) => d.only_if === "unlabeled" && (d.value ?? 0) > 1 && d.values === undefined)).toBe(true);
+		expect(new Set(deltas.map((d) => d.value))).toEqual(new Set([2, 3]));
 		for (const part of parts) {
 			// An op touches a chunk once, and carries one value.
 			const keys = part.map((d) => d.key.join("/"));
@@ -122,7 +177,7 @@ describe("accepting what a view shows", () => {
 		let i = 0;
 		for (let z = box[0]; z < box[3]; z++) {
 			for (let y = box[1]; y < box[4]; y++) {
-				for (let x = box[2]; x < box[5]; x++, i++) if (values[i]) expected.set(`${z}/${y}/${x}`, values[i]!);
+				for (let x = box[2]; x < box[5]; x++, i++) if (values[i]! > 1) expected.set(`${z}/${y}/${x}`, values[i]!);
 			}
 		}
 		expect(written(parts)).toEqual(expected);
@@ -142,10 +197,12 @@ describe("accepting what a view shows", () => {
 		// The input stays as it was, and what is left makes edits only for those voxels.
 		expect([...predicted]).toEqual([1, 2, 3, 1, 2, 2, 2, 2]);
 		const filled = written(acceptParts(left, box));
-		expect(filled.size).toBe(5);
+		expect(filled.size).toBe(4);
 		expect(filled.has("5/0/62")).toBe(false);
 		expect(filled.get("5/0/63")).toBe(2);
 		expect(filled.get("5/1/65")).toBeUndefined();
+		// The one still-unlabeled Background voxel is included only by explicit opt-in.
+		expect(written(acceptParts(left, box, true)).size).toBe(5);
 		// Everything labeled: nothing to send.
 		expect(acceptParts(unlabeledOnly(predicted, new Uint8Array(8).fill(1)), box)).toEqual([]);
 		// Nothing labeled: all of it.
@@ -236,23 +293,23 @@ describe("accepting what a view shows", () => {
 
 		it("says what's wrong, most basic first", () => {
 			expect(why({ imageReplaced: true })).toContain("image was replaced");
-			expect(why({ predicted: false })).toContain("no prediction");
+			expect(why({ predicted: false })).toContain("No suggestions ready");
 			expect(why({ shown: false })).toContain("hidden");
-			expect(why({ opacity: 0 })).toContain("opacity is 0");
-			expect(why({ opacity: Number.NaN })).toContain("opacity is 0");
+			expect(why({ opacity: 0 })).toContain("0% opacity");
+			expect(why({ opacity: Number.NaN })).toContain("0% opacity");
 			expect(why({ box: null })).toContain("Nothing of the image is in view");
 			expect(why({ box: [3, 0, 0, 4, 4096, 4096] })).toBe("Zoom in a bit: the visible area is too big to accept at once.");
 			// Or when the view counts more chunks than the box touches, as when it leaves the prediction out.
 			expect(why({ tiles: 120 })).toBe("Zoom in a bit: the visible area is too big to accept at once.");
 			expect(why({ tiles: 102 })).toBe("");
 			expect(why({ mixed: true })).toContain("proposal");
-			expect(why({ covered: false })).toContain("Nothing is predicted");
+			expect(why({ covered: false })).toContain("No suggestions ready");
 		});
 
 		it("gives the first reason when there are several", () => {
 			const everything = { imageReplaced: true, predicted: false, shown: false, opacity: 0, box: null, tiles: 0, mixed: true, covered: false };
 			expect(why(everything)).toContain("image was replaced");
-			expect(why({ ...everything, imageReplaced: false })).toContain("no prediction");
+			expect(why({ ...everything, imageReplaced: false })).toContain("No suggestions ready");
 			expect(why({ ...everything, imageReplaced: false, predicted: true })).toContain("hidden");
 			expect(why({ ...everything, imageReplaced: false, predicted: true, shown: true })).toContain("opacity");
 			expect(why({ ...everything, imageReplaced: false, predicted: true, shown: true, opacity: 1 })).toContain("Nothing of the image");
@@ -260,7 +317,7 @@ describe("accepting what a view shows", () => {
 			const big: Partial<ViewAccept> = { box: [3, 0, 0, 4, 4096, 4096], tiles: 4096, mixed: true, covered: false };
 			expect(why(big)).toContain("too big");
 			expect(why({ ...big, box: slice, tiles: 64 })).toContain("proposal");
-			expect(why({ ...big, box: slice, tiles: 64, mixed: false })).toContain("Nothing is predicted");
+			expect(why({ ...big, box: slice, tiles: 64, mixed: false })).toContain("No suggestions ready");
 		});
 	});
 

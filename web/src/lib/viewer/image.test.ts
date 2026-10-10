@@ -122,7 +122,7 @@ describe("httpStatus", () => {
 		const answered = failure(await opening(503));
 		expect(answered.status).toBe(503);
 		expect(answered.error).toContain("503");
-		expect(failure(new TypeError("Failed to fetch"))).toEqual({ error: "TypeError: Failed to fetch", status: undefined });
+		expect(failure(new TypeError("Failed to fetch"))).toEqual({ error: "TypeError: Failed to fetch", status: undefined, retryable: true });
 	});
 
 	it("says 404 for an array the server has no metadata for, which zarrita reports as not found", async () => {

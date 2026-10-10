@@ -16,3 +16,31 @@ export function latestPredictions(pipelines: Pipeline[]): Record<string, Pipelin
 	}
 	return latest;
 }
+
+export interface ActivityGroup {
+	/** Newest run in this consecutive group; its date and model label the row. */
+	latest: Pipeline;
+	count: number;
+}
+
+/** Compact recent activity without hiding errors, progress, or intervening work. */
+export function groupActivity(pipelines: Pipeline[]): ActivityGroup[] {
+	const groups: ActivityGroup[] = [];
+	for (const pipeline of pipelines) {
+		const previous = groups.at(-1);
+		if (previous && pipeline.kind === previous.latest.kind
+			&& pipeline.status === "succeeded" && previous.latest.status === "succeeded"
+			&& !pipeline.error && !previous.latest.error) {
+			previous.count++;
+		} else {
+			groups.push({ latest: pipeline, count: 1 });
+		}
+	}
+	return groups;
+}
+
+/** A group links to the newest run's model, never an unrelated older model. */
+export function activityModelHref(project: string, group: ActivityGroup): string | null {
+	const model = group.latest.model_id;
+	return model ? `/p/${encodeURIComponent(project)}/models#model-${encodeURIComponent(model)}` : null;
+}

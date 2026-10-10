@@ -1,8 +1,10 @@
 <script lang="ts">
 	import { page } from "$app/state";
 	import { api, message } from "#lib/api.ts";
+	import { trainingNotifications, type TrainingModel } from "#lib/training-notifications.svelte.ts";
 	import { latestPredictions, unfinished } from "#lib/pipelines.ts";
 	import type { Pipeline } from "#lib/types.ts";
+	import type { ModelPlugin } from "#lib/viewer/live.ts";
 	import { BACKGROUND_VALUE, withBackground } from "#lib/viewer/background.ts";
 	import type { LabelClass } from "#lib/viewer/labels.ts";
 	import { SHOW_ROIS } from "#lib/features.ts";
@@ -13,14 +15,15 @@
 	import Play from "@lucide/svelte/icons/play";
 	import Trash from "@lucide/svelte/icons/trash";
 
-	interface Plugin {
+	interface Plugin extends ModelPlugin {
 		name: string;
 		version: string;
 		devices: string[];
 		params_schema: { properties: Record<string, { type: string; default: number; minimum?: number; maximum?: number; title?: string }> };
 	}
 
-	interface Model {
+	interface Model extends TrainingModel {
+		live: boolean;
 		id: string;
 		name: string;
 		plugin: string;
@@ -31,12 +34,16 @@
 		class_values: number[];
 		metrics: {
 			mean_dice?: number | null;
+			mean_iou?: number | null;
 			accuracy?: number | null;
+			voxels?: number;
+			evaluation?: "human_validation_rois" | "human_out_of_bag";
+			evaluation_voxels?: number;
 			validation_crops?: number;
 			classes?: Record<string, { dice: number; iou: number; voxels: number }>;
 		} | null;
 		pipeline_id: string | null;
-		training_set: { labeled_chunks?: number; rois?: { complete: number; open: number; validation: number } };
+		training_set: { label_seq?: number; labeled_chunks?: number; rois?: { complete: number; open: number; validation: number } };
 		created_at: string;
 	}
 
@@ -47,6 +54,9 @@
 
 	const pid = $derived(page.params.pid ?? "");
 	let models: Model[] = $state([]);
+	let loadedProject = $state("");
+	const targetModel = $derived(page.url.hash.startsWith("#model-") ? page.url.hash.slice(7) : null);
+	const missingModel = $derived(loadedProject === pid && targetModel && !models.some((model) => model.id === targetModel));
 	let plugins: Plugin[] = $state([]);
 	let classes: LabelClass[] = $state([]);
 	let classesLoaded = $state(false);
@@ -66,6 +76,8 @@
 	let error = $state("");
 	let busy = $state(false);
 	let projectName = $state("");
+	let refreshGeneration = 0;
+	const trainBusy = $derived(trainingNotifications.isTraining(pid));
 
 	$effect(() => {
 		crumbs.set([{ label: "Projects", href: "/projects" }, { label: projectName || "…", href: `/p/${pid}` }, { label: "Models" }]);
@@ -95,19 +107,46 @@
 	const training = $derived(
 		[...models.filter((m) => m.status === "training").map((m) => m.pipeline_id), ...Object.values(predicting)].join(","),
 	);
+	const readyModels = $derived(models.filter((model) => model.status === "ready"));
+	const latestScoredSeq = $derived(
+		Math.max(
+			-1,
+			...readyModels
+				.filter((model) => scoreVoxels(model) > 0 && model.training_set.label_seq !== undefined)
+				.map((model) => model.training_set.label_seq ?? -1),
+		),
+	);
+	const bestCurrentDice = $derived(
+		Math.max(
+			-1,
+			...readyModels
+				.filter((model) => model.training_set.label_seq === latestScoredSeq)
+				.map((model) => model.metrics?.mean_dice ?? -1),
+		),
+	);
 
 	async function refresh() {
+		const project = pid, generation = ++refreshGeneration;
 		try {
-			models = await api<Model[]>(`/api/projects/${pid}/models`);
-			quota = await api<Quota>("/api/me/quota").catch(() => null);
-			prediction = await api<{ model_id: string | null; model_name: string | null }>(
-				`/api/projects/${pid}/prediction`,
-			).catch(() => null);
-			predictions = latestPredictions(await api<Pipeline[]>(`/api/projects/${pid}/pipelines`));
-			counts = await api<Record<string, number>>(`/api/projects/${pid}/labels/counts`).catch(() => null);
-			hasRois = await api<unknown[]>(`/api/projects/${pid}/rois`).then((list) => list.length > 0, () => null);
+			const [found, limits, predicted, pipelines, labeled, rois] = await Promise.all([
+				api<Model[]>(`/api/projects/${project}/models`),
+				api<Quota>("/api/me/quota").catch(() => null),
+				api<{ model_id: string | null; model_name: string | null }>(`/api/projects/${project}/prediction`).catch(() => null),
+				api<Pipeline[]>(`/api/projects/${project}/pipelines`),
+				api<Record<string, number>>(`/api/projects/${project}/labels/counts`).catch(() => null),
+				api<unknown[]>(`/api/projects/${project}/rois`).then((list) => list.length > 0, () => null),
+			]);
+			if (project !== pid || generation !== refreshGeneration) return;
+			models = found;
+			loadedProject = project;
+			for (const model of found) trainingNotifications.watch(project, model);
+			quota = limits;
+			prediction = predicted;
+			predictions = latestPredictions(pipelines);
+			counts = labeled;
+			hasRois = rois;
 		} catch (e) {
-			error = message(e);
+			if (project === pid && generation === refreshGeneration) error = message(e);
 		}
 	}
 
@@ -153,16 +192,16 @@
 
 	async function train(event: SubmitEvent) {
 		event.preventDefault();
-		busy = true;
+		if (busy || blocked || trainBusy) return;
+		const project = pid;
 		error = "";
 		try {
-			await api(`/api/projects/${pid}/models`, { body: { plugin, params, name: name || undefined } });
+			const model = await trainingNotifications.submit(project, { plugin, params: { ...params }, name: name || undefined });
+			if (!model || project !== pid) return;
 			name = "";
 			await refresh();
 		} catch (e) {
-			error = message(e);
-		} finally {
-			busy = false;
+			if (project === pid) error = message(e);
 		}
 	}
 
@@ -197,6 +236,22 @@
 	function percent(value: number | null | undefined): string {
 		return value === null || value === undefined ? "–" : `${Math.round(value * 100)}%`;
 	}
+
+	function scoreVoxels(model: Model): number {
+		if (model.metrics?.evaluation_voxels !== undefined) return model.metrics.evaluation_voxels;
+		return model.metrics?.validation_crops ? (model.metrics.voxels ?? 0) : 0;
+	}
+
+	function evaluationName(model: Model): string {
+		switch (model.metrics?.evaluation) {
+			case "human_validation_rois":
+				return "Held-out validation ROIs";
+			case "human_out_of_bag":
+				return "Out-of-bag human labels";
+			default:
+				return scoreVoxels(model) > 0 ? "Legacy validation" : "Not graded";
+		}
+	}
 </script>
 
 <ProjectTabs {pid} />
@@ -210,19 +265,21 @@
 					Trains on everything labeled so far: complete ROIs (unlabeled voxels there count as background), open ROIs, and
 					labels outside ROIs. Validation ROIs are held out to score the model.
 				{:else}
-					Trains on everything you've labeled: your classes, and Background, which tells the model what to leave alone.
+					Trains on everything you've labeled: your classes, and Background, which tells the model what to leave alone. Each model is
+					graded on held-out human-drawn or imported voxels (out-of-bag for RF); accepted predictions never grade the model.
 				{/if}
 			</p>
 			{#if plugins.length > 1}
 				<label class="label">
 					Kind
 					<select class="field" bind:value={plugin}>
-						{#each plugins as p (p.name)}<option value={p.name}>{p.name}</option>{/each}
+						{#each plugins as p (p.name)}<option value={p.name}>{p.capabilities.display_name}</option>{/each}
 					</select>
 				</label>
 			{/if}
 			<label class="label">Name (optional) <input class="field" bind:value={name} maxlength="100" placeholder="rf model" /></label>
 			{#if chosen}
+				<p class="text-2xs text-ink-dim">{chosen.capabilities.display_name} · {chosen.capabilities.family} · {chosen.devices.join(" / ")} · {chosen.capabilities.learning} learning in Live. Training here creates a saved checkpoint.</p>
 				<details class="group rounded-sm border border-edge bg-field">
 					<summary class="cursor-pointer px-2 py-1 text-2xs text-ink-dim select-none hover:text-ink">Settings</summary>
 					<div class="grid grid-cols-2 gap-2 p-2">
@@ -263,27 +320,75 @@
 				</div>
 			{/if}
 			{#if error}<p class="error" role="alert">{error}</p>{/if}
-			<button class="btn btn-primary h-7" disabled={busy || blocked} title={blocked ? whyTooLittle : undefined}><Brain size={14} /> Train</button>
+			<button class="btn btn-primary h-7" disabled={busy || blocked || trainBusy} title={blocked ? whyTooLittle : undefined}><Brain size={14} /> {trainBusy ? "Training…" : "Train"}</button>
 		</form>
 	</section>
 
 	<section class="flex flex-col gap-3">
 		<h1>Models</h1>
+		{#if missingModel}<p class="muted" role="status">This model is no longer available.</p>{/if}
 		{#if models.length === 0}
 			<div class="panel grid place-items-center gap-2 p-10 text-center">
 				<Brain size={28} class="text-ink-faint" />
 				<p class="muted">No models yet.</p>
 			</div>
 		{:else}
+			{#if readyModels.length > 0}
+			<section class="panel overflow-x-auto" aria-labelledby="comparison-title">
+				<div class="panel-title flex items-center justify-between gap-3" id="comparison-title">
+					<span>Model comparison</span>
+					<span class="text-2xs font-normal tracking-normal text-ink-faint normal-case">Human labels only</span>
+				</div>
+				<table class="w-full min-w-[42rem] text-2xs">
+					<thead class="text-ink-dim">
+						<tr>
+							<th class="px-3 py-2 text-left font-normal">Model</th>
+							<th class="px-3 py-2 text-right font-normal">Mean Dice</th>
+							<th class="px-3 py-2 text-right font-normal">Accuracy</th>
+							<th class="px-3 py-2 text-right font-normal">Human voxels</th>
+							<th class="px-3 py-2 text-right font-normal">Label state</th>
+							<th class="px-3 py-2 text-left font-normal">Method</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each readyModels as model (model.id)}
+							{@const current = model.training_set.label_seq === latestScoredSeq}
+							{@const best = current && model.metrics?.mean_dice === bestCurrentDice && bestCurrentDice >= 0}
+							<tr class="border-t border-edge {current ? '' : 'text-ink-dim'}">
+								<td class="px-3 py-2 font-medium text-ink">{model.name}{#if best}<span class="ml-1.5 text-ok">best</span>{/if}</td>
+								<td class="px-3 py-2 text-right font-mono">{percent(model.metrics?.mean_dice)}</td>
+								<td class="px-3 py-2 text-right font-mono">{percent(model.metrics?.accuracy)}</td>
+								<td class="px-3 py-2 text-right font-mono">{scoreVoxels(model).toLocaleString()}</td>
+								<td class="px-3 py-2 text-right font-mono">#{model.training_set.label_seq ?? "–"}</td>
+								<td class="px-3 py-2">{evaluationName(model)}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+				<p class="border-t border-edge px-3 py-2 text-2xs text-ink-dim">
+					“Best” compares models trained from the newest shared label state. Older rows remain useful history, but their test voxels may differ.
+				</p>
+			</section>
+			{/if}
 			<ul class="flex flex-col gap-2">
 				{#each models as model (model.id)}
 					{@const last = predictions[model.id]}
 					<li
-						class="panel flex flex-col gap-2 border-l-2 p-3
+						id="model-{model.id}"
+						tabindex="-1"
+						{@attach (node) => {
+							// Models arrive after navigation; the browser's initial hash jump is too early.
+							if (targetModel === model.id) {
+								node.scrollIntoView({ block: "start" });
+								node.focus({ preventScroll: true });
+							}
+						}}
+						class="panel flex scroll-mt-3 flex-col gap-2 border-l-2 p-3 target:outline target:outline-accent
 							{model.status === 'ready' ? 'border-l-ok' : model.status === 'failed' ? 'border-l-danger' : 'border-l-warn'}"
 					>
 						<div class="flex items-center gap-2">
-							<span class="font-medium">{model.name}</span>
+						<span class="font-medium">{model.name}</span>
+						{#if model.live}<span class="text-2xs text-ink-dim">Live · rolling checkpoint</span>{/if}
 							<span class="rounded-sm bg-field px-1.5 py-0.5 text-2xs text-ink-dim">{model.status}</span>
 							{#if prediction?.model_id === model.id}
 								<span class="rounded-sm bg-accent-soft px-1.5 py-0.5 text-2xs text-ink">shown in the annotator</span>
@@ -316,7 +421,10 @@
 							chunks{#if SHOW_ROIS}, {model.training_set.rois?.complete ?? 0} complete and {model.training_set.rois?.open ?? 0} open ROIs{/if}
 						</p>
 						{#if model.metrics}
-							{#if model.metrics.validation_crops}
+							{#if scoreVoxels(model) > 0}
+								<p class="text-2xs text-ink-dim">
+									{evaluationName(model)} · {scoreVoxels(model).toLocaleString()} human-annotated voxels
+								</p>
 								<table class="w-full max-w-md text-2xs">
 									<thead class="text-ink-dim">
 										<tr><th class="py-1 text-left font-normal">Class</th><th class="text-right font-normal">Dice</th><th class="text-right font-normal">IoU</th></tr>
@@ -334,8 +442,8 @@
 										</tr>
 									</tbody>
 								</table>
-							{:else if SHOW_ROIS}
-								<p class="text-2xs text-ink-dim">No validation ROIs, so no scores. Mark some ROIs as validation to score models.</p>
+							{:else}
+								<p class="text-2xs text-ink-dim">No held-out human labels were available to grade this model.</p>
 							{/if}
 						{/if}
 					</li>

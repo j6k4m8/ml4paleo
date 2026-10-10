@@ -155,10 +155,13 @@ def test_training_sets_pin_labels_and_rois(ada, settings, migrated_database_url)
     )
     assert raw is not None
     manifest = json.loads(raw)
+    assert manifest["version"] == 2
     assert manifest["rois"] == [
         {"bbox": [0, 0, 0, 8, 8, 8], "status": "open", "split": "val"}
     ]
     assert [c[:3] for c in manifest["chunks"]] == [[0, 0, 0]]
+    assert len(manifest["chunks"][0]) == 5
+    assert all(manifest["chunks"][0][3:])
 
     # The same labels make the same training set; new labels a new one.
     again = ada.post(base, json={}).json()
@@ -810,7 +813,7 @@ def test_a_worker_trains_a_random_forest(
             lambda r: r.json()["status"] != "training",
         ).json()
         assert status["status"] == "ready", status
-        assert status["plugin_version"] == "1"
+        assert status["plugin_version"] == "2"
         assert status["metrics"]["validation_crops"] == 1
         assert status["metrics"]["classes"][str(BONE)]["dice"] > 0.8
         # The worker's memory budget leaves room for every sample asked for.
@@ -840,6 +843,22 @@ def test_a_worker_trains_a_random_forest(
         ).json()
         assert proposal_pipeline["status"] == "succeeded", proposal_pipeline
         assert proposal_pipeline["kind"] == "proposal"
+
+        # Live runs the same halo-aware predictor but commits only one chunk,
+        # into an immutable cache artifact rather than either shared head.
+        live = ada.post(
+            f"/api/projects/{project}/models/{model['id']}/live-chunk",
+            json={
+                "image_artifact_id": model["training_set"]["image_artifact_id"],
+                "key": [0, 0, 0],
+            },
+        ).json()
+        live_pipeline = wait(
+            f"/api/projects/{project}/pipelines/{live['pipeline_id']}",
+            lambda r: r.json()["status"] in ("succeeded", "failed", "cancelled"),
+        ).json()
+        assert live_pipeline["status"] == "succeeded", live_pipeline
+        assert live_pipeline["kind"] == "live preview"
     finally:
         worker.stop()
         thread.join(timeout=30)
@@ -867,6 +886,17 @@ def test_a_worker_trains_a_random_forest(
     )
     predicted = np.asarray(group["class"][:])
     assert ((predicted == BONE) == truth).mean() > 0.95
+    live_values = np.asarray(
+        zarr.open_group(
+            store=zarr_store(
+                project_storage(settings).child(
+                    f"projects/{project}/artifacts/{live['artifact_id']}"
+                )
+            ),
+            mode="r",
+        )["class"][:]
+    )
+    np.testing.assert_array_equal(live_values, predicted)
     # The proposal holds the same prediction inside its ROI, and nothing else.
     proposed_classes = np.asarray(
         zarr.open_group(
@@ -996,10 +1026,11 @@ def complete_validation_roi(ada, project, box):
     assert done.status_code == 200, done.text
 
 
-def test_training_with_no_validation_scores_nothing_and_still_succeeds(
+def test_training_without_validation_rois_scores_human_labels_out_of_bag(
     new_browser, settings, migrated_database_url, live_server
 ):
-    # No validation ROIs, so no score is defined: none is given, not a NaN one.
+    # With no validation ROIs, the forest still grades the human strokes on
+    # trees whose bootstrap samples did not include those particular voxels.
     def labels(ada, project):
         strokes(settings, migrated_database_url, project)
 
@@ -1007,7 +1038,9 @@ def test_training_with_no_validation_scores_nothing_and_still_succeeds(
         new_browser, settings, migrated_database_url, live_server, labels
     )
     assert metrics["validation_crops"] == 0
-    assert SCORES.isdisjoint(metrics), metrics
+    assert metrics["evaluation"] == "human_out_of_bag"
+    assert metrics["evaluation_voxels"] > 0
+    assert SCORES.issubset(metrics), metrics
 
 
 def test_training_with_a_class_nothing_of_is_validated_leaves_it_unscored(
@@ -1038,11 +1071,12 @@ def test_training_with_a_class_nothing_of_is_validated_leaves_it_unscored(
     assert metrics["mean_dice"] == metrics["classes"][str(BONE)]["dice"]
 
 
-def test_training_validated_on_nothing_but_background_scores_no_class(
+def test_empty_validation_roi_does_not_treat_implicit_background_as_truth(
     new_browser, settings, migrated_database_url, live_server
 ):
-    # A complete validation ROI with no labels in it is all background: the
-    # classes have no voxels there, so there is no mean of their scores.
+    # Empty space in a complete ROI is useful training background, but no
+    # person annotated those voxels, so it must not inflate the grade. Fall
+    # back to the human strokes' out-of-bag estimate instead.
     def labels(ada, project):
         strokes(settings, migrated_database_url, project)
         complete_validation_roi(ada, project, A_CORNER_THE_BALL_IS_FAR_FROM)
@@ -1050,7 +1084,7 @@ def test_training_validated_on_nothing_but_background_scores_no_class(
     metrics = trained_without_nan(
         new_browser, settings, migrated_database_url, live_server, labels
     )
-    assert metrics["validation_crops"] == 1
-    assert metrics["classes"] == {}
-    assert (metrics["mean_dice"], metrics["mean_iou"]) == (None, None)
-    assert 0 <= metrics["accuracy"] <= 1
+    assert metrics["validation_crops"] == 0
+    assert metrics["evaluation"] == "human_out_of_bag"
+    assert metrics["evaluation_voxels"] > 0
+    assert SCORES.issubset(metrics), metrics

@@ -46,6 +46,21 @@ describe("paletteBytes", () => {
 });
 
 describe("paletteRows", () => {
+	it("applies independent class opacity in both layers while Background stays labels-only", () => {
+		const bytes = paletteRows(new Map([[1, "#ffffff"], [2, "#ff8000"], [3, "#ffffff"], [4, "#ffffff"], [255, "#ffffff"]]), {
+			1: { color: "#123456", opacity: 0.5 }, 2: { opacity: 0.5 }, 3: { visible: false }, 4: { opacity: 0 },
+		});
+		for (const offset of [0, 1024]) {
+			expect([...bytes.slice(offset + 8, offset + 12)]).toEqual([255, 128, 0, 128]);
+			expect(bytes[offset + 3 * 4 + 3]).toBe(0);
+			expect(bytes[offset + 4 * 4 + 3]).toBe(0);
+			expect(bytes[offset + 255 * 4 + 3]).toBe(0);
+		}
+		expect([...bytes.slice(4, 8)]).toEqual([0, 0, 0, 0]);
+		expect([...bytes.slice(1028, 1032)]).toEqual([0x12, 0x34, 0x56, 85]);
+		expect(paletteRows(new Map(), { 1: { visible: false } })[1031]).toBe(0);
+	});
+
 	it("shows painted background as a haze in the labels' row only", () => {
 		const bytes = paletteRows(new Map([[2, "#ff8000"]]));
 		expect(bytes.length).toBe(256 * 4 * 2);
@@ -222,5 +237,24 @@ describe("PlaneRenderer's overlays", () => {
 
 	it("draws every tile of an overlay that names no level, stencil or not", () => {
 		expect(drawn(false)).toEqual([2, 4]);
+	});
+
+	it("pulses stale chunks only, leaving fresh predictions and saved paint steady", () => {
+		let alpha = 0;
+		const drawnAlpha: number[] = [];
+		const { gl } = fakeGl({
+			getUniformLocation: (_program: unknown, name: string) => ({ name }),
+			uniform1f: (location: { name: string }, value: number) => { if (location.name === "opacity") alpha = value; },
+			drawArrays: () => drawnAlpha.push(alpha),
+		});
+		const renderer = new PlaneRenderer({ getContext: () => gl } as unknown as HTMLCanvasElement, PLANES.xy, [128, 128, 128]);
+		const stale = { ...fine, id: "prediction/0/0/0", stale: true };
+		const fresh = { ...fine, id: "prediction/0/0/1" };
+		for (const tile of [stale, fresh, fine]) renderer.uploadLabels(tile, 0, chunk);
+		for (const pulse of [0.5, 0.9]) renderer.draw(view, [0, 1], [], [
+			{ slice: 0, tiles: [stale, fresh], opacity: 0.8, staleOpacity: pulse, hatched: true },
+			{ slice: 0, tiles: [fine], opacity: 0.8 },
+		]);
+		expect(drawnAlpha).toEqual([0.4, 0.8, 0.8, expect.closeTo(0.72), 0.8, 0.8]);
 	});
 });

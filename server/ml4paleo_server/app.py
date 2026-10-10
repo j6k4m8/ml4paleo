@@ -32,15 +32,17 @@ from . import __version__
 from .api import ROUTERS
 from .auth.sessions import cookie_name
 from .auth.tokens import csrf_token, tokens_match
+from .compression import CompressionMiddleware
 from .db import create_engine, create_sessionmaker
 from .jobs import JobSignal
 from .label_pyramid import LabelPyramid
+from .mesh_preview import MeshPreviewPool
 from .settings import Settings
 from .storage import project_storage
 from .viewer import (
     NEUROGLANCER_CONTENT_SECURITY_POLICY,
     NEUROGLANCER_PATH,
-    neuroglancer_available,
+    require_neuroglancer,
 )
 
 MIN_SECRET_KEY_LENGTH = 32
@@ -113,7 +115,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         raise RuntimeError(
             f"M4P_SECRET_KEY must be at least {MIN_SECRET_KEY_LENGTH} random characters."
         )
-    has_neuroglancer = neuroglancer_available(settings)
+    neuroglancer_dir = require_neuroglancer(settings)
     parts = urlsplit(settings.public_url)
     public_origin = f"{parts.scheme}://{parts.netloc}"
     session_cookie = cookie_name(settings)
@@ -130,6 +132,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            app.state.mesh_preview.close()
             await job_signal.stop()
             await engine.dispose()
 
@@ -144,6 +147,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.label_pyramid = LabelPyramid(settings.label_cache_mb * 1024 * 1024)
+    app.state.mesh_preview = MeshPreviewPool()
+    app.add_middleware(CompressionMiddleware)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(
@@ -192,13 +197,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response = await call_next(request)
         policy = (
             NEUROGLANCER_CONTENT_SECURITY_POLICY
-            if has_neuroglancer and request.url.path.startswith(NEUROGLANCER_PATH + "/")
+            if request.url.path.startswith(NEUROGLANCER_PATH + "/")
             else app_policy
         )
         response.headers.setdefault("Content-Security-Policy", policy)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        if request.url.path in (
+            NEUROGLANCER_PATH + "/",
+            NEUROGLANCER_PATH + "/index.html",
+        ):
+            # Revalidate the entry point so an iframe reload picks up newly
+            # bundled, content-hashed assets after a viewer upgrade.
+            response.headers["Cache-Control"] = "no-cache"
         if settings.is_https:
             response.headers.setdefault(
                 "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
@@ -224,13 +236,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     for router in ROUTERS:
         app.include_router(router)
 
-    if has_neuroglancer:
-        assert settings.neuroglancer_dir is not None
-        app.mount(
-            NEUROGLANCER_PATH,
-            StaticFiles(directory=settings.neuroglancer_dir, html=True),
-            name="neuroglancer",
-        )
+    app.mount(
+        NEUROGLANCER_PATH,
+        StaticFiles(directory=neuroglancer_dir, html=True),
+        name="neuroglancer",
+    )
 
     @app.get("/{path:path}", include_in_schema=False)
     async def web_app(path: str) -> Response:

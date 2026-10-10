@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from ml4paleo.labels import (
     BACKGROUND,
+    DECLINED,
     LABEL_CHUNK_ZYX,
     PLUGIN_IGNORE,
     Source,
@@ -58,6 +59,12 @@ def test_plugin_space_round_trip():
         from_plugin_space(np.array([3], dtype=np.uint8), [2, 5])
     with pytest.raises(ValueError):
         to_plugin_space(labels, class_values=[1])
+
+
+def test_declines_are_ignored_by_training_even_inside_complete_rois():
+    labels = np.array([DECLINED, 0, 1, 2], dtype=np.uint8)
+    targets = to_plugin_space(labels, class_values=[2], complete=True)
+    assert targets.tolist() == [PLUGIN_IGNORE, 0, 0, 1]
 
 
 def test_codec_round_trips_and_skips_empty_chunks():
@@ -169,6 +176,7 @@ def _row_delta(value, only_if):
         ("any", EVERY_VALUE),
         ("unlabeled", {0}),
         ("labeled", EVERY_VALUE - {0}),
+        ("declined", set()),
         ("class:2", {2}),
         ("class:1", {1}),
         ("class:1,3", {1, 3}),
@@ -221,6 +229,7 @@ def test_a_condition_applies_to_per_voxel_values_too():
         ("any", "any"),
         ("unlabeled", "unlabeled"),
         ("labeled", "labeled"),
+        ("declined", "declined"),
         ("class:2", "class:2"),
         ("class:1", "class:1"),
         ("class:254", "class:254"),
@@ -259,6 +268,19 @@ def test_every_class_value_can_be_listed_in_any_order():
     assert applied.changed == 254
     written = applied.class_chunk[0, :4, :].ravel()
     assert written.tolist() == [0 if value == 0 else 254 for value in held]
+
+
+def test_declined_condition_restores_only_tombstones():
+    chunk = _zeros()
+    chunk[0, 0, :4] = [DECLINED, 2, DECLINED, BACKGROUND]
+    applied = apply_delta(
+        chunk,
+        _zeros(),
+        _delta(0, "declined", (0, 0, 0, 1, 1, 4)),
+        Source.HUMAN,
+    )
+    assert applied.class_chunk[0, 0, :4].tolist() == [0, 2, 0, BACKGROUND]
+    assert applied.changed == 2
 
 
 @pytest.mark.parametrize(
@@ -508,6 +530,14 @@ def test_split_rejects_out_of_range_values():
         split_into_deltas(mask, (0, 0, 0), values=np.array([[[2, 300]]]))
 
 
+def test_deltas_can_write_decline_tombstones_but_not_match_them_as_classes():
+    delta = _delta(value=DECLINED)
+    applied = apply_delta(_zeros(), _zeros(), delta, Source.HUMAN)
+    assert applied.class_chunk[0, 0, 0] == DECLINED
+    with pytest.raises(ValueError):
+        normalize_only_if(f"class:{DECLINED}")
+
+
 def test_deltas_can_be_checked_against_the_volume_shape():
     edge = _delta(value=2, box=(0, 0, 0, 4, 4, 4))
     edge.check_within((4, 4, 4))
@@ -520,7 +550,7 @@ def test_deltas_can_be_checked_against_the_volume_shape():
     [
         {"box": (0, 0, 0, 65, 1, 1)},
         {"box": (3, 0, 0, 3, 1, 1)},
-        {"value": 255},
+        {"value": 256},
         {"only_if": "class:999"},
         {"only_if": "everything"},
         {"value": None},

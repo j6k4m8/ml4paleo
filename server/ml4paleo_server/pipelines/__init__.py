@@ -22,6 +22,7 @@ NAMES = {
     "model.train": "training",
     "predict.prepare": "prediction",
     "predict.region": "proposal",
+    "predict.live": "live preview",
     "compose.prepare": "segmentation",
     "mesh.block": "meshes",
     "export.files": "export",

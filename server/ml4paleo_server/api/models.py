@@ -18,6 +18,7 @@ kept counts against the project owner's trained-model quota; deleting one
 frees its slot.
 """
 
+import dataclasses
 import datetime
 import uuid
 from typing import Any
@@ -45,6 +46,7 @@ class PluginOut(BaseModel):
     version: str
     devices: list[str]
     params_schema: dict[str, Any]
+    capabilities: dict[str, Any]
 
 
 @router.get("/plugins")
@@ -55,6 +57,7 @@ async def list_plugins(auth: CurrentAuth) -> list[PluginOut]:
             version=plugin.version,
             devices=list(plugin.caps.devices),
             params_schema=plugin.Params.model_json_schema(),
+            capabilities=dataclasses.asdict(plugin.caps),
         )
         for plugin in plugins().values()
     ]
@@ -64,6 +67,7 @@ class TrainIn(BaseModel):
     plugin: str = "rf"
     params: dict[str, Any] = {}
     name: str | None = Field(default=None, max_length=100)
+    live: bool = False
 
     @field_validator("params")
     @classmethod
@@ -89,6 +93,11 @@ class ModelOut(BaseModel):
     pipeline_id: uuid.UUID | None
     training_set: dict[str, Any]
     created_at: datetime.datetime
+    live: bool = False
+    created_by: uuid.UUID | None = None
+    # Only on a live train request: whether this checkpoint pins the snapshot
+    # just requested (including returning to an older state through undo).
+    live_current: bool | None = None
 
 
 async def _model_out(db, model: TrainedModel) -> ModelOut:
@@ -97,13 +106,9 @@ async def _model_out(db, model: TrainedModel) -> ModelOut:
         if model.job_id
         else None
     )
-    artifact_state = (
-        await db.scalar(select(Artifact.state).where(Artifact.id == model.artifact_id))
-        if model.artifact_id
-        else None
-    )
+    artifact = await db.get(Artifact, model.artifact_id) if model.artifact_id else None
     training_set = await db.get(TrainingSet, model.training_set_id)
-    status = train.model_status(model, job_status, artifact_state)
+    status = train.model_status(model, job_status, artifact.state if artifact else None)
     error = None
     if status == "failed" and model.job_id:
         error = await pipelines.failure(db, model.job_id)
@@ -125,6 +130,8 @@ async def _model_out(db, model: TrainedModel) -> ModelOut:
             **(training_set.summary if training_set else {}),
         },
         created_at=model.created_at,
+        live=bool(artifact and artifact.inputs.get("live")),
+        created_by=model.created_by,
     )
 
 
@@ -189,13 +196,70 @@ async def train_model(
     assert owner is not None
     await train.release_failed_slots(db, owner.id)
     await db.commit()
-    await quotas.check_trained_model(db, settings, owner)
+    if not body.live:
+        await quotas.check_trained_model(db, settings, owner)
     try:
         training_set = await training.snapshot(
             db, request.app.state.sessionmaker, settings, project.id
         )
     except training.NotReady as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
+    if body.live:
+        if plugin.caps.learning == "manual":
+            raise HTTPException(
+                status_code=422,
+                detail="This model requires explicit training on the Models page.",
+            )
+        # Serialize live requests across tabs. Keep one ready checkpoint and
+        # at most one training, without touching manually saved models.
+        await db.scalar(
+            select(Project.id)
+            .where(Project.id == project.id)
+            .with_for_update(key_share=True)
+        )
+        previous = (
+            await db.scalars(
+                select(TrainedModel)
+                .join(Artifact, Artifact.id == TrainedModel.artifact_id)
+                .where(
+                    TrainedModel.project_id == project.id,
+                    TrainedModel.created_by == auth.user.id,
+                    TrainedModel.deleted_at.is_(None),
+                    Artifact.inputs.contains({"live": True}),
+                )
+                .order_by(TrainedModel.created_at.desc())
+            )
+        ).all()
+        ready = None
+        for old in previous:
+            out = await _model_out(db, old)
+            out.live_current = (
+                old.training_set_id == training_set.id
+                and old.plugin == plugin.name
+                and old.params == params.model_dump()
+            )
+            if out.status == "training":
+                await db.commit()
+                return out
+            if old.plugin == plugin.name and old.params == params.model_dump():
+                # A failed snapshot is not retried in a tight loop either.
+                if (
+                    old.training_set_id == training_set.id
+                    or (artifacts.now() - old.created_at).total_seconds() * 1000
+                    < plugin.caps.min_train_interval_ms
+                ):
+                    await db.commit()
+                    return out
+            if out.status == "ready" and ready is None:
+                ready = old.id
+        for old in previous:
+            if old.id == ready:
+                continue
+            old.deleted_at = artifacts.now()
+            artifact = await db.get(Artifact, old.artifact_id)
+            if artifact:
+                artifact.expires_at = artifacts.now()
+            await train.release_slots(db, owner.id, TrainedModel.id == old.id)
     count = len(
         (
             await db.scalars(
@@ -203,7 +267,11 @@ async def train_model(
             )
         ).all()
     )
-    name = body.name or f"{plugin.name} model {count + 1}"
+    name = body.name or (
+        f"Live {plugin.caps.display_name}"
+        if body.live
+        else f"{plugin.name} model {count + 1}"
+    )
     _, model = await train.start(
         db,
         settings,
@@ -213,6 +281,7 @@ async def train_model(
         params=params,
         name=name,
         created_by=auth.user.id,
+        live=body.live,
     )
     audit.record(
         db,
@@ -228,7 +297,9 @@ async def train_model(
         },
     )
     await db.commit()
-    return await _model_out(db, model)
+    out = await _model_out(db, model)
+    out.live_current = True if body.live else None
+    return out
 
 
 @router.get("/projects/{project_id}/models/{model_id}")
@@ -260,7 +331,10 @@ async def delete_model(
         if job is not None and job.status in train.RUNNING_JOB:
             await jobs.cancel_pipeline(db, job.root_id)
     for root in await predict.running(
-        db, project.id, model.id, kinds=["predict.prepare", "predict.region"]
+        db,
+        project.id,
+        model.id,
+        kinds=["predict.prepare", "predict.region", "predict.live"],
     ):
         await jobs.cancel_pipeline(db, root.id)
     if model.artifact_id:
@@ -283,6 +357,49 @@ async def delete_model(
 class PredictionStarted(BaseModel):
     pipeline_id: uuid.UUID
     artifact_id: uuid.UUID
+
+
+class LiveChunkIn(BaseModel):
+    image_artifact_id: uuid.UUID
+    key: tuple[int, int, int]
+
+
+class LiveChunkOut(BaseModel):
+    artifact_id: uuid.UUID
+    pipeline_id: uuid.UUID | None
+    ready: bool
+    box: list[int]
+    zarr_url: str
+
+
+@router.post("/projects/{project_id}/models/{model_id}/live-chunk")
+async def live_chunk(
+    model_id: uuid.UUID,
+    body: LiveChunkIn,
+    project: MemberProject,
+    auth: CurrentAuth,
+    db: DbSession,
+) -> LiveChunkOut:
+    model = await _model(db, project, model_id)
+    image = await artifacts.head(db, project.id, "image")
+    if image is None or image.id != body.image_artifact_id:
+        raise HTTPException(
+            status_code=409, detail="The image changed; reload the annotator."
+        )
+    try:
+        result = await predict.live_chunk(
+            db, model=model, image=image, key=body.key, created_by=auth.user.id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    await db.commit()
+    return LiveChunkOut(
+        artifact_id=result.id,
+        pipeline_id=result.produced_by_job,
+        ready=result.state == "committed",
+        box=result.inputs["box"],
+        zarr_url=zarr_path(project.id, result.id),
+    )
 
 
 @router.post("/projects/{project_id}/models/{model_id}/predict", status_code=202)

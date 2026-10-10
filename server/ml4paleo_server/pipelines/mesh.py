@@ -75,6 +75,7 @@ async def start(
         head_slot="meshes",
         inputs={
             "segmentation_artifact_id": str(segmentation.id),
+            "image_artifact_id": str(image.id) if image is not None else None,
             "downsample": downsample,
             "method": method,
             "simplify": simplify,

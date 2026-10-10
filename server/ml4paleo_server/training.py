@@ -84,7 +84,11 @@ async def read_snapshot(
         chunks = (
             await db.execute(
                 select(
-                    LabelChunk.cz, LabelChunk.cy, LabelChunk.cx, LabelChunk.class_sha
+                    LabelChunk.cz,
+                    LabelChunk.cy,
+                    LabelChunk.cx,
+                    LabelChunk.class_sha,
+                    LabelChunk.source_sha,
                 )
                 .where(
                     LabelChunk.project_id == project_id,
@@ -117,12 +121,18 @@ async def read_snapshot(
     if not chunks:
         raise NotReady("Label something first.")
     manifest = {
-        "version": 1,
+        "version": 2,
         "project_id": str(project_id),
         "image": image_info,
         "class_values": classes,
         "rois": roi_info,
-        "chunks": [[cz, cy, cx, sha] for cz, cy, cx, sha in chunks],
+        # Both arrays are pinned. Model evaluation uses the source array to
+        # grade only labels a person drew or imported, never a model's own
+        # accepted output or unlabeled space in a complete ROI.
+        "chunks": [
+            [cz, cy, cx, class_sha, source_sha]
+            for cz, cy, cx, class_sha, source_sha in chunks
+        ],
     }
     return manifest, int(label_seq or 0)
 

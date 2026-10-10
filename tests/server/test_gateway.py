@@ -65,6 +65,18 @@ def test_members_read_committed_artifacts(new_browser, settings, migrated_databa
     assert (tail.status_code, tail.content) == (206, metadata.content[-5:])
     middle = browser.get(f"{base}/zarr.json", headers={"Range": "bytes=2-6"})
     assert middle.content == metadata.content[2:7]
+    assert "content-encoding" not in tail.headers
+    assert "content-encoding" not in middle.headers
+    array = browser.get(f"{base}/0/zarr.json")
+    assert array.headers["content-encoding"] == "gzip"
+    inner_codecs = array.json()["codecs"][0]["configuration"]["codecs"]
+    assert any(codec["name"] == "zstd" for codec in inner_codecs)
+    shard = browser.get(f"{base}/0/c/0/0/0/0")
+    assert shard.status_code == 200
+    assert "content-encoding" not in shard.headers  # Already compressed inside Zarr.
+    shard_tail = browser.get(f"{base}/0/c/0/0/0/0", headers={"Range": "bytes=-16"})
+    assert shard_tail.content == shard.content[-16:]
+    assert "content-encoding" not in shard_tail.headers
     # A chunk that was never written is a 404, which zarr reads as empty.
     assert browser.get(f"{base}/0/c/0/9/9/9").status_code == 404
     for bad in ["", "..%2Fsecret", "0/../../x"]:
@@ -157,7 +169,7 @@ def test_neuroglancer_is_served_with_its_own_policy(
     assert layer["shaderControls"]["normalized"]["range"] == [10, 100]
 
 
-def test_without_a_neuroglancer_build_there_is_no_link(
+def test_the_image_always_has_a_bundled_neuroglancer_link(
     new_browser, settings, migrated_database_url
 ):
     browser = new_browser()
@@ -165,9 +177,11 @@ def test_without_a_neuroglancer_build_there_is_no_link(
     project = make_project(browser)
     committed_image(settings, migrated_database_url, project)
     assert (
-        browser.get(f"/api/projects/{project}/image").json()["neuroglancer_url"] is None
+        browser.get(f"/api/projects/{project}/image")
+        .json()["neuroglancer_url"]
+        .startswith("/neuroglancer/?v=obj1#!")
     )
-    # The path falls through to the web app instead, under the strict policy.
     page = browser.get("/neuroglancer/")
-    assert "has not been built" in page.text
-    assert "eval" not in page.headers["content-security-policy"]
+    assert page.status_code == 200
+    assert "neuroglancer" in page.text
+    assert "wasm-unsafe-eval" in page.headers["content-security-policy"]

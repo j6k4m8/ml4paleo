@@ -15,6 +15,7 @@ dependencies = [
     "pyotp>=2.9",
     "sqlalchemy[asyncio]>=2.0.44",
     "uvicorn[standard]>=0.38",
+    "zmesh>=1.11.0",
 ]
 
 [project.scripts]

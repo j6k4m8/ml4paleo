@@ -143,12 +143,12 @@ describe("a decoder", () => {
 		const { fetcher, answers } = serving({ [chunk("class_1")]: { status: 503, headers: { "retry-after": "3" } } });
 		const decode = createDecoder(fetcher);
 		await decode(read("class_1"), never);
-		// The same chunk fails another way later, and another chunk too: neither is told to wait.
+		// A new failure must not inherit an earlier response's Retry-After.
 		answers[chunk("class_1")] = { status: 500 };
 		expect((await decode(read("class_1"), never)).reply).toEqual({ id: 1, error: expect.stringContaining("500"), status: 500 });
 		const other = read("class_1", { region: [[0, 64], [0, 64], [0, 64]] });
 		answers[`${BASE}class_1/c/0/0/0`] = { status: 500, headers: { "retry-after": "9" } };
-		expect((await decode(other, never)).reply).toEqual({ id: 1, error: expect.stringContaining("500"), status: 500 });
+		expect((await decode(other, never)).reply).toEqual({ id: 1, error: expect.stringContaining("500"), status: 500, retryAfter: "9" });
 	});
 
 	it("says the status of any other answer the server gave, and 404 for an array it doesn't have", async () => {

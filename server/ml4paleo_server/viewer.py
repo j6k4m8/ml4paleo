@@ -6,6 +6,7 @@ Neuroglancer release), and links that open a project's data in it.
 
 import json
 import math
+import pathlib
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -16,6 +17,9 @@ from ml4paleo.labels import FIRST_CLASS, MAX_CLASS
 from .settings import Settings
 
 NEUROGLANCER_PATH = "/neuroglancer"
+# The old entry point had no cache policy. A new URL ensures already-open
+# clients pick up the OBJ fix; all entry points now revalidate on future loads.
+NEUROGLANCER_ENTRY = NEUROGLANCER_PATH + "/?v=obj1"
 # Neuroglancer compiles WebAssembly decoders, builds some functions at run
 # time (its chunk decoding worker does so as it starts, so it can't draw
 # anything without 'unsafe-eval'), and injects its own styles. It still runs
@@ -83,9 +87,17 @@ _OTHER_LENGTHS = {
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
-def neuroglancer_available(settings: Settings) -> bool:
+def require_neuroglancer(settings: Settings) -> pathlib.Path:
+    """A missing bundled viewer is a startup error, not an optional UI state."""
     directory = settings.neuroglancer_dir
-    return directory is not None and (directory / "index.html").is_file()
+    if directory is None or not (directory / "index.html").is_file():
+        raise RuntimeError(
+            "Neuroglancer is required. M4P_NEUROGLANCER_DIR must point to its "
+            "built client directory (containing index.html). The server image "
+            "includes it; source installs can run "
+            "'bash deploy/build-neuroglancer.sh <directory>' first."
+        )
+    return directory
 
 
 def neuroglancer_link(
@@ -97,6 +109,8 @@ def neuroglancer_link(
     classes: Sequence[tuple[int, str]] = (),
     prediction_url: str | None = None,
     segmentation_url: str | None = None,
+    meshes_url: str | None = None,
+    meshes_manifest: Mapping[str, Any] | None = None,
 ) -> str:
     """
     A Neuroglancer view of a project, as a link to /neuroglancer/ with its
@@ -108,8 +122,9 @@ def neuroglancer_link(
     - `prediction` and `final segmentation`: the `class` arrays of the zarr
       groups at `prediction_url` and `segmentation_url`, if given, hidden
       until someone switches them on.
+    - `mesh: <class>`: existing OBJ exports, when given, visible in 3D.
 
-    The last three are segmentation layers that select only the project's
+    Labels, predictions and final segmentations select only the project's
     `classes` (pairs of a value, 2 or more, and a color, `#rrggbb`), so
     background (1) and unlabeled (0) stay transparent. The first of them
     holds the selection and the colors and the others link to it, so they are
@@ -179,6 +194,11 @@ def neuroglancer_link(
             layer["linkedSegmentationGroup"] = shown[0][0]
         layers.append(layer)
 
+    if meshes_url is not None and meshes_manifest:
+        layers.extend(
+            _mesh_layers(public_url, meshes_url, meshes_manifest, classes, dimensions)
+        )
+
     state: dict[str, Any] = {"dimensions": dimensions}
     if shape:
         longest = max(n * s for n, s in zip(shape, scales, strict=True)) / min(scales)
@@ -186,9 +206,65 @@ def neuroglancer_link(
         state["crossSectionScale"] = round(longest / FIT_PIXELS, 3)
     state["layers"] = layers
     state["layout"] = "4panel"
-    return f"{NEUROGLANCER_PATH}/#!" + quote(
+    return f"{NEUROGLANCER_ENTRY}#!" + quote(
         json.dumps(state, separators=(",", ":")), safe="/:,"
     )
+
+
+def _mesh_layers(
+    public_url: str,
+    files_url: str,
+    manifest: Mapping[str, Any],
+    classes: Sequence[tuple[int, str]],
+    dimensions: dict,
+) -> list[dict[str, Any]]:
+    """Reuse OBJ exports, mapping their physical XYZ coordinates back to voxels."""
+    if manifest.get("axis_order") != "xyz":
+        return []
+    try:
+        spacing = [float(v) for v in manifest["voxel_size_xyz"]]
+        if len(spacing) != 3 or not all(math.isfinite(v) and v > 0 for v in spacing):
+            return []
+    except (KeyError, TypeError, ValueError):
+        return []
+    # OBJ vertices already include voxel spacing. Undo that once, then use
+    # the image's coordinate space. This works for physical and unitless scans,
+    # anisotropy, and downsampled exports (already in full-resolution coordinates).
+    transform = {
+        "inputDimensions": dimensions,
+        "outputDimensions": dimensions,
+        "matrix": [
+            [1 / spacing[i] if i == j else 0 for j in range(4)] for i in range(3)
+        ],
+    }
+    colors = dict(classes)
+    layers = []
+    for entry in manifest.get("classes", []):
+        value = entry.get("value")
+        if value not in colors or not entry.get("triangles"):
+            continue
+        # Our exporter writes exactly <class>.obj. Do not turn arbitrary
+        # manifest paths into URLs or interpret them as protocols/fragments.
+        filename = entry.get("files", {}).get("obj")
+        if filename != f"{value}.obj":
+            continue
+        color = colors[value] if _COLOR.fullmatch(colors[value]) else "#ffffff"
+        layers.append(
+            {
+                "type": "mesh",
+                "name": f"mesh: {entry.get('name') or f'class {value}'}",
+                "source": {
+                    "url": f"obj://{public_url}{files_url}{filename}",
+                    "transform": transform,
+                },
+                "shader": (
+                    f'#uicontrol vec3 color color(default="{color.lower()}")\n'
+                    "#uicontrol float opacity slider(min=0, max=1, default=0.65)\n"
+                    "void main() { emitRGBA(vec4(color, opacity)); }"
+                ),
+            }
+        )
+    return layers
 
 
 def _shape(manifest: Mapping[str, Any]) -> list[int] | None:

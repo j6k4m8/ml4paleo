@@ -8,6 +8,9 @@
 	import { page } from "$app/state";
 	import { session } from "#lib/session.svelte.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
+	import { untrack } from "svelte";
+	import { trainingNotifications } from "#lib/training-notifications.svelte.ts";
+	import TrainingToasts from "#lib/ui/TrainingToasts.svelte";
 
 	let { children } = $props();
 
@@ -21,6 +24,12 @@
 	let accountButton: HTMLButtonElement | undefined = $state();
 
 	afterNavigate(() => (menu = false));
+
+	$effect(() => {
+		const user = session.current?.user.id;
+		if (user) untrack(() => trainingNotifications.start(user));
+		return () => trainingNotifications.stop();
+	});
 
 	function menuKey(event: KeyboardEvent) {
 		if (!menu || event.key !== "Escape") return;
@@ -138,3 +147,5 @@
 		{/if}
 	</main>
 </div>
+
+<TrainingToasts />

@@ -7,6 +7,12 @@ function press(key: string, init: Partial<KeyboardEventInit> = {}, tagName = "CA
 }
 
 describe("keymap", () => {
+	it("selects the Accept tool with I without changing whole-view acceptance on A", () => {
+		expect(actionFor(press("i"))).toBe("accept-tool");
+		expect(actionFor(press("a"))).toBe("accept");
+		expect(actionFor(press("i", {}, "INPUT"))).toBeUndefined();
+	});
+
 	it("binds each key once", () => {
 		const keys = KEYMAP.flatMap((binding) => binding.keys);
 		expect(new Set(keys).size).toBe(keys.length);
@@ -28,6 +34,13 @@ describe("keymap", () => {
 		expect(binding?.keys).toEqual(["a"]);
 		expect(binding?.label).toContain("this view");
 		expect(binding?.label.includes("ROI")).toBe(SHOW_ROIS);
+	});
+
+	it("declines foreground suggestions in the view with X", () => {
+		expect(actionFor(press("x"))).toBe("decline");
+		const binding = KEYMAP.find((b) => b.action === "decline");
+		expect(binding?.keys).toEqual(["x"]);
+		expect(binding?.label).toContain("this view");
 	});
 
 	it("maps presses to actions", () => {
@@ -117,9 +130,10 @@ describe("the keymap with ROIs either way", () => {
 		return import("./keymap");
 	}
 
-	it.each([false, true])("answers A to accept, and an ROI's other keys only with ROIs shown (shown: %s)", async (shown) => {
+	it.each([false, true])("answers A/X to review, and an ROI's other keys only with ROIs shown (shown: %s)", async (shown) => {
 		const { actionFor: act, KEYMAP: keys } = await keymapWith(shown);
 		expect(act(press("a"))).toBe("accept");
+		expect(act(press("x"))).toBe("decline");
 		expect(act(press("r"))).toBe(shown ? "roi" : undefined);
 		expect(act(press("g"))).toBe(shown ? "next-roi" : undefined);
 		expect(act(press("c"))).toBe(shown ? "complete-roi" : undefined);

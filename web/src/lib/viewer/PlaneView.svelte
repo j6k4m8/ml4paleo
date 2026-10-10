@@ -4,7 +4,8 @@
 	import { PlaneMask } from "../labels/raster";
 	import type { Box, Roi } from "../rois.svelte";
 	import type { Stroke } from "./state.svelte";
-	import { BACKGROUND_VALUE, withBackground } from "./background";
+	import { BACKGROUND_VALUE } from "./background";
+	import type { ClassStyles } from "./class-display";
 	import { Busy, type ChunkStore } from "./chunks";
 	import { isRightClick } from "./keymap";
 	import type { LabelLayer } from "./labels";
@@ -36,13 +37,21 @@
 		levels,
 		images,
 		labels,
+		classStyles = {},
+		paintColor = "#ffffff",
 		prediction = null,
+		predictionVersions,
+		stalePredictions,
+		animatePredictions = false,
 		proposal = null,
 		segmentation = null,
 		onhover,
 		onresize,
 		onstroke,
 		onpolygon,
+		onacceptstart,
+		onacceptcancel,
+		acceptGestureId,
 		rois,
 		onroi,
 	}: {
@@ -51,8 +60,13 @@
 		levels: Level[];
 		images: ChunkStore;
 		labels: LabelLayer | null;
+		classStyles?: ClassStyles;
+		paintColor?: string;
 		/** A model's prediction (label values), drawn under the labels. */
 		prediction?: ChunkStore | null;
+		predictionVersions?: ReadonlyMap<string, string>;
+		stalePredictions?: ReadonlySet<string>;
+		animatePredictions?: boolean;
 		/**
 		 * A proposal: one box predicted on demand (empty elsewhere), drawn in
 		 * place of the prediction there, with the prediction's visibility.
@@ -66,6 +80,9 @@
 		onstroke: (stroke: Stroke) => void;
 		/** Close the polygon being drawn: fill it, or with `cut`, cut it out of the active class. */
 		onpolygon: (cut: boolean) => void;
+		onacceptstart: (plane: Plane, slice: number) => number | null;
+		onacceptcancel: (id: number) => void;
+		acceptGestureId: number | null;
 		rois: Roi[];
 		/** A rectangle drawn with the ROI tool, in plane voxels, at `slice`. */
 		onroi: (plane: Plane, slice: number, corners: [[number, number], [number, number]]) => void;
@@ -103,6 +120,9 @@
 	let shownLevel: number | undefined;
 	let shownLabelLevel: number | undefined;
 	let frame = 0;
+	let pulseTimer: ReturnType<typeof setTimeout> | undefined;
+	let reducedMotion = $state(false);
+	let staleVisible = $state(false);
 	let destroyed = false;
 
 	const slice = $derived(Math.floor(viewer.position[plane.normal]));
@@ -130,10 +150,15 @@
 
 	function start() {
 		renderer = new PlaneRenderer(canvas, plane, viewer.shape);
-		if (labels) renderer.setPalette(labels.colors);
+		if (labels) renderer.setPalette(labels.colors, classStyles);
 	}
 
 	onMount(() => {
+		const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
+		const setMotion = () => { reducedMotion = motion.matches; schedule(); };
+		setMotion();
+		motion.addEventListener("change", setMotion);
+		document.addEventListener("visibilitychange", schedule);
 		const observer = new ResizeObserver(([entry]) => {
 			if (!entry) return;
 			const ratio = window.devicePixelRatio || 1;
@@ -163,6 +188,8 @@
 			error = e instanceof Error ? e.message : String(e);
 		}
 		return () => {
+			motion.removeEventListener("change", setMotion);
+			document.removeEventListener("visibilitychange", schedule);
 			observer.disconnect();
 			canvas.removeEventListener("webglcontextlost", lost);
 			canvas.removeEventListener("webglcontextrestored", restored);
@@ -170,11 +197,15 @@
 	});
 
 	onDestroy(() => {
+		if (stroke?.accept !== undefined) onacceptcancel(stroke.accept);
+		if (viewer.polygon?.plane === plane.name && viewer.polygon.accept !== undefined) onacceptcancel(viewer.polygon.accept);
 		destroyed = true;
 		cancelAnimationFrame(frame);
 		clearTimeout(unfinishedTimer);
+		clearTimeout(pulseTimer);
 		images.want(plane.name, new Set());
 		labels?.store.want(plane.name, new Set());
+		labels?.store.want(`${plane.name}:declines`, new Set());
 		prediction?.want(plane.name, new Set());
 		proposal?.store.want(plane.name, new Set());
 		segmentation?.want(plane.name, new Set());
@@ -190,24 +221,32 @@
 	// A layer that now shows another store (a newer prediction or proposal,
 	// say) has other contents: forget the old one's textures.
 	let shownStores: Record<string, ChunkStore | null | undefined> = {};
+	let shownVersions: ReadonlyMap<string, string> | undefined;
 	$effect(() => {
 		const stores = { "prediction/": prediction, "proposal/": proposal?.store, "segmentation/": segmentation };
 		for (const [prefix, store] of Object.entries(stores)) {
 			if (prefix in shownStores && shownStores[prefix] !== store) {
 				shownStores[prefix]?.want(plane.name, new Set());
-				renderer?.dropOverlay(prefix);
+				if (prefix === "prediction/" && shownVersions && predictionVersions) {
+					for (const id of new Set([...shownVersions.keys(), ...predictionVersions.keys()])) {
+						if (shownVersions.get(id) !== predictionVersions.get(id)) renderer?.dropLabels(prefix + id);
+					}
+				} else renderer?.dropOverlay(prefix);
 				schedule();
 			}
 		}
 		shownStores = stores;
+		shownVersions = predictionVersions;
 	});
 
 	// New label colors, and chunks someone else just edited.
 	$effect(() => {
 		if (!labels) return;
-		renderer?.setPalette(labels.colors);
+		const styles = classStyles;
+		renderer?.setPalette(labels.colors, styles);
+		schedule();
 		const stopClasses = labels.onClasses(() => {
-			renderer?.setPalette(labels.colors);
+			renderer?.setPalette(labels.colors, styles);
 			schedule();
 		});
 		const stop = labels.onChange((ids) => {
@@ -240,6 +279,9 @@
 			height,
 			labels,
 			prediction,
+			stalePredictions,
+			animatePredictions,
+			reducedMotion,
 			proposal,
 			segmentation,
 		];
@@ -253,8 +295,18 @@
 	}
 
 	function failed(e: unknown) {
-		if (e instanceof DOMException && e.name === "AbortError") return;
+		if (e instanceof DOMException && e.name === "AbortError") return schedule();
 		loadError = e instanceof Error ? e.message : String(e);
+	}
+
+	function loadingStores() { return [images, labels?.store, prediction, proposal?.store, segmentation]; }
+	function clearLoadError() {
+		if (!loadingStores().some((store) => store?.failed)) loadError = "";
+	}
+	function retryLoads() {
+		for (const store of loadingStores()) store?.retryFailed();
+		loadError = "";
+		schedule();
 	}
 
 	/** The store gave up waiting for a label chunk the server is still making: say so, and have the next frame ask again soon. */
@@ -266,6 +318,7 @@
 	}
 
 	function render() {
+		clearTimeout(pulseTimer);
 		if (destroyed || !renderer || levels.length === 0 || width === 0) return;
 		const current = view();
 		const chosen = viewLevel(levels, current, shownLevel, MAX_IMAGE_TILES);
@@ -306,28 +359,53 @@
 		overlaysHidden = (predicted || segmented) && overlayHidden(full, current, overlaysHidden);
 		const fullTiles = overlaysHidden ? [] : visibleTiles(full, current, 0);
 		const overlays: Overlay[] = [];
+		// Model-derived layers must wait for and sample the full-resolution
+		// labels so a 255 decline tombstone never flashes through as paint.
+		const declineTiles = labels && (predicted || segmented) ? fullTiles.map((key) => ({ id: `${key.cz}/${key.cy}/${key.cx}`, key })) : [];
+		labels?.store.want(`${plane.name}:declines`, declineTiles.map((tile) => tile.id));
+		for (const tile of declineTiles) loadOverlay(labels!.store, "", tile, levels, at);
 		/** Draw a layer's chunks in view (or just `keys`), leaving out `hole`. */
 		const add = (
 			store: ChunkStore | null | undefined,
 			prefix: string,
 			shown: boolean,
 			opacity: number,
-			{ keys = fullTiles, hole, background }: { keys?: TileKey[]; hole?: Rect; background?: boolean } = {},
+			{
+				keys = fullTiles,
+				hole,
+				background,
+				hatched,
+				maskDeclined,
+			}: { keys?: TileKey[]; hole?: Rect; background?: boolean; hatched?: boolean; maskDeclined?: boolean } = {},
 		) => {
 			if (!store) return;
 			if (!shown || keys.length === 0) return store.want(plane.name, []);
 			const tiles = keys.map((key) => ({ id: `${key.cz}/${key.cy}/${key.cx}`, key }));
 			store.want(plane.name, tiles.map((t) => t.id));
 			for (const tile of tiles) loadOverlay(store, prefix, tile, levels, at);
-			overlays.push({ slice: at, tiles: tiles.map((t) => ({ ...t, id: prefix + t.id })), opacity, hole, background });
+			overlays.push({
+				slice: at,
+				tiles: tiles.map((t) => ({ ...t, id: prefix + t.id, stale: prefix === "prediction/" && stalePredictions?.has(t.id), ...(maskDeclined ? { declineMask: t.id } : {}) })),
+				opacity,
+				staleOpacity: reducedMotion || !animatePredictions ? 0.65 : 0.7 + 0.2 * Math.sin(performance.now() / 400),
+				hole,
+				background,
+				hatched,
+			});
 		};
 		// A proposal shows in its box, in place of the prediction there.
 		const inlay = proposal ? boxOnPlane(proposal.box, plane, at) : null;
-		add(prediction, "prediction/", viewer.showPrediction, viewer.predictionOpacity, { hole: inlay ?? undefined });
-		add(proposal?.store, "proposal/", viewer.showPrediction, viewer.predictionOpacity, {
-			keys: inlay ? fullTiles.filter((key) => tileCrosses(key, plane, inlay)) : [],
+		add(prediction, "prediction/", viewer.showPrediction, viewer.opacity, {
+			hole: inlay ?? undefined,
+			hatched: true,
+			maskDeclined: true,
 		});
-		add(segmentation, "segmentation/", viewer.showSegmentation, viewer.segmentationOpacity);
+		add(proposal?.store, "proposal/", viewer.showPrediction, viewer.opacity, {
+			keys: inlay ? fullTiles.filter((key) => tileCrosses(key, plane, inlay)) : [],
+			hatched: true,
+			maskDeclined: true,
+		});
+		add(segmentation, "segmentation/", viewer.showSegmentation, viewer.segmentationOpacity, { maskDeclined: true });
 		// The labels come at the level that fits the view, with the coarser
 		// levels under it, and this page's latest edits over them, so a stroke
 		// doesn't vanish as it's finished however far out the view is.
@@ -356,6 +434,10 @@
 			labelsUnfinished = false;
 		}
 		renderer.draw(current, viewer.window, layers, overlays);
+		staleVisible = overlays.some((overlay) => overlay.opacity > 0 && overlay.tiles.some((tile) => tile.stale));
+		// Only stale model tiles pulse, at 12 fps. Paint, image, and fresh chunks
+		// remain steady; hidden tabs and reduced-motion preferences do no work.
+		if (staleVisible && animatePredictions && !reducedMotion && !document.hidden) pulseTimer = setTimeout(schedule, 80);
 	}
 
 	/**
@@ -387,13 +469,13 @@
 		if (!renderer || renderer.hasImage(key, at)) return;
 		const id = tileId(key);
 		const cached = images.get(id);
-		if (cached) return renderer.uploadImage(key, at, cached);
+		if (cached) { clearLoadError(); return renderer.uploadImage(key, at, cached); }
 		if (waiting.has(`image:${id}`)) return;
 		waiting.add(`image:${id}`);
 		images
 			.request(id)
 			.then((chunk) => {
-				loadError = "";
+				clearLoadError();
 				if (!renderer || renderer.hasImage(key, at)) return;
 				if (sliceIndex(levels[key.level]!, view()) !== at) return schedule();
 				renderer.uploadImage(key, at, chunk);
@@ -414,7 +496,7 @@
 		const named = { ...tile, id: prefix + tile.id };
 		if (!renderer || !level || renderer.hasLabels(named.id, slice)) return;
 		const cached = store.get(tile.id);
-		if (cached) return renderer.uploadLabels(named, slice, cached);
+		if (cached) { clearLoadError(); return renderer.uploadLabels(named, slice, cached); }
 		if (waiting.has(`overlay:${named.id}`)) return;
 		waiting.add(`overlay:${named.id}`);
 		store
@@ -422,6 +504,7 @@
 			.then((chunk) => {
 				// The layer may show another store by now, under the same names.
 				if (![prediction, proposal?.store, segmentation, labels?.store].includes(store)) return schedule();
+				clearLoadError();
 				if (store === labels?.store && unfinished.delete(tile.id)) labelsUnfinished = unfinished.size > 0;
 				if (!renderer || renderer.hasLabels(named.id, slice)) return;
 				if (sliceIndex(level, view()) !== slice) return schedule();
@@ -447,7 +530,12 @@
 	let wheelSteps = 0;
 
 	const ratio = () => window.devicePixelRatio || 1;
-	const painting = $derived(viewer.tool === "brush" || viewer.tool === "eraser");
+	const painting = $derived(viewer.drawingBrush);
+
+	$effect(() => {
+		const id = acceptGestureId;
+		if (stroke?.accept !== undefined && stroke.accept !== id) cancel();
+	});
 
 	function offset(event: MouseEvent): [number, number] {
 		const rect = canvas.getBoundingClientRect();
@@ -476,7 +564,7 @@
 	const reach = (event: PointerEvent) => (event.pointerType === "mouse" ? 1 : 2);
 
 	/** Whether closing the polygon with this event's keys held cuts it out. */
-	const cuts = (event: MouseEvent) => closingMode(viewer.polygonMode, event) === "subtract";
+	const cuts = (event: MouseEvent) => viewer.tool !== "accept" && closingMode(viewer.polygonMode, event) === "subtract";
 
 	/** Where a plane point is on screen, in CSS pixels. */
 	function screen(u: number, v: number): [number, number] {
@@ -496,7 +584,7 @@
 	const labelValues = () => [BACKGROUND_VALUE, ...(labels?.classes ?? []).map((c) => c.value)];
 
 	function canEdit(): boolean {
-		return viewer.tool === "eraser" || viewer.tool === "roi" || viewer.activeClass !== null;
+		return viewer.tool === "accept" || viewer.tool === "eraser" || viewer.tool === "roi" || viewer.activeClass !== null;
 	}
 
 	function pointerDown(event: PointerEvent) {
@@ -510,6 +598,13 @@
 		const pan = viewer.tool === "navigate" || viewer.panning || event.button === 1;
 		press = { x: event.clientX, y: event.clientY, moved: false, pan, pointer: event.pointerId, draws: false, before: 0 };
 		if (pan || event.button !== 0 || !canEdit()) return;
+		let accept: number | undefined;
+		if (viewer.tool === "accept") {
+			const id = viewer.drawingPolygon && polygonHere?.accept !== undefined
+				? polygonHere.accept : onacceptstart(plane, slice);
+			if (id === null) { press = null; return; }
+			accept = id;
+		}
 		if (painting) {
 			const point = planePoint(event);
 			const mask = new PlaneMask(viewer.shape[plane.u], viewer.shape[plane.v]);
@@ -523,18 +618,19 @@
 				value: viewer.tool === "eraser" ? 0 : (viewer.activeClass ?? 0),
 				onlyIf: viewer.tool === "eraser" ? viewer.eraseCondition(labelValues()) : viewer.paintCondition(labelValues()),
 				radius: viewer.brushRadius,
+				accept,
 				last: point,
 			};
 			drawStroke();
 		} else if (viewer.tool === "roi") {
 			const point = planePoint(event);
 			rectangle = { from: point, to: point };
-		} else if (viewer.tool === "polygon") {
+		} else if (viewer.drawingPolygon) {
 			const point = planePoint(event);
 			const current = polygonHere;
 			// Clicking the first point again closes the polygon.
 			if (current && closesAt(current.points, point, scale(), CLOSE_PIXELS * reach(event))) return onpolygon(cuts(event));
-			viewer.polygon = current ? { ...current, points: [...current.points, point] } : { plane: plane.name, slice, points: [point] };
+			viewer.polygon = current ? { ...current, points: [...current.points, point] } : { plane: plane.name, slice, points: [point], accept };
 			press.draws = true;
 			press.before = current?.points.length ?? 0;
 		}
@@ -603,6 +699,7 @@
 			stroke = null;
 			clearStroke();
 			if (finished.mask.count > 0) onstroke(finished);
+			else if (finished.accept !== undefined) onacceptcancel(finished.accept);
 		} else if (press?.draws && viewer.lassoing) {
 			// Letting go of a freehand drag closes it, where the pointer let go.
 			viewer.lassoing = false;
@@ -622,13 +719,16 @@
 
 	/** Move the crosshair to where the pointer is. */
 	function goHere(event: PointerEvent) {
+		if (acceptGestureId !== null) return;
 		viewer.autoFit = false;
 		viewer.moveTo(voxelAt(view(), ...offset(event)));
 	}
 
 	function cancel() {
+		if (stroke?.accept !== undefined) onacceptcancel(stroke.accept);
 		// A drag the browser called off (for a system gesture, say) takes back the points it added.
 		if (press?.draws && viewer.lassoing && polygonHere) {
+			if (press.before === 0 && polygonHere.accept !== undefined) onacceptcancel(polygonHere.accept);
 			viewer.polygon = press.before > 0 ? { ...polygonHere, points: polygonHere.points.slice(0, press.before) } : null;
 		}
 		if (press?.draws) viewer.lassoing = false;
@@ -640,6 +740,7 @@
 
 	function wheel(event: WheelEvent) {
 		event.preventDefault();
+		if (acceptGestureId !== null) return;
 		const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? height : 1);
 		if (event.ctrlKey || event.metaKey) {
 			viewer.autoFit = false;
@@ -666,11 +767,7 @@
 
 	// --- previews --------------------------------------------------------------
 
-	const activeColor = $derived(
-		viewer.tool === "eraser"
-			? "#ffffff"
-			: (withBackground(labels?.classes ?? []).find((c) => c.value === viewer.activeClass)?.color ?? "#ffffff"),
-	);
+	const activeColor = $derived(viewer.tool === "accept" ? "#6ee7b7" : viewer.tool === "eraser" ? "#ffffff" : paintColor);
 
 	function clearStroke() {
 		overlay?.getContext("2d")?.clearRect(0, 0, overlay.width, overlay.height);
@@ -686,7 +783,8 @@
 		const { mask } = stroke;
 		const px = pixelsPerVoxel(view());
 		const r = ratio();
-		context.globalAlpha = Math.max(0.35, viewer.opacity);
+		// Acceptance is a selection preview, not solid human paint.
+		context.globalAlpha = stroke.accept !== undefined ? 0.18 : Math.max(0.35, viewer.opacity);
 		context.fillStyle = activeColor;
 		for (let j = mask.v0; j < mask.v0 + mask.height; j++) {
 			let i = mask.u0;
@@ -775,7 +873,7 @@
 		onpointerenter={() => onhover(plane)}
 		onpointerleave={() => (cursor = null)}
 		oncontextmenu={(event) => event.preventDefault()}
-		ondblclick={(event) => viewer.tool === "polygon" && onpolygon(cuts(event))}
+		ondblclick={(event) => viewer.drawingPolygon && onpolygon(cuts(event))}
 		onfocus={() => onhover(plane)}
 		onwheel={wheel}
 		class:editing={viewer.tool !== "navigate" && !viewer.panning}
@@ -844,8 +942,9 @@
 		{#if labels && !viewer.showLabels}<span class="warn">· labels hidden (V)</span>{/if}
 		{#if hiddenLayers.length > 0}<span class="muted">· zoom in to see {list.format(hiddenLayers)}</span>{/if}
 		{#if labelsUnfinished}<span class="muted">· the server is still making the zoomed-out labels, retrying</span>{/if}
+		{#if staleVisible}<span class="muted">· {animatePredictions ? "Updating suggestions…" : "Older suggestions"}</span>{/if}
 	</div>
-	{#if error || loadError}<p class="error" role="alert">{error || loadError}</p>{/if}
+	{#if error || loadError}<p class="error" role="alert">{error || loadError} {#if loadError && !error}<button type="button" onclick={retryLoads}>Retry</button>{/if}</p>{/if}
 </div>
 
 <style>
@@ -984,4 +1083,5 @@
 		color: var(--color-danger);
 		font-size: 0.6875rem;
 	}
+	.error button { margin-left: 0.5rem; text-decoration: underline; cursor: pointer; }
 </style>

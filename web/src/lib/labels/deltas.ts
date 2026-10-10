@@ -25,6 +25,8 @@ export interface DeltaIn {
 	value?: number;
 	values?: string;
 	only_if: string;
+	/** For a decline: the model value the server must find under the tombstone. */
+	prediction_value?: number;
 }
 
 /** Pack 0/1 bytes into bits, least significant bit first (numpy's "little"). */

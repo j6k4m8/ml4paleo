@@ -31,7 +31,7 @@ from ml4paleo_server.db import (
 from ml4paleo_server.storage import project_storage
 from sqlalchemy import func, select, text, update
 
-from ml4paleo.labels import LABEL_CHUNK_ZYX, Source
+from ml4paleo.labels import DECLINED, LABEL_CHUNK_ZYX, Source
 from ml4paleo.labels.codec import decode_chunk
 from ml4paleo.labels.deltas import split_into_deltas
 from ml4paleo.segmentation.predict import create_prediction, open_prediction
@@ -394,6 +394,9 @@ def test_a_condition_is_refused_unless_it_is_one_of_the_forms(ada, project):
     for good in ("labeled", "class:3", "class:3,2", "class:254,2,3"):
         assert raw_edit(ada, project, mask, (0, 0, 0), 2, good).status_code == 201
     assert len(ada.get(f"{base}/ops").json()) == 4
+    assert raw_edit(ada, project, mask, (0, 0, 0), 0, "declined").status_code == 201
+    assert raw_edit(ada, project, mask, (0, 0, 0), 2, "declined").status_code == 422
+    assert len(ada.get(f"{base}/ops").json()) == 5
     # Every value from 1 to 254, in any order.
     every = list(range(1, 255))
     random.Random(1).shuffle(every)
@@ -760,6 +763,7 @@ def test_accepting_a_prediction_is_checked_against_it(
         "model": None,
         "roi": roi,
     }
+    assert op["accepted"]["kind"] == "prediction"
 
     # Plain edits are always people's own.
     mask = np.ones((2, 2, 2), dtype=bool)
@@ -772,6 +776,69 @@ def test_accepting_a_prediction_is_checked_against_it(
         },
     )
     assert claimed.status_code == 422
+
+
+def test_declining_a_prediction_is_checked_and_undoable(
+    ada, project, settings, migrated_database_url
+):
+    prediction = add_prediction(settings, migrated_database_url, project)
+    roi = add_roi(ada, project)
+    url = f"/api/projects/{project}/labels/decline"
+
+    def decline(expected=2, value=DECLINED, only_if="unlabeled"):
+        deltas = deltas_for(
+            np.ones((2, 2, 2), dtype=bool),
+            (0, 0, 0),
+            value=value,
+            only_if=only_if,
+        )
+        for delta in deltas:
+            delta["prediction_value"] = expected
+        return ada.post(
+            url,
+            json={
+                "client_op_id": str(uuid.uuid4()),
+                "prediction_artifact_id": prediction,
+                "roi_id": roi,
+                "deltas": deltas,
+            },
+        )
+
+    # The endpoint authenticates both the tombstone and what it hides.
+    assert decline(expected=3).status_code == 422
+    assert decline(value=2).status_code == 422
+    assert decline(only_if="any").status_code == 422
+
+    declined = decline()
+    assert declined.status_code == 201, declined.text
+    assert (chunk(ada, project, (0, 0, 0))[:2, :2, :2] == DECLINED).all()
+    assert (
+        chunk(ada, project, (0, 0, 0), array="source")[:2, :2, :2] == Source.DECLINED
+    ).all()
+    [op] = ada.get(f"/api/projects/{project}/labels/ops?limit=1").json()
+    assert op["source"] == Source.DECLINED
+    assert op["tool"] == {
+        "name": "decline-prediction",
+        "prediction": prediction,
+        "model": None,
+        "roi": roi,
+    }
+    assert op["accepted"]["kind"] == "prediction"
+    # Declines are not reported as training labels.
+    assert ada.get(f"/api/projects/{project}/labels/counts").json()["2"] == 0
+
+    assert toggle(ada, project, declined.json()["seq"], "undo").status_code == 201
+    assert not chunk(ada, project, (0, 0, 0))[:2, :2, :2].any()
+    assert toggle(ada, project, declined.json()["seq"], "redo").status_code == 201
+    assert (chunk(ada, project, (0, 0, 0))[:2, :2, :2] == DECLINED).all()
+
+    # The ordinary edit endpoint can remove tombstones, but the dedicated
+    # condition cannot be used to turn them into training labels.
+    mask = np.ones((2, 2, 2), dtype=bool)
+    assert edit(ada, project, mask, (0, 0, 0), 2, only_if="declined").status_code == 422
+    restored = edit(ada, project, mask, (0, 0, 0), 0, only_if="declined")
+    assert restored.status_code == 201, restored.text
+    assert not chunk(ada, project, (0, 0, 0))[:2, :2, :2].any()
 
 
 def test_predictions_labels_were_accepted_from_are_kept(

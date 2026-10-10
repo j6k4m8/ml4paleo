@@ -19,6 +19,11 @@ let csrfToken: string | null = null;
 
 const SAFE = new Set(["GET", "HEAD"]);
 
+/** Same-origin workers use the same CSRF protection for ephemeral mesh requests. */
+export function csrfHeaders(): Record<string, string> {
+	return csrfToken ? { "X-CSRF-Token": csrfToken } : {};
+}
+
 export async function api<T>(
 	path: string,
 	options: { method?: string; body?: unknown; signal?: AbortSignal } = {},

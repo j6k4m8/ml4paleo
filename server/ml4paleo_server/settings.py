@@ -168,8 +168,8 @@ class Settings(BaseSettings):
     # The built web app (`web/build`). When missing, the API still runs and
     # serves a placeholder page.
     web_dir: pathlib.Path | None = None
-    # A Neuroglancer build to serve at /neuroglancer/ (the server image has
-    # one). Without it, there is no Neuroglancer link.
+    # Required when serving the app. The server image configures its bundled
+    # build; source installs must build it and set this directory too.
     neuroglancer_dir: pathlib.Path | None = None
     # Number of API worker processes.
     api_workers: int = Field(default=4, ge=1)

@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from scipy import ndimage
 
-from ml4paleo.labels import BACKGROUND, FIRST_CLASS
+from ml4paleo.labels import BACKGROUND, DECLINED, FIRST_CLASS
 from ml4paleo.segmentation.compose import (
     TooLarge,
     apply_shard,
@@ -39,6 +39,16 @@ def test_labels_overrule_the_prediction_and_complete_rois_are_background():
     assert (merged[0] == TOOTH).all()  # labeled, inside the complete ROI
     assert (merged[1] == BACKGROUND).all()  # unlabeled, inside it
     assert (merged[2:] == BONE).all()  # outside: the prediction
+
+
+def test_declines_suppress_predictions_without_becoming_a_class():
+    prediction = np.full((2, 2, 3), BONE, dtype=np.uint8)
+    labels = np.zeros_like(prediction)
+    labels[0, 0, 0] = DECLINED
+    labels[0, 0, 1] = TOOTH
+    merged = merge(prediction, labels, (0, 0, 0, 2, 2, 3), [])
+    assert merged[0, 0].tolist() == [BACKGROUND, TOOTH, BONE]
+    assert DECLINED not in merged
 
 
 def compose(volume, labeled, shard, min_voxels, slab=2):

@@ -1,0 +1,8 @@
+diff --git a/src/util/array.ts b/src/util/array.ts
+--- a/src/util/array.ts
++++ b/src/util/array.ts
+@@ -634,3 +634,3 @@
+   shrinkToFit() {
+-    this.data = this.data.slice(0, length) as T;
++    this.data = this.data.slice(0, this.length) as T;
+   }

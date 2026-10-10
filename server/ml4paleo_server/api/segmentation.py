@@ -16,7 +16,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .. import artifacts, audit
 from ..auth.deps import CurrentAuth, DbSession
@@ -100,6 +100,8 @@ class SegmentationOut(BaseModel):
     min_voxels: int
     # When the newest label edit it includes was made; None if it has none.
     labels_as_of: datetime.datetime | None
+    # Label-state changes after the snapshot (edits, undo, and redo).
+    label_changes_since: int
     # Its zarr group (an array `class`), through the data gateway.
     zarr_url: str
     committed_at: datetime.datetime
@@ -129,20 +131,27 @@ async def current_segmentation(
         )
     # What the server recorded when it started, not what the worker wrote.
     inputs = head.inputs or {}
+    label_seq = int(inputs.get("label_seq", 0))
     labels_as_of = await db.scalar(
         select(LabelOp.created_at)
         .where(
             LabelOp.project_id == project.id,
-            LabelOp.seq <= int(inputs.get("label_seq", 0)),
+            LabelOp.seq <= label_seq,
         )
         .order_by(LabelOp.seq.desc())
         .limit(1)
+    )
+    label_changes_since = await db.scalar(
+        select(func.count())
+        .select_from(LabelOp)
+        .where(LabelOp.project_id == project.id, LabelOp.seq > label_seq)
     )
     return SegmentationOut(
         artifact_id=head.id,
         model_name=await _model_name(db, project.id, inputs.get("model_id")),
         min_voxels=int(inputs.get("min_voxels", 0)),
         labels_as_of=labels_as_of,
+        label_changes_since=int(label_changes_since or 0),
         zarr_url=zarr_path(project.id, head.id),
         committed_at=head.state_changed_at,
     )

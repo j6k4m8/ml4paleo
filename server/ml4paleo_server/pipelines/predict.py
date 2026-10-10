@@ -21,6 +21,7 @@ proposal slot (see `artifacts.proposal_slot`) for them to look over and
 accept. Their newer proposal stops their older ones; other people's go on.
 """
 
+import datetime
 import math
 import uuid
 from collections.abc import Sequence
@@ -41,6 +42,92 @@ from .train import RUNNING_JOB
 WEIGHTS = {"prepare": 1.0, "shards": 95.0, "finalize": 1.0}
 # The most a proposal predicts: about as much as one shard job, quickly.
 MAX_PROPOSAL_VOXELS = 256**3
+
+
+async def live_chunk(
+    db: AsyncSession,
+    *,
+    model: TrainedModel,
+    image: Artifact,
+    key: tuple[int, int, int],
+    created_by: uuid.UUID,
+) -> Artifact:
+    """One immutable, cacheable 64³ preview. Never changes a shared head.
+
+    A user can have only one live job queued/running in this project, even
+    across tabs. Requests for more work wait, rather than building a backlog.
+    Old checkpoints remain usable while another model trains.
+    """
+    shape = _shape(image)
+    origin = tuple(c * 64 for c in key)
+    if any(c < 0 or c >= n for c, n in zip(origin, shape, strict=True)):
+        raise ValueError("That chunk is outside the image.")
+    box = (*origin, *(min(c + 64, n) for c, n in zip(origin, shape, strict=True)))
+    model_artifact = await _start_with(db, model)
+    cache_key = f"live:{image.id}:{model_artifact.id}:{','.join(map(str, key))}"
+    cached = await db.scalar(
+        select(Artifact)
+        .where(
+            Artifact.project_id == model.project_id,
+            Artifact.cache_key == cache_key,
+            Artifact.state.in_(("staging", "committed")),
+        )
+        .order_by(Artifact.created_at.desc())
+    )
+    if cached is not None:
+        if cached.state == "committed":
+            cached.expires_at = artifacts.now() + datetime.timedelta(days=2)
+            return cached
+        job = await db.get(Job, cached.produced_by_job)
+        if job and job.status in RUNNING_JOB and not job.cancel_requested:
+            return cached
+    if await running(
+        db, model.project_id, kinds=["predict.live"], created_by=created_by
+    ):
+        raise ValueError(
+            "A live chunk is still running; wait before requesting another."
+        )
+    plugin = get_plugin(model.plugin)
+    window = _window(model_artifact, image)
+    result = await artifacts.create_staging(
+        db,
+        project_id=model.project_id,
+        kind="prediction",
+        cache_key=cache_key,
+        expires_at=artifacts.now() + datetime.timedelta(days=2),
+        inputs={
+            "model_id": str(model.id),
+            "image_artifact_id": str(image.id),
+            "window": window,
+            "box": list(box),
+            "live": True,
+        },
+    )
+    job = await jobs.enqueue(
+        db,
+        "predict.live",
+        {
+            "model_id": str(model.id),
+            "image_artifact_id": str(image.id),
+            "plugin": model.plugin,
+            "class_values": list(model.class_values),
+            "window": window,
+            "shape_zyx": list(shape),
+            "box": list(box),
+        },
+        project_id=model.project_id,
+        created_by=created_by,
+        tier=Tier.INTERACTIVE,
+        min_vram_gb=plugin.caps.min_vram_gb,
+        grants=[
+            artifacts.grant_for(image, "r"),
+            artifacts.grant_for(model_artifact, "r"),
+            artifacts.grant_for(result),
+        ],
+    )
+    result.produced_by_job = job.id
+    await db.flush()
+    return result
 
 
 async def running(

@@ -25,7 +25,7 @@ from .. import artifacts, audit, jobs, pipelines, streams
 from ..auth.deps import CurrentAuth, DbSession, SettingsDep
 from ..db import Job, Project, ProjectMember, Upload, UserSession
 from ..jobs.queue import FINISHED
-from ..viewer import neuroglancer_available, neuroglancer_link
+from ..viewer import neuroglancer_link
 from .gateway import zarr_path
 from .projects import MemberProject
 
@@ -123,15 +123,15 @@ async def start_ingest(
 
 
 @router.get("/pipelines")
-async def list_pipelines(project: MemberProject, db: DbSession) -> list[PipelineOut]:
-    roots = (
-        await db.scalars(
-            select(Job)
-            .where(Job.project_id == project.id, Job.id == Job.root_id)
-            .order_by(Job.created_at.desc())
-            .limit(50)
-        )
-    ).all()
+async def list_pipelines(
+    project: MemberProject, db: DbSession, include_live_previews: bool = True
+) -> list[PipelineOut]:
+    query = select(Job).where(Job.project_id == project.id, Job.id == Job.root_id)
+    if not include_live_previews:
+        # Filter before the limit: frequent previews must not push deliberate
+        # project actions out of Activity. Individual status reads still work.
+        query = query.where(Job.kind != "predict.live")
+    roots = (await db.scalars(query.order_by(Job.created_at.desc()).limit(50))).all()
     return [await pipeline_out(db, root) for root in roots]
 
 
@@ -241,8 +241,8 @@ class ImageOut(BaseModel):
     manifest: dict[str, Any]
     # The OME-Zarr image, through the data gateway.
     zarr_url: str
-    # The image in Neuroglancer, if this server has it.
-    neuroglancer_url: str | None
+    # The image in the bundled Neuroglancer.
+    neuroglancer_url: str
 
 
 @router.get("/image")
@@ -259,7 +259,5 @@ async def current_image(
         committed_at=image.state_changed_at,
         manifest=manifest,
         zarr_url=zarr_url,
-        neuroglancer_url=neuroglancer_link(settings.public_url, zarr_url, manifest)
-        if neuroglancer_available(settings)
-        else None,
+        neuroglancer_url=neuroglancer_link(settings.public_url, zarr_url, manifest),
     )

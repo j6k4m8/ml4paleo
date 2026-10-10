@@ -154,6 +154,14 @@
 		@apply rounded-sm border border-line bg-field px-1 font-mono text-2xs text-ink-dim;
 	}
 
+	.app-tooltip {
+		@apply fixed z-50 rounded-sm border border-line bg-chrome px-2 py-1 font-mono text-2xs text-ink shadow-lg;
+		width: max-content;
+		max-width: min(24rem, calc(100vw - 1rem));
+		/* The portal is outside scrolling panels, so it cannot be clipped. */
+		pointer-events: auto;
+	}
+
 	.error {
 		@apply text-danger;
 	}

@@ -6,6 +6,7 @@
  */
 
 import type { Chunk } from "../viewer/chunks";
+import { BACKGROUND_VALUE, DECLINED_VALUE } from "../viewer/background";
 import { MAX_OVERLAY_TILES } from "../viewer/overlays";
 import type { Layout } from "../viewer/state.svelte";
 import { countTiles, type Level, type Plane, PLANES, TILE_HYSTERESIS, type Vec3, type View, visibleBox } from "../viewer/tiles";
@@ -134,13 +135,13 @@ export interface ViewAccept {
 /** Why accepting in the view can't go ahead, in a sentence, or "" if it can. */
 export function whyNotInView(now: ViewAccept): string {
 	if (now.imageReplaced) return "This project's image was replaced; reload the page first.";
-	if (!now.predicted) return "There's no prediction to accept yet.";
-	if (!now.shown) return "The prediction is hidden; show it (M) to accept what's in view.";
-	if (!(now.opacity > 0)) return "The prediction's opacity is 0; raise it to accept what's in view.";
+	if (!now.predicted) return "No suggestions ready to accept yet.";
+	if (!now.shown) return "Suggestions are hidden. Show them (M) before accepting.";
+	if (!(now.opacity > 0)) return "Suggestions are invisible at 0% opacity. Raise the opacity before accepting.";
 	if (!now.box) return "Nothing of the image is in view.";
 	if (tooBigForView(now.box, now.tiles)) return "Zoom in a bit: the visible area is too big to accept at once.";
 	if (now.mixed) return "Part of this view shows your proposal and part doesn't; zoom in on one of them to accept it.";
-	if (!now.covered) return "Nothing is predicted in this view yet.";
+	if (!now.covered) return "No suggestions ready in this view yet.";
 	return "";
 }
 
@@ -169,12 +170,28 @@ export function leavesLabeledOut(skipLabeled: boolean, predicted: boolean, toggl
 	return skipLabeled && predicted && !toggling;
 }
 
-/** Edits that write each predicted value into the box's unlabeled voxels. */
-export function acceptParts(values: Uint8Array, box: Box): DeltaIn[][] {
+/** Foreground and Background voxels available for an accept. */
+export function acceptCounts(values: Uint8Array): { classes: number; background: number } {
+	let classes = 0;
+	let background = 0;
+	for (const value of values) {
+		if (value === BACKGROUND_VALUE) background++;
+		else if (value > BACKGROUND_VALUE) classes++;
+	}
+	return { classes, background };
+}
+
+/**
+ * Edits that write predicted foreground classes into the box's unlabeled
+ * voxels. Background is deliberately left out unless the person explicitly
+ * includes it: accepting a model must not silently confirm its negative
+ * space as training truth.
+ */
+export function acceptParts(values: Uint8Array, box: Box, includeBackground = false): DeltaIn[][] {
 	const shape: Vec3 = [box[3] - box[0], box[4] - box[1], box[5] - box[2]];
 	const origin: Vec3 = [box[0], box[1], box[2]];
 	const present = new Set<number>();
-	for (const value of values) if (value) present.add(value);
+	for (const value of values) if (value > BACKGROUND_VALUE || (includeBackground && value === BACKGROUND_VALUE)) present.add(value);
 	return [...present]
 		.sort((a, b) => a - b)
 		.map((value) => {
@@ -182,4 +199,61 @@ export function acceptParts(values: Uint8Array, box: Box): DeltaIn[][] {
 			for (let i = 0; i < values.length; i++) if (values[i] === value) mask[i] = 1;
 			return splitIntoDeltas(mask, shape, origin, { value, onlyIf: "unlabeled" });
 		});
+}
+
+/**
+ * Edits that replace predicted foreground suggestions with decline
+ * tombstones. One part is made per predicted value so the server can verify
+ * every selected voxel against that exact value before writing 255.
+ */
+export function declineParts(values: Uint8Array, box: Box): DeltaIn[][] {
+	const shape: Vec3 = [box[3] - box[0], box[4] - box[1], box[5] - box[2]];
+	const origin: Vec3 = [box[0], box[1], box[2]];
+	const present = new Set<number>();
+	for (const value of values) if (value > BACKGROUND_VALUE && value < DECLINED_VALUE) present.add(value);
+	return [...present]
+		.sort((a, b) => a - b)
+		.map((predictionValue) => {
+			const mask = new Uint8Array(values.length);
+			for (let i = 0; i < values.length; i++) if (values[i] === predictionValue) mask[i] = 1;
+			return splitIntoDeltas(mask, shape, origin, { value: DECLINED_VALUE, onlyIf: "unlabeled" }).map((delta) => ({
+				...delta,
+				prediction_value: predictionValue,
+			}));
+		});
+}
+
+/** Restore decline tombstones to unlabeled without touching anything newer. */
+export function restoreDeclinedParts(values: Uint8Array, box: Box): DeltaIn[][] {
+	const shape: Vec3 = [box[3] - box[0], box[4] - box[1], box[5] - box[2]];
+	const origin: Vec3 = [box[0], box[1], box[2]];
+	const mask = Uint8Array.from(values, (value) => (value === DECLINED_VALUE ? 1 : 0));
+	return [splitIntoDeltas(mask, shape, origin, { value: 0, onlyIf: "declined" })];
+}
+
+/**
+ * Predicted values an eraser stroke should decline. With "any", every
+ * foreground suggestion under the stroke is selected. With "unlabeled"
+ * (Only predictions), only suggestions without a stored label are selected.
+ * With a class mode, a voxel is selected when either its stored label is one
+ * of those classes, or it has no stored label and its suggestion is one of
+ * them. This defines the mode on stored state, independent of opacity or what
+ * happened to be drawn.
+ */
+export function declinesUnderErase(
+	predicted: Uint8Array,
+	labeled: Uint8Array,
+	stroke: Uint8Array,
+	onlyIf: string,
+): Uint8Array {
+	const out = new Uint8Array(predicted.length);
+	const classes = onlyIf.startsWith("class:") ? new Set(onlyIf.slice(6).split(",").map(Number)) : null;
+	for (let i = 0; i < out.length; i++) {
+		const suggestion = predicted[i]!;
+		if (!stroke[i] || suggestion <= BACKGROUND_VALUE || suggestion >= DECLINED_VALUE) continue;
+		if (onlyIf === "any" || (onlyIf === "unlabeled" && labeled[i] === 0) || (classes && classes.has(labeled[i] || suggestion))) {
+			out[i] = suggestion;
+		}
+	}
+	return out;
 }

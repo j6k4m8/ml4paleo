@@ -32,7 +32,7 @@ from typing import Any, Literal, Protocol, cast
 
 import numpy as np
 
-from ml4paleo.labels import LABEL_CHUNK_ZYX, PLUGIN_IGNORE, to_plugin_space
+from ml4paleo.labels import LABEL_CHUNK_ZYX, PLUGIN_IGNORE, Source, to_plugin_space
 from ml4paleo.labels.codec import blob_key, decode_chunk
 from ml4paleo.storage import StorageGrant, get_bytes
 
@@ -54,6 +54,10 @@ class LabelSource(Protocol):
         """A stored label chunk's class array, or None if it's empty."""
         ...
 
+    def source(self, key: ChunkKey) -> np.ndarray | None:
+        """The matching provenance chunk, or None if it is all zero."""
+        ...
+
 
 class MissingLabels(Exception):
     """
@@ -66,12 +70,39 @@ class BlobLabels:
     Label chunks read from their content-addressed blobs.
     """
 
-    def __init__(self, grant: StorageGrant, shas: dict[ChunkKey, str]):
+    def __init__(
+        self,
+        grant: StorageGrant,
+        shas: dict[ChunkKey, str],
+        source_shas: dict[ChunkKey, str] | None = None,
+    ):
         self.grant = grant
         self.shas = shas
+        self.source_shas = source_shas
 
     def chunk(self, key: ChunkKey) -> np.ndarray | None:
         sha = self.shas.get(key)
+        if sha is None:
+            return None
+        data = get_bytes(self.grant, blob_key(sha))
+        if data is None:
+            raise MissingLabels(f"Label blob {sha} is missing")
+        return decode_chunk(data)
+
+    def source(self, key: ChunkKey) -> np.ndarray | None:
+        """
+        Read provenance pinned beside the class chunk. Version-1 training
+        manifests did not pin it; treating their nonzero labels as human
+        preserves their historical behavior without weakening new grades.
+        """
+        if self.source_shas is None:
+            chunk = self.chunk(key)
+            return (
+                None
+                if chunk is None
+                else np.where(chunk, Source.HUMAN, Source.NONE).astype(np.uint8)
+            )
+        sha = self.source_shas.get(key)
         if sha is None:
             return None
         data = get_bytes(self.grant, blob_key(sha))
@@ -203,6 +234,45 @@ class TrainingSet:
             ]
         return out
 
+    def read_sources(self, box: Box) -> np.ndarray:
+        """Stored provenance for a box, assembled like its class labels."""
+        out = np.zeros(tuple(box[a + 3] - box[a] for a in range(3)), dtype=np.uint8)
+        first = [box[a] // LABEL_CHUNK_ZYX[a] for a in range(3)]
+        last = [(box[a + 3] - 1) // LABEL_CHUNK_ZYX[a] for a in range(3)]
+        source = getattr(self.labels, "source", None)
+        for key in itertools.product(
+            *(range(f, t + 1) for f, t in zip(first, last, strict=True))
+        ):
+            classes = self.labels.chunk(cast(ChunkKey, key))
+            chunk = source(cast(ChunkKey, key)) if source is not None else None
+            # Old in-memory/custom label sources may expose only class
+            # chunks. Sources that do expose provenance decide what a
+            # missing source chunk means themselves.
+            if source is None and classes is not None:
+                chunk = np.where(classes, Source.HUMAN, Source.NONE).astype(np.uint8)
+            if chunk is None:
+                continue
+            origin = [k * c for k, c in zip(key, LABEL_CHUNK_ZYX, strict=True)]
+            lo = [max(box[a], origin[a]) for a in range(3)]
+            hi = [min(box[a + 3], origin[a] + LABEL_CHUNK_ZYX[a]) for a in range(3)]
+            out[tuple(slice(lo[a] - box[a], hi[a] - box[a]) for a in range(3))] = chunk[
+                tuple(slice(lo[a] - origin[a], hi[a] - origin[a]) for a in range(3))
+            ]
+        return out
+
+    def _targets(
+        self, box: Box, complete: np.ndarray | bool = False
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Plugin targets and which of them are direct human annotations."""
+        targets = to_plugin_space(
+            self.read_labels(box), self.class_values, complete=complete
+        )
+        sources = self.read_sources(box)
+        human = ((sources == Source.HUMAN) | (sources == Source.IMPORTED)) & (
+            targets != PLUGIN_IGNORE
+        )
+        return targets, human
+
     def read_image(
         self, box: Box, halo: int
     ) -> tuple[np.ndarray, tuple[slice, slice, slice]]:
@@ -236,17 +306,23 @@ class TrainingSet:
         )
         for index, roi in enumerate(mine):
             for box in tiles(roi.bbox, self.tile):
-                targets = to_plugin_space(
-                    self.read_labels(box),
-                    self.class_values,
-                    complete=self._inside(box, complete),
+                targets, human = self._targets(
+                    box, complete=self._inside(box, complete)
                 )
                 # Voxels of earlier ROIs of this split were counted there.
-                targets[self._inside(box, mine[:index] + held_out)] = PLUGIN_IGNORE
+                excluded = self._inside(box, mine[:index] + held_out)
+                targets[excluded] = PLUGIN_IGNORE
+                human[excluded] = False
                 if (targets == PLUGIN_IGNORE).all():
                     continue
                 image, interior = self.read_image(box, halo)
-                yield Crop(image=image, targets=targets, interior=interior, split=split)
+                yield Crop(
+                    image=image,
+                    targets=targets,
+                    human=human,
+                    interior=interior,
+                    split=split,
+                )
         if split != "train":
             return
         for key in self.labeled_chunks:
@@ -262,11 +338,17 @@ class TrainingSet:
             if any(chunk[a] >= chunk[a + 3] for a in range(3)):
                 continue
             for box in tiles(chunk, self.tile):
-                targets = to_plugin_space(self.read_labels(box), self.class_values)
-                targets[self._inside(box, self.rois)] = PLUGIN_IGNORE
+                targets, human = self._targets(box)
+                excluded = self._inside(box, self.rois)
+                targets[excluded] = PLUGIN_IGNORE
+                human[excluded] = False
                 if (targets == PLUGIN_IGNORE).all():
                     continue
                 image, interior = self.read_image(box, halo)
                 yield Crop(
-                    image=image, targets=targets, interior=interior, split="train"
+                    image=image,
+                    targets=targets,
+                    human=human,
+                    interior=interior,
+                    split="train",
                 )

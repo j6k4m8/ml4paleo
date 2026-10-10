@@ -6,6 +6,8 @@
  * its places meanwhile, for chunks a server is still making (`Busy`).
  */
 
+import { LOAD_RETRIES, LoadError, loadRetryDelay } from "./load-errors";
+
 export interface Chunk {
 	data: ArrayBufferView & { length: number };
 	/** Shape of the chunk, (z, y, x). Edge chunks may be smaller. */
@@ -77,7 +79,8 @@ interface Pending {
 	/** When its first load began, which its patience is counted from. */
 	began?: number;
 	/** The latest answer that the server was busy, which the load ends with if its patience runs out. */
-	busy?: Busy;
+	busy?: Busy | LoadError;
+	failures?: number;
 	/**
 	 * While a load answered busy waits to be asked again (in the queue, with
 	 * no place taken): the earliest it may be.
@@ -92,6 +95,9 @@ export class ChunkStore {
 	#cache = new Map<string, Chunk>();
 	#bytes = 0;
 	#pending = new Map<string, Pending>();
+	// A redraw must not reset an exhausted retry budget. Forget failures when
+	// leaving the area, on invalidation/refresh, or through an explicit Retry.
+	#failed = new Map<string, LoadError>();
 	// Loads waiting for a place, and loads waiting to be asked again.
 	#queue: Pending[] = [];
 	#sorted = true;
@@ -121,6 +127,9 @@ export class ChunkStore {
 	get bytes(): number {
 		return this.#bytes;
 	}
+
+	get failed(): boolean { return this.#failed.size > 0; }
+	retryFailed(): void { this.#failed.clear(); }
 
 	/** A cached chunk, marked as just used. */
 	get(id: string): Chunk | undefined {
@@ -164,6 +173,8 @@ export class ChunkStore {
 		if (cached) return Promise.resolve(cached);
 		const pending = this.#pending.get(id);
 		if (pending) return pending.promise;
+		const failed = this.#failed.get(id);
+		if (failed) return Promise.reject(failed);
 		return this.#enqueue(id, false);
 	}
 
@@ -174,6 +185,7 @@ export class ChunkStore {
 	 * `refreshing`.
 	 */
 	refresh(id: string, version?: number): Promise<Chunk> {
+		this.#failed.delete(id);
 		this.#cancel(id, "Changed while loading", false);
 		return this.#enqueue(id, true, version);
 	}
@@ -234,6 +246,7 @@ export class ChunkStore {
 
 	/** Cancel queued, running and waiting loads of chunks not in `wanted`. */
 	keepOnly(wanted: Set<string>): void {
+		for (const id of this.#failed.keys()) if (!wanted.has(id)) this.#failed.delete(id);
 		const cancelled = [...this.#pending.values()].filter((entry) => !wanted.has(entry.id));
 		if (cancelled.length === 0) return;
 		const gone = new Set(cancelled);
@@ -277,6 +290,7 @@ export class ChunkStore {
 	 * running might return the old contents, so it is cancelled too.
 	 */
 	invalidate(id: string): void {
+		this.#failed.delete(id);
 		this.#drop(id);
 		this.#cancel(id, "Changed while loading");
 	}
@@ -317,6 +331,7 @@ export class ChunkStore {
 			if (entry.retryAt !== undefined && now - (entry.began ?? now) > PATIENCE_MS) {
 				this.#queue.splice(index, 1);
 				this.#pending.delete(entry.id);
+				if (entry.busy instanceof LoadError) this.#failed.set(entry.id, entry.busy);
 				entry.reject(entry.busy);
 				// The chunks passed over so far may have been held for this one: look again from the start.
 				if (index > 0) {
@@ -385,11 +400,11 @@ export class ChunkStore {
 	 * Queue a load that was answered busy to be asked again, unless the wait
 	 * would end past its patience.
 	 */
-	#park(entry: Pending, busy: Busy): boolean {
+	#park(entry: Pending, busy: Busy | LoadError, delay: number): boolean {
 		const now = Date.now();
-		if (now + busy.delay - (entry.began ?? now) > PATIENCE_MS) return false;
+		if (now + delay - (entry.began ?? now) > PATIENCE_MS) return false;
 		entry.busy = busy;
-		entry.retryAt = now + busy.delay;
+		entry.retryAt = now + delay;
 		this.#queue.push(entry);
 		this.#sorted = false;
 		return true;
@@ -424,7 +439,15 @@ export class ChunkStore {
 				.catch((error: unknown) => {
 					if (this.#pending.get(entry.id) === entry) {
 						// The server is making it: wait to be asked again, in no one's way.
-						if (error instanceof Busy && this.#park(entry, error)) return;
+						if (error instanceof Busy && this.#park(entry, error, error.delay)) return;
+						// LabelLayer already owns refresh retries while keeping the
+						// last good copy visible; don't multiply its retry budget.
+						if (error instanceof LoadError && !entry.refresh) {
+							const attempt = (entry.failures ?? 0) + 1;
+							entry.failures = attempt;
+							if (error.transient && attempt <= LOAD_RETRIES && this.#park(entry, error, loadRetryDelay(error, attempt))) return;
+							this.#failed.set(entry.id, error);
+						}
 						this.#pending.delete(entry.id);
 					}
 					entry.reject(error);

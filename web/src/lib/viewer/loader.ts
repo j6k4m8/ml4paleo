@@ -7,43 +7,52 @@ import { Busy, type Chunk, type Loader } from "./chunks";
 import type { ArrayRegion, DecodeResponse, Region } from "./decoding";
 import { retryDelay } from "./patient";
 import { CHUNK, type Level, type Vec3 } from "./tiles";
+import { LoadError } from "./load-errors";
+export { LoadError } from "./load-errors";
 
-/**
- * A load that failed: what went wrong, and the HTTP status the server
- * answered with, if it did (for a 503, its `Retry-After`, as written).
- */
-export class LoadError extends Error {
-	constructor(
-		message: string,
-		readonly status?: number,
-		readonly retryAfter?: string,
-	) {
-		super(message);
-		this.name = "LoadError";
-	}
-}
+// The worker can itself hang or crash, beyond fetch's 20-second deadline.
+export const WORKER_TIMEOUT_MS = 45_000;
 
 export class WorkerPool {
-	#workers: Worker[];
+	#workers: (Worker | undefined)[];
 	#next = 0;
 	#id = 0;
-	#waiting = new Map<number, { resolve: (c: Chunk) => void; reject: (e: unknown) => void }>();
+	#closed = false;
+	#waiting = new Map<number, { worker: Worker; resolve: (c: Chunk) => void; reject: (e: unknown) => void }>();
 
 	constructor(size = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1))) {
-		this.#workers = Array.from({ length: size }, () => {
-			const worker = new Worker(new URL("./decode.worker.ts", import.meta.url), {
-				type: "module",
-			});
-			worker.onmessage = (event: MessageEvent<DecodeResponse>) => this.#settle(event.data);
-			return worker;
-		});
+		this.#workers = Array.from({ length: size }, () => this.#create());
 	}
 
-	#settle(response: DecodeResponse): void {
+	#create(): Worker {
+		const worker = new Worker(new URL("./decode.worker.ts", import.meta.url), { type: "module" });
+		worker.onmessage = (event: MessageEvent<DecodeResponse>) => this.#settle(worker, event.data);
+		worker.onerror = (event) => {
+			event.preventDefault();
+			this.#discard(worker, new LoadError("The image reader stopped.", undefined, undefined, true));
+		};
+		worker.onmessageerror = () => this.#discard(worker, new LoadError("Couldn't read the image response.", undefined, undefined, true));
+		return worker;
+	}
+
+	#discard(worker: Worker, error: LoadError): void {
+		const index = this.#workers.indexOf(worker);
+		if (index < 0) return; // A late event from a replaced worker.
+		this.#workers[index] = undefined;
+		worker.terminate();
+		for (const [id, waiting] of this.#waiting) {
+			if (waiting.worker !== worker) continue;
+			this.#waiting.delete(id);
+			waiting.reject(error);
+		}
+		// Recreate only on the next load, so a broken worker script cannot spin.
+	}
+
+	#settle(worker: Worker, response: DecodeResponse): void {
 		const waiting = this.#waiting.get(response.id);
-		if (!waiting) return;
+		if (!waiting || waiting.worker !== worker) return;
 		this.#waiting.delete(response.id);
-		if ("error" in response) waiting.reject(new LoadError(response.error, response.status, response.retryAfter));
+		if ("error" in response) waiting.reject(new LoadError(response.error, response.status, response.retryAfter, response.retryable));
 		else {
 			waiting.resolve({
 				data: response.data as Chunk["data"],
@@ -55,27 +64,38 @@ export class WorkerPool {
 	}
 
 	load(request: ArrayRegion, signal: AbortSignal): Promise<Chunk> {
+		if (this.#closed || signal.aborted) return Promise.reject(new DOMException("No longer needed", "AbortError"));
+		if (!this.#workers.length) return Promise.reject(new Error("No decode workers"));
 		const id = ++this.#id;
-		const worker = this.#workers[this.#next++ % this.#workers.length];
-		if (!worker) return Promise.reject(new Error("No decode workers"));
+		const index = this.#next++ % this.#workers.length;
+		let worker: Worker;
+		try { worker = this.#workers[index] ??= this.#create(); }
+		catch { return Promise.reject(new LoadError("Couldn't start the image reader.", undefined, undefined, true)); }
 		return new Promise<Chunk>((resolve, reject) => {
+			const timer = setTimeout(() => this.#discard(worker, new LoadError("Loading this area took too long.", undefined, undefined, true)), WORKER_TIMEOUT_MS);
+			const done = () => { clearTimeout(timer); signal.removeEventListener("abort", abort); };
 			const abort = () => {
-				worker.postMessage({ type: "cancel", id });
 				this.#waiting.delete(id);
+				done();
 				reject(new DOMException("No longer needed", "AbortError"));
+				try { worker.postMessage({ type: "cancel", id }); }
+				catch { this.#discard(worker, new LoadError("The image reader stopped.", undefined, undefined, true)); }
 			};
 			signal.addEventListener("abort", abort, { once: true });
-			const done = () => signal.removeEventListener("abort", abort);
 			this.#waiting.set(id, {
+				worker,
 				resolve: (chunk) => (done(), resolve(chunk)),
 				reject: (error) => (done(), reject(error)),
 			});
-			worker.postMessage({ type: "load", id, ...request });
+			try { worker.postMessage({ type: "load", id, ...request }); }
+			catch { this.#discard(worker, new LoadError("Couldn't send work to the image reader.", undefined, undefined, true)); }
 		});
 	}
 
 	close(): void {
-		for (const worker of this.#workers) worker.terminate();
+		this.#closed = true;
+		for (const worker of this.#workers) worker?.terminate();
+		this.#workers.fill(undefined);
 		for (const { reject } of this.#waiting.values()) reject(new DOMException("Closed", "AbortError"));
 		this.#waiting.clear();
 	}

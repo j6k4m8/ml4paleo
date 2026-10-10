@@ -78,5 +78,5 @@ export interface ProjectImage {
 	artifact_id: string;
 	manifest: ImageManifest;
 	zarr_url: string;
-	neuroglancer_url: string | null;
+	neuroglancer_url: string;
 }

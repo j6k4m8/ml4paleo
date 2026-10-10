@@ -80,6 +80,28 @@ def test_the_web_apps_inline_script_is_allowed_by_hash(settings, web_dir):
     assert script_src.split() == ["script-src", "'self'", f"'sha256-{digest}'"]
 
 
+def test_large_web_assets_compress_but_ranges_remain_exact(settings, web_dir):
+    data = b"console.log('a large test bundle');\n" * 4000
+    (web_dir / "_app" / "immutable" / "large.js").write_bytes(data)
+    settings = settings.model_copy(update={"web_dir": web_dir})
+    with TestClient(create_app(settings)) as client:
+        url = "/_app/immutable/large.js"
+        packed = client.get(url, headers={"Accept-Encoding": "gzip"})
+        plain = client.get(url, headers={"Accept-Encoding": "identity"})
+        assert packed.content == plain.content == data
+        assert packed.headers["content-encoding"] == "gzip"
+        assert packed.headers["etag"] == "W/" + plain.headers["etag"]
+        assert "Accept-Encoding" in packed.headers["vary"]
+        assert "immutable" in packed.headers["cache-control"]
+        part = client.get(
+            url, headers={"Accept-Encoding": "gzip", "Range": "bytes=7-31"}
+        )
+        assert part.status_code == 206
+        assert part.content == data[7:32]
+        assert "content-encoding" not in part.headers
+        assert part.headers["content-range"] == f"bytes 7-31/{len(data)}"
+
+
 def test_migrations_round_trip_and_match_the_models(database_url):
     migrations.upgrade(database_url)
     migrations.check(database_url)

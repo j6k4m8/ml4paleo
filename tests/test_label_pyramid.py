@@ -9,7 +9,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from ml4paleo.labels import LABEL_CHUNK_ZYX
+from ml4paleo.labels import DECLINED, LABEL_CHUNK_ZYX, MAX_CLASS
 from ml4paleo.labels.pyramid import downsample_labels
 
 
@@ -23,10 +23,12 @@ def reference(labels, step):
         window = labels[
             tuple(slice(i * s, (i + 1) * s) for i, s in zip(index, step, strict=True))
         ].ravel()
-        classes = [int(v) for v in window if v >= 2]
+        classes = [int(v) for v in window if 2 <= v <= MAX_CLASS]
         if classes:
             # Most common class; the lowest value among those that tie.
             out[index] = min(set(classes), key=lambda v: (-classes.count(v), v))
+        elif (window == DECLINED).any():
+            out[index] = DECLINED
         elif (window == 1).any():
             out[index] = 1
     return out
@@ -53,6 +55,15 @@ def test_a_class_beats_background_however_few_voxels_it_has():
 def test_background_beats_unlabeled():
     assert downsample_labels(block([0, 0, 0, 0, 0, 0, 0, 1]))[0, 0, 0] == 1
     assert downsample_labels(block([0, 0, 0, 0, 0, 0, 0, 0]))[0, 0, 0] == 0
+
+
+def test_classes_beat_declines_and_declines_beat_background():
+    assert (
+        downsample_labels(block([DECLINED, 1, 1, 1, 0, 0, 0, 0]))[0, 0, 0] == DECLINED
+    )
+    assert (
+        downsample_labels(block([DECLINED, DECLINED, 7, 1, 0, 0, 0, 0]))[0, 0, 0] == 7
+    )
 
 
 def test_every_axis_halves_unless_told_otherwise():

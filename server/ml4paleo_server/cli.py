@@ -74,8 +74,12 @@ def main(argv: list[str] | None = None) -> int:
         import uvicorn
 
         from ml4paleo_server.settings import Settings
+        from ml4paleo_server.viewer import require_neuroglancer
 
         settings = Settings()
+        # Refuse an incomplete install before starting a worker supervisor
+        # that would otherwise keep restarting failed API processes.
+        require_neuroglancer(settings)
         uvicorn.run(
             "ml4paleo_server.app:create_app",
             factory=True,

@@ -57,7 +57,7 @@ describe("what, who, and origin", () => {
 	});
 
 	it("doesn't take an edit's word for what it was", () => {
-		for (const name of ["accept-prediction", "v1-import", "constructor", "toString", 7, undefined]) {
+		for (const name of ["accept-prediction", "decline-prediction", "v1-import", "constructor", "toString", 7, undefined]) {
 			const edit = op(1, { tool: { name } });
 			expect([action(edit), what(edit), origin(edit)]).toEqual(["edit", "Edit", "By hand"]);
 		}
@@ -69,6 +69,13 @@ describe("what, who, and origin", () => {
 		const v1 = op(2, { source: 2, accepted: accepted({ kind: "prediction", model_id: null, model_name: null, v1_job_id: "ab12cd" }) });
 		expect([what(v1), origin(v1)]).toEqual(["Accepted prediction", "From v1 job ab12cd"]);
 		expect(origin(op(3, { source: 2, accepted: accepted({ model_name: null }) }))).toBe("From a model");
+	});
+
+	it("names checked declines and explicit restores", () => {
+		const declined = op(1, { source: 6, tool: { name: "decline-prediction" }, accepted: accepted() });
+		expect([action(declined), what(declined), origin(declined)]).toEqual(["decline", "Declined proposal", "From rf one"]);
+		const restored = op(2, { tool: { name: "restore-declined" } });
+		expect([action(restored), what(restored), origin(restored)]).toEqual(["restore-declined", "Restored suggestion", "By hand"]);
 	});
 
 	it("names imports and other sources", () => {

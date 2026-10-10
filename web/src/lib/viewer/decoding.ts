@@ -8,6 +8,8 @@
 import * as zarr from "zarrita";
 import { failure, shardedFetch } from "./image";
 import { CHUNK } from "./tiles";
+import { timedFetch } from "./fetch";
+import { LoadError } from "./load-errors";
 
 export type Region = [[number, number], [number, number], [number, number]];
 
@@ -39,7 +41,7 @@ export interface CancelRequest {
 export type DecodeResponse =
 	| { id: number; data: ArrayBufferView; shape: number[]; version?: number; pyramid?: number }
 	// For a 503, the answer's `Retry-After`, as the server wrote it.
-	| { id: number; error: string; status?: number; retryAfter?: string };
+	| { id: number; error: string; status?: number; retryAfter?: string; retryable?: boolean };
 
 type OpenArray = zarr.Array<zarr.DataType, zarr.FetchStore>;
 
@@ -57,6 +59,7 @@ export function chunkUrl({ url, path, region }: ArrayRegion): string {
  * its own taken by the wait.
  */
 export function createDecoder(fetcher: (request: Request) => Promise<Response> = (request) => fetch(request)) {
+	const read = timedFetch(fetcher);
 	const arrays = new Map<string, Promise<OpenArray>>();
 	// What the server said of each chunk it sent, by chunk URL: for the
 	// project's own chunks, the version, which is the next edit's base
@@ -64,16 +67,19 @@ export function createDecoder(fetcher: (request: Request) => Promise<Response> =
 	// chunk was made from; and a 503's `Retry-After`.
 	const versions = new Map<string, number>();
 	const pyramids = new Map<string, number>();
-	const retries = new Map<string, string>();
 
 	async function fetchNoting(request: Request): Promise<Response> {
-		const response = await fetcher(request);
+		const response = await read(request);
+		if (!response.ok && response.status !== 404) {
+			// Keep Retry-After on the error itself: metadata/index reads can be
+			// shared by several chunks, each of which must respect that delay.
+			void response.body?.cancel().catch(() => {});
+			throw new LoadError(`Unexpected response status ${response.status}`, response.status, response.headers.get("retry-after") ?? undefined);
+		}
 		const version = response.headers.get("x-chunk-version");
 		if (version !== null) versions.set(request.url, Number(version));
 		const pyramid = response.headers.get("x-pyramid-version");
 		if (pyramid !== null) pyramids.set(request.url, Number(pyramid));
-		const retry = response.headers.get("retry-after");
-		if (response.status === 503 && retry !== null) retries.set(request.url, retry);
 		return response;
 	}
 
@@ -110,9 +116,12 @@ export function createDecoder(fetcher: (request: Request) => Promise<Response> =
 			pyramids.delete(name);
 			return { reply: { id: message.id, data, shape: chunk.shape, version, pyramid }, transfer: [data.buffer as ArrayBuffer] };
 		} catch (error) {
-			const retryAfter = retries.get(name);
-			retries.delete(name);
-			return { reply: { id: message.id, ...failure(error), ...(retryAfter === undefined ? {} : { retryAfter }) }, transfer: [] };
+			const failed = failure(error);
+			// Some browsers report a timed-out response body as AbortError,
+			// even though its deadline's reason is TimeoutError. A real view
+			// cancellation must stay non-retryable.
+			if (error instanceof DOMException && error.name === "AbortError" && !signal.aborted) failed.retryable = true;
+			return { reply: { id: message.id, ...failed }, transfer: [] };
 		}
 	};
 }

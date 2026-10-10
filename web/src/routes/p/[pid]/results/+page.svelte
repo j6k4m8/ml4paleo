@@ -25,6 +25,7 @@
 		min_voxels: number;
 		// When the newest label edit it includes was made.
 		labels_as_of: string | null;
+		label_changes_since: number;
 		committed_at: string;
 	}
 
@@ -300,6 +301,11 @@
 						</span>
 					</div>
 				</div>
+				{#if segmentation.label_changes_since > 0}
+					<p class="text-sm text-warn">
+						{segmentation.label_changes_since.toLocaleString()} label {segmentation.label_changes_since === 1 ? "change" : "changes"} since this result. Update it before making final downloads or meshes.
+					</p>
+				{/if}
 			{/if}
 			<form class="flex items-end gap-2" onsubmit={compose}>
 				<label class="label">
@@ -308,7 +314,7 @@
 				</label>
 				<button class="btn btn-primary" disabled={!prediction || active(composing) || starting}>
 					<Combine size={13} />
-					{active(composing) ? "Making…" : segmentation ? "Make it again" : "Make final segmentation"}
+					{active(composing) ? "Making…" : segmentation?.label_changes_since ? "Update result" : segmentation ? "Make it again" : "Make final segmentation"}
 				</button>
 			</form>
 			{@render progress(composing, composeError)}
