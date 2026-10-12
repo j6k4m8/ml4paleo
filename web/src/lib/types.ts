@@ -6,6 +6,7 @@ export interface User {
 	email: string | null;
 	email_verified: boolean;
 	is_admin: boolean;
+	two_factor_enabled: boolean;
 	status: string;
 }
 

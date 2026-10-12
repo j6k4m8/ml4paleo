@@ -1,9 +1,14 @@
 <script lang="ts">
+	import { goto } from "$app/navigation";
+	import { page } from "$app/state";
 	import { api, message } from "#lib/api.ts";
+	import { authenticatorQr } from "#lib/authenticator-qr.ts";
+	import { safeNext } from "#lib/navigation.ts";
 	import { session } from "#lib/session.svelte.ts";
 	import type { Session } from "#lib/types.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
 	import Panel from "#lib/ui/Panel.svelte";
+	import AuthenticatorSetup from "#lib/ui/AuthenticatorSetup.svelte";
 
 	interface Quota {
 		storage_bytes_limit: number | null;
@@ -21,6 +26,9 @@
 	let setup: { secret: string; otpauth_uri: string } | null = $state(null);
 	let code = $state("");
 	let totpError = $state("");
+	let totpBusy = $state(false);
+	let qr = $state("");
+	let qrError = $state(false);
 
 	// Whether this site sends email (null until known).
 	let emailOn: boolean | null = $state(null);
@@ -37,6 +45,8 @@
 
 	const steps = $derived(session.current?.required_steps ?? []);
 	const user = $derived(session.current?.user);
+	const needsPassword = $derived(steps.includes("change_password"));
+	const needsTotp = $derived(steps.includes("set_up_two_factor"));
 	$effect(() => crumbs.set([{ label: "Account" }]));
 
 	$effect(() => {
@@ -103,29 +113,56 @@
 			passwordDone = true;
 			current = next = "";
 			await session.load();
+			await returnAfterSetup();
 		} catch (e) {
 			passwordError = message(e);
 		}
 	}
 
 	async function startTotp() {
+		if (totpBusy) return;
+		totpBusy = true;
 		totpError = "";
+		qrError = false;
+		qr = "";
+		code = "";
 		try {
 			setup = await api("/api/auth/totp/setup", { method: "POST" });
+			try {
+				qr = await authenticatorQr(setup!.otpauth_uri);
+			} catch {
+				// Keep the same pending key usable through the manual / app-link fallback.
+				qrError = true;
+			}
 		} catch (e) {
 			totpError = message(e);
+		} finally {
+			totpBusy = false;
 		}
 	}
 
 	async function confirmTotp(event: SubmitEvent) {
 		event.preventDefault();
+		if (totpBusy) return;
+		totpBusy = true;
 		totpError = "";
 		try {
 			await api("/api/auth/totp/confirm", { body: { code } });
 			setup = null;
+			qr = code = "";
 			await session.load();
+			await returnAfterSetup();
 		} catch (e) {
 			totpError = message(e);
+		} finally {
+			totpBusy = false;
+		}
+	}
+
+	async function returnAfterSetup() {
+		const target = page.url.searchParams.get("next");
+		if (target && session.current && session.current.required_steps.length === 0) {
+			await goto(safeNext(target, page.url.origin), { replace: true });
 		}
 	}
 
@@ -133,13 +170,46 @@
 	const limitOf = (value: number | null, show: (n: number) => string) => (value === null ? "unlimited" : show(value));
 </script>
 
+{#snippet passwordForm()}
+	<form class="flex max-w-sm flex-col gap-3" onsubmit={changePassword}>
+		<label class="label">
+			Current password
+			<input class="field" type="password" bind:value={current} autocomplete="current-password" required />
+		</label>
+		<label class="label">
+			New password
+			<input class="field" type="password" bind:value={next} autocomplete="new-password" minlength="12" required />
+		</label>
+		{#if passwordError}<p class="error" role="alert">{passwordError}</p>{/if}
+		{#if passwordDone}<p class="text-ok">Password changed.</p>{/if}
+		<button class="btn btn-primary self-start">Change password</button>
+	</form>
+{/snippet}
+
 <div class="mx-auto flex max-w-xl flex-col gap-3 p-6">
 	<h1>Account</h1>
-	{#if steps.length > 0}
-		<p class="rounded-sm border border-warn/40 bg-warn/10 p-2 text-warn">Finish these steps to use ml4paleo.</p>
+	{#if needsTotp || needsPassword}
+		<div class="rounded-sm border border-warn/40 bg-warn/10 p-2 text-warn" role="status">
+			{#if needsTotp}<p>Administration requires two-factor sign-in. Set it up below to continue.</p>{/if}
+			{#if needsPassword}<p>Change your temporary password before continuing.</p>{/if}
+		</div>
 	{/if}
 
 	<div class="panel overflow-hidden">
+		{#if needsPassword}
+			<Panel title="Change your temporary password">
+				{@render passwordForm()}
+			</Panel>
+		{/if}
+		{#if needsTotp}
+			<Panel title="Set up two-factor sign-in">
+				<AuthenticatorSetup {setup} {qr} {qrError} bind:code busy={totpBusy} error={totpError} onstart={startTotp} onconfirm={confirmTotp} />
+			</Panel>
+		{:else if user?.two_factor_enabled}
+			<Panel title="Two-factor sign-in">
+				<p class="text-ok" role="status">Two-factor sign-in is on.</p>
+			</Panel>
+		{/if}
 		<Panel title="Email">
 			{#if user?.email}
 				<p>
@@ -197,9 +267,11 @@
 					<dd class="font-mono">{quota.trained_models_used} of {limitOf(quota.trained_models_limit, String)}</dd>
 				</dl>
 				{#if quota.open_request}
-					<p class="muted">Your request for more is with the admins.</p>
+					<p class="muted">Your request is pending.</p>
 				{:else}
-					<form class="flex flex-col gap-3" onsubmit={askForMore}>
+					<details>
+						<summary class="cursor-pointer text-ink-dim hover:text-ink">Need a quota increase?</summary>
+					<form class="mt-3 flex flex-col gap-3" onsubmit={askForMore}>
 						<label class="label">
 							Ask for more
 							<textarea
@@ -213,40 +285,14 @@
 						{#if askError}<p class="error" role="alert">{askError}</p>{/if}
 						<button class="btn self-start">Send to the admins</button>
 					</form>
+					</details>
 				{/if}
 			</Panel>
 		{/if}
 
-		<Panel title="Password">
-			<form class="flex max-w-sm flex-col gap-3" onsubmit={changePassword}>
-				<label class="label">
-					Current password
-					<input class="field" type="password" bind:value={current} autocomplete="current-password" required />
-				</label>
-				<label class="label">
-					New password
-					<input class="field" type="password" bind:value={next} autocomplete="new-password" minlength="12" required />
-				</label>
-				{#if passwordError}<p class="error" role="alert">{passwordError}</p>{/if}
-				{#if passwordDone}<p class="text-ok">Password changed.</p>{/if}
-				<button class="btn btn-primary self-start">Change password</button>
-			</form>
-		</Panel>
-
-		{#if steps.includes("set_up_two_factor")}
-			<Panel title="Two-factor sign-in">
-				{#if setup}
-					<p>Add this key to your authenticator app, then enter the code it shows.</p>
-					<code class="kbd self-start !text-xs">{setup.secret}</code>
-					<a href={setup.otpauth_uri}>Open in an authenticator app</a>
-					<form class="flex max-w-sm flex-col gap-3" onsubmit={confirmTotp}>
-						<label class="label">Code <input class="field" bind:value={code} inputmode="numeric" autocomplete="one-time-code" required /></label>
-						<button class="btn btn-primary self-start">Turn on</button>
-					</form>
-				{:else}
-					<button class="btn btn-primary self-start" onclick={startTotp}>Set up two-factor sign-in</button>
-				{/if}
-				{#if totpError}<p class="error" role="alert">{totpError}</p>{/if}
+		{#if !needsPassword}
+			<Panel title="Change password" open={false}>
+				{@render passwordForm()}
 			</Panel>
 		{/if}
 	</div>
