@@ -11,7 +11,11 @@ from helpers import make_admin, run_db, signup
 from ml4paleo_server import quotas
 from ml4paleo_server.api import projects as projects_api
 from ml4paleo_server.db import (
+    Artifact,
+    ArtifactHead,
     AuditEvent,
+    TrainedModel,
+    TrainingSet,
     User,
     UserUsage,
     create_engine,
@@ -57,6 +61,65 @@ def test_other_peoples_projects_look_missing(new_browser):
         assert bob.get(f"{url}/members").status_code == 404
         assert bob.post(f"{url}/members", json={"username": "bob"}).status_code == 404
     assert bob.get("/api/projects").json() == []
+
+
+def test_project_cards_include_current_scan_and_only_saved_ready_models(
+    new_browser, migrated_database_url
+):
+    ada = make_user(new_browser, "ada")
+    bob = make_user(new_browser, "bob")
+    pid = create_project(ada)["id"]
+    other = create_project(bob)["id"]
+    empty = ada.get("/api/projects").json()[0]
+    assert empty["image"] is None
+    assert empty["image_bytes"] == empty["model_count"] == 0
+
+    async def seed(db):
+        project_id = uuid.UUID(pid)
+        image = Artifact(
+            project_id=project_id,
+            kind="image",
+            state="committed",
+            bytes=1234,
+            manifest={"shape_czyx": [1, 10, 20, 30], "window": [0, 255]},
+        )
+        db.add_all([image, TrainingSet(id="a" * 64, project_id=project_id, summary={})])
+        await db.flush()
+        db.add(ArtifactHead(project_id=project_id, slot="image", artifact_id=image.id))
+        for state, live, deleted, project in [
+            ("committed", False, False, project_id),
+            ("committed", True, False, project_id),
+            ("failed", False, False, project_id),
+            ("staging", False, False, project_id),
+            ("committed", False, True, project_id),
+            ("committed", False, False, uuid.UUID(other)),
+        ]:
+            artifact = Artifact(
+                project_id=project, kind="model", state=state, inputs={"live": live}
+            )
+            db.add(artifact)
+            await db.flush()
+            db.add(
+                TrainedModel(
+                    project_id=project,
+                    name="Test",
+                    plugin="rf",
+                    params={},
+                    class_values=[1, 2],
+                    training_set_id="a" * 64,
+                    artifact_id=artifact.id,
+                    deleted_at=image.created_at if deleted else None,
+                )
+            )
+        return str(image.id)
+
+    image_id = run_db(migrated_database_url, seed)
+    card = ada.get("/api/projects").json()[0]
+    assert card["image"]["artifact_id"] == image_id
+    assert image_id in card["image"]["zarr_url"]
+    assert card["image_bytes"] == 1234
+    assert card["model_count"] == 1
+    assert len(ada.get("/api/projects").json()) == 1
 
 
 def test_collaborators_get_full_access_but_cannot_delete(new_browser):

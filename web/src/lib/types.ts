@@ -32,6 +32,12 @@ export interface Project {
 	members: Member[] | null;
 }
 
+export interface ProjectSummary extends Project {
+	image: Pick<ProjectImage, "artifact_id" | "manifest" | "zarr_url"> | null;
+	image_bytes: number;
+	model_count: number;
+}
+
 export interface Upload {
 	id: string;
 	filename: string;
