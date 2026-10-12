@@ -5,6 +5,7 @@ The API skeleton: health, security headers, SPA serving, and migrations.
 import base64
 import hashlib
 import http.client
+import pathlib
 import uuid
 from urllib.parse import urlsplit
 
@@ -78,6 +79,73 @@ def test_the_web_apps_inline_script_is_allowed_by_hash(settings, web_dir):
         policy = client.get("/projects").headers["content-security-policy"]
     script_src = next(d for d in policy.split("; ") if d.startswith("script-src"))
     assert script_src.split() == ["script-src", "'self'", f"'sha256-{digest}'"]
+
+
+@pytest.mark.parametrize(
+    "path", ["/", "/index.html", "/projects", "/account", "/admin", "/p/1/annotate"]
+)
+def test_web_rebuild_updates_the_bootstrap_hash_without_a_restart(
+    settings, web_dir, path
+):
+    settings = settings.model_copy(update={"web_dir": web_dir})
+    index = web_dir / "index.html"
+    with TestClient(create_app(settings)) as client:
+        policies = []
+        for script in ["startOldBuild();", "startNewBuild();"]:
+            html = f"<html><script>{script}</script></html>"
+            index.write_text(html)
+            response = client.get(path)
+            assert response.status_code == 200
+            assert response.text == html
+            assert response.headers["cache-control"] == "no-cache"
+            policy = response.headers["content-security-policy"]
+            script_src = next(
+                d for d in policy.split("; ") if d.startswith("script-src")
+            )
+            digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+            assert script_src.split() == ["script-src", "'self'", f"'sha256-{digest}'"]
+            assert "frame-ancestors 'none'" in policy
+            policies.append(policy)
+        assert policies[0] != policies[1]
+
+
+def test_html_and_policy_use_one_snapshot_even_during_a_rebuild(
+    settings, web_dir, monkeypatch
+):
+    settings = settings.model_copy(update={"web_dir": web_dir})
+    index = web_dir / "index.html"
+    script = "startOriginalBuild();"
+    original = f"<html><script>{script}</script></html>"
+    replacement = "<html><script>startReplacementBuild();</script></html>"
+    index.write_text(original)
+    read_text = pathlib.Path.read_text
+
+    def replace_after_read(path, *args, **kwargs):
+        body = read_text(path, *args, **kwargs)
+        if path == index:
+            index.write_text(replacement)
+        return body
+
+    with TestClient(create_app(settings)) as client:
+        monkeypatch.setattr(pathlib.Path, "read_text", replace_after_read)
+        response = client.get("/account")
+    assert response.text == original
+    assert read_text(index) == replacement
+    digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+    assert f"'sha256-{digest}'" in response.headers["content-security-policy"]
+
+
+def test_web_build_created_after_startup_gets_its_own_policy(settings, tmp_path):
+    web = tmp_path / "late-build"
+    settings = settings.model_copy(update={"web_dir": web})
+    with TestClient(create_app(settings)) as client:
+        assert "has not been built" in client.get("/").text
+        web.mkdir()
+        script = "startFirstBuild();"
+        (web / "index.html").write_text(f"<script>{script}</script>")
+        response = client.get("/")
+    digest = base64.b64encode(hashlib.sha256(script.encode()).digest()).decode()
+    assert f"'sha256-{digest}'" in response.headers["content-security-policy"]
 
 
 def test_large_web_assets_compress_but_ranges_remain_exact(settings, web_dir):

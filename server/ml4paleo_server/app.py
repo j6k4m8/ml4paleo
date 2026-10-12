@@ -72,12 +72,16 @@ def content_security_policy(
     JavaScript). Browsers upload file parts to `upload_origin` when storage
     is on another site (a cloud bucket).
     """
-    scripts = ["'self'"]
     index = web_dir / "index.html" if web_dir is not None else None
-    if index is not None and index.is_file():
-        for body in _INLINE_SCRIPT.findall(index.read_text(encoding="utf-8")):
-            digest = hashlib.sha256(body.encode()).digest()
-            scripts.append(f"'sha256-{base64.b64encode(digest).decode()}'")
+    html = index.read_text(encoding="utf-8") if index and index.is_file() else ""
+    return _policy_for_html(html, upload_origin)
+
+
+def _policy_for_html(html: str, upload_origin: str | None = None) -> str:
+    scripts = ["'self'"]
+    for body in _INLINE_SCRIPT.findall(html):
+        digest = hashlib.sha256(body.encode()).digest()
+        scripts.append(f"'sha256-{base64.b64encode(digest).decode()}'")
     return "; ".join(
         [
             "default-src 'self'",
@@ -119,7 +123,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     parts = urlsplit(settings.public_url)
     public_origin = f"{parts.scheme}://{parts.netloc}"
     session_cookie = cookie_name(settings)
-    app_policy = content_security_policy(settings.web_dir, _upload_origin(settings))
+    upload_origin = _upload_origin(settings)
+    # Non-HTML responses need no inline-script allowance. The SPA response
+    # supplies hashes for its own HTML, even when rebuilt without a restart.
+    app_policy = content_security_policy(None, upload_origin)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -246,7 +253,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def web_app(path: str) -> Response:
         if path == "api" or path.startswith("api/"):
             raise HTTPException(status_code=404)
-        return _serve_web_app(settings.web_dir, path)
+        return await run_in_threadpool(
+            _serve_web_app, settings.web_dir, path, upload_origin
+        )
 
     return app
 
@@ -288,12 +297,20 @@ def _check_storage(settings: Settings) -> None:
         break
 
 
-def _serve_web_app(web_dir: pathlib.Path | None, path: str) -> Response:
+def _serve_web_app(
+    web_dir: pathlib.Path | None, path: str, upload_origin: str | None = None
+) -> Response:
     if web_dir is None or not (web_dir / "index.html").is_file():
         return HTMLResponse(PLACEHOLDER_PAGE)
     root = web_dir.resolve()
     candidate = (root / path).resolve()
-    if path and candidate.is_relative_to(root) and candidate.is_file():
+    index = root / "index.html"
+    if (
+        path
+        and candidate != index
+        and candidate.is_relative_to(root)
+        and candidate.is_file()
+    ):
         # SvelteKit puts content-hashed files under _app/immutable.
         immutable = candidate.is_relative_to(root / "_app" / "immutable")
         return FileResponse(
@@ -304,4 +321,14 @@ def _serve_web_app(web_dir: pathlib.Path | None, path: str) -> Response:
                 else "no-cache"
             },
         )
-    return FileResponse(root / "index.html", headers={"Cache-Control": "no-cache"})
+    # Read once and use the same snapshot for both the body and its CSP.
+    # A FileResponse would reopen index.html later, so a concurrent rebuild
+    # could send a new bootstrap script with the previous build's hash.
+    html = index.read_text(encoding="utf-8")
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-cache",
+            "Content-Security-Policy": _policy_for_html(html, upload_origin),
+        },
+    )
