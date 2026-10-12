@@ -8,18 +8,18 @@ look the same as projects that don't exist.
 
 import datetime
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from .. import audit
 from ..auth import ratelimit
 from ..auth.deps import CurrentAuth, DbSession, EngineDep
 from ..auth.ratelimit import client_key
-from ..db import Project, ProjectMember, User
+from ..db import Artifact, ArtifactHead, Project, ProjectMember, TrainedModel, User
 from ..pipelines import train
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -64,6 +64,12 @@ class ProjectOut(BaseModel):
     owner: str
     created_at: datetime.datetime
     members: list[MemberOut] | None = None
+
+
+class ProjectSummary(ProjectOut):
+    image: dict[str, Any] | None = None
+    image_bytes: int = 0
+    model_count: int = 0
 
 
 class ProjectName(BaseModel):
@@ -133,16 +139,68 @@ async def create_project(
 
 
 @router.get("")
-async def list_projects(auth: CurrentAuth, db: DbSession) -> list[ProjectOut]:
+async def list_projects(auth: CurrentAuth, db: DbSession) -> list[ProjectSummary]:
+    # Three queries for the whole list, not requests for every card's image
+    # and models. The gateway still authorizes each thumbnail read.
+    from .gateway import zarr_path
+
     projects = (
-        await db.scalars(
-            select(Project)
+        await db.execute(
+            select(Project, User.username)
             .join(ProjectMember, ProjectMember.project_id == Project.id)
+            .join(User, User.id == Project.owner_id)
             .where(ProjectMember.user_id == auth.user.id, Project.deleted_at.is_(None))
             .order_by(Project.created_at.desc())
         )
     ).all()
-    return [await _project_out(db, project) for project in projects]
+    ids = [project.id for project, _ in projects]
+    if not ids:
+        return []
+    images = {
+        image.project_id: image
+        for image in await db.scalars(
+            select(Artifact)
+            .join(ArtifactHead, ArtifactHead.artifact_id == Artifact.id)
+            .where(
+                ArtifactHead.project_id.in_(ids),
+                ArtifactHead.slot == "image",
+                Artifact.state == "committed",
+            )
+        )
+    }
+    counts = dict(
+        (
+            await db.execute(
+                select(TrainedModel.project_id, func.count())
+                .join(Artifact, Artifact.id == TrainedModel.artifact_id)
+                .where(
+                    TrainedModel.project_id.in_(ids),
+                    TrainedModel.deleted_at.is_(None),
+                    Artifact.state == "committed",
+                    ~Artifact.inputs.contains({"live": True}),
+                )
+                .group_by(TrainedModel.project_id)
+            )
+        ).all()
+    )
+    return [
+        ProjectSummary(
+            id=str(project.id),
+            name=project.name,
+            owner=owner,
+            created_at=project.created_at,
+            image={
+                "artifact_id": str(image.id),
+                "manifest": image.manifest,
+                "zarr_url": zarr_path(project.id, image.id),
+            }
+            if (image := images.get(project.id)) and image.manifest
+            else None,
+            image_bytes=image.bytes if image else 0,
+            model_count=counts.get(project.id, 0),
+        )
+        for project, owner in projects
+    ]
 
 
 @router.get("/{project_id}")
