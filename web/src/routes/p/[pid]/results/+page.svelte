@@ -12,6 +12,8 @@
 	import type { Pipeline } from "#lib/types.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
+	import Methods from "#lib/ui/Methods.svelte";
+	import type { MethodsEntry } from "#lib/methods.ts";
 
 	interface Prediction {
 		artifact_id: string;
@@ -90,6 +92,8 @@
 	let exports: Export[] = $state([]);
 	let pipelines: Pipeline[] = $state([]);
 	let loaded = $state(false);
+	let methods: MethodsEntry[] = $state([]);
+	let methodsError = $state("");
 	let minVoxels = $state(50);
 	let downsample = $state(1);
 	let method = $state("any");
@@ -130,6 +134,11 @@
 			]);
 			imageDtype = image?.manifest.dtype ?? null;
 			imageId = image?.artifact_id ?? null;
+			methodsError = "";
+			methods = await api<MethodsEntry[]>(`/api/projects/${pid}/methods`).catch((e) => {
+				methodsError = message(e);
+				return [];
+			});
 		} catch (e) {
 			error = message(e);
 		} finally {
@@ -320,6 +329,8 @@
 			{@render progress(composing, composeError)}
 		</div>
 	</section>
+
+	<Methods entries={methods} {pid} error={methodsError} />
 
 	<section class="panel self-start lg:col-span-2">
 		<h2 class="panel-title">Meshes</h2>

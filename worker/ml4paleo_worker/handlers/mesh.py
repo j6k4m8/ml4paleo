@@ -211,6 +211,7 @@ def finalize(ctx: JobContext) -> dict[str, Any]:
                 }
             )
     info = {
+        "mesher": "zmesh",
         "axis_order": "xyz",
         "units": ctx.payload["unit"],
         "voxel_size_xyz": ctx.payload["voxel_size_xyz"],
