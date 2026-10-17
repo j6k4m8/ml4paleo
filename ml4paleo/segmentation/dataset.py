@@ -27,7 +27,7 @@ they are at prediction time, so features near the edges match.
 
 import dataclasses
 import itertools
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import Any, Literal, Protocol, cast
 
 import numpy as np
@@ -188,12 +188,14 @@ class TrainingSet:
         class_values: list[int],
         window: tuple[float, float],
         tile: int = 96,
+        feature_reader: Callable[[Box], np.ndarray] | None = None,
     ):
         """
         `image` is the level-0 (c, z, y, x) array; `labeled_chunks` are the
         keys of label chunks that have any labels. ROIs are cut to the image.
         """
         self.image = image
+        self.feature_reader = feature_reader
         self.labels = labels
         self.labeled_chunks = sorted(set(labeled_chunks))
         self.class_values = list(class_values)
@@ -322,6 +324,7 @@ class TrainingSet:
                     human=human,
                     interior=interior,
                     split=split,
+                    features=self.feature_reader(box) if self.feature_reader else None,
                 )
         if split != "train":
             return
@@ -351,4 +354,5 @@ class TrainingSet:
                     human=human,
                     interior=interior,
                     split="train",
+                    features=self.feature_reader(box) if self.feature_reader else None,
                 )

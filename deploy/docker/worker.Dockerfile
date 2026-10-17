@@ -40,8 +40,10 @@ RUN --mount=from=uv,source=/uv,target=/bin/uv \
     uv sync --locked --package ml4paleo-worker --no-editable
 
 # Workers parse untrusted uploads, so they never run as root.
-RUN useradd --system --uid 10002 --no-create-home ml4paleo-worker
+RUN useradd --system --uid 10002 --no-create-home ml4paleo-worker \
+    && mkdir -p /var/cache/ml4paleo/features \
+    && chown -R 10002 /var/cache/ml4paleo
 USER ml4paleo-worker
-ENV PATH="/app/.venv/bin:$PATH"
+ENV PATH="/app/.venv/bin:$PATH" M4PW_FEATURE_CACHE_DIR=/var/cache/ml4paleo/features
 
 CMD ["ml4paleo-worker"]

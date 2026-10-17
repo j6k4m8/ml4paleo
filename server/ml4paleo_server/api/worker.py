@@ -90,7 +90,9 @@ async def claim(
                 detail="A valid worker token is required.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        claimed = await jobs.claim(db, worker, body.caps)
+        claimed = await jobs.claim(
+            db, worker, body.caps, reserve_for_live=body.reserve_for_live
+        )
         # Commit either way, so no connection is held while waiting.
         await db.commit()
         if claimed is not None:

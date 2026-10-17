@@ -115,7 +115,7 @@ export class TrainingNotifications {
 	}
 
 	/** The mutex covers the POST and the whole training, even if the page unmounts. */
-	async submit(project: string, body: { plugin: string; params: Record<string, number>; name?: string }): Promise<TrainingModel | null> {
+	async submit(project: string, body: { plugin: string; params: Record<string, number | string>; name?: string }): Promise<TrainingModel | null> {
 		if (this.isTraining(project)) return null;
 		if (!this.#user) throw new Error("Sign in before training a model.");
 		const generation = this.#generation;

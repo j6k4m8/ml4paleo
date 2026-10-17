@@ -244,7 +244,12 @@ services:
       context: ../..
       dockerfile: deploy/docker/worker.Dockerfile
     environment:
-      M4PW_SLOTS: ${M4P_CPU_WORKER_SLOTS:-1}
+      M4PW_SLOTS: ${M4P_CPU_WORKER_SLOTS:-2}
+      M4PW_LIVE_SLOTS: ${M4P_CPU_LIVE_SLOTS:-1}
+      M4PW_FEATURE_CACHE_MB: ${M4P_FEATURE_CACHE_MB:-128}
+      M4PW_FEATURE_CACHE_DISK_MB: ${M4P_FEATURE_CACHE_DISK_MB:-2048}
+    volumes:
+      - feature-cache:/var/cache/ml4paleo/features
     # A hard ceiling on what parsing uploads can take; the worker also sizes
     # each job from this limit.
     mem_limit: ${M4P_CPU_WORKER_MEMORY:-4g}
@@ -304,3 +309,4 @@ volumes:
   caddy-config:
   postgres-data:
   seaweedfs-data:
+  feature-cache:

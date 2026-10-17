@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ml4paleo.protocol import JobLease
+from ml4paleo.segmentation.features import FeatureCache
 from ml4paleo.storage import StorageGrant
 
 
@@ -40,8 +41,10 @@ class JobContext:
         *,
         v1_volume: Path | None = None,
         label_ops: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        feature_cache: FeatureCache | None = None,
     ):
         self.lease = lease
+        self.feature_cache = feature_cache
         # How much memory this job may use: the worker's memory shared among
         # its slots. Handlers size what they hold at once from it.
         self.memory_budget_bytes = memory_budget_bytes

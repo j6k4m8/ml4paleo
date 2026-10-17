@@ -213,6 +213,25 @@ class ProjectMember(Base):
     )
 
 
+class LiveSession(Base):
+    """Short browser leases that reserve a worker lane for live prediction."""
+
+    __tablename__ = "live_sessions"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    image_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE")
+    )
+    expires_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+
+
 class AuditEvent(Base):
     """
     Who did what, for actions on accounts and projects.

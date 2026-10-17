@@ -19,7 +19,7 @@
 		name: string;
 		version: string;
 		devices: string[];
-		params_schema: { properties: Record<string, { type: string; default: number; minimum?: number; maximum?: number; title?: string }> };
+		params_schema: { properties: Record<string, { type: string; default: number | string; enum?: string[]; minimum?: number; maximum?: number; title?: string; description?: string }> };
 	}
 
 	interface Model extends TrainingModel {
@@ -30,7 +30,7 @@
 		status: "training" | "ready" | "failed";
 		/** Why training failed, if it says. */
 		error?: string | null;
-		params: Record<string, number>;
+		params: Record<string, number | string>;
 		class_values: number[];
 		metrics: {
 			mean_dice?: number | null;
@@ -71,7 +71,7 @@
 	// Each model's latest prediction pipeline.
 	let predictions: Record<string, Pipeline> = $state({});
 	let plugin = $state("rf");
-	let params: Record<string, number> = $state({});
+	let params: Record<string, number | string> = $state({});
 	let name = $state("");
 	let error = $state("");
 	let busy = $state(false);
@@ -265,8 +265,7 @@
 					Trains on everything labeled so far: complete ROIs (unlabeled voxels there count as background), open ROIs, and
 					labels outside ROIs. Validation ROIs are held out to score the model.
 				{:else}
-					Trains on everything you've labeled: your classes, and Background, which tells the model what to leave alone. Each model is
-					graded on held-out human-drawn or imported voxels (out-of-bag for RF); accepted predictions never grade the model.
+				Your labels teach the model what to find. Background teaches it what to ignore.
 				{/if}
 			</p>
 			{#if plugins.length > 1}
@@ -279,13 +278,18 @@
 			{/if}
 			<label class="label">Name (optional) <input class="field" bind:value={name} maxlength="100" placeholder="rf model" /></label>
 			{#if chosen}
-				<p class="text-2xs text-ink-dim">{chosen.capabilities.display_name} · {chosen.capabilities.family} · {chosen.devices.join(" / ")} · {chosen.capabilities.learning} learning in Live. Training here creates a saved checkpoint.</p>
+				<p class="text-2xs text-ink-dim">{chosen.name === "rf" ? "Random Forest" : chosen.capabilities.display_name} ({chosen.devices.map((device) => device === "cuda" ? "GPU" : device.toUpperCase()).join(" / ")})</p>
 				<details class="group rounded-sm border border-edge bg-field">
 					<summary class="cursor-pointer px-2 py-1 text-2xs text-ink-dim select-none hover:text-ink">Settings</summary>
 					<div class="grid grid-cols-2 gap-2 p-2">
 						{#each Object.entries(chosen.params_schema.properties) as [key, spec] (key)}
-							<label class="label">
+							<label class="label" class:col-span-2={!!spec.enum} title={spec.description}>
 								{spec.title ?? key}
+								{#if spec.enum}
+									<select class="field" bind:value={params[key]}>
+										{#each spec.enum as value (value)}<option {value}>{value === "full" ? "Intensity, edges and texture (smarter)" : value === "intensity_edges" ? "Intensity and edges (faster)" : value}</option>{/each}
+									</select>
+								{:else}
 								<input
 									class="field font-mono"
 									type="number"
@@ -294,6 +298,7 @@
 									max={spec.maximum}
 									bind:value={params[key]}
 								/>
+								{/if}
 							</label>
 						{/each}
 					</div>
@@ -337,7 +342,7 @@
 			<section class="panel overflow-x-auto" aria-labelledby="comparison-title">
 				<div class="panel-title flex items-center justify-between gap-3" id="comparison-title">
 					<span>Model comparison</span>
-					<span class="text-2xs font-normal tracking-normal text-ink-faint normal-case">Human labels only</span>
+					<span class="text-2xs font-normal tracking-normal text-ink-faint normal-case" title="Scores use held-out human-drawn or imported annotations, never accepted predictions. Random Forest uses out-of-bag scoring.">Human labels only</span>
 				</div>
 				<table class="w-full min-w-[42rem] text-2xs">
 					<thead class="text-ink-dim">

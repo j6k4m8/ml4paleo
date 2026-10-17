@@ -760,8 +760,17 @@ def settings(migrated_database_url, tmp_path, s3_endpoint, s3_bucket):
     )
 
 
+@pytest.mark.parametrize(
+    "feature_set, cached", [("full", False), ("full", True), ("intensity_edges", True)]
+)
 def test_a_worker_trains_a_random_forest(
-    new_browser, settings, migrated_database_url, live_server
+    new_browser,
+    settings,
+    migrated_database_url,
+    live_server,
+    tmp_path,
+    feature_set,
+    cached,
 ):
     ada = new_browser()
     signup(ada)
@@ -788,13 +797,19 @@ def test_a_worker_trains_a_random_forest(
         "max_depth": 8,
         "samples_per_class": 2000,
         "sigma_max": 1.0,
+        "feature_set": feature_set,
     }
     model = ada.post(f"/api/projects/{project}/models", json={"params": params}).json()
 
     token = add_worker(migrated_database_url)
     client = ServerClient(token, base_url=live_server)
     caps = WorkerCaps(version="test", kinds=sorted(HANDLERS))
-    worker = Worker(client, caps, claim_wait_seconds=0.5, heartbeat_seconds=0.2)
+    from ml4paleo.segmentation.features import FeatureCache
+
+    cache = FeatureCache(tmp_path / "features") if cached else None
+    worker = Worker(
+        client, caps, claim_wait_seconds=0.5, heartbeat_seconds=0.2, feature_cache=cache
+    )
     thread = threading.Thread(target=worker.run, kwargs={"max_jobs": None})
     thread.start()
 
@@ -813,11 +828,13 @@ def test_a_worker_trains_a_random_forest(
             lambda r: r.json()["status"] != "training",
         ).json()
         assert status["status"] == "ready", status
-        assert status["plugin_version"] == "2"
+        assert status["plugin_version"] == "3"
         assert status["metrics"]["validation_crops"] == 1
         assert status["metrics"]["classes"][str(BONE)]["dice"] > 0.8
         # The worker's memory budget leaves room for every sample asked for.
         assert status["metrics"]["samples_per_class_used"] == 2000
+        if cached:
+            assert list((tmp_path / "features").glob("*.f32.zst"))
 
         # The model predicts the whole image, which becomes the prediction.
         assert ada.get(f"/api/projects/{project}/prediction").status_code == 404

@@ -86,12 +86,16 @@ def model_sentences(
         ]
         # The v2 RF plugin computes these 3D features, unlike the v1 slice model.
         if (
-            version in ("1", "1.0", "1.0.0", "2", "2.0", "2.0.0")
+            version in ("1", "1.0", "1.0.0", "2", "2.0", "2.0.0", "3")
             and "sigma_max" in params
         ):
+            groups = (
+                "intensity and edge"
+                if params.get("feature_set") == "intensity_edges"
+                else "intensity, edge and Hessian-based texture"
+            )
             sentences.append(
-                "Input features comprised multiscale 3D intensity, edge and "
-                "Hessian-based texture features for each image channel, with "
+                f"Input features comprised multiscale 3D {groups} features for each image channel, with "
                 f"Gaussian scales from 1 to {params['sigma_max']:g} voxels."
             )
         cap = metrics.get("samples_per_class_used", params.get("samples_per_class"))

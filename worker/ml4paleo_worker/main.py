@@ -34,6 +34,7 @@ from ml4paleo.protocol import (
     WorkerCaps,
     json_text,
 )
+from ml4paleo.segmentation.features import FeatureCache
 
 from .client import LeaseLost, ServerClient, Unauthorized, with_retries
 from .context import Cancelled, JobContext, PermanentError
@@ -77,12 +78,16 @@ class Worker:
         claim_wait_seconds: float = MAX_CLAIM_WAIT_SECONDS,
         heartbeat_seconds: float | None = None,
         v1_volume: Path | None = None,
+        feature_cache: FeatureCache | None = None,
+        live_slots: int = 1,
     ):
         self.client = client
         self.caps = caps
         self.handlers = handlers
         # The v1 app's volume folder, for importing v1 jobs.
         self.v1_volume = v1_volume
+        self.feature_cache = feature_cache
+        self.live_slots = min(max(0, live_slots), max(0, caps.slots - 1))
         self.claim_wait_seconds = claim_wait_seconds
         # The server suggests a heartbeat interval; tests use a shorter one.
         self._heartbeat_override = heartbeat_seconds
@@ -119,7 +124,9 @@ class Worker:
             ", ".join(self.caps.labels) or "none",
         )
         slots = [
-            threading.Thread(target=self._slot, name=f"slot-{i}")
+            threading.Thread(
+                target=self._slot, args=(i < self.live_slots,), name=f"slot-{i}"
+            )
             for i in range(self.caps.slots)
         ]
         for slot in slots:
@@ -143,11 +150,19 @@ class Worker:
                 self._max_jobs is not None and self.jobs_done >= self._max_jobs
             )
 
-    def _slot(self) -> None:
+    def _slot(self, reserve_for_live: bool = False) -> None:
         failures = 0
         while not self._done():
             try:
-                lease = self.client.claim(self.caps, self.claim_wait_seconds)
+                if self.feature_cache:
+                    self.feature_cache.prune_memory()
+                lease = (
+                    self.client.claim(
+                        self.caps, self.claim_wait_seconds, reserve_for_live=True
+                    )
+                    if reserve_for_live
+                    else self.client.claim(self.caps, self.claim_wait_seconds)
+                )
             except Unauthorized:
                 log.error("The server refused this worker's token; stopping.")
                 self.unauthorized = True
@@ -183,6 +198,7 @@ class Worker:
             self.memory_budget_bytes(),
             self.threads(),
             v1_volume=self.v1_volume,
+            feature_cache=self.feature_cache,
             label_ops=lambda op: self.client.label_op(
                 lease.job_id, lease.lease_token, op
             ),

@@ -19,13 +19,14 @@ import json
 import math
 import os
 import pathlib
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from pydantic import BaseModel, Field
 
 from ml4paleo.labels import PLUGIN_IGNORE
 
+from ..features import FeatureRecipe, extractor, multiscale_recipe
 from ..metrics import ScoreSheet
 from ..plugin import (
     Crop,
@@ -47,6 +48,11 @@ class RandomForestParams(BaseModel):
     max_depth: int = Field(16, ge=1, le=64)
     samples_per_class: int = Field(50_000, ge=MIN_SAMPLES_PER_CLASS, le=1_000_000)
     sigma_max: float = Field(8.0, ge=1.0, le=8.0)
+    feature_set: Literal["full", "intensity_edges"] = Field(
+        "full",
+        title="Image features",
+        description="Texture costs more compute; compare model scores before choosing.",
+    )
     # scikit-learn takes seeds from 0 to 2³² - 1.
     seed: int = Field(0, ge=0, le=2**32 - 1)
 
@@ -98,28 +104,16 @@ def samples_that_fit(
 
 
 def features(
-    image: np.ndarray, sigma_max: float, threads: int | None = None
+    image: np.ndarray,
+    sigma_max: float,
+    threads: int | None = None,
+    recipe: FeatureRecipe | None = None,
 ) -> np.ndarray:
     """
     (C, Z, Y, X) float32 -> (Z, Y, X, F) float32 features, computed on up to
     `threads` threads (None: every core).
     """
-    from skimage.feature import multiscale_basic_features
-
-    per_channel = [
-        multiscale_basic_features(
-            channel,
-            intensity=True,
-            edges=True,
-            texture=True,
-            sigma_min=1.0,
-            # Typed as int, but any positive number works.
-            sigma_max=cast(Any, sigma_max),
-            workers=threads,
-        ).astype(np.float32)
-        for channel in image
-    ]
-    return np.concatenate(per_channel, axis=-1)
+    return extractor(recipe or multiscale_recipe(sigma_max)).compute(image, threads)
 
 
 class Reservoir:
@@ -197,9 +191,39 @@ class Reservoir:
 class RandomForestPredictor:
     def __init__(self, forest: Any, meta: dict[str, Any], threads: int | None = None):
         self.forest = forest
-        self.sigma_max = float(meta["sigma_max"])
         self.halo = int(meta["halo"])
         self.num_classes = int(meta["num_classes"])
+        # Older models used the full recipe; preserve it on load.
+        self.feature_recipe = (
+            FeatureRecipe.model_validate(meta["feature_recipe"])
+            if "feature_recipe" in meta
+            else multiscale_recipe(float(meta["sigma_max"]))
+        )
+        implementation = extractor(self.feature_recipe)
+        self.sigma_max = float(self.feature_recipe.params.get("sigma_max", 1))
+        if implementation.halo != self.halo:
+            raise ValueError("The model's saved feature halo is inconsistent")
+        channels = meta.get("channels")
+        if channels is None and (
+            self.feature_recipe.name,
+            self.feature_recipe.version,
+        ) == ("multiscale", "1"):
+            # Only this historical extractor had a known linear channel layout.
+            groups = implementation.width(1)
+            channels = (
+                int(self.forest.n_features_in_) // groups
+                if int(self.forest.n_features_in_) % groups == 0
+                else 0
+            )
+        if (
+            not isinstance(channels, int)
+            or channels < 1
+            or implementation.width(channels) != self.forest.n_features_in_
+        ):
+            raise ValueError(
+                "The model's feature width does not match its saved recipe"
+            )
+        self.channels = channels
         # Threads for features (None: every core); the trees predict on one.
         self.threads = threads
         self.forest.n_jobs = 1
@@ -213,18 +237,26 @@ class RandomForestPredictor:
         # 160 bytes a voxel besides the features. Then the class
         # probabilities as float64, a few times over while scikit-learn adds
         # up its trees.
-        features = int(self.forest.n_features_in_)
-        at_once = min(self.threads or os.cpu_count() or 1, scale_count(self.sigma_max))
-        return max(16 * features, 4 * features + 160 * at_once) + 32 * self.num_classes
+        return (
+            extractor(self.feature_recipe).bytes_per_voxel(
+                self.channels, self.threads or os.cpu_count() or 1
+            )
+            + 32 * self.num_classes
+        )
 
     def predict_block(self, block: np.ndarray) -> np.ndarray:
         # Callers pad blocks at the image's edges by repeating its edge
         # voxels, as training crops are, so every block has the full halo.
         h = self.halo
-        feats = features(block, self.sigma_max, self.threads)
+        feats = features(block, self.sigma_max, self.threads, self.feature_recipe)
         interior = feats[
             h : feats.shape[0] - h, h : feats.shape[1] - h, h : feats.shape[2] - h
         ]
+        return self.predict_features(interior)
+
+    def predict_features(self, interior: np.ndarray) -> np.ndarray:
+        if interior.ndim != 4 or interior.shape[-1] != self.forest.n_features_in_:
+            raise ValueError("Feature array does not match the saved model")
         shape = interior.shape[:3]
         proba = self.forest.predict_proba(interior.reshape(-1, interior.shape[-1]))
         out = np.zeros((self.num_classes, *shape), dtype=np.float32)
@@ -235,7 +267,7 @@ class RandomForestPredictor:
 
 class RandomForestPlugin:
     name: ClassVar[str] = "rf"
-    version: ClassVar[str] = "2"
+    version: ClassVar[str] = "3"
     caps: ClassVar[PluginCaps] = PluginCaps(
         devices=("cpu",),
         display_name="Random forest",
@@ -245,6 +277,10 @@ class RandomForestPlugin:
         min_train_interval_ms=5000,
     )
     Params: ClassVar[type[BaseModel]] = RandomForestParams
+
+    def feature_recipe(self, params: BaseModel) -> FeatureRecipe:
+        assert isinstance(params, RandomForestParams)
+        return multiscale_recipe(params.sigma_max, texture=params.feature_set == "full")
 
     def train(
         self,
@@ -257,13 +293,14 @@ class RandomForestPlugin:
         from sklearn.ensemble import RandomForestClassifier
 
         assert isinstance(params, RandomForestParams)
-        halo = halo_for(params.sigma_max)
+        implementation = extractor(self.feature_recipe(params))
+        halo = implementation.halo
         threads = max(1, ctx.threads)
         # Samples and the forest get half the memory; crops get the rest.
         per_class = samples_that_fit(
             ctx.memory_budget_bytes // 2,
             data.num_classes,
-            feature_count(data.channels, params.sigma_max),
+            extractor(self.feature_recipe(params)).width(data.channels),
             threads,
             params,
         )
@@ -279,7 +316,9 @@ class RandomForestPlugin:
         for crop in data.crops("train", halo):
             ctx.check()
             crops += 1
-            rows, labels, human = self._samples(crop, params.sigma_max, threads)
+            rows, labels, human = self._samples(
+                crop, params.sigma_max, threads, self.feature_recipe(params)
+            )
             for label in np.unique(labels):
                 selected = labels == label
                 reservoir.add(int(label), rows[selected], human[selected])
@@ -341,6 +380,8 @@ class RandomForestPlugin:
             "class_values": data.class_values,
             "window": [float(v) for v in data.window],
             "features": int(width),
+            "channels": data.channels,
+            "feature_recipe": self.feature_recipe(params).model_dump(),
         }
         (out / META_FILE).write_text(json.dumps(meta, indent=2))
         ctx.progress(0.8, "Scoring on held-out human annotations")
@@ -358,7 +399,12 @@ class RandomForestPlugin:
                 continue
             validation_crops += 1
             # Crops carry the full halo, so they predict like any block.
-            sheet.add(predictor.predict_block(crop.image).argmax(axis=0), human_targets)
+            probabilities = (
+                predictor.predict_features(crop.features)
+                if crop.features is not None
+                else predictor.predict_block(crop.image)
+            )
+            sheet.add(probabilities.argmax(axis=0), human_targets)
         evaluation = "human_validation_rois"
         if sheet.voxels == 0:
             # No explicit human validation labels: use the forest's standard
@@ -393,17 +439,24 @@ class RandomForestPlugin:
         # each scale and stacks them, and they are cut down to the samples.
         # With several threads it computes that many scales at once, as for
         # prediction (see `RandomForestPredictor.bytes_per_voxel`).
-        count = feature_count(channels, params.sigma_max)
-        at_once = min(max(1, threads), scale_count(params.sigma_max))
+        implementation = extractor(self.feature_recipe(params))
         return CropCost(
-            halo=halo_for(params.sigma_max),
-            bytes_per_voxel=max(16 * count, 4 * count + 160 * at_once),
+            halo=implementation.halo,
+            bytes_per_voxel=implementation.bytes_per_voxel(channels, threads),
         )
 
     def _samples(
-        self, crop: Crop, sigma_max: float, threads: int
+        self,
+        crop: Crop,
+        sigma_max: float,
+        threads: int,
+        recipe: FeatureRecipe | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        feats = features(crop.image, sigma_max, threads)[crop.interior]
+        feats = (
+            crop.features
+            if crop.features is not None
+            else features(crop.image, sigma_max, threads, recipe)[crop.interior]
+        )
         known = crop.targets != PLUGIN_IGNORE
         human = crop.human if crop.human is not None else known
         return feats[known], crop.targets[known], np.asarray(human, dtype=bool)[known]

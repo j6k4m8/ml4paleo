@@ -17,6 +17,7 @@ each block with the predictor's halo straight from the image (see
 import itertools
 import math
 from collections.abc import Callable, Sequence
+from typing import Protocol, cast
 
 import numpy as np
 import zarr
@@ -32,6 +33,10 @@ SHARD_ZYX = (512, 512, 512)
 ARRAYS = ("class", "uncertainty")
 # Blocks are at least this many voxels a side, however little memory there is.
 MIN_BLOCK = 16
+
+
+class FeaturePredictor(Protocol):
+    def predict_features(self, features: np.ndarray) -> np.ndarray: ...
 
 
 def create_prediction(
@@ -114,12 +119,17 @@ def _predict(
     box: Box,
     window: tuple[float, float],
     class_values: list[int],
+    feature_reader: Callable[[Box], np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Stored label values and uncertainty for a box of the image.
     """
-    probabilities = predictor.predict_block(
-        normalize(read_box(image, box, predictor.halo), window)
+    probabilities = (
+        cast(FeaturePredictor, predictor).predict_features(feature_reader(box))
+        if feature_reader
+        else predictor.predict_block(
+            normalize(read_box(image, box, predictor.halo), window)
+        )
     )
     classes = from_plugin_space(
         probabilities.argmax(axis=0).astype(np.uint8), class_values
@@ -137,6 +147,7 @@ def predict_box(
     out: zarr.Group,
     memory_budget_bytes: int,
     progress: Callable[[float], None] | None = None,
+    feature_reader: Callable[[Box], np.ndarray] | None = None,
 ) -> None:
     """
     Predict a box of the image (level 0, (c, z, y, x)) into the prediction
@@ -175,7 +186,7 @@ def predict_box(
                 slice(piece[a] - layer[a], piece[a + 3] - layer[a]) for a in range(3)
             )
             classes[at], uncertainty[at] = _predict(
-                predictor, image, piece, window, class_values
+                predictor, image, piece, window, class_values, feature_reader
             )
             done += 1
             if progress:

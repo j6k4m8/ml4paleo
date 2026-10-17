@@ -83,8 +83,15 @@ class ServerClient:
             self._post("/hello", HelloIn(caps=caps)).content
         )
 
-    def claim(self, caps: WorkerCaps, wait_seconds: float) -> JobLease | None:
-        response = self._post("/claim", ClaimIn(caps=caps, wait_seconds=wait_seconds))
+    def claim(
+        self, caps: WorkerCaps, wait_seconds: float, *, reserve_for_live: bool = False
+    ) -> JobLease | None:
+        response = self._post(
+            "/claim",
+            ClaimIn(
+                caps=caps, wait_seconds=wait_seconds, reserve_for_live=reserve_for_live
+            ),
+        )
         return ClaimOut.model_validate_json(response.content).job
 
     def heartbeat(

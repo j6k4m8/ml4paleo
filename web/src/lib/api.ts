@@ -26,7 +26,7 @@ export function csrfHeaders(): Record<string, string> {
 
 export async function api<T>(
 	path: string,
-	options: { method?: string; body?: unknown; signal?: AbortSignal } = {},
+    options: { method?: string; body?: unknown; signal?: AbortSignal; keepalive?: boolean } = {},
 ): Promise<T> {
 	const method = options.method ?? (options.body === undefined ? "GET" : "POST");
 	const headers: Record<string, string> = {};
@@ -37,6 +37,7 @@ export async function api<T>(
 		headers,
 		body: options.body === undefined ? undefined : JSON.stringify(options.body),
 		signal: options.signal,
+        keepalive: options.keepalive,
 		credentials: "same-origin",
 	});
 	if (response.status === 204) return undefined as T;

@@ -18,6 +18,7 @@ export interface LiveModel {
 	id: string;
 	name: string;
 	plugin: string;
+	params?: Record<string, unknown>;
 	status: "training" | "ready" | "failed";
 	error?: string | null;
 	live: boolean;

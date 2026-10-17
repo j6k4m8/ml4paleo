@@ -23,6 +23,7 @@ from ml4paleo.segmentation.predict import (
 from ml4paleo.storage import StorageGrant, get_bytes, write_manifest
 
 from ..context import JobContext, PermanentError
+from ..features import reader
 
 # The last model loaded, since a worker usually runs many shards of one
 # prediction in a row.
@@ -74,15 +75,24 @@ def shard(ctx: JobContext) -> dict[str, Any]:
         ctx.progress(fraction)
         ctx.check()
 
+    image = OmeImage.open(image_grant).array(0)
+    window = tuple(ctx.payload["window"])
     predict_box(
         predictor,
-        OmeImage.open(image_grant).array(0),
+        image,
         box,  # type: ignore[arg-type]
         tuple(ctx.payload["window"]),  # type: ignore[arg-type]
         list(ctx.payload["class_values"]),
         open_prediction(prediction_grant),
         ctx.memory_budget_bytes,
         progress=progress,
+        feature_reader=reader(
+            ctx,
+            image,
+            ctx.payload.get("image_artifact_id"),
+            window,
+            getattr(predictor, "feature_recipe", None),
+        ),
     )
     return {"box": list(box)}
 
