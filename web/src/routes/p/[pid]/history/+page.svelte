@@ -52,6 +52,7 @@
 		edit: Pencil,
 		undo: Undo2,
 		redo: Redo2,
+		reset: RotateCcw,
 	};
 
 	/** Whose and which entries are listed; empty for everyone and every source. */

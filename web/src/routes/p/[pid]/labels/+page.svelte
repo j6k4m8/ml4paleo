@@ -5,6 +5,7 @@
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
 	import Labeled from "#lib/ui/Labeled.svelte";
 	import LabelImport from "#lib/ui/LabelImport.svelte";
+	import ClassActions from "#lib/ui/ClassActions.svelte";
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 	import type { LabelClass } from "#lib/viewer/labels.ts";
 
@@ -14,6 +15,7 @@
 	let hasImage = $state<boolean | null>(null);
 	let classes: LabelClass[] = $state([]);
 	let counts: Record<string, number> | null = $state(null);
+	let status = $state("");
 
 	$effect(() => {
 		crumbs.set([{ label: "Projects", href: "/projects" }, { label: projectName || "…", href: `/p/${pid}` }, { label: "Labels" }]);
@@ -37,6 +39,11 @@
 			// The page still works for importing.
 		}
 	}
+
+	function changed(mode: "reset" | "delete", label: LabelClass) {
+		status = mode === "reset" ? `${label.name} reset. All saved annotations for this class were erased.` : `${label.name} deleted from the project.`;
+		void load();
+	}
 </script>
 
 <ProjectTabs {pid} />
@@ -51,7 +58,12 @@
 					A model learns from two kinds of labels: what you're looking for, and background, which is everything else.
 					Paint both in the annotator, or import labels from a file.
 				</p>
-				{#if counts}<Labeled {classes} {counts} />{/if}
+				{#if counts}
+					<Labeled {classes} {counts}>
+						{#snippet actions(label)}<ClassActions {pid} {label} onchanged={changed} />{/snippet}
+					</Labeled>
+				{/if}
+				{#if status}<p class="text-ok" role="status">{status}</p>{/if}
 				<a class="btn btn-primary self-start no-underline" href="/p/{pid}/annotate"><Brush size={13} /> Open the annotator</a>
 			</div>
 		</section>

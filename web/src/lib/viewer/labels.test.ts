@@ -1247,8 +1247,8 @@ class FakeSource {
 	}
 	close() {}
 	/** The server says these chunks changed. */
-	change(chunks: { key: Vec3; version: number }[]) {
-		this.#handlers.get("change")?.({ data: JSON.stringify({ chunks }) });
+	change(chunks: { key: Vec3; version: number }[], op?: { seq: number; kind: string }) {
+		this.#handlers.get("change")?.({ data: JSON.stringify({ chunks, op }) });
 	}
 }
 
@@ -1273,6 +1273,18 @@ describe("label levels", () => {
 	it("start with full resolution only, until the server says what it has", () => {
 		const layer = new LabelLayer("p", levelPool().pool, [256, 256, 256]);
 		expect(layer.levels.map((l) => l.path)).toEqual(["class"]);
+	});
+
+	it("refreshes class lists when another tab resets or deletes a class", async () => {
+		const { layer, source } = await started(group(pyramid));
+		vi.mocked(api).mockResolvedValueOnce([{ value: 3, name: "Matrix", color: "#000000" }]);
+		const revision = vi.fn();
+		layer.onRevision = revision;
+		source.change([], { seq: 17, kind: "reset" });
+		await Promise.resolve();
+		expect(api).toHaveBeenLastCalledWith("/api/projects/p/labels/classes");
+		expect(layer.classes).toEqual([{ value: 3, name: "Matrix", color: "#000000" }]);
+		expect(revision).toHaveBeenCalledWith(17);
 	});
 
 	it("are read from the group's metadata when the layer starts", async () => {

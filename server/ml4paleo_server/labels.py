@@ -37,14 +37,21 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
-from ml4paleo.labels import LABEL_CHUNK_ZYX, Source
+from ml4paleo.labels import BACKGROUND, DECLINED, LABEL_CHUNK_ZYX, Source
 from ml4paleo.labels.codec import blob_key, content_hash, decode_chunk, encode_chunk
-from ml4paleo.labels.deltas import ChunkDelta, Claim, apply_delta, recompute
+from ml4paleo.labels.deltas import (
+    ChunkDelta,
+    Claim,
+    apply_delta,
+    pack_values,
+    recompute,
+    unpack_values,
+)
 from ml4paleo.ome import LevelSpec
 from ml4paleo.storage import StorageGrant, get_bytes, put_bytes
 
 from . import artifacts, label_pyramid
-from .db import LabelChunk, LabelOp, LabelOpChunk
+from .db import LabelChunk, LabelClass, LabelOp, LabelOpChunk
 from .settings import Settings
 from .storage import project_storage
 
@@ -207,6 +214,120 @@ async def notify(db: AsyncSession, project_id: uuid.UUID) -> None:
     )
 
 
+async def lock_project(
+    db: AsyncSession, project_id: uuid.UUID, *, exclusive: bool = False
+) -> None:
+    """Edits may run together; a permanent reset excludes every label writer."""
+    lock = (
+        func.pg_advisory_xact_lock if exclusive else func.pg_advisory_xact_lock_shared
+    )
+    await db.execute(
+        select(lock(func.hashtextextended(f"{CHANNEL}:write:{project_id}", 0)))
+    )
+
+
+def _check_classes(deltas: Sequence[ChunkDelta], allowed: set[int]) -> None:
+    for delta in deltas:
+        used = (
+            {delta.value}
+            if delta.value is not None
+            else set(
+                np.unique(unpack_values(delta.values or b"", delta.box_shape)).tolist()
+            )
+        )
+        if not used <= allowed:
+            raise ValueError(
+                f"label values {sorted(used - allowed)} are not classes here"
+            )
+
+
+async def reset_class(
+    db: AsyncSession,
+    settings: Settings,
+    project_id: uuid.UUID,
+    *,
+    value: int,
+    name: str,
+    remove: bool,
+    client_op_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> LabelOp:
+    """Erase this class atomically. Its reset seq also fences off old undo claims.
+
+    Only allocated chunks containing this value are read, one bounded batch
+    at a time. Historical claims stay intact for provenance, but replay never
+    restores this class from before the reset. Fresh paint can still be undone.
+    The caller holds the exclusive project lock and commits the transaction.
+    """
+    try:
+        shape = await volume_shape(db, project_id)
+    except NoImage:
+        shape = (0, 0, 0)
+    grant = labels_root(settings, project_id)
+    made: list[LabelOpChunk] = []
+    erased = 0
+    after: ChunkKey | None = None
+    while True:
+        query = select(LabelChunk).where(
+            LabelChunk.project_id == project_id,
+            LabelChunk.class_counts[str(value)].as_integer() > 0,
+        )
+        if after is not None:
+            query = query.where(
+                tuple_(LabelChunk.cz, LabelChunk.cy, LabelChunk.cx) > after
+            )
+        rows = (
+            await db.scalars(
+                query.order_by(LabelChunk.cz, LabelChunk.cy, LabelChunk.cx)
+                .limit(128)
+                .with_for_update(key_share=True)
+                .execution_options(populate_existing=True)
+            )
+        ).all()
+        if not rows:
+            break
+        for row in rows:
+            class_chunk = await _read_chunk(grant, row.class_sha)
+            source_chunk = await _read_chunk(grant, row.source_sha)
+            mask = class_chunk == value
+            erased += int(np.count_nonzero(mask))
+            class_chunk[mask] = 0
+            source_chunk[mask] = Source.NONE
+            base = row.version
+            await _store_chunk(grant, row, class_chunk, source_chunk)
+            made.append(
+                LabelOpChunk(
+                    project_id=project_id,
+                    cz=row.cz,
+                    cy=row.cy,
+                    cx=row.cx,
+                    base_version=base,
+                    new_version=row.version,
+                    class_sha=row.class_sha,
+                )
+            )
+        last = rows[-1]
+        after = (last.cz, last.cy, last.cx)
+        await db.flush()
+    op = LabelOp(
+        project_id=project_id,
+        client_op_id=client_op_id,
+        kind="reset",
+        user_id=user_id,
+        source=int(Source.HUMAN),
+        tool={
+            "name": "delete-class" if remove else "reset-class",
+            "value": value,
+            "class_name": name,
+            "erased_voxels": erased,
+        },
+        bbox=[0, 0, 0, *shape],
+        live=True,
+    )
+    await _record(db, op, made)
+    return op
+
+
 async def existing(
     db: AsyncSession, project_id: uuid.UUID, client_op_id: uuid.UUID
 ) -> OpResult | None:
@@ -277,6 +398,7 @@ async def apply_edit(
     """
     Apply one edit (see the module docstring); the caller commits.
     """
+    await lock_project(db, project_id)
     if done := await existing(db, project_id, client_op_id):
         return done
     if not deltas:
@@ -287,6 +409,22 @@ async def apply_edit(
     shape = await volume_shape(db, project_id)
     for delta in deltas:
         delta.check_within(shape)
+    # Validate again under the project lock: a class can be deleted while an
+    # API's earlier validation is in flight, including a worker's import.
+    allowed = {
+        0,
+        BACKGROUND,
+        *(
+            await db.scalars(
+                select(LabelClass.value).where(
+                    LabelClass.project_id == project_id, LabelClass.deleted_at.is_(None)
+                )
+            )
+        ),
+    }
+    if source == Source.DECLINED:
+        allowed.add(DECLINED)
+    await run_in_threadpool(_check_classes, deltas, allowed)
     chunks = await _lock_chunks(db, project_id, keys)
     # A retry of this op that got the locks first has committed by now.
     if done := await existing(db, project_id, client_op_id):
@@ -379,6 +517,7 @@ async def set_live(
     """
     Undo (`live=False`) or redo (`live=True`) an edit; the caller commits.
     """
+    await lock_project(db, project_id)
     if done := await existing(db, project_id, client_op_id):
         return done
     target = await db.scalar(
@@ -407,13 +546,23 @@ async def set_live(
     ).all()
     chunks = await _lock_chunks(db, project_id, [(c.cz, c.cy, c.cx) for c in claims])
     target.live = live
+    reset_value = LabelOp.tool["value"].as_integer()
+    resets = dict(
+        (
+            await db.execute(
+                select(reset_value, func.max(LabelOp.seq))
+                .where(LabelOp.project_id == project_id, LabelOp.kind == "reset")
+                .group_by(reset_value)
+            )
+        ).all()
+    )
     grant = labels_root(settings, project_id)
     made = []
     for claim_row in claims:
         key = (claim_row.cz, claim_row.cy, claim_row.cx)
         region = _claim(claim_row, Source(target.source))
         live_claims = [
-            _claim(row, Source(source))
+            await run_in_threadpool(_replay_claim, row, Source(source), resets)
             for row, source in (
                 await db.execute(
                     select(LabelOpChunk, LabelOp.source)
@@ -473,6 +622,20 @@ def _claim(row: LabelOpChunk, source: Source) -> Claim:
         values=row.claim_values,
         source=source,
     )
+
+
+def _replay_claim(row: LabelOpChunk, source: Source, resets: dict[int, int]) -> Claim:
+    """A reset permanently erases old values, without rewriting their history."""
+    claim = _claim(row, source)
+    erased = [value for value, seq in resets.items() if row.seq < seq]
+    if not erased:
+        return claim
+    values = unpack_values(claim.values, claim.box_shape)
+    mask = np.isin(values, erased)
+    if not mask.any():
+        return claim
+    values[mask] = 0
+    return claim.model_copy(update={"values": pack_values(values)})
 
 
 async def changes_since(

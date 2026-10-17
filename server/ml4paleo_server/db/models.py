@@ -710,7 +710,7 @@ class LabelOp(Base):
     )
     # The browser's id for the op, so a retried request applies it once.
     client_op_id: Mapped[uuid.UUID]
-    # "edit", "undo", or "redo".
+    # "edit", "undo", "redo", or an irreversible class "reset".
     kind: Mapped[str] = mapped_column(String(8))
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
@@ -736,7 +736,7 @@ class LabelOp(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("kind IN ('edit', 'undo', 'redo')", name="kind"),
+        CheckConstraint("kind IN ('edit', 'undo', 'redo', 'reset')", name="kind"),
         Index("ix_label_ops_client_op", "project_id", "client_op_id", unique=True),
     )
 

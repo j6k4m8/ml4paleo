@@ -310,8 +310,9 @@ export class LabelLayer {
 			}
 		};
 		this.#events.addEventListener("change", (event) => {
-			const change = JSON.parse((event as MessageEvent<string>).data) as { op: { seq: number }; chunks: { key: Vec3; version: number }[] };
+			const change = JSON.parse((event as MessageEvent<string>).data) as { op: { seq: number; kind?: string }; chunks: { key: Vec3; version: number }[] };
 			this.onRevision?.(change.op?.seq ?? 0);
+			if (change.op?.kind === "reset") void this.refreshClasses().catch(() => {});
 			this.changed(change.chunks);
 		});
 	}
