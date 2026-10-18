@@ -65,6 +65,12 @@ export class LivePreview {
 	#learningRetryAt = 0;
 	#predictionRetryAt = 0;
 	#freeze: () => boolean;
+	#reservation: string | null = null;
+	#reservationReady = false;
+	#reservationBusy = false;
+	#renewAt = 0;
+	#pageHide = () => this.releaseReservation();
+	#visibility = () => { if (document.hidden) this.releaseReservation(); else this.pulse(); };
 
 	/** Compact presentation follows work state, never parses the explanatory copy. */
 	get learningPhase(): LearningPhase {
@@ -95,6 +101,8 @@ export class LivePreview {
 		private pool: WorkerPool, private me: string, freeze: () => boolean) {
 		this.#freeze = freeze;
 		this.#timer = setInterval(() => this.pulse(), 500);
+		if (typeof window !== "undefined") window.addEventListener("pagehide", this.#pageHide);
+		document.addEventListener?.("visibilitychange", this.#visibility);
 	}
 
 	changed(revision: number) {
@@ -138,6 +146,9 @@ export class LivePreview {
 
 	stop() {
 		this.#stopped = true;
+		this.releaseReservation();
+		if (typeof window !== "undefined") window.removeEventListener("pagehide", this.#pageHide);
+		document.removeEventListener?.("visibilitychange", this.#visibility);
 		this.#generation++;
 		clearInterval(this.#timer);
 		this.#controller.abort();
@@ -154,9 +165,47 @@ export class LivePreview {
 	}
 
 	private pulse() {
-		if (this.#stopped || !this.enabled || this.paused || document.hidden || this.#freeze()) return;
+		if (this.#stopped || !this.enabled || this.paused || document.hidden || !this.plugin) {
+			this.releaseReservation();
+			return;
+		}
+		if (!this.#reservationBusy && Date.now() >= this.#renewAt) void this.renewReservation();
+		if (!this.#reservationReady || this.#freeze()) return;
 		if (!this.#learningBusy && Date.now() >= this.#learningRetryAt) void this.learn();
 		if (!this.#predictionBusy && Date.now() >= this.#predictionRetryAt) void this.predict();
+	}
+
+	private async renewReservation() {
+		const id = this.#reservation ??= crypto.randomUUID();
+		this.#reservationBusy = true;
+		this.#renewAt = Date.now() + 15_000;
+		try {
+			await api(`/api/projects/${this.project}/live-sessions/${id}`, {
+				method: "PUT", body: { image_artifact_id: this.image }, keepalive: true,
+			});
+			if (this.#reservation === id && !this.#stopped) this.#reservationReady = true;
+		} catch {
+			// A failed renewal must not keep reserving capacity locally forever.
+			this.#renewAt = Date.now() + 5_000;
+			this.#reservationReady = false;
+		} finally {
+			this.#reservationBusy = false;
+			// A renewal that finishes after Stop cannot recreate a reservation.
+			if (this.#reservation !== id || this.#stopped) void this.deleteReservation(id);
+			else if (this.#reservationReady) this.pulse();
+		}
+	}
+
+	private deleteReservation(id: string) {
+		return api(`/api/projects/${this.project}/live-sessions/${id}`, { method: "DELETE", keepalive: true }).catch(() => {});
+	}
+
+	private releaseReservation() {
+		const id = this.#reservation;
+		this.#reservation = null;
+		this.#reservationReady = false;
+		this.#renewAt = 0;
+		if (id) void this.deleteReservation(id);
 	}
 
 	private async learn() {
@@ -177,7 +226,8 @@ export class LivePreview {
 				trained = await api<LiveModel>(`/api/projects/${this.project}/models/${this.#training.id}`, { signal: this.#controller.signal });
 			} else {
 				this.#lastTrain = Date.now();
-				trained = await api<LiveModel>(`/api/projects/${this.project}/models`, { body: { plugin: plugin.name, live: true }, signal: this.#controller.signal });
+				trained = await api<LiveModel>(`/api/projects/${this.project}/models`, { body: { plugin: plugin.name, live: true,
+					...(this.model?.plugin === plugin.name && this.model.params ? { params: this.model.params } : {}) }, signal: this.#controller.signal });
 				if (generation === this.#generation && trained.live_current) this.#coveredRevision = revision;
 			}
 			if (generation !== this.#generation || this.#stopped) return;

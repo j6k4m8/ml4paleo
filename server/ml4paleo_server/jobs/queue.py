@@ -49,7 +49,7 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import exists, func, not_, or_, select, text, update
+from sqlalchemy import exists, func, not_, or_, select, text, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -57,6 +57,7 @@ from sqlalchemy.orm import aliased
 from ml4paleo.protocol import Tier, WorkerCaps
 from ml4paleo.storage import StorageGrant
 
+from .. import live
 from ..db import Artifact, Job, JobAttempt, JobDep, Upload, Worker, uuid7
 
 LEASE = datetime.timedelta(seconds=120)
@@ -294,11 +295,23 @@ async def _lock_granted_files(db: AsyncSession, paths: list[str]) -> None:
             )
 
 
-async def claim(db: AsyncSession, worker: Worker, caps: WorkerCaps) -> Claimed | None:
+async def claim(
+    db: AsyncSession,
+    worker: Worker,
+    caps: WorkerCaps,
+    *,
+    reserve_for_live: bool = False,
+) -> Claimed | None:
     """
     Lease the first queued job that `caps` can run, or return None.
     """
     current = now()
+    reserved = (
+        reserve_for_live
+        and caps.slots > 1
+        and "predict.live" in caps.kinds
+        and await live.active(db, current)
+    )
     job = await db.scalar(
         select(Job)
         .where(
@@ -309,6 +322,7 @@ async def claim(db: AsyncSession, worker: Worker, caps: WorkerCaps) -> Claimed |
             Job.kind.in_(caps.kinds),
             Job.required_labels.contained_by(sorted(set(caps.labels))),
             Job.min_vram_gb <= caps.vram_gb,
+            Job.kind == "predict.live" if reserved else true(),
         )
         .order_by(Job.tier, Job.submitted_at, Job.id)
         .limit(1)

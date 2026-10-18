@@ -156,6 +156,257 @@ def test_counts_say_what_has_been_labeled(ada, project):
     assert ada.get(f"{base}/counts").json() == {"1": 24, "3": 24}
 
 
+def class_action(browser, project, value=2, *, mode="reset", name="bone", op_id=None):
+    return browser.post(
+        f"/api/projects/{project}/labels/classes/{value}/{mode}",
+        json={"confirmation": name, "client_op_id": str(op_id or uuid.uuid4())},
+    )
+
+
+@pytest.mark.parametrize("mode", ["reset", "delete"])
+def test_class_action_requires_exact_name_without_touching_labels(ada, project, mode):
+    mask = np.ones((1, 1, 1), dtype=bool)
+    edit(ada, project, mask, (0, 0, 0), 2)
+    for name in ["Bone", "bone ", "matrix"]:
+        response = class_action(ada, project, mode=mode, name=name)
+        assert response.status_code == 422, response.text
+        assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 2
+        assert len(ada.get(f"/api/projects/{project}/labels/classes").json()) == 2
+
+
+@pytest.mark.parametrize("mode", ["reset", "delete"])
+def test_class_action_erases_whole_scan_but_preserves_other_classes(ada, project, mode):
+    mask = np.ones((1, 2, 3), dtype=bool)
+    edit(ada, project, mask, (0, 0, 0), 2)
+    edit(ada, project, mask, (65, 65, 65), 2)
+    edit(ada, project, mask, (1, 0, 0), 3)
+    edit(ada, project, mask, (2, 0, 0), 1)
+    response = class_action(ada, project, mode=mode)
+    assert response.status_code == 200, response.text
+    assert response.json()["erased_voxels"] == 12
+    first = chunk(ada, project, (0, 0, 0))
+    assert first[0, 0, 0] == 0
+    assert first[1, 0, 0] == 3 and first[2, 0, 0] == 1
+    assert not chunk(ada, project, (1, 1, 1)).any()
+    sources = chunk(ada, project, (0, 0, 0), "source")
+    assert sources[0, 0, 0] == Source.NONE
+    assert sources[1, 0, 0] == sources[2, 0, 0] == Source.HUMAN
+    base = f"/api/projects/{project}/labels"
+    assert [c["value"] for c in ada.get(f"{base}/classes").json()] == (
+        [3] if mode == "delete" else [2, 3]
+    )
+    counts = {"1": 6, "3": 6}
+    if mode == "reset":
+        counts["2"] = 0
+    assert ada.get(f"{base}/counts").json() == counts
+    history = ada.get(f"{base}/ops?limit=1").json()[0]
+    assert history["kind"] == "reset" and history["tool"]["class_name"] == "bone"
+    assert (
+        len(
+            ada.get(f"{base}/changes?after={response.json()['seq'] - 1}").json()[0][
+                "chunks"
+            ]
+        )
+        == 2
+    )
+    # An irreversible action is not an undoable paint op.
+    assert (
+        ada.post(
+            f"{base}/ops/{response.json()['seq']}/undo",
+            json={"client_op_id": str(uuid.uuid4())},
+        ).status_code
+        == 404
+    )
+    if mode == "delete":
+        assert edit(ada, project, mask, (0, 0, 0), 2).status_code == 422
+        assert (
+            ada.post(
+                f"{base}/classes", json={"name": "new bone", "color": "#ffffff"}
+            ).json()["value"]
+            == 4
+        )
+
+
+def test_reset_is_permanent_through_undo_redo_but_new_paint_works(ada, project):
+    base = f"/api/projects/{project}/labels"
+    mask = np.ones((1, 1, 1), dtype=bool)
+    old = edit(ada, project, mask, (0, 0, 0), 2).json()["seq"]
+    covered = edit(ada, project, mask, (0, 0, 0), 3).json()["seq"]
+    assert class_action(ada, project).json()["erased_voxels"] == 0
+
+    def toggle(seq, action):
+        response = ada.post(
+            f"{base}/ops/{seq}/{action}", json={"client_op_id": str(uuid.uuid4())}
+        )
+        assert response.status_code == 201, response.text
+
+    toggle(covered, "undo")
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 0
+    toggle(old, "undo")
+    toggle(old, "redo")
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 0
+    fresh = edit(ada, project, mask, (0, 0, 0), 2).json()["seq"]
+    toggle(fresh, "undo")
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 0
+    toggle(fresh, "redo")
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 2
+    # A second reset fences off the newer paint too.
+    assert class_action(ada, project).status_code == 200
+    toggle(fresh, "undo")
+    toggle(fresh, "redo")
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 0
+
+
+@pytest.mark.parametrize("mode", ["reset", "delete"])
+def test_retried_class_action_does_not_wipe_newer_work(ada, project, mode):
+    mask = np.ones((1, 1, 1), dtype=bool)
+    edit(ada, project, mask, (0, 0, 0), 2)
+    request = uuid.uuid4()
+    first = class_action(ada, project, mode=mode, op_id=request)
+    assert first.status_code == 200, first.text
+    if mode == "reset":
+        edit(ada, project, mask, (0, 0, 0), 2)
+    else:
+        edit(ada, project, mask, (0, 0, 0), 3)
+    retry = class_action(ada, project, mode=mode, op_id=request)
+    assert retry.status_code == 200 and retry.json() == first.json()
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == (2 if mode == "reset" else 3)
+    assert (
+        class_action(ada, project, value=3, name="matrix", op_id=request).status_code
+        == 409
+    )
+    assert (
+        class_action(ada, project, mode=mode, name="wrong", op_id=request).status_code
+        == 422
+    )
+
+
+def test_background_can_reset_but_cannot_be_deleted(ada, project):
+    mask = np.ones((1, 1, 1), dtype=bool)
+    edit(ada, project, mask, (0, 0, 0), 1)
+    assert (
+        class_action(ada, project, 1, name="Background", mode="delete").status_code
+        == 422
+    )
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 1
+    assert class_action(ada, project, 1, name="Background").json()["erased_voxels"] == 1
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 0
+    assert edit(ada, project, mask, (0, 0, 0), 1).status_code == 201
+
+
+def test_class_action_requires_project_membership(ada, project, new_browser):
+    other = new_browser()
+    signup(other, username="outsider")
+    for mode in ["reset", "delete"]:
+        assert class_action(other, project, mode=mode).status_code == 404
+
+
+def test_class_can_be_deleted_before_an_image_is_uploaded(ada):
+    project = ada.post("/api/projects", json={"name": "Empty"}).json()["id"]
+    ada.post(
+        f"/api/projects/{project}/labels/classes",
+        json={"name": "bone", "color": "#ffffff"},
+    )
+    assert class_action(ada, project, mode="delete").json()["erased_voxels"] == 0
+    assert ada.get(f"/api/projects/{project}/labels/classes").json() == []
+
+
+def test_reset_spans_multiple_bounded_batches(ada, project, migrated_database_url):
+    add_image(migrated_database_url, project, shape=(1, 1, 8200))
+    mask = np.ones((1, 1, 8193), dtype=bool)  # 129 chunks; the last is partial.
+    assert edit(ada, project, mask, (0, 0, 0), 2).status_code == 201
+    response = class_action(ada, project)
+    assert response.status_code == 200, response.text
+    assert response.json()["erased_voxels"] == 8193
+    assert ada.get(f"/api/projects/{project}/labels/counts").json()["2"] == 0
+    for key in [(0, 0, 0), (0, 0, 127), (0, 0, 128)]:
+        assert not chunk(ada, project, key).any()
+
+
+@pytest.mark.parametrize("source", [Source.IMPORTED, Source.MODEL_VERIFIED])
+def test_reset_erases_imported_and_accepted_annotations(
+    ada, project, settings, migrated_database_url, source
+):
+    async def write(db):
+        return await labels.apply_edit(
+            db,
+            settings,
+            uuid.UUID(project),
+            client_op_id=uuid.uuid4(),
+            deltas=list(
+                split_into_deltas(np.ones((1, 1, 1), dtype=bool), (0, 0, 0), value=2)
+            ),
+            source=source,
+        )
+
+    run_db(migrated_database_url, write)
+    assert chunk(ada, project, (0, 0, 0), "source")[0, 0, 0] == source
+    assert class_action(ada, project).json()["erased_voxels"] == 1
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 0
+    assert chunk(ada, project, (0, 0, 0), "source")[0, 0, 0] == Source.NONE
+
+
+def test_reset_rolls_back_all_chunks_if_storage_fails(ada, project, monkeypatch):
+    mask = np.ones((1, 1, 1), dtype=bool)
+    edit(ada, project, mask, (0, 0, 0), 2)
+    edit(ada, project, mask, (65, 65, 65), 2)
+    read = labels._read_chunk
+    calls = 0
+
+    async def fail_on_second_chunk(grant, sha):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("test storage failure")
+        return await read(grant, sha)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(labels, "_read_chunk", fail_on_second_chunk)
+        with pytest.raises(OSError, match="test storage failure"):
+            class_action(ada, project)
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 2
+    assert chunk(ada, project, (1, 1, 1))[1, 1, 1] == 2
+    assert ada.get(f"/api/projects/{project}/labels/counts").json()["2"] == 2
+    assert all(
+        op["kind"] == "edit"
+        for op in ada.get(f"/api/projects/{project}/labels/ops").json()
+    )
+
+
+def test_reset_waits_for_in_flight_writer_then_erases_its_paint(
+    ada, project, settings, migrated_database_url
+):
+    locked, release = threading.Event(), threading.Event()
+
+    async def write(db):
+        await labels.apply_edit(
+            db,
+            settings,
+            uuid.UUID(project),
+            client_op_id=uuid.uuid4(),
+            deltas=list(
+                split_into_deltas(np.ones((1, 1, 1), dtype=bool), (0, 0, 0), value=2)
+            ),
+        )
+        locked.set()
+        assert await asyncio.to_thread(release.wait, 10)
+
+    with ThreadPoolExecutor(2) as pool:
+        writer = pool.submit(run_db, migrated_database_url, write)
+        try:
+            assert locked.wait(10)
+            resetting = pool.submit(class_action, ada, project)
+            with pytest.raises(TimeoutError):
+                resetting.result(timeout=0.1)
+        finally:
+            release.set()
+        writer.result(timeout=10)
+        response = resetting.result(timeout=10)
+    assert response.status_code == 200, response.text
+    assert response.json()["erased_voxels"] == 1
+    assert chunk(ada, project, (0, 0, 0))[0, 0, 0] == 0
+
+
 def test_an_edit_shows_up_in_the_label_zarr(ada, project):
     mask = np.zeros((4, 70, 4), dtype=bool)
     mask[:, :, :] = True  # crosses from chunk y=0 into y=1

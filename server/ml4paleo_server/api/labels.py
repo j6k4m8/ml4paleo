@@ -6,6 +6,8 @@ feed collaborators follow, and the labels as a zarr group for viewers.
     POST   /api/projects/{id}/labels/classes             {name, color}
     PATCH  /api/projects/{id}/labels/classes/{value}     {name?, color?}
     DELETE /api/projects/{id}/labels/classes/{value}
+    POST   /api/projects/{id}/labels/classes/{value}/reset   {confirmation, client_op_id}
+    POST   /api/projects/{id}/labels/classes/{value}/delete  {confirmation, client_op_id}
     GET    /api/projects/{id}/labels/counts              voxels labeled with each value
     POST   /api/projects/{id}/labels/ops                 apply an edit
     POST   /api/projects/{id}/labels/ops/{seq}/undo      {client_op_id}
@@ -271,6 +273,7 @@ async def _class(db, project, value: int) -> LabelClass:
 async def edit_class(
     value: int, body: ClassPatch, project: MemberProject, db: DbSession
 ) -> ClassOut:
+    await labels.lock_project(db, project.id, exclusive=True)
     row = await _class(db, project, value)
     if body.name is not None:
         row.name = body.name
@@ -291,6 +294,7 @@ async def remove_class(
     """
     Retire a class: no new labels can use it, and its value is never reused.
     """
+    await labels.lock_project(db, project.id, exclusive=True)
     row = await _class(db, project, value)
     row.deleted_at = datetime.datetime.now(datetime.UTC)
     audit.record(
@@ -303,6 +307,115 @@ async def remove_class(
         details={"value": value},
     )
     await db.commit()
+
+
+class ClassActionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmation: str = Field(min_length=1, max_length=100)
+    client_op_id: uuid.UUID
+
+
+class ClassActionOut(BaseModel):
+    seq: int
+    erased_voxels: int
+
+
+async def _class_action(body, value, project, request, auth, db, settings, *, remove):
+    await labels.lock_project(db, project.id, exclusive=True)
+    action = "delete-class" if remove else "reset-class"
+    # A lost response can be retried without wiping newer paint. Deletion's
+    # retry must also work after its class is no longer in the active list.
+    done = await db.scalar(
+        select(LabelOp).where(
+            LabelOp.project_id == project.id, LabelOp.client_op_id == body.client_op_id
+        )
+    )
+    if done is not None:
+        if (
+            done.kind != "reset"
+            or done.tool.get("value") != value
+            or done.tool.get("name") != action
+        ):
+            raise HTTPException(
+                status_code=409, detail="That request ID was already used."
+            )
+        if body.confirmation != done.tool.get("class_name"):
+            raise HTTPException(
+                status_code=422, detail="Type the class name exactly to confirm."
+            )
+        return ClassActionOut(seq=done.seq, erased_voxels=done.tool["erased_voxels"])
+    if value == BACKGROUND:
+        if remove:
+            raise HTTPException(
+                status_code=422, detail="Background is built in and cannot be deleted."
+            )
+        row, name = None, "Background"
+    else:
+        row = await _class(db, project, value)
+        name = row.name
+    if body.confirmation != name:
+        raise HTTPException(
+            status_code=422, detail="Type the class name exactly to confirm."
+        )
+    op = await labels.reset_class(
+        db,
+        settings,
+        project.id,
+        value=value,
+        name=name,
+        remove=remove,
+        client_op_id=body.client_op_id,
+        user_id=auth.user.id,
+    )
+    if remove:
+        assert row is not None
+        row.deleted_at = datetime.datetime.now(datetime.UTC)
+    audit.record(
+        db,
+        actor_id=auth.user.id,
+        action="labels.class.delete" if remove else "labels.class.reset",
+        target_type="project",
+        target_id=project.id,
+        request=request,
+        details={
+            "value": value,
+            "name": name,
+            "erased_voxels": op.tool["erased_voxels"],
+        },
+    )
+    await db.commit()
+    return ClassActionOut(seq=op.seq, erased_voxels=op.tool["erased_voxels"])
+
+
+@router.post("/classes/{value}/reset")
+async def reset_class(
+    value: int,
+    body: ClassActionIn,
+    project: MemberProject,
+    request: Request,
+    auth: CurrentAuth,
+    db: DbSession,
+    settings: SettingsDep,
+) -> ClassActionOut:
+    return await _class_action(
+        body, value, project, request, auth, db, settings, remove=False
+    )
+
+
+@router.post("/classes/{value}/delete")
+async def delete_class(
+    value: int,
+    body: ClassActionIn,
+    project: MemberProject,
+    request: Request,
+    auth: CurrentAuth,
+    db: DbSession,
+    settings: SettingsDep,
+) -> ClassActionOut:
+    return await _class_action(
+        body, value, project, request, auth, db, settings, remove=True
+    )
 
 
 # --- ops ---------------------------------------------------------------------

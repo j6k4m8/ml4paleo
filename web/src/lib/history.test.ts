@@ -48,6 +48,14 @@ function undo(seq: number, target: Entry, kind: "undo" | "redo" = "undo"): Entry
 }
 
 describe("what, who, and origin", () => {
+	it("names permanent class resets and deletion without an undo button", () => {
+		const reset = op(3, { kind: "reset", tool: { name: "reset-class", class_name: "Bone" } });
+		const deleted = op(4, { kind: "reset", tool: { name: "delete-class", class_name: "Matrix" } });
+		expect(what(reset)).toBe("Reset Bone");
+		expect(what(deleted)).toBe("Deleted Matrix");
+		expect(toggles([deleted, reset, op(1)]).has(reset.seq)).toBe(false);
+		expect(toggles([deleted, reset, op(1)]).has(deleted.seq)).toBe(false);
+	});
 	it("names people's tools", () => {
 		expect(what(op(1))).toBe("Brush stroke");
 		expect(what(op(1, { tool: { name: "eraser" } }))).toBe("Eraser stroke");

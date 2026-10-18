@@ -20,6 +20,7 @@ from .artifacts import collect_garbage
 from .db import (
     AuthToken,
     EmailOutbox,
+    LiveSession,
     RateLimit,
     UserSession,
     create_engine,
@@ -43,6 +44,7 @@ KEEP_RATE_LIMITS = datetime.timedelta(days=1)
 async def prune(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
     now = datetime.datetime.now(datetime.UTC)
     async with sessionmaker() as db:
+        await db.execute(delete(LiveSession).where(LiveSession.expires_at < now))
         await db.execute(delete(UserSession).where(UserSession.expires_at < now))
         await db.execute(
             delete(AuthToken).where(

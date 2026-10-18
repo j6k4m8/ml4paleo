@@ -12,10 +12,51 @@ worker stops answering, its jobs go back in the queue; a job gets three tries.
 is on. They reach only the worker API, through Caddy on a private network,
 and read and write storage through the site, never directly.
 
-- `M4P_CPU_WORKER_SLOTS`: jobs at once (default 1). Each job gets an equal
+- `M4P_CPU_WORKER_SLOTS`: jobs at once (default 2). Each job gets an equal
   share of the worker's memory and CPUs and sizes its work to fit.
 - `M4P_CPU_WORKER_MEMORY`: the worker's memory limit (default `4g`). More
   memory lets jobs work in bigger pieces; very large scans want 8–16 GB.
+
+With two or more slots, one CPU slot is available for `predict.live` while
+a visible annotator has Live enabled. Training uses the ordinary slots.
+Turning Live off, pausing, hiding the tab, or leaving the annotator releases
+that reservation. Browser heartbeats run every 15 seconds and expire after
+45 seconds, so closing/crashing a browser or losing the connection cannot
+hold capacity indefinitely. Already-running work finishes normally. When
+no Live lease remains, the slot takes ordinary jobs again. One-slot workers
+continue taking all jobs without reservations. Set `M4P_CPU_LIVE_SLOTS=0`
+(or the worker's `--live-slots 0`) to disable the reservation.
+
+## Stored image features
+
+Classical models record a versioned feature recipe in their model file and
+manifest. RF offers full multiscale intensity, edge and 3D texture features,
+or a faster intensity-and-edge recipe in the Models page settings. Compare
+held-out human annotation scores before choosing; the full recipe remains
+the default. Historical RF models retain their original full recipe.
+
+Workers compute image-aligned feature chunks on first use and retain them
+for subsequent training and prediction, including after classifier weights
+change. The cache key includes the immutable image artifact, channels,
+normalization window, boundary convention, recipe version/parameters and
+numerical-library versions. Changing any of those creates different entries;
+labels and model IDs are deliberately absent. Other extractors can register
+their own versioned recipe; raw-image/neural plugins need no feature cache.
+
+The cache has a decoded memory LRU (default 128 MiB, capped at 5% of worker
+memory) and compressed disk chunks (default 2 GiB). Decoded entries expire
+after ten idle minutes. Disk eviction removes oldest cache chunks, never
+project artifacts. Atomic writes, checksums and cross-process locks protect
+shared cache directories; missing/corrupt/unwritable entries are recomputed.
+Compose keeps CPU features in the `feature-cache` volume across restarts.
+Remote workers keep their own cache; mount a persistent directory at
+`/var/cache/ml4paleo/features` in Docker to preserve it across replacement.
+
+Worker options: `--feature-cache-dir`, `--feature-cache-mb`, and
+`--feature-cache-disk-mb`, also `M4PW_FEATURE_CACHE_DIR`,
+`M4PW_FEATURE_CACHE_MB`, and `M4PW_FEATURE_CACHE_DISK_MB`. Compose uses
+`M4P_FEATURE_CACHE_MB` and `M4P_FEATURE_CACHE_DISK_MB` for those limits.
+These disposable caches do not count against users' project-storage quotas.
 
 ## On another machine
 

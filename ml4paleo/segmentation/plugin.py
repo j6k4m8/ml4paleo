@@ -82,6 +82,8 @@ class Crop:
         slice(None),
     )
     split: Split = "train"
+    # Optional versioned features; raw-image plugins do not request these.
+    features: np.ndarray | None = None
 
 
 class TrainingData(Protocol):

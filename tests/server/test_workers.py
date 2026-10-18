@@ -539,7 +539,7 @@ def test_a_worker_with_the_v1_volume_runs_only_the_import(monkeypatch, tmp_path)
     class Started:
         unauthorized = False
 
-        def __init__(self, client, caps, *, handlers, v1_volume):
+        def __init__(self, client, caps, *, handlers, v1_volume, **configuration):
             started.append((caps, handlers, v1_volume))
 
         def run(self):

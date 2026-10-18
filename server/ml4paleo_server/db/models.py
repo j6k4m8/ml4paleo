@@ -213,6 +213,25 @@ class ProjectMember(Base):
     )
 
 
+class LiveSession(Base):
+    """Short browser leases that reserve a worker lane for live prediction."""
+
+    __tablename__ = "live_sessions"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    image_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE")
+    )
+    expires_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+
+
 class AuditEvent(Base):
     """
     Who did what, for actions on accounts and projects.
@@ -691,7 +710,7 @@ class LabelOp(Base):
     )
     # The browser's id for the op, so a retried request applies it once.
     client_op_id: Mapped[uuid.UUID]
-    # "edit", "undo", or "redo".
+    # "edit", "undo", "redo", or an irreversible class "reset".
     kind: Mapped[str] = mapped_column(String(8))
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
@@ -717,7 +736,7 @@ class LabelOp(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("kind IN ('edit', 'undo', 'redo')", name="kind"),
+        CheckConstraint("kind IN ('edit', 'undo', 'redo', 'reset')", name="kind"),
         Index("ix_label_ops_client_op", "project_id", "client_op_id", unique=True),
     )
 

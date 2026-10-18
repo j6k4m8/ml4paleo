@@ -79,7 +79,9 @@ These are set up for you:
 | `M4P_DOMAIN` | The domain people use. |
 | `M4P_SMTP__HOST`, `__PORT`, `__USERNAME`, `__FROM_ADDRESS` | Outgoing email; leave the host empty to turn email off. The password goes in `secrets/smtp_password`. For implicit TLS (usually port 465), add `M4P_SMTP__SECURITY=tls`. |
 | `COMPOSE_PROFILES` | `gpu` also runs the GPU worker. |
-| `M4P_CPU_WORKER_SLOTS`, `M4P_CPU_WORKER_MEMORY` | How many jobs the CPU worker runs at once, and its memory limit. Each job sizes itself to its share of the memory. |
+| `M4P_CPU_WORKER_SLOTS`, `M4P_CPU_WORKER_MEMORY` | CPU jobs at once (default 2), and the memory limit. Each job sizes itself to its share of the memory. |
+| `M4P_CPU_LIVE_SLOTS` | CPU slots reserved during active Live sessions (default 1; a normal slot always remains). Released when Live stops or its browser lease expires. |
+| `M4P_FEATURE_CACHE_MB`, `M4P_FEATURE_CACHE_DISK_MB` | Decoded and compressed feature cache limits, default 128 MiB and 2048 MiB. See [Workers](workers.md). |
 | `M4P_GPU_WORKER_MEMORY` | The GPU worker's memory limit. |
 | `M4P_API_WORKERS` | API processes (default 4). |
 

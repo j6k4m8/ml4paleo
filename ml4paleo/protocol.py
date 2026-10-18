@@ -85,6 +85,9 @@ class HelloOut(BaseModel):
 
 class ClaimIn(BaseModel):
     caps: WorkerCaps
+    # A designated slot remains available for prediction during active Live
+    # sessions, and takes ordinary work again when those sessions end.
+    reserve_for_live: bool = False
     wait_seconds: float = Field(
         default=MAX_CLAIM_WAIT_SECONDS, ge=0, allow_inf_nan=False
     )

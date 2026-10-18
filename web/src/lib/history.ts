@@ -21,7 +21,7 @@ export interface Accepted {
 /** One op, as `GET /api/projects/<id>/labels/ops` gives it. */
 export interface Entry {
 	seq: number;
-	kind: "edit" | "undo" | "redo";
+	kind: "edit" | "undo" | "redo" | "reset";
 	user_id: string | null;
 	/** Who made it; null for a job's edits (see `job_kind`). */
 	username: string | null;
@@ -67,7 +67,7 @@ const JOBS = new Map([
 	["labels.import", { who: "Label import", what: "Labels from a file" }],
 ]);
 
-export type Action = "brush" | "eraser" | "polygon" | "polygon-erase" | "accept" | "decline" | "restore-declined" | "import" | "edit" | "undo" | "redo";
+export type Action = "brush" | "eraser" | "polygon" | "polygon-erase" | "accept" | "decline" | "restore-declined" | "import" | "edit" | "undo" | "redo" | "reset";
 
 /** The kind of thing an op did. */
 export function action(entry: Entry): Action {
@@ -83,6 +83,7 @@ export function action(entry: Entry): Action {
 /** What an op did, in a few words. */
 export function what(entry: Entry): string {
 	const done = action(entry);
+	if (done === "reset") return `${entry.tool.name === "delete-class" ? "Deleted" : "Reset"} ${entry.tool.class_name ?? "class"}`;
 	if (done === "undo") return `Undid #${entry.target_seq}`;
 	if (done === "redo") return `Redid #${entry.target_seq}`;
 	if (done === "accept") return `Accepted ${entry.accepted?.kind ?? "prediction"}`;

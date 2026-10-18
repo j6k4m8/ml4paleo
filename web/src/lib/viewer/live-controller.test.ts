@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "#lib/api.ts";
 import { LivePreview } from "./live.svelte";
 import type { LiveModel, ModelPlugin } from "./live";
 import type { WorkerPool } from "./loader";
 
-vi.mock("#lib/api.ts", () => ({ api: vi.fn(), message: (error: Error) => error.message }));
-const request = vi.mocked(api);
+const calls = vi.hoisted(() => ({ work: vi.fn(), capacity: vi.fn() }));
+vi.mock("#lib/api.ts", () => ({ api: (path: string, options: unknown) =>
+	path.includes("/live-sessions/") ? calls.capacity(path, options) : calls.work(path, options),
+	message: (error: Error) => error.message }));
+const request = calls.work;
 const plugin: ModelPlugin = { name: "rf", version: "1", devices: ["cpu"], capabilities: {
 	display_name: "Random forest", family: "classical", learning: "debounced", debounce_ms: 1000, min_train_interval_ms: 5000,
 } };
@@ -22,11 +24,57 @@ beforeEach(() => {
 	decode.mockReset().mockResolvedValue({ data: Uint8Array.of(2), shape: [1, 1, 1] });
 	preview = new LivePreview("p", "image", [64, 64, 128], { load: decode } as unknown as WorkerPool, "me", () => frozen);
 	request.mockReset();
+	calls.capacity.mockReset().mockResolvedValue(undefined);
 	request.mockResolvedValue([]);
 });
 afterEach(() => { preview.stop(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("live scheduling", () => {
+	it("keeps the chosen model's feature settings when Live learns again", async () => {
+		request.mockResolvedValue([{ ...ready, params: { feature_set: "intensity_edges", sigma_max: 2 } }]);
+		await preview.select(plugin);
+		request.mockClear();
+		preview.enabled = true;
+		preview.changed(2);
+		request.mockResolvedValue({ ...ready, status: "training" });
+		await vi.advanceTimersByTimeAsync(1500);
+		expect(request.mock.calls[0]![1].body.params).toEqual({ feature_set: "intensity_edges", sigma_max: 2 });
+	});
+	it("renews capacity while active and releases it on disable, hiding and stop", async () => {
+		await preview.select({ ...plugin, capabilities: { ...plugin.capabilities, learning: "manual" } });
+		preview.enabled = true;
+		await vi.advanceTimersByTimeAsync(500);
+		const path = calls.capacity.mock.calls[0]![0];
+		expect(calls.capacity.mock.calls[0]![1].method).toBe("PUT");
+		await vi.advanceTimersByTimeAsync(15000);
+		expect(calls.capacity.mock.calls.at(-1)![1].method).toBe("PUT");
+		preview.enabled = false;
+		await vi.advanceTimersByTimeAsync(500);
+		expect(calls.capacity).toHaveBeenLastCalledWith(path, { method: "DELETE", keepalive: true });
+		preview.enabled = true;
+		await vi.advanceTimersByTimeAsync(500);
+		const next = calls.capacity.mock.calls.at(-1)![0];
+		expect(next).not.toBe(path);
+		vi.stubGlobal("document", { hidden: true });
+		await vi.advanceTimersByTimeAsync(500);
+		expect(calls.capacity.mock.calls.at(-1)![1].method).toBe("DELETE");
+		vi.stubGlobal("document", { hidden: false });
+		await vi.advanceTimersByTimeAsync(500);
+		preview.stop();
+		expect(calls.capacity.mock.calls.at(-1)![1].method).toBe("DELETE");
+	});
+	it("releases a late renewal again after Stop so it cannot resurrect capacity", async () => {
+		await preview.select(plugin);
+		let complete!: () => void;
+		calls.capacity.mockImplementationOnce(() => new Promise<void>((resolve) => { complete = resolve; }));
+		preview.enabled = true;
+		await vi.advanceTimersByTimeAsync(500);
+		const path = calls.capacity.mock.calls[0]![0];
+		preview.stop();
+		complete();
+		await Promise.resolve(); await Promise.resolve();
+		expect(calls.capacity.mock.calls.filter(([url, options]) => url === path && options.method === "DELETE")).toHaveLength(2);
+	});
 	it("finishing learning retains the previous checkpoint's visible regions", async () => {
 		request.mockResolvedValue([ready]);
 		await preview.select({ ...plugin, capabilities: { ...plugin.capabilities, learning: "manual" } });

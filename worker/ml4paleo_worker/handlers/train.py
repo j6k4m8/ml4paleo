@@ -29,6 +29,7 @@ from ml4paleo.segmentation.plugin import get_plugin
 from ml4paleo.storage import get_bytes, put_bytes, write_manifest
 
 from ..context import JobContext, PermanentError
+from ..features import reader, recipe_for
 
 
 def run(ctx: JobContext) -> dict[str, Any]:
@@ -67,6 +68,13 @@ def run(ctx: JobContext) -> dict[str, Any]:
         class_values=list(manifest["class_values"]),
         window=tuple(manifest["image"]["window"]),  # type: ignore[arg-type]
         tile=tile_for(ctx.memory_budget_bytes // 2, cost),
+        feature_reader=reader(
+            ctx,
+            image,
+            manifest["image"].get("artifact_id"),
+            tuple(manifest["image"]["window"]),
+            recipe_for(plugin, params),
+        ),
     )
     with tempfile.TemporaryDirectory(prefix="m4p-train-") as scratch:
         out = pathlib.Path(scratch)
@@ -82,6 +90,7 @@ def run(ctx: JobContext) -> dict[str, Any]:
         for name in result.files:
             put_bytes(model_grant, name, (out / name).read_bytes())
     samples = {str(k): v for k, v in result.samples.items()}
+    recipe = recipe_for(plugin, params)
     write_manifest(
         model_grant,
         {
@@ -89,6 +98,7 @@ def run(ctx: JobContext) -> dict[str, Any]:
             "plugin": plugin_class.name,
             "plugin_version": plugin_class.version,
             "params": params.model_dump(),
+            **({"feature_recipe": recipe.model_dump()} if recipe is not None else {}),
             "class_values": data.class_values,
             # The window crops were normalized with, for prediction to use.
             "window": [float(v) for v in data.window],

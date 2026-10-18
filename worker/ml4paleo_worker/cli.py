@@ -42,8 +42,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--slots",
         type=int,
-        default=int(os.environ.get("M4PW_SLOTS", "1")),
-        help="How many jobs to run at once (default: 1).",
+        default=int(os.environ.get("M4PW_SLOTS", "2")),
+        help="How many jobs to run at once (default: 2).",
+    )
+    parser.add_argument(
+        "--live-slots",
+        type=int,
+        default=int(os.environ.get("M4PW_LIVE_SLOTS", "1")),
+        help="Slots reserved while Live is active (default: 1; always leaves an ordinary slot).",
+    )
+    parser.add_argument(
+        "--feature-cache-dir",
+        type=pathlib.Path,
+        default=os.environ.get("M4PW_FEATURE_CACHE_DIR", "/tmp/ml4paleo-features"),
+    )
+    parser.add_argument(
+        "--feature-cache-mb",
+        type=int,
+        default=int(os.environ.get("M4PW_FEATURE_CACHE_MB", "128")),
+    )
+    parser.add_argument(
+        "--feature-cache-disk-mb",
+        type=int,
+        default=int(os.environ.get("M4PW_FEATURE_CACHE_DISK_MB", "2048")),
     )
     parser.add_argument(
         "--label",
@@ -69,6 +90,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.server or not args.token_file:
         parser.error("--server and --token-file are required")
+    if (
+        args.slots < 1
+        or min(args.live_slots, args.feature_cache_mb, args.feature_cache_disk_mb) < 0
+    ):
+        parser.error("Slots must be positive and cache/reservation limits nonnegative")
     parts = urlsplit(args.server)
     if parts.scheme != "https" and not (
         parts.scheme == "http" and (args.allow_http or parts.hostname in LOCAL_HOSTS)
@@ -84,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    from ml4paleo.segmentation.features import FeatureCache
     from ml4paleo_worker.caps import detect
     from ml4paleo_worker.client import ServerClient
     from ml4paleo_worker.handlers import HANDLERS, V1_HANDLERS
@@ -96,11 +123,26 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"{args.v1_volume} has no jobs.json")
     handlers = V1_HANDLERS if args.v1_volume else HANDLERS
     client = ServerClient(token, args.server.rstrip("/"))
+    caps = detect(labels, args.slots, kinds=handlers)
+    cache = None
+    try:
+        cache = FeatureCache(
+            args.feature_cache_dir,
+            min(
+                args.feature_cache_mb * 1024**2,
+                int((caps.memory_gb or 4) * 1024**3 * 0.05),
+            ),
+            args.feature_cache_disk_mb * 1024**2,
+        )
+    except OSError as error:
+        logging.getLogger(__name__).warning("Feature cache unavailable: %s", error)
     worker = Worker(
         client,
-        detect(labels, args.slots, kinds=handlers),
+        caps,
         handlers=handlers,
         v1_volume=args.v1_volume,
+        feature_cache=cache,
+        live_slots=0 if args.v1_volume else args.live_slots,
     )
 
     def stop(signum, frame):
