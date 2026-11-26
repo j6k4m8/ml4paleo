@@ -12,6 +12,7 @@
 	import Labeled from "#lib/ui/Labeled.svelte";
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
 	import Brain from "@lucide/svelte/icons/brain";
+	import Orbit from "@lucide/svelte/icons/orbit";
 	import Play from "@lucide/svelte/icons/play";
 	import Trash from "@lucide/svelte/icons/trash";
 
@@ -96,9 +97,9 @@
 	const blocked = $derived(tooLittle && hasRois === false);
 	const whyTooLittle = $derived.by(() => {
 		const only = labeledNow[0];
-		if (!only) return "Nothing is labeled yet. In the annotator, label what you're looking for, and some background.";
-		if (only.value === BACKGROUND_VALUE) return "Only background is labeled. Label what you're looking for too.";
-		return `Only ${only.name} is labeled. Paint some Background too, so the model can tell them apart.`;
+		if (!only) return "Paint some of the feature you want to find and some Background.";
+		if (only.value === BACKGROUND_VALUE) return "Background is labeled. Paint some of the feature you want to find too.";
+		return `${only.name} is labeled. Paint some Background too, so the model can tell them apart.`;
 	});
 	// The prediction pipelines still running, by model.
 	const predicting: Record<string, string> = $derived(
@@ -132,7 +133,7 @@
 				api<Model[]>(`/api/projects/${project}/models`),
 				api<Quota>("/api/me/quota").catch(() => null),
 				api<{ model_id: string | null; model_name: string | null }>(`/api/projects/${project}/prediction`).catch(() => null),
-				api<Pipeline[]>(`/api/projects/${project}/pipelines`),
+				api<Pipeline[]>(`/api/projects/${project}/pipelines?include_live_previews=false`),
 				api<Record<string, number>>(`/api/projects/${project}/labels/counts`).catch(() => null),
 				api<unknown[]>(`/api/projects/${project}/rois`).then((list) => list.length > 0, () => null),
 			]);
@@ -256,7 +257,7 @@
 
 <ProjectTabs {pid} />
 
-<div class="mx-auto grid max-w-6xl gap-4 p-6 lg:grid-cols-[20rem_1fr]">
+<div class="mx-auto grid max-w-6xl gap-4 p-6 lg:grid-cols-[20rem_minmax(0,1fr)]">
 	<section class="panel self-start">
 		<h2 class="panel-title">Train a model</h2>
 		<form class="flex flex-col gap-3 p-3" onsubmit={train}>
@@ -320,61 +321,31 @@
 					<Labeled {classes} {counts} />
 					{#if tooLittle}
 						<p class="text-warn" role="status">{whyTooLittle}</p>
-						<a href="/p/{pid}/annotate">Open the annotator</a>
+						<a href="/p/{pid}/annotate">Go to Annotate</a>
 					{/if}
 				</div>
 			{/if}
 			{#if error}<p class="error" role="alert">{error}</p>{/if}
-			<button class="btn btn-primary h-7" disabled={busy || blocked || trainBusy} title={blocked ? whyTooLittle : undefined}><Brain size={14} /> {trainBusy ? "Training…" : "Train"}</button>
+			<button class="btn btn-primary h-7" disabled={busy || blocked || trainBusy} title={blocked ? whyTooLittle : undefined}><Brain size={14} /> {trainBusy ? "Training…" : "Train model"}</button>
+			{#if trainBusy}
+				<p class="text-2xs text-ink-dim" role="status">Training runs in the background. You’ll get an in-app notification when it finishes.</p>
+			{/if}
 		</form>
 	</section>
 
-	<section class="flex flex-col gap-3">
+	<section class="flex min-w-0 flex-col gap-3">
 		<h1>Models</h1>
 		{#if missingModel}<p class="muted" role="status">This model is no longer available.</p>{/if}
 		{#if models.length === 0}
 			<div class="panel grid place-items-center gap-2 p-10 text-center">
 				<Brain size={28} class="text-ink-faint" />
-				<p class="muted">No models yet.</p>
+				{#if loadedProject === pid}
+					<p class="muted">After training, use your model to predict across the whole scan.</p>
+				{:else if !error}
+					<p class="muted">Loading models…</p>
+				{/if}
 			</div>
 		{:else}
-			{#if readyModels.length > 0}
-			<section class="panel overflow-x-auto" aria-labelledby="comparison-title">
-				<div class="panel-title flex items-center justify-between gap-3" id="comparison-title">
-					<span>Model comparison</span>
-					<span class="text-2xs font-normal tracking-normal text-ink-faint normal-case" title="Scores use held-out human-drawn or imported annotations, never accepted predictions. Random Forest uses out-of-bag scoring.">Human labels only</span>
-				</div>
-				<table class="w-full min-w-[42rem] text-2xs">
-					<thead class="text-ink-dim">
-						<tr>
-							<th class="px-3 py-2 text-left font-normal">Model</th>
-							<th class="px-3 py-2 text-right font-normal">Mean Dice</th>
-							<th class="px-3 py-2 text-right font-normal">Accuracy</th>
-							<th class="px-3 py-2 text-right font-normal">Human voxels</th>
-							<th class="px-3 py-2 text-right font-normal">Label state</th>
-							<th class="px-3 py-2 text-left font-normal">Method</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each readyModels as model (model.id)}
-							{@const current = model.training_set.label_seq === latestScoredSeq}
-							{@const best = current && model.metrics?.mean_dice === bestCurrentDice && bestCurrentDice >= 0}
-							<tr class="border-t border-edge {current ? '' : 'text-ink-dim'}">
-								<td class="px-3 py-2 font-medium text-ink">{model.name}{#if best}<span class="ml-1.5 text-ok">best</span>{/if}</td>
-								<td class="px-3 py-2 text-right font-mono">{percent(model.metrics?.mean_dice)}</td>
-								<td class="px-3 py-2 text-right font-mono">{percent(model.metrics?.accuracy)}</td>
-								<td class="px-3 py-2 text-right font-mono">{scoreVoxels(model).toLocaleString()}</td>
-								<td class="px-3 py-2 text-right font-mono">#{model.training_set.label_seq ?? "–"}</td>
-								<td class="px-3 py-2">{evaluationName(model)}</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-				<p class="border-t border-edge px-3 py-2 text-2xs text-ink-dim">
-					“Best” compares models trained from the newest shared label state. Older rows remain useful history, but their test voxels may differ.
-				</p>
-			</section>
-			{/if}
 			<ul class="flex flex-col gap-2">
 				{#each models as model (model.id)}
 					{@const last = predictions[model.id]}
@@ -391,18 +362,18 @@
 						class="panel flex scroll-mt-3 flex-col gap-2 border-l-2 p-3 target:outline target:outline-accent
 							{model.status === 'ready' ? 'border-l-ok' : model.status === 'failed' ? 'border-l-danger' : 'border-l-warn'}"
 					>
-						<div class="flex items-center gap-2">
-						<span class="font-medium">{model.name}</span>
-						{#if model.live}<span class="text-2xs text-ink-dim">Live · rolling checkpoint</span>{/if}
+						<div class="flex flex-wrap items-center gap-2">
+							<span class="min-w-0 font-medium [overflow-wrap:anywhere]">{model.name}</span>
+							{#if model.live}<span class="text-2xs text-ink-dim">Live · rolling checkpoint</span>{/if}
 							<span class="rounded-sm bg-field px-1.5 py-0.5 text-2xs text-ink-dim">{model.status}</span>
 							{#if prediction?.model_id === model.id}
-								<span class="rounded-sm bg-accent-soft px-1.5 py-0.5 text-2xs text-ink">shown in the annotator</span>
+									<span class="rounded-sm bg-accent-soft px-1.5 py-0.5 text-2xs text-ink">Current prediction</span>
 							{/if}
 							<div class="ml-auto flex gap-1">
 								{#if model.status === "ready"}
 									<button class="btn" disabled={busy || !!predicting[model.id]} onclick={() => predict(model)}>
 										<Play size={12} />
-										{predicting[model.id] ? "Predicting…" : "Predict"}
+										{predicting[model.id] ? "Predicting…" : "Predict full scan"}
 									</button>
 								{/if}
 								<button class="btn btn-ghost btn-danger" onclick={() => remove(model)} aria-label="Delete {model.name}">
@@ -411,9 +382,15 @@
 							</div>
 						</div>
 						{#if model.status === "training"}
-							<progress class="h-1 w-full" max="1" value={progress[model.pipeline_id ?? ""] ?? 0}></progress>
+							<progress class="h-1 w-full" aria-label="Training progress for {model.name}" max="1" value={progress[model.pipeline_id ?? ""]}></progress>
 						{:else if last && predicting[model.id]}
-							<progress class="h-1 w-full" max="1" value={progress[last.id] ?? last.progress}></progress>
+							<progress class="h-1 w-full" aria-label="Full-scan prediction progress for {model.name}" max="1" value={progress[last.id] ?? last.progress}></progress>
+						{/if}
+						{#if prediction?.model_id === model.id}
+							<div class="flex flex-wrap items-center gap-2">
+								<a class="btn hover:no-underline" href="/p/{pid}/neuroglancer"><Orbit size={13} /> View in Visualization</a>
+								<a href="/p/{pid}/results">Open Results</a>
+							</div>
 						{/if}
 						{#if model.status === "failed"}
 							<p class="error text-2xs" role="alert">Training failed{model.error ? `: ${model.error}` : "."}</p>
@@ -454,6 +431,43 @@
 					</li>
 				{/each}
 			</ul>
+			{#if readyModels.length > 0}
+			<section class="panel overflow-x-auto" aria-labelledby="comparison-title">
+				<div class="panel-title flex items-center justify-between gap-3" id="comparison-title">
+					<span>Model comparison</span>
+					<span class="text-2xs font-normal tracking-normal text-ink-faint normal-case" title="Scores use held-out human-drawn or imported annotations, never accepted predictions. Random Forest uses out-of-bag scoring.">Human labels only</span>
+				</div>
+				<table class="w-full min-w-[42rem] text-2xs">
+					<thead class="text-ink-dim">
+						<tr>
+							<th class="px-3 py-2 text-left font-normal">Model</th>
+							<th class="px-3 py-2 text-right font-normal">Mean Dice</th>
+							<th class="px-3 py-2 text-right font-normal">Accuracy</th>
+							<th class="px-3 py-2 text-right font-normal">Human voxels</th>
+							<th class="px-3 py-2 text-right font-normal">Label state</th>
+							<th class="px-3 py-2 text-left font-normal">Method</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each readyModels as model (model.id)}
+							{@const current = model.training_set.label_seq === latestScoredSeq}
+							{@const best = current && model.metrics?.mean_dice === bestCurrentDice && bestCurrentDice >= 0}
+							<tr class="border-t border-edge {current ? '' : 'text-ink-dim'}">
+								<td class="px-3 py-2 font-medium text-ink">{model.name}{#if best}<span class="ml-1.5 text-ok">best</span>{/if}</td>
+								<td class="px-3 py-2 text-right font-mono">{percent(model.metrics?.mean_dice)}</td>
+								<td class="px-3 py-2 text-right font-mono">{percent(model.metrics?.accuracy)}</td>
+								<td class="px-3 py-2 text-right font-mono">{scoreVoxels(model).toLocaleString()}</td>
+								<td class="px-3 py-2 text-right font-mono">#{model.training_set.label_seq ?? "–"}</td>
+								<td class="px-3 py-2">{evaluationName(model)}</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+				<p class="border-t border-edge px-3 py-2 text-2xs text-ink-dim">
+					“Best” compares models trained from the newest shared label state. Older rows remain useful history, but their test voxels may differ.
+				</p>
+			</section>
+			{/if}
 		{/if}
 	</section>
 </div>

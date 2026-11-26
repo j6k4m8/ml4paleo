@@ -1530,7 +1530,7 @@
 		const name = className.trim();
 		if (!labels || !name || savingClass) return;
 		if (pickable.some((c) => c.name.trim().toLowerCase() === name.toLowerCase())) {
-			classError = `There's a class called ${name} already.`;
+			classError = `There's a label called ${name} already.`;
 			return;
 		}
 		savingClass = true;
@@ -1541,7 +1541,7 @@
 			// Ready to paint with it, which is why anyone adds one.
 			viewer.activeClass = made.value;
 			if (first) setTool("brush");
-			classAdded = `Added ${made.name}.`;
+			classAdded = first ? `Added ${made.name}. Brush selected.` : `Added ${made.name}.`;
 			savingClass = false;
 			await closeClassForm();
 		} catch (e) {
@@ -1566,7 +1566,7 @@
 	const hint = $derived(
 		{
 			navigate: "Drag to pan · wheel steps slices · Ctrl+wheel zooms · right-click moves the crosshair",
-			brush: `Drag to paint the active class${paintWhere ? ` ${paintWhere}` : ""} · [ ] change the size · right-click moves the crosshair`,
+			brush: `Drag to paint the selected label${paintWhere ? ` ${paintWhere}` : ""} · [ ] change the size · right-click moves the crosshair`,
 			eraser: `Drag to erase labels${eraseWhere ? ` ${eraseWhere}` : ""} · [ ] change the size · right-click moves the crosshair`,
 			accept: viewer.acceptShape === "brush"
 				? "Drag to accept visible predictions · [ ] change size · Esc cancels · Ctrl+Z undoes the gesture"
@@ -1600,6 +1600,9 @@
 				{#each TOOLS as entry (entry.tool)}
 					{#if entry.tool === viewer.tool}<entry.icon size={14} class="text-ink-dim" />{entry.label}{/if}
 				{/each}
+				{#if viewer.tool === "brush" && activeClass}
+					<span class="max-w-28 truncate font-normal text-ink-dim" title={activeClass.name}>· {activeClass.name}</span>
+				{/if}
 			</span>
 			<span class="h-4 w-px shrink-0 bg-line" aria-hidden="true"></span>
 			{#if viewer.tool === "accept"}
@@ -1656,14 +1659,15 @@
 			{/if}
 			<span class="hidden min-w-48 flex-1 basis-48 truncate text-right text-2xs text-ink-faint xl:block" use:tooltip={hint}>{hint}</span>
 		</div>
-		<button
-			class="btn btn-ghost mx-1.5 mt-1.5 shrink-0 md:hidden"
-			aria-label="Panels"
-			aria-expanded={dockOpen}
-			onclick={() => (dockOpen = !dockOpen)}
-		>
-			<PanelRight size={14} />
-		</button>
+		{#if labels && classes.length === 0 && !dockOpen}
+			<button class="btn mx-1.5 mt-1.5 shrink-0 md:hidden" aria-expanded={dockOpen} onclick={startClass}>
+				<Plus size={14} /> Add label
+			</button>
+		{:else}
+			<button class="btn btn-ghost mx-1.5 mt-1.5 shrink-0 md:hidden" aria-expanded={dockOpen} onclick={() => (dockOpen = !dockOpen)}>
+				{#if dockOpen}<X size={14} /> Close panels{:else}<PanelRight size={14} /> Panels{/if}
+			</button>
+		{/if}
 	</div>
 
 	<div class="relative flex min-h-0 flex-1">
@@ -1689,8 +1693,8 @@
 			<button
 				class="size-7 rounded-sm border-2 border-ink/80 shadow-[0_0_0_1px_black]"
 				style:background={activeClass?.color ?? "transparent"}
-				use:tooltip={activeClass ? `Painting ${activeClass.name} (1–9 to change)` : "Add a class to start labeling"}
-				aria-label={activeClass ? `Active class: ${activeClass.name}` : "Add a class"}
+				use:tooltip={activeClass ? `Selected label: ${activeClass.name} (1–9 to change)` : "Add a label to start painting"}
+				aria-label={activeClass ? `Selected label: ${activeClass.name}` : "Add a label"}
 				onclick={() => (activeClass ? ((classesOpen = true), (dockOpen = true)) : startClass())}
 			></button>
 			<span class="my-1.5 h-px w-6 bg-line"></span>
@@ -1771,6 +1775,81 @@
 			aria-label="Panels"
 			{@attach keepFocus}
 		>
+			<Panel title="Labels" bind:open={classesOpen}>
+				{#snippet actions()}
+					{#if labels && !classFormOpen}
+						<button class="btn btn-ghost gap-1" bind:this={addClassButton} onclick={startClass}>
+							<Plus size={12} /> Add label
+						</button>
+					{/if}
+				{/snippet}
+				<p class="sr-only" role="status">{classAdded}</p>
+				{#if classFormOpen}
+					<form class="flex flex-col gap-2" onsubmit={saveClass} {@attach closesOnEscape}>
+						{#if classes.length === 0}<p class="text-ink-dim">Name what you want to segment.</p>{/if}
+						<div class="flex items-center gap-2">
+							<input
+								class="field"
+								bind:this={classInput}
+								bind:value={className}
+								maxlength="100"
+								placeholder="For example, Bone"
+								aria-label="Label name"
+								autocomplete="off"
+								required
+							/>
+							<input
+								type="color"
+								class="h-6 w-8 shrink-0 cursor-pointer rounded-sm border border-edge bg-field p-0.5"
+								value={classColor}
+								oninput={(event) => (pickedColor = event.currentTarget.value)}
+								aria-label="Label color"
+								title="Label color"
+							/>
+						</div>
+						{#if classError}<p class="error" role="alert">{classError}</p>{/if}
+						<div class="flex items-center gap-2">
+							<button class="btn btn-primary" disabled={!className.trim()} aria-disabled={savingClass}>Add label</button>
+							{#if classes.length > 0}
+								<button type="button" class="btn btn-ghost" disabled={savingClass} onclick={closeClassForm}>Cancel</button>
+							{/if}
+						</div>
+					</form>
+				{/if}
+				<ul class="-mx-2.5 -my-1 flex flex-col">
+					{#each pickable as label, index (label.value)}
+						<ClassRow {label} {index} {display} active={viewer.activeClass === label.value}
+							disabled={!labels || decidingSuggestion || erasingComposite || !!pendingAccept}
+							onselect={() => viewer.activeClass = label.value}
+							oncolor={(color) => previewClassColor(label.value, color)}
+							onsave={async () => { if (label.value !== BACKGROUND_VALUE) await labels?.saveColor(label.value); }} />
+					{/each}
+				</ul>
+				{#if labels && classes.length > 0 && (!proposer || !hasBackground)}
+					<div class="flex flex-col gap-1.5 border-t border-edge pt-2 text-ink-dim">
+						{#if !proposer}
+							<p>Use <strong class="font-medium text-ink">Brush (B)</strong> on a slice to paint examples of your label and Background.</p>
+						{/if}
+						{#if !hasBackground}
+							<p>Paint Background in areas outside your target.</p>
+							<button
+								class="btn self-start"
+								onclick={() => {
+									viewer.activeClass = BACKGROUND_VALUE;
+									if (viewer.tool !== "brush" && viewer.tool !== "polygon") setTool("brush");
+									dockOpen = false;
+								}}
+							>
+								Paint Background
+							</button>
+						{/if}
+						{#if !proposer}
+							<p>Once both kinds of examples are saved, <a href="/p/{project}/models">train a model</a>.</p>
+						{/if}
+					</div>
+				{/if}
+			</Panel>
+
 			<Panel title="Info">
 				<div class="grid grid-cols-[1rem_1fr] gap-x-1 gap-y-0.5 font-mono text-2xs">
 					<span class="text-axis-x">X</span><span>{voxel(2)}</span>
@@ -1874,85 +1953,6 @@
 						<Lock size={12} />
 					</li>
 				</ul>
-			</Panel>
-
-			<Panel title="Classes" bind:open={classesOpen}>
-				{#snippet actions()}
-					{#if labels && !classFormOpen}
-						<button class="btn btn-ghost gap-1" bind:this={addClassButton} title="Add a class to label with" onclick={startClass}>
-							<Plus size={12} /> Add class
-						</button>
-					{/if}
-				{/snippet}
-				{#if labels && classes.length === 0}
-					<div class="flex flex-col gap-1 rounded-sm border border-edge bg-field p-2.5">
-						<p class="font-medium text-ink">Start labeling</p>
-						<p class="text-ink-dim">
-							The model learns from two kinds of labels: what you're looking for, and background, which is everything else.
-						</p>
-						<ol class="ml-4 list-decimal text-ink-dim">
-							<li>Name what you're looking for, below.</li>
-							<li>Paint a little of it, then paint some Background, which is already in the list.</li>
-						</ol>
-					</div>
-				{/if}
-				<ul class="-mx-2.5 -my-1 flex flex-col">
-					{#each pickable as label, index (label.value)}
-						<ClassRow {label} {index} {display} active={viewer.activeClass === label.value}
-							disabled={!labels || decidingSuggestion || erasingComposite || !!pendingAccept}
-							onselect={() => viewer.activeClass = label.value}
-							oncolor={(color) => previewClassColor(label.value, color)}
-							onsave={async () => { if (label.value !== BACKGROUND_VALUE) await labels?.saveColor(label.value); }} />
-					{/each}
-				</ul>
-				{#if labels && classes.length > 0 && !hasBackground}
-					<div class="flex flex-col gap-1.5 text-ink-dim">
-						<p>
-							<span class="text-ink">Paint some Background too:</span> everything that isn't what you're looking for. The model needs both to tell them apart.
-						</p>
-						<button
-							class="btn self-start"
-							onclick={() => {
-								viewer.activeClass = BACKGROUND_VALUE;
-								if (viewer.tool !== "brush" && viewer.tool !== "polygon") setTool("brush");
-							}}
-						>
-							Paint Background
-						</button>
-					</div>
-				{/if}
-				<p class="sr-only" role="status">{classAdded}</p>
-				{#if classFormOpen}
-					<form class="flex flex-col gap-2" onsubmit={saveClass} {@attach closesOnEscape}>
-						<div class="flex items-center gap-2">
-							<input
-								class="field"
-								bind:this={classInput}
-								bind:value={className}
-								maxlength="100"
-								placeholder={classes.length === 0 ? "What are you looking for? Like bone" : "Class name, like bone"}
-								aria-label="Class name"
-								autocomplete="off"
-								required
-							/>
-							<input
-								type="color"
-								class="h-6 w-8 shrink-0 cursor-pointer rounded-sm border border-edge bg-field p-0.5"
-								value={classColor}
-								oninput={(event) => (pickedColor = event.currentTarget.value)}
-								aria-label="Class color"
-								title="Class color"
-							/>
-						</div>
-						{#if classError}<p class="error" role="alert">{classError}</p>{/if}
-						<div class="flex items-center gap-2">
-							<button class="btn btn-primary" disabled={!className.trim()} aria-disabled={savingClass}>{classes.length === 0 ? "Start labeling" : "Add"}</button>
-							{#if classes.length > 0}
-								<button type="button" class="btn btn-ghost" disabled={savingClass} onclick={closeClassForm}>Cancel</button>
-							{/if}
-						</div>
-					</form>
-				{/if}
 			</Panel>
 
 			{#if SHOW_ROIS}

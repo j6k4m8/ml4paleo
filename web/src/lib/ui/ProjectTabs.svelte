@@ -20,7 +20,7 @@
 		...(SHOW_ROIS ? [{ href: `/p/${pid}/rois`, label: "ROIs", icon: SquareDashed }] : []),
 		{ href: `/p/${pid}/models`, label: "Models", icon: Brain },
 		{ href: `/p/${pid}/results`, label: "Results", icon: Shapes },
-		{ href: `/p/${pid}/neuroglancer`, label: "Neuroglancer", icon: Orbit },
+		{ href: `/p/${pid}/neuroglancer`, label: "Visualization", icon: Orbit },
 		{ href: `/p/${pid}/history`, label: "History", icon: RotateCcwClock },
 		{ href: `/p/${pid}/settings`, label: "Settings", icon: Settings },
 	]);

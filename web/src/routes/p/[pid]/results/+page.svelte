@@ -4,6 +4,7 @@
 	import Brush from "@lucide/svelte/icons/brush";
 	import Combine from "@lucide/svelte/icons/combine";
 	import Download from "@lucide/svelte/icons/download";
+	import Orbit from "@lucide/svelte/icons/orbit";
 	import Shapes from "@lucide/svelte/icons/shapes";
 	import Trash from "@lucide/svelte/icons/trash";
 	import { untrack } from "svelte";
@@ -116,6 +117,7 @@
 	};
 	const active = (p: Pipeline | undefined) => p?.status === "waiting" || p?.status === "running";
 	// The newest of each kind (the list is newest first).
+	const predicting = $derived(pipelines.find((p) => p.kind === "prediction"));
 	const composing = $derived(pipelines.find((p) => p.kind === "segmentation"));
 	const meshing = $derived(pipelines.find((p) => p.kind === "meshes"));
 	const stale = $derived.by(() => !!meshes && !!segmentation && meshes.segmentation_artifact_id !== segmentation.artifact_id);
@@ -128,7 +130,7 @@
 				api<Prediction>(`/api/projects/${pid}/prediction`).catch(missing),
 				api<Segmentation>(`/api/projects/${pid}/segmentation`).catch(missing),
 				api<Meshes>(`/api/projects/${pid}/meshes`).catch(missing),
-				api<Pipeline[]>(`/api/projects/${pid}/pipelines`),
+				api<Pipeline[]>(`/api/projects/${pid}/pipelines?include_live_previews=false`),
 				api<{ artifact_id: string; manifest: { dtype: string } }>(`/api/projects/${pid}/image`).catch(missing),
 				api<Export[]>(`/api/projects/${pid}/exports`),
 			]);
@@ -153,7 +155,7 @@
 	// Only which pipelines run, so status updates don't reopen the streams.
 	const running = $derived(
 		[
-			...[composing, meshing].filter(active).map((p) => p?.id),
+			...[predicting, composing, meshing].filter(active).map((p) => p?.id),
 			...exports.filter((e) => e.status === "making").map((e) => e.pipeline_id),
 		]
 			.filter(Boolean)
@@ -257,10 +259,10 @@
 			.replace(/^-|-$/g, "") || "mesh";
 </script>
 
-{#snippet progress(pipeline: Pipeline | undefined, failed: string)}
+{#snippet progress(pipeline: Pipeline | undefined, label: string, failed = "")}
 	{#if pipeline && active(pipeline)}
 		<div class="flex items-center gap-2">
-			<progress class="h-1 flex-1 accent-accent" max="1" value={pipeline.progress}></progress>
+			<progress class="h-1 flex-1 accent-accent" aria-label={label} max="1" value={pipeline.progress}></progress>
 			<span class="font-mono text-2xs text-ink-dim">{Math.round(pipeline.progress * 100)}%</span>
 		</div>
 	{:else if pipeline && pipeline.status !== "succeeded"}
@@ -275,17 +277,29 @@
 	{#if error}<p class="error lg:col-span-2" role="alert">{error}</p>{/if}
 
 	<section class="panel self-start">
-		<h2 class="panel-title">Prediction</h2>
+		<h2 class="panel-title">Full-scan prediction</h2>
 		<div class="flex flex-col gap-2 p-3">
 			{#if prediction}
 				<p>
 					From <span class="font-medium">{prediction.model_name ?? "a deleted model"}</span>,
 					<span class="text-ink-dim">{new Date(prediction.committed_at).toLocaleString()}</span>
 				</p>
-				<a class="btn self-start hover:no-underline" href="/p/{pid}/annotate"><Brush size={13} /> Review in the annotator</a>
-			{:else if loaded}
-				<p class="text-ink-dim">No prediction yet. Train a model and predict on the <a href="/p/{pid}/models">Models</a> page.</p>
+				<div class="flex flex-wrap items-center gap-2">
+					<a class="btn btn-primary hover:no-underline" href="/p/{pid}/neuroglancer"><Orbit size={13} /> View in Visualization</a>
+					<a class="btn hover:no-underline" href="/p/{pid}/annotate"><Brush size={13} /> Edit annotations</a>
+				</div>
+				<p class="text-ink-dim">Turn on the prediction layer in Visualization. To improve the prediction, add labels where it’s off, then train and predict again in <a href="/p/{pid}/models">Models</a>.</p>
+			{:else if loaded && !error && !active(predicting)}
+				{#if imageId}
+					<p class="text-ink-dim">Train a model in <a href="/p/{pid}/models">Models</a>, then choose <strong>Predict full scan</strong> when it’s ready.</p>
+				{:else}
+					<p class="text-ink-dim">Start by <a href="/p/{pid}">uploading a scan on the Overview</a>.</p>
+				{/if}
 			{/if}
+			{#if active(predicting)}
+				<p class="text-ink-dim" role="status">{predicting?.status === "waiting" ? "A full-scan prediction is queued." : "Predicting across the whole scan…"}</p>
+			{/if}
+			{@render progress(predicting, "Full-scan prediction progress")}
 		</div>
 	</section>
 
@@ -293,7 +307,7 @@
 		<h2 class="panel-title">Final segmentation</h2>
 		<div class="flex flex-col gap-3 p-3">
 			<p class="text-ink-dim">
-				The prediction with your labels on top, and specks of each class removed unless someone labeled part of them.
+				Combines the prediction with your labels and removes small pieces that have no labels of their own.
 			</p>
 			{#if segmentation}
 				<div class="flex items-start gap-2 rounded-sm border border-edge bg-field p-2">
@@ -310,6 +324,7 @@
 						</span>
 					</div>
 				</div>
+				<p class="text-ink-dim">Turn on the final segmentation layer in <a href="/p/{pid}/neuroglancer">Visualization</a> to inspect it.</p>
 				{#if segmentation.label_changes_since > 0}
 					<p class="text-sm text-warn">
 						{segmentation.label_changes_since.toLocaleString()} label {segmentation.label_changes_since === 1 ? "change" : "changes"} since this result. Update it before making final downloads or meshes.
@@ -326,7 +341,7 @@
 					{active(composing) ? "Making…" : segmentation?.label_changes_since ? "Update result" : segmentation ? "Make it again" : "Make final segmentation"}
 				</button>
 			</form>
-			{@render progress(composing, composeError)}
+			{@render progress(composing, "Final segmentation progress", composeError)}
 		</div>
 	</section>
 
@@ -401,7 +416,7 @@
 			{#if !segmentation && loaded}
 				<p class="text-2xs text-ink-dim">Make a final segmentation first.</p>
 			{/if}
-			{@render progress(meshing, meshError)}
+			{@render progress(meshing, "Mesh generation progress", meshError)}
 		</div>
 	</section>
 

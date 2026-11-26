@@ -19,6 +19,8 @@
 
 	let project: Project | null = $state(null);
 	let image: ProjectImage | null = $state(null);
+	let scanLoadedFor = $state<string | null>(null);
+	const scanLoaded = $derived(scanLoadedFor === pid);
 	let pipelines: Pipeline[] = $state([]);
 	const activity = $derived(groupActivity(pipelines));
 	let error = $state("");
@@ -79,7 +81,8 @@
 	function choose(chosen: File | undefined) {
 		if (!chosen || uploading) return;
 		if (!chosen.name.toLowerCase().endsWith(".zip")) {
-			rejected = `${chosen.name} isn't a .zip. Choose a .zip of image slices or DICOM files.`;
+			file = null;
+			rejected = `Choose a ZIP file instead of ${chosen.name}.`;
 			return;
 		}
 		rejected = "";
@@ -93,13 +96,18 @@
 	}
 
 	async function refresh() {
+		const projectId = pid;
 		try {
-			project = await api<Project>(`/api/projects/${pid}`);
-			pipelines = await api<Pipeline[]>(`/api/projects/${pid}/pipelines?include_live_previews=false`);
-			const found = await api<ProjectImage>(`/api/projects/${pid}/image`).catch((e: unknown) => {
+			const current = await api<Project>(`/api/projects/${projectId}`);
+			if (pid !== projectId) return;
+			project = current;
+			const currentPipelines = await api<Pipeline[]>(`/api/projects/${projectId}/pipelines?include_live_previews=false`);
+			const found = await api<ProjectImage>(`/api/projects/${projectId}/image`).catch((e: unknown) => {
 				if (e instanceof ApiError && e.status === 404) return null;
 				throw e;
 			});
+			if (pid !== projectId) return;
+			pipelines = currentPipelines;
 			// A new object only for a new image, so the previews don't draw again
 			// each time something else finishes.
 			if (found?.artifact_id !== image?.artifact_id) {
@@ -116,8 +124,9 @@
 					);
 				}
 			}
+			scanLoadedFor = projectId;
 		} catch (e) {
-			error = message(e);
+			if (pid === projectId) error = message(e);
 		}
 	}
 
@@ -148,13 +157,18 @@
 	}
 
 	$effect(() => {
-		if (pid) refresh();
+		if (pid) {
+			project = null;
+			scanLoadedFor = null;
+			error = "";
+			refresh();
+		}
 	});
 
 	// Follow each running pipeline until it finishes. The browser reconnects
 	// dropped streams; the server ends them (204) once the pipeline is done.
 	$effect(() => {
-		const ids = running ? running.split(",") : [];
+		const ids = scanLoaded && running ? running.split(",") : [];
 		const sources = ids.map((id) => {
 			const source = new EventSource(`/api/projects/${untrack(() => pid)}/pipelines/${id}/events`);
 			source.addEventListener("status", (event) => {
@@ -185,6 +199,8 @@
 			return;
 		}
 		uploading = true;
+		uploaded = 0;
+		rejected = "";
 		error = "";
 		try {
 			const existing = await unfinished(file);
@@ -234,17 +250,17 @@
 	<div class="flex flex-col gap-2 rounded-sm border border-edge bg-field p-3" role="status">
 		{#if active(pipeline)}
 			<span class="[overflow-wrap:anywhere]">
-				{pipeline.kind === "import" ? "Importing a v1 job." : name ? `Uploaded ${name}.` : "A scan was uploaded."} Bringing it
-				in: reading its slices and building the zoom levels.
+				{pipeline.kind === "import" ? "Importing a v1 job." : name ? `Uploaded ${name}.` : ""}
+				Preparing the scan for annotation…
 			</span>
 			<div class="flex items-center gap-2">
-				<progress class="h-1.5 flex-1" max="1" value={pipeline.progress}></progress>
+				<progress class="h-1.5 flex-1" max="1" value={pipeline.progress} aria-label="Scan preparation progress"></progress>
 				<span class="font-mono text-2xs text-ink-dim">{percent(pipeline.progress)}</span>
 				<button class="btn btn-ghost" onclick={() => stop(pipeline)}>Stop</button>
 			</div>
-			<span class="text-2xs text-ink-dim">You can leave this page; it keeps going.</span>
+			<span class="text-2xs text-ink-dim">You can leave this page while the scan is being prepared.</span>
 		{:else}
-			<span>Brought in. Loading it…</span>
+			<span>Scan prepared. Loading the overview…</span>
 		{/if}
 	</div>
 {/snippet}
@@ -252,12 +268,12 @@
 {#snippet failed()}
 	{#if failedIngest}
 		<p class="error [overflow-wrap:anywhere]" role="alert">
-			The last scan couldn't be brought in{failedIngest.error ? `: ${failedIngest.error}` : "."}
+			The scan couldn't be prepared.{failedIngest.error ? ` ${failedIngest.error}` : ""}
 		</p>
 	{/if}
 {/snippet}
 
-{#snippet dropzone(prompt: string)}
+{#snippet dropzone()}
 	<form onsubmit={upload} class="flex flex-col gap-2">
 		<!-- Its children ignore the pointer, so dragging over them doesn't count as leaving. -->
 		<label
@@ -272,19 +288,28 @@
 			ondrop={dropped}
 		>
 			<Upload size={20} class="text-ink-faint" />
-			<span>{file ? file.name : prompt}</span>
-			<span class="text-2xs text-ink-faint">A .zip of image slices or DICOM files</span>
-			<input class="sr-only" type="file" accept=".zip" onchange={(e) => choose(e.currentTarget.files?.[0])} disabled={uploading} />
+			<span class="break-all">{file ? file.name : "Drop a ZIP file here or click to browse"}</span>
+			<span class="text-2xs text-ink-faint">Use one ZIP containing a DICOM series or image slices such as TIFF or PNG.</span>
+			<input
+				class="sr-only"
+				type="file"
+				accept=".zip"
+				onchange={(e) => {
+					choose(e.currentTarget.files?.[0]);
+					e.currentTarget.value = "";
+				}}
+				disabled={uploading}
+			/>
 		</label>
 		{#if rejected}<p class="error" role="alert">{rejected}</p>{/if}
 		{#if uploading}
 			<div class="flex items-center gap-2">
-				<progress class="h-1.5 flex-1" max="1" value={uploaded}></progress>
+				<progress class="h-1.5 flex-1" max="1" value={uploaded} aria-label="Scan upload progress"></progress>
 				<span class="font-mono text-2xs text-ink-dim">{percent(uploaded)}</span>
 			</div>
 		{/if}
 		<div class="flex items-center gap-2">
-			<button class="btn btn-primary" disabled={!file || uploading}>Upload and ingest</button>
+			<button class="btn btn-primary" disabled={!file || uploading}>{uploading ? "Uploading scan…" : "Upload scan"}</button>
 			{#if image && !uploading}
 				<button
 					type="button"
@@ -306,18 +331,24 @@
 	<div class="mx-auto grid max-w-6xl gap-4 p-6 lg:grid-cols-[1fr_22rem]">
 		<div class="flex flex-col gap-4">
 			<div class="flex items-center gap-3">
-				<h1 class="text-lg">{project.name}</h1>
-				{#if image}
-					<a class="btn btn-primary ml-auto h-7 hover:no-underline" href="/p/{pid}/annotate">
-						<Brush size={14} /> Open in annotator
+				<h1 class="min-w-0 text-lg [overflow-wrap:anywhere]">{project.name}</h1>
+				{#if scanLoaded && image}
+					<a class="btn btn-primary ml-auto h-7 shrink-0 hover:no-underline" href="/p/{pid}/annotate">
+						<Brush size={14} /> Annotate scan
 					</a>
 				{/if}
 			</div>
 
 			<section class="panel">
-				<h2 class="panel-title">Image</h2>
+				<h2 class="panel-title">{scanLoaded && !image ? "Scan setup" : "Scan"}</h2>
 				<div class="flex flex-col gap-3 p-3">
-					{#if image}
+					{#if !scanLoaded}
+						{#if error}
+							<p class="error" role="alert">{error}</p>
+						{:else}
+							<p class="muted" role="status">Checking for a scan…</p>
+						{/if}
+					{:else if image}
 						{@const [, z, y, x] = image.manifest.shape_czyx}
 						{@const [sz, , sx] = image.manifest.voxel_size_zyx ?? [1, 1, 1]}
 						{@const widest = Math.max(x * sx, z * sz)}
@@ -365,7 +396,7 @@
 						{/each}
 						<div class="flex items-center gap-3">
 							<a class="flex items-center gap-1" href={image.neuroglancer_url} target="_blank" rel="noopener">
-								Open in Neuroglancer <ExternalLink size={12} />
+								Open in Visualization <ExternalLink size={12} />
 							</a>
 							{#if !replacing && !ingesting && !uploading}
 								<button class="btn btn-ghost ml-auto" onclick={() => (replacing = true)}>Replace the scan…</button>
@@ -380,65 +411,67 @@
 									A new scan replaces this one for everyone in the project. Predictions and results made from this one won't
 									match it; labels stay where they are, so they only line up if the new scan covers the same space.
 								</p>
-								{@render dropzone("Drop the new scan here, or click to choose")}
+								{@render dropzone()}
 							</div>
 						{/if}
 					{:else if ingesting && !uploading}
 						{@render bringingIn(ingesting)}
 					{:else}
-						<p class="muted">No image yet. Upload a zip of image slices or DICOM files.</p>
 						{@render failed()}
-						{@render dropzone("Drop a scan here, or click to choose")}
+						{@render dropzone()}
 					{/if}
 				</div>
 			</section>
-
-			{#if image}
-				<Loop {pid} importHref="/p/{pid}/labels" />
-			{/if}
 		</div>
 
-		<section class="panel self-start">
-			<h2 class="panel-title">Activity</h2>
-			{#if pipelines.length === 0}
-				<p class="muted p-3">Nothing has run yet.</p>
-			{:else}
-				<ul class="divide-y divide-edge">
-					{#each activity as group (group.latest.id)}
-						{@const pipeline = group.latest}
-						{@const modelHref = activityModelHref(pid, group)}
-						<li class="flex flex-col gap-1 px-3 py-2">
-							<div class="flex items-center gap-2">
-								<span
-									class="size-1.5 rounded-full {pipeline.status === 'succeeded'
-										? 'bg-ok'
-										: pipeline.status === 'failed'
-											? 'bg-danger'
-											: pipeline.status === 'cancelled'
-												? 'bg-ink-faint'
-												: 'animate-pulse bg-warn'}"
-								></span>
-								<span class="shrink-0 font-medium capitalize">{pipeline.kind}{#if group.count > 1} (×{group.count}){/if}</span>
-								<time class="ml-auto text-right text-2xs text-ink-faint" datetime={pipeline.created_at} title={group.count > 1 ? "Latest run" : undefined}>{new Date(pipeline.created_at).toLocaleString()}</time>
-							</div>
-							{#if pipeline.status === "waiting" || pipeline.status === "running"}
-								<div class="flex items-center gap-2">
-									<progress class="h-1 flex-1" max="1" value={pipeline.progress}></progress>
-									<span class="font-mono text-2xs text-ink-dim">{percent(pipeline.progress)}</span>
-								</div>
-							{:else}
-								<div class="flex items-center justify-between gap-2 text-2xs">
-									<span class="text-ink-dim">{pipeline.status}</span>
-									{#if modelHref}<a href={modelHref}>{group.count > 1 ? "Latest model" : "View model"}</a>{/if}
-								</div>
-							{/if}
-							{#if active(pipeline) && modelHref}<a class="text-2xs" href={modelHref}>View model</a>{/if}
-							{#if pipeline.error}<span class="text-2xs text-danger">{pipeline.error}</span>{/if}
-						</li>
-					{/each}
-				</ul>
-			{/if}
-		</section>
+		{#if scanLoaded}
+			<aside class="flex flex-col gap-4">
+				{#if image}
+					<Loop {pid} importHref="/p/{pid}/labels" />
+				{/if}
+				<section class="panel">
+					<h2 class="panel-title">Activity</h2>
+					{#if pipelines.length === 0}
+						<p class="muted p-3">Nothing has run yet.</p>
+					{:else}
+						<ul class="divide-y divide-edge">
+							{#each activity as group (group.latest.id)}
+								{@const pipeline = group.latest}
+								{@const modelHref = activityModelHref(pid, group)}
+								<li class="flex flex-col gap-1 px-3 py-2">
+									<div class="flex items-center gap-2">
+										<span
+											class="size-1.5 rounded-full {pipeline.status === 'succeeded'
+												? 'bg-ok'
+												: pipeline.status === 'failed'
+													? 'bg-danger'
+													: pipeline.status === 'cancelled'
+														? 'bg-ink-faint'
+														: 'animate-pulse bg-warn'}"
+										></span>
+										<span class="shrink-0 font-medium capitalize">{pipeline.kind === "ingest" ? "Scan preparation" : pipeline.kind}{#if group.count > 1} (×{group.count}){/if}</span>
+										<time class="ml-auto text-right text-2xs text-ink-faint" datetime={pipeline.created_at} title={group.count > 1 ? "Latest run" : undefined}>{new Date(pipeline.created_at).toLocaleString()}</time>
+									</div>
+									{#if pipeline.status === "waiting" || pipeline.status === "running"}
+										<div class="flex items-center gap-2">
+											<progress class="h-1 flex-1" max="1" value={pipeline.progress}></progress>
+											<span class="font-mono text-2xs text-ink-dim">{percent(pipeline.progress)}</span>
+										</div>
+									{:else}
+										<div class="flex items-center justify-between gap-2 text-2xs">
+											<span class="text-ink-dim">{pipeline.status}</span>
+											{#if modelHref}<a href={modelHref}>{group.count > 1 ? "Latest model" : "View model"}</a>{/if}
+										</div>
+									{/if}
+									{#if active(pipeline) && modelHref}<a class="text-2xs" href={modelHref}>View model</a>{/if}
+									{#if pipeline.error}<span class="text-2xs text-danger">{pipeline.error}</span>{/if}
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</section>
+			</aside>
+		{/if}
 	</div>
 {/if}
-{#if error}<p class="error p-6" role="alert">{error}</p>{/if}
+{#if error && (!project || scanLoaded)}<p class="error p-6" role="alert">{error}</p>{/if}

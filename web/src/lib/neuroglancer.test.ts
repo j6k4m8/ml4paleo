@@ -41,7 +41,7 @@ describe("answerView", () => {
 
 	it("treats missing links as errors, never an optional feature", () => {
 		for (const answer of [{ url: null }, {}, null, undefined]) {
-			expect(answerView(answer)).toEqual({ kind: "error", message: "Couldn't load Neuroglancer. Please reload the page." });
+			expect(answerView(answer)).toEqual({ kind: "error", message: "Couldn't load the visualization. Please reload the page." });
 		}
 	});
 
