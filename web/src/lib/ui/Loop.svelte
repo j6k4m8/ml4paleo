@@ -41,7 +41,7 @@
 
 <!-- How labels become a model, and how a model gets better: the loop. -->
 <section class="panel">
-	<h2 class="panel-title">How training works</h2>
+	<h2 class="panel-title">How to segment a scan</h2>
 	<ol class="flex flex-col gap-2 p-3">
 		<li class="flex gap-2">
 			{@render step(1, "Label")}
@@ -50,14 +50,14 @@
 					a few places: draw an ROI in the <a href="/p/{pid}/annotate">annotator</a>, paint it, and mark it complete. Or
 					<a href={importHref}>import labels</a> from a file.
 				{:else}
-					what you're looking for, and some background, in the <a href="/p/{pid}/annotate">annotator</a>. Or
-					<a href={importHref}>import labels</a> from a file.
+					Open <a href="/p/{pid}/annotate">Annotate</a>, choose Add label for what you want to find, then use the Brush to
+					paint examples of that label and Background. You can also <a href={importHref}>import labels</a> from a file.
 				{/if}
 			</span>
 		</li>
 		<li class="flex gap-2">
 			{@render step(2, "Train")}
-			<span class="text-ink-dim">a model on the <a href="/p/{pid}/models">Models</a> page.</span>
+			<span class="text-ink-dim">On <a href="/p/{pid}/models">Models</a>, choose Train model.</span>
 		</li>
 		<li class="flex gap-2">
 			{#if SHOW_ROIS}
@@ -65,14 +65,22 @@
 				<span class="text-ink-dim">somewhere new to see how the model does, and fix what it gets wrong.</span>
 			{:else}
 				{@render step(3, "Predict")}
-				<span class="text-ink-dim">on the Models page, and look at what the model finds in the annotator.</span>
+				<span class="text-ink-dim">
+					When training finishes, choose Predict full scan on Models. Turn on the prediction layer in
+					<a href="/p/{pid}/neuroglancer">Visualization</a> to check what the model found.
+				</span>
 			{/if}
 		</li>
 		<li class="flex gap-2">
-			{@render step(4, "Retrain")}
-			<span class="text-ink-dim">
-				{SHOW_ROIS ? "with those fixes, then explore again." : "with more labels where the model got it wrong."}
-			</span>
+			{#if SHOW_ROIS}
+				{@render step(4, "Retrain")}
+				<span class="text-ink-dim">with those fixes, then explore again.</span>
+			{:else}
+				{@render step(4, "Refine")}
+				<span class="text-ink-dim">
+					Add more examples in <a href="/p/{pid}/annotate">Annotate</a> where the prediction needs work, then train and predict again.
+				</span>
+			{/if}
 		</li>
 	</ol>
 	{#if SHOW_ROIS}

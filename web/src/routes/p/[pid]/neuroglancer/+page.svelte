@@ -13,7 +13,7 @@
 	let frame: HTMLIFrameElement | undefined = $state();
 
 	$effect(() => {
-		crumbs.set([{ label: "Projects", href: "/projects" }, { label: projectName || "…", href: `/p/${pid}` }, { label: "Neuroglancer" }]);
+		crumbs.set([{ label: "Projects", href: "/projects" }, { label: projectName || "…", href: `/p/${pid}` }, { label: "Visualization" }]);
 	});
 
 	$effect(() => {
@@ -56,8 +56,9 @@
 
 	{#if view.kind === "ready"}
 		{@const began = view.url}
-		<div class="flex h-7 shrink-0 items-center gap-3 border-b border-edge bg-panel px-3 text-2xs text-ink-dim">
-			<span class="truncate">Image, labels, results and meshes. Paint in the annotator.</span>
+		<div class="flex min-h-7 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-edge bg-panel px-3 py-1 text-2xs text-ink-dim">
+			<span class="basis-full sm:basis-auto">Turn on the prediction or final segmentation layer to see results.</span>
+			<a class="shrink-0" href="/p/{pid}/annotate">Edit annotations</a>
 			<a
 				class="ml-auto flex shrink-0 items-center gap-1"
 				href={began}
@@ -72,7 +73,7 @@
 			</a>
 		</div>
 		<!-- Neuroglancer is this site's own page, so it reads the data as whoever is signed in. -->
-		<iframe bind:this={frame} title="Neuroglancer" src={began} class="min-h-0 w-full flex-1 border-0 bg-black"></iframe>
+		<iframe bind:this={frame} title="Visualization" src={began} class="min-h-0 w-full flex-1 border-0 bg-black"></iframe>
 	{:else}
 		<div class="grid min-h-0 flex-1 place-items-center overflow-auto bg-pasteboard p-6">
 			{#if view.kind === "loading"}

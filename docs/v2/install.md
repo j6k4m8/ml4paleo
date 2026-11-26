@@ -20,7 +20,7 @@ The script uses the same commit and OBJ-reader fix as the Dockerfile. Rerun it
 after updating the app: unchanged builds are reused without network access;
 a changed pin or patch triggers a rebuild.
 
-The project's Neuroglancer tab includes existing mesh exports as visible,
+The project's Visualization tab includes existing mesh exports as visible,
 class-colored 3D layers, with color and opacity controls. It reuses the OBJ
 files without remeshing and respects voxel spacing. These are whole-class
 mesh downloads, not Neuroglancer multiscale mesh chunks. Meshes from a replaced

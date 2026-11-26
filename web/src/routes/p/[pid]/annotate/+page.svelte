@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from "$app/state";
-	import { api, message } from "#lib/api.ts";
+	import { ApiError, api, message } from "#lib/api.ts";
 	import type { Project, ProjectImage } from "#lib/types.ts";
 	import { crumbs } from "#lib/ui/crumbs.svelte.ts";
 	import ProjectTabs from "#lib/ui/ProjectTabs.svelte";
@@ -9,7 +9,7 @@
 
 	const pid = $derived(page.params.pid ?? "");
 	// The image and the project it belongs to, set together.
-	let shown: { pid: string; name: string; image: ProjectImage } | null = $state(null);
+	let shown: { pid: string; name: string; image: ProjectImage | null } | null = $state(null);
 	let error = $state("");
 
 	$effect(() => {
@@ -26,7 +26,10 @@
 		shown = null;
 		error = "";
 		Promise.all([
-			api<ProjectImage>(`/api/projects/${project}/image`, { signal: controller.signal }),
+			api<ProjectImage>(`/api/projects/${project}/image`, { signal: controller.signal }).catch((e) => {
+				if (e instanceof ApiError && e.status === 404) return null;
+				throw e;
+			}),
 			api<Project>(`/api/projects/${project}`, { signal: controller.signal }),
 		]).then(
 			([image, info]) => (shown = { pid: project, name: info.name, image }),
@@ -41,7 +44,7 @@
 <div class="flex h-full min-h-0 flex-col">
 	<div class="shrink-0"><ProjectTabs {pid} /></div>
 	<div class="min-h-0 flex-1">
-		{#if shown}
+		{#if shown?.image}
 			{#key `${shown.pid}/${shown.image.artifact_id}`}
 				<Viewer
 					image={shown.image}
@@ -52,7 +55,13 @@
 			{/key}
 		{:else}
 			<div class="grid h-full place-items-center overflow-auto bg-pasteboard p-6">
-				{#if error}
+				{#if shown}
+					<div class="panel flex max-w-md flex-col items-center gap-2 p-6 text-center">
+						<h1 class="font-medium">A scan is needed to start annotating</h1>
+						<p class="muted">Upload a scan or check its progress in Overview.</p>
+						<a class="btn btn-primary no-underline" href="/p/{shown.pid}">Go to Overview</a>
+					</div>
+				{:else if error}
 					<div class="panel flex flex-col items-center gap-2 p-6">
 						<p class="error" role="alert">{error}</p>
 						<a href="/p/{pid}">Back to the project</a>

@@ -34,23 +34,27 @@
 </script>
 
 <div class="mx-auto flex max-w-6xl flex-col gap-4 p-6">
-	<div class="flex items-center gap-3">
+	<div class="flex flex-wrap items-center gap-x-3 gap-y-2">
 		<h1>Projects</h1>
 		<a class="btn btn-ghost ml-auto hover:no-underline" href="/import">Import from v1</a>
-		<button class="btn btn-primary" onclick={() => (creating = !creating)}>
-			<Plus size={14} /> New project
-		</button>
+		{#if projects?.length !== 0}
+			<button class="btn btn-primary" aria-expanded={creating} onclick={() => (creating = !creating)}>
+				<Plus size={14} /> New project
+			</button>
+		{/if}
 	</div>
 
 	{#if creating}
-		<form class="panel flex items-end gap-2 p-3" onsubmit={create}>
-			<label class="label flex-1">
-				Name
+		<form class="panel flex flex-wrap items-end gap-2 p-3" onsubmit={create}>
+			<label class="label min-w-36 flex-1">
+				Project name
 				<!-- svelte-ignore a11y_autofocus -->
 				<input class="field" bind:value={name} maxlength="100" placeholder="Skull, Ammonite 3…" required autofocus />
 			</label>
-			<button class="btn btn-primary">Create</button>
-			<button type="button" class="btn btn-ghost" onclick={() => (creating = false)}>Cancel</button>
+			<div class="flex gap-2">
+				<button class="btn btn-primary">Create project</button>
+				<button type="button" class="btn btn-ghost" onclick={() => (creating = false)}>Cancel</button>
+			</div>
 		</form>
 	{/if}
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -58,10 +62,15 @@
 	{#if projects === null}
 		<p class="muted">Loading…</p>
 	{:else if projects.length === 0}
-		<div class="panel grid place-items-center gap-2 p-10 text-center">
-			<Box size={28} class="text-ink-faint" />
-			<p class="muted">No projects yet. Make one, then upload a scan.</p>
-		</div>
+		{#if !creating}
+			<div class="panel grid place-items-center gap-3 p-10 text-center">
+				<Box size={28} class="text-ink-faint" />
+				<p class="muted">Create a project for the scan you want to segment.</p>
+				<button class="btn btn-primary h-7" onclick={() => (creating = true)}>
+					<Plus size={14} /> New project
+				</button>
+			</div>
+		{/if}
 	{:else}
 		<ul class="grid grid-cols-[repeat(auto-fill,minmax(13rem,1fr))] gap-3">
 			{#each projects as project (project.id)}
@@ -73,8 +82,12 @@
 						<ProjectPreview image={project.image} />
 						<div class="flex flex-col gap-0.5 border-t border-edge px-3 py-2">
 							<span class="truncate font-medium">{project.name}</span>
-							<span class="text-2xs text-ink-dim" title="Compressed scan size and saved, trained models (excluding Live checkpoints)">
-								{project.image_bytes > 0 && project.image_bytes < 0.01 * 1024 ** 3 ? "<0.01" : (project.image_bytes / 1024 ** 3).toLocaleString(undefined, { maximumFractionDigits: 2 })} GB · {project.model_count} {project.model_count === 1 ? "model" : "models"}
+							<span class="text-2xs text-ink-dim" title={project.image ? "Compressed scan size and saved, trained models (excluding Live checkpoints)" : undefined}>
+								{#if project.image}
+									{project.image_bytes > 0 && project.image_bytes < 0.01 * 1024 ** 3 ? "<0.01" : (project.image_bytes / 1024 ** 3).toLocaleString(undefined, { maximumFractionDigits: 2 })} GB · {project.model_count} {project.model_count === 1 ? "model" : "models"}
+								{:else}
+									Awaiting scan
+								{/if}
 							</span>
 							<span class="text-2xs text-ink-faint">{new Date(project.created_at).toLocaleDateString()}</span>
 						</div>

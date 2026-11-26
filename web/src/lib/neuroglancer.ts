@@ -1,5 +1,5 @@
 /**
- * The project's Neuroglancer tab: what it shows, and the links it opens.
+ * Handles the project view and links in the Visualization tab.
  *
  * The server serves Neuroglancer on this site, at `/neuroglancer/`, and builds
  * the link to a project's view (`GET /api/projects/<id>/neuroglancer`). The
@@ -36,9 +36,9 @@ export function isNeuroglancerLink(url: unknown): url is string {
  */
 export function answerView(answer: { url?: unknown } | null | undefined): NeuroglancerView {
 	const url = answer?.url;
-	if (url === null || url === undefined) return { kind: "error", message: "Couldn't load Neuroglancer. Please reload the page." };
+	if (url === null || url === undefined) return { kind: "error", message: "Couldn't load the visualization. Please reload the page." };
 	if (isNeuroglancerLink(url)) return { kind: "ready", url };
-	return { kind: "error", message: "The server's link to Neuroglancer isn't one this page can show." };
+	return { kind: "error", message: "The server returned an invalid visualization link." };
 }
 
 /**

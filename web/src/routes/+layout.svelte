@@ -17,7 +17,7 @@
 
 	// Pages that help finish the required account steps.
 	const SETUP = ["/account", "/verify-email"];
-	// The annotator and the Neuroglancer tab fill the window; other pages scroll.
+	// The annotator and the Visualization tab fill the window. Other pages scroll.
 	const workspace = $derived(page.url.pathname.endsWith("/annotate") || page.url.pathname.endsWith("/neuroglancer"));
 	let menu = $state(false);
 	let account: HTMLElement | undefined = $state();
